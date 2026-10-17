@@ -15,6 +15,31 @@ before a tag.
 
 ## Unreleased
 
+### Added
+
+- **`exec.code`, a custody-gated class for opaque agent code (APRV-510; 0.4.5
+  candidate).** `python3 -c`, `python -c`, `node -e`/`--eval`, `bun -e`/`--eval`,
+  `deno eval`, `perl -e`/`-E`, `ruby -e`, and `python`/`python3`/`bun` running a
+  file that is not a skill script were refused before policy on every harness, and
+  Hermes `execute_code` with them. A new policy block opens them key by key:
+  `exec.code.custody: attested` (the operator's statement that credential custody
+  is in place) classifies the shell forms `exec.code`, resolved like any class;
+  `exec.code.execute_code: hooked` beside it opens Hermes `execute_code`. A record
+  binds the program's SHA-256 and length and the command line's SHA-256, never the
+  program text, and says the program existed rather than what it did. A policy
+  that never names `exec.code` keeps every refusal byte for byte; one that names it
+  without custody refuses the new `hook-exec-code-custody-unattested`; a file
+  program the hook cannot read, or cannot place by the kernel's reading (a path
+with `..`, a symlinked directory, a program that is not the line's sole segment,
+no stated working directory), refuses the new `hook-exec-code-unreadable`. `bash
+  -c`, `sh -c`, `eval`, pipes into an interpreter, stdin and a program inside a
+subshell stay refused, the open
+  window does not reach the class, and Codex stays closed. **Rollout order:** a
+  core without this release refuses the `exec` key and fails the whole policy
+  closed, so a tenant gets the block only after its pinned core carries it. New
+  conformance suite `hook-exec-code` 1.0.0; `refusal-unions` 29.0.0;
+  `schema-validation` 3.4.0. SPEC.md §5.2, §7 and §11.2 amended, pending sign-off.
+
 ### The Hermes home's other organs (APRV-511; 0.4.5 candidate)
 
 - **Security: `hermes-agent/`, `plugins/` and `.op.env` are organs.** On an

@@ -453,7 +453,7 @@ Tool names and argument keys are Hermes's own, read off its tool registrations:
 | `patch` | file edit | `path` (plus `old_string`, `new_string`, `mode`, `replace_all`) |
 | `read_file` | read | `path` (plus `offset`, `limit`) |
 | `search_files` | read | `path`; its `target` enum selects a grep or a name search |
-| `execute_code` | **refused outright** | nothing — see below |
+| `execute_code` | **refused outright**, unless the policy declares both `exec.code` keys (APRV-510) | `code`, bound by hash — see below |
 
 **Hermes's own side-effecting tools have classes of their own (APRV-445).** They
 were allowed as "not a gated tool" until the Agent Village survey of v2026.9.24
@@ -592,7 +592,7 @@ whole check. Refusing there would deny every skill script on every box. The
 same is true after a `cd` whose target the text cannot name.
 
 What stays unclassified or out of reach, stated so nobody assumes otherwise:
-inline programs (`python3 -c`, `node -e`) are refused as opaque; `dd` and
+inline programs (`python3 -c`, `node -e`) are refused as opaque unless the policy opens `exec.code` (APRV-510, below); `dd` and
 `install` have no classifier rule and are denied as unclassified; a recursive
 search of an ANCESTOR of the home with a filename filter (`search_files` over
 `$HOME` with `file_glob: .env`, Claude Code's `Grep` over the repository with
@@ -757,33 +757,184 @@ names an array and needed list handling. A `paths` array arriving in a later
 release would fall to that same handling with no change, because the read gate
 reads both shapes.
 
-**`execute_code` is refused before anything else looks at it**, with its own
-machine-readable code `hook-hermes-execute-code-unbound`. Two reasons, and the
-second is the stronger one:
+**`execute_code` is refused before anything else looks at it unless the policy
+declares two keys (APRV-510).** Its machine-readable code is
+`hook-hermes-execute-code-unbound`, and for a policy that does not declare both
+keys below the refusal and its words are exactly what they were before APRV-510.
+The call carries a `code` string and nothing else (no path, no argv, no working
+directory), so there is nothing for the classifier to read, and the kernel it
+runs in can call Hermes's other tools.
 
-1. The call carries a `code` string and nothing else — no path, no argv, no
-   working directory. There is nothing for the classifier to read and nothing a
-   payload could bind, so a verdict over it would authorize a program this runtime
-   never parsed. SPEC.md §11.1 resolves ambiguity to the stricter path.
-2. `execute_code` runs in a persistent kernel whose scripts can call Hermes's
-   other tools **in-process**. Whether those inner calls re-fire `pre_tool_call`
-   is **still UNPROBED and is the highest-risk unknown about this harness**: if
-   they do not, one `execute_code` call is an unbounded bypass of this entire
-   adapter. The live run cannot settle it, and the reason is the refusal working:
-   both `execute_code` calls were refused before they ran (the model asked twice),
-   so no inner call was ever made. Settling it means arming the probe to ALLOW one
-   `execute_code` call in a scratch project and watching whether a tool call from
-   inside the kernel produces an envelope. Until somebody does that, refusing the
-   tool is the only answer available to a hook that cannot see inside it.
+The probe of APRV-509 answered the question this section used to leave open, from
+the v2026.9.24 source: **a tool call made from inside the `execute_code` kernel
+DOES fire `pre_tool_call`** (`tools/code_kernel.py` calls
+`model_tools.handle_function_call` with `skip_pre_tool_call_hook` at its default
+`False`, and `model_tools.py` dispatches the hooks; a block holds and
+`fail_closed` applies). The kernel's allow-list is exactly seven tools
+(`web_search`, `web_extract`, `read_file`, `write_file`, `search_files`, `patch`,
+`terminal`), enforced before dispatch, so no Index, plugin or `send_message` call
+can originate inside it. Inner-call envelopes arrive with an empty `session_id`
+and `tool_call_id`, so their records sit under the unknown session: an `exec.code`
+record for `execute_code` is the OUTER call, and the inner records are each hooked
+tool's own records under that session gap.
+
+That is still not containment, and the docs say so plainly: the kernel's own
+Python (`subprocess`, sockets, `open()` on `~/.hermes/.env`) is never a tool call
+and never reaches this hook. So opening `execute_code` takes BOTH keys:
+
+```yaml
+# an excerpt of the approval-policy block
+exec:
+  code:
+    custody: attested        # credential custody is in place (opens python3 -c and kin)
+    execute_code: hooked     # Hermes only, beside custody: the operator accepts the probe result
+classes:
+  exec.code: { autonomy: autonomous }   # or manual, or human-only; absent = defaults.autonomy
+```
+
+| policy | `execute_code` |
+|---|---|
+| names neither key and no `exec.code` row | `hook-hermes-execute-code-unbound`, word for word as before |
+| `custody: attested`, no `execute_code` key | `hook-hermes-execute-code-unbound`, plus a sentence naming the missing key |
+| `execute_code: hooked` (or an `exec.code` row) without custody | `hook-exec-code-custody-unattested` |
+| both keys | classified `exec.code`, payload `{tool, exec_code: {interpreter: execute_code, mode: execute_code, code_sha256, code_bytes, argv: [], workdir}, input_sha256}`, resolved by the policy |
+
+`execute_code: hooked` records the operator's ACCEPTANCE of the probe result. It
+is not a proof that the kernel is contained, and an operator sets it only after
+credential custody is live (the first key), because a program that can read the
+tenant's credentials can use them without any tool call. A `tools` entry cannot
+claim `execute_code` (the adapter's table claims it), the open window does not
+reach it, and its post event closes the start it wrote.
 
 The code is distinct from its two nearest neighbours because the repairs differ.
 `hook-opaque` says a command line carried a construct the classifier could not
-read, and its repair is to write the command differently — there is no rewriting
+read, and its repair is to write the command differently; there is no rewriting
 of an `execute_code` call. `hook-unsupported-execution-context` says the harness
-did not say *where* a call would run, and on this harness its repair is available
-to the session itself (the next section) — here there is no path, argv or directory
-to expose at all. The repair for this one is to do the work through `terminal`,
-where the words are visible, or through `approval run` with a granted token.
+did not say *where* a call would run. The repair for this one is to do the work
+through `terminal`, through `approval run` with a granted token, or, for an
+operator, the two keys above.
+
+### Opaque programs on `terminal`: the `exec.code` class (APRV-510)
+
+`python3 -c`, `python -c`, `node -e` / `--eval`, `bun -e` / `--eval`,
+`deno eval`, `perl -e` / `-E` and `ruby -e` are refused `hook-opaque` (and
+`bun -e`, `python3 <file>` and `bun <file>.ts` `hook-unclassified`) under every
+policy that says nothing about them, exactly as before. With
+`exec.code.custody: attested` in the attested policy they classify `exec.code`
+and the policy decides: an `exec.code` row, an `exec.*` row, or
+`defaults.autonomy`. A policy that names `exec.code` (a row or the `exec` block)
+without the custody line refuses `hook-exec-code-custody-unattested`, naming it.
+
+- **The record binds a hash, never the program.** The payload is `{exec_code:
+  [{interpreter, mode, code_sha256, code_bytes, argv, workdir, path?}],
+  command_sha256, command_bytes, segments, cwd}`: the argv word that held the
+  program is replaced by `<program sha256:… N bytes>`, and the whole command
+  line's SHA-256 still binds every byte. The program text reaches neither the log
+  nor the payload store, and a phone card for a `manual` row shows the hash, not
+  the code (no prefix is shown: a program is where a secret it was handed sits).
+- **A file program is read and hashed at hook time** (`python3 tools/x.py`,
+  `bun scripts/x.ts`). A skill script stays `exec.local` (APRV-502), and
+  `node <file>` keeps its existing class. A file this hook cannot read is refused
+  `hook-exec-code-unreadable`: absent, unreadable (EACCES), not a regular file,
+  over 16 MiB, or relative after a `cd` in the same line; the rules below add
+  an indirect path, another segment on the line, and a call that states no
+  absolute working directory. **Beyond those, the only place-based refusals are the credential and
+  protected paths named below.** Any other file the hook's process can read,
+  anywhere, is accepted and hashed, including one outside the resident's home. Under
+  co-location the hook runs as `approvald`, so a file inside the resident's
+  0700 Hermes home is refused `hook-exec-code-unreadable` as a side effect of
+  EACCES, not by a co-location check; a world-readable file the resident puts
+  where `approvald` can reach it (under `/tmp`, say) is accepted. The village's
+  usual paths are the inline forms and `execute_code`. A file that resolves onto a credential or protected path is
+  refused `hook-unclassified`. The hash is of the file on the hook's machine, so
+  file mode is meant for Hermes's `local` terminal backend only (the village's:
+  the overlay sets no `terminal.backend`, and unset is `local`); under `docker`,
+  `ssh`, `modal` or another sandbox backend the interpreter runs whatever sits at
+  that path on the other filesystem, outside the hash.
+- **File mode binds only a file the hook can place by the kernel's reading**
+  (fix round 2), and refuses `hook-exec-code-unreadable` otherwise:
+  - **The program must be the line's sole segment.** File mode opens only when
+    the `exec.code` segment is the only one on the line: no `;`, `&&`, `||`,
+    `|`, `&` or newline before or after it, and no subshell around it. Any
+    other segment could write, copy, move or relink the file after the hook
+    hashes it (`echo … > x.py; python3 x.py`, `cp`, `mv`, `tee`, `ln -sf`),
+    so `cd a && python3 x.py` and `python3 x.py; echo done` are refused alike.
+    Inline mode (`-c`, `-e`, `eval`) is not bound by this rule: its program is
+    in argv, which no earlier segment rewrites.
+  - **No `..`, and no symlinked directory.** A path with a `..` component, or
+    a `.` or empty component after the first (`sub/./x.py`, `sub//x.py`), is
+    refused, never folded: the kernel follows a symlink before it climbs, a
+    lexical join folds `..` first, and the two name different files. The
+    directory the file sits in (the `workdir` joined with the path's
+    directory) is resolved with realpath, and a directory that is not its own
+    realpath, a symlinked `workdir` included, is refused. A leading `./` and a
+    symlinked FILE are fine: the file's own realpath is what the kernel opens.
+  - **The directory comes from the call.** The `workdir` the call states;
+    Hermes refuses a `terminal` call without one before this point.
+- **The hash is taken before the program runs.** A file program is hashed when
+  the hook runs and opened by the interpreter afterwards. The program is not
+  running in that window, and the sole-segment rule closes every writer on the
+  same line, so what remains is a writer other than the hooked call: a
+  background job an earlier hooked call started, another session, cron. One
+  that rewrites the file in between makes the interpreter run bytes the record
+  never saw. The record binds the bytes the hook saw, and a writer the agent
+  controls is itself an earlier hooked, logged call, so the trail that explains
+  the mismatch is in the log. That limit is inherent to a binding taken before
+  execution: the record says which program the agent asked to run.
+- **The hash binds the ENTRY program's bytes, and nothing it loads.** A `-c`
+  program that runs `exec(open(...).read())`, a file program's imports of
+  sibling modules, a `.pth`, `sitecustomize` or `usercustomize` under the
+  agent's home, and anything a program fetches are outside it. That is inherent
+  to hashing a program before it runs and is not mended by more mechanism; it is
+  why the record says the program existed rather than what it did. The same
+  goes for a `bunfig.toml` `preload` in the working directory, which bun runs
+  before the entry program. A program fed through stdin (a pipe, `<`, `<&` or
+  any dup onto descriptor 0 such as `0>&3`, a heredoc, or any of these after a
+  subshell's `)`, which feeds every program inside it) is outside the class,
+  because the source would be outside the hash, and so is a `terminal` call
+  with `background` or `pty` set, whose stdin a later `process` call can write.
+- **A bare interpreter name is resolved by the shell's `PATH`.** `terminal`
+  keeps exported variables between calls (the local backend re-dumps
+  `export -p` after every command and restores it), so a change to `PATH` in an
+  earlier call can change what `python3` names in a later one, where no single
+  command line shows it. Since 0.4.4 the two spellings that classified as reads,
+  a bare `PATH=…` and `printf -v PATH …`, are refused on their own (APRV-508, a
+  steering assignment), and `export` was already refused, so none of them moves
+  `PATH` through the gate; the limit stands for a change the gate never sees as a
+  command line. Bare names are kept anyway, and deliberately: the same is true
+  of every bare name this classifier reads (`ls`, `cat`, `git`), so refusing them
+  for `exec.code` alone would close nothing the rest of the table leaves open,
+  and would refuse the spelling every one of the 18 observed `python3 -c` calls
+  used. The payload records the interpreter as spelled. Inside one command line,
+  a segment that can change name resolution (a bare `PATH=…`, `printf -v`,
+  `read`, `mapfile`, `alias`, `hash` and kin) closes the class for the rest of
+  the line; across calls, the limit
+  stands and is the gate's, not this class's.
+- **It records existence, not effects.** An `exec.code` record authorizes nothing
+  the program then does through Hermes's tools (each of those is its own hook
+  event), and a subprocess, socket or file the program opens directly is never
+  seen. The human-only classes and the Index write tools are untouched by it.
+- **Outside the class, and refused as before whatever the policy says:** `bash
+  -c`, `sh -c` and every shell wrapper (including a program inside one), `eval`,
+  a pipe into an interpreter (`curl … | python3`), `python3 -` (stdin), an
+  assignment prefix (`PYTHONSTARTUP=…`), a substituted or shell-expanded program
+  word (double quotes with `$` or a backslash the shell keeps, unquoted globs or
+  `~`), a heredoc, a pipe, a `<&` or a dup onto descriptor 0 (`0>&3`) into the
+  program's stdin, a program inside a subshell `( … )` (redirected or not: a
+  redirection after the `)` feeds its stdin) or a `{ …; }` group, any redirection
+  except a write to a discard device, a word
+  after an inline program (a loader could carry the real program there), an
+  interpreter spelled by a relative path or from any directory but `/usr/bin`,
+  `/bin` and `/usr/local/bin` (the `bin` directories of the classifier's one
+  system-bin list, which the `date` and system-reader shapes also read; a rule
+  about spelling: on macOS `/usr/local/bin` is often user-owned, and a bare name
+  resolves through it anyway), a device or process path as the program file (`/dev/stdin`,
+  `/proc/self/fd/0`), a program or command with a lone UTF-16 surrogate, or a
+  command with an embedded NUL, which no argv word can hold
+  (`hook-exec-code-unreadable`), and any part of a line after a segment that can
+  change what a bare name resolves to (a bare `PATH=…`, `printf -v`, `alias`,
+  `hash` and kin). The open window does not reach `exec.code`, and the
+  class is not opened on Codex.
 
 ### Tools the table does not know: the policy's `tools` mapping (APRV-499)
 
@@ -816,7 +967,7 @@ tools:
   inert: the table reads the call's `action` and arguments (`cronjob_manage list`
   is a read, `create` is `cron.manage`), an entry reads only the name, and a
   name-only line must not loosen a call the runtime classified from what it does.
-  `execute_code` stays refused before anything reads the policy.
+  `execute_code` is claimed by the adapter's table and decided by the two `exec.code` keys (APRV-510), never by a `tools` entry.
 - **Every `class` must be declared** in `classes`, exactly or under a trailing
   `<prefix>.*` family. A malformed or undeclared entry fails the policy closed,
   and then an unknown tool is blocked `hook-policy-unavailable` with the rest,
@@ -952,8 +1103,10 @@ off.
 - Anything Hermes does without a tool call: the prompt, the context it attaches,
   its own model calls.
 - The session's reads *before* the first hook fires.
-- `execute_code`'s in-process tool calls, if those bypass the hook. Refused
-  rather than covered.
+- What an `execute_code` program or an `exec.code` program does without a tool
+  call: its own `subprocess`, sockets and file reads. The kernel's tool calls do
+  fire the hook (APRV-509); its Python does not. Refused unless both `exec.code`
+  keys are declared, and recorded rather than covered when they are.
 - MCP tools register into the same tool registry, so they *should* flow through
   the same dispatch. Not traced end to end.
 - A tool Hermes adds in a later release. An unknown tool takes the path it took
@@ -977,10 +1130,13 @@ and each one says what a next round would have to do. Nothing on this list is a
 guess dressed as a fact: where the adapter had to choose, it chose the refusing
 side.
 
-1. **`execute_code`'s in-process tool calls.** Whether a tool call made from inside
-   the persistent kernel re-fires `pre_tool_call`. Arm the probe to ALLOW one
-   `execute_code` call in the scratch project and see whether an envelope appears
-   for the inner call. The highest-risk unknown here.
+1. **`execute_code`'s in-process tool calls: SETTLED from source (APRV-509).** A
+   tool call from inside the kernel fires `pre_tool_call`, through the same
+   dispatch, against a seven-tool allow-list; its envelope carries an empty
+   `session_id` and `tool_call_id`. What stays open is a LIVE confirmation on a
+   gated box (the probe's HANDS row) and the part no hook can see: the kernel's
+   own Python. That is why `exec.code.execute_code: hooked` exists as a separate
+   key rather than following from the custody key.
 2. **First-use consent with no TTY.** The gateway pass ran with consent already
    recorded from a terminal, so it proves the hooks fire for gateway sessions and
    nothing about the sandbox case. Clear
@@ -1322,9 +1478,15 @@ clamp does not apply to them.
   relative path, gets `hook-unsupported-execution-context` and a reason telling
   the agent to retry absolutely. Residents should be told this once rather than
   discovering it as a wall.
-- **`execute_code` is refused**, so a resident's agent cannot run arbitrary
-  Python through this gate at all. That is a real loss of capability and it is the
-  honest trade while its in-process tool calls are unverified.
+- **`execute_code` and `python3 -c` are refused** until the tenant's policy opens
+  `exec.code` (APRV-510): `custody: attested` once credential custody is live, then
+  `execute_code: hooked` on the operator's acceptance of the APRV-509 probe. The
+  template carries the row and the keys commented out; the rollout order is in
+  `examples/agent-village/approval-policy.md`. Under co-location a `python3
+  <file>` whose file sits in the resident's 0700 home stays refused even then
+  (`hook-exec-code-unreadable`: the daemon cannot read it). That is EACCES, not
+  a co-location rule: a file the daemon can read, outside the home, is accepted
+  and hashed.
 - **Every record names the daemon that wrote it** (APRV-383): the tenant's
   attested policy may list which daemon ids may write at all
   (`design/hosted-daemon-identity.md`), and the launcher can set
@@ -1360,7 +1522,8 @@ approval hook hermes               # gate a Hermes Agent session: snake_case
                                    #   (observed on main 118984d7; its default
                                    #   is false, and v0.21.3 ignores it
                                    #   silently). execute_code is refused
-                                   #   outright, and so is any call whose
+                                   #   unless both exec.code keys are set
+                                   #   (APRV-510), and so is any call whose
                                    #   effective directory the event does not
                                    #   carry. See docs/hermes-hook.md
 ```

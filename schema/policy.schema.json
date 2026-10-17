@@ -197,6 +197,29 @@
         }
       ]
     },
+    "exec": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "SPEC.md §5.2 and §7 (APRV-510, proposed; 0.4.5 candidate): what an operator has attested about opaque agent code. Absent, every policy behaves exactly as before the key existed: `python3 -c`, `node -e` and kin are refused `hook-opaque`, an interpreter running a file that is not a skill script is refused `hook-unclassified`, and a Hermes `execute_code` call is refused `hook-hermes-execute-code-unbound`. A core that predates this key refuses it at the schema, and the whole policy then fails closed (every class `manual`), so a tenant receives this block only after its pinned core knows it.",
+      "properties": {
+        "code": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The `exec.code` class (APRV-510). Each key opens one thing and only the attested policy can set it; an absent key is the closed answer. With `custody: attested`, an inline program or a non-skill interpreter file run is classified `exec.code` and resolved by the policy like any class (an `exec.code` row, an `exec.*` family row, or `defaults.autonomy`), and a record of it binds the program's SHA-256 and length, never its text. The record says the program existed; it authorizes nothing the program then does through other tools, each of which is its own hook event.",
+          "properties": {
+            "custody": {
+              "enum": ["attested", "unattested"],
+              "description": "`attested`: the operator states that credential custody is in place for this agent (the code it runs cannot read credentials it should not hold), which is the precondition for opening the class at all, because opaque code run without it bypasses every gate that guards a credential. `unattested`, or the key absent: the class stays closed, and where the policy names `exec.code` anywhere the refusal is `hook-exec-code-custody-unattested`, naming this key."
+            },
+            "execute_code": {
+              "enum": ["hooked", "unhooked"],
+              "description": "Hermes `execute_code` only, and only beside `custody: attested`. `hooked`: the operator has observed that a tool call made from inside the `execute_code` kernel re-fires the hook (the lane L1 probe's answer), so the call is classified `exec.code` with the program's hash bound. `unhooked`, or the key absent: `execute_code` is refused `hook-hermes-execute-code-unbound` as before. Set it only on the probe's yes: if inner calls do not re-fire the hook, one `execute_code` call is an unbounded bypass of the whole adapter."
+            }
+          }
+        }
+      },
+      "examples": [{ "code": { "custody": "attested" } }, { "code": { "custody": "attested", "execute_code": "hooked" } }]
+    },
     "read_scope": {
       "type": "object",
       "additionalProperties": false,

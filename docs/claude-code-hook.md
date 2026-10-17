@@ -343,6 +343,7 @@ an addition).
 | `harness-launch-hermes` | hermes | (any) | harness.launch.hermes, read.shell (APRV-398) |
 | `node` | node | (any) | files.write.workspace, gate.self, log.sync, log.advance, exec.local (rule `node-skill-script` for a skill script, APRV-502) |
 | `skill-script` | bun, python, python3 | a skill-script path § | exec.local (APRV-502) |
+| `exec-code` | python, python3, node, bun, deno, perl, ruby | an inline program, or a file that is not a skill script, only when the policy declares `exec.code.custody: attested` | exec.code (`exec-code-inline`, `exec-code-file`; APRV-510) |
 | `approval` | approval | (any) | gate.self, log.sync, log.advance |
 | `workspace-tool` | npx, tsx, ts-node, tsc, oxlint, eslint, prettier, vitest, jest, backlog, make | (any) | files.write.workspace (plus the `harness.launch.*` family, for `npx` naming a harness package exactly — APRV-354) |
 | `workspace-write` | mkdir, cp, mv, touch, tee, ln, chmod, truncate, rmdir | (any) | files.write.workspace |
@@ -1291,12 +1292,35 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-unsupported-execution-context` | the harness does not tell the hook where the call will run, so no verdict over the visible bytes can bind the action. Never produced on this adapter: Claude Code's events carry the directory. It is the refusal native Codex Bash takes on every event, because Codex 0.152.1 honours a per-call working directory that appears in no field of the event (`docs/codex-hook.md`) |
 | `hook-muse-contributor-model` | the session names a Contributor-tier model, so every tool call is refused above the policy: Meta trains on that tier's prompts and completions, and a session on one discloses every byte it reads. Never produced on this adapter, which is Anthropic's; it is Meta Muse Code's (`docs/muse-hook.md`). The repair is to change the model in Muse's own picker, not to ask an approver |
 | `hook-hermes-execute-code-unbound` | a Hermes Agent `execute_code` call, refused before anything else looks at it: it carries a program and no path, no argv and no working directory, so no class can be resolved and no payload can bind what it would do. Never produced on this adapter; it is Hermes Agent's (`docs/hermes-hook.md`). Distinct from `hook-opaque`, whose repair is to write the command differently — there is no spelling of an `execute_code` call this hook could answer, so the repair is to do the work through the shell tool or through `approval run` with a granted token |
+| `hook-exec-code-custody-unattested` | an opaque program (`python3 -c`, `node -e` and kin, an interpreter running a file that is not a skill script, or a Hermes `execute_code` with `exec.code.execute_code: hooked`) under a policy that NAMES the `exec.code` class (a row, or the `exec` block) without declaring `exec.code.custody: attested` (APRV-510). The repair is that line in the attested policy. A policy that never names `exec.code` keeps `hook-opaque` / `hook-unclassified` byte for byte. Nothing is appended |
+| `hook-exec-code-unreadable` | an `exec.code` file program this hook cannot read and hash: absent, EACCES, not a regular file, over 16 MiB, or relative after a `cd` in the same line (APRV-510); or one it cannot place by the kernel's reading: a path with `..` (or a `.` or empty component after the first), a directory that is not its own realpath, a program that is not the line's sole segment, or an envelope with no absolute `cwd` (fix round 2). A record of an opaque program binds its hash, so a program whose bytes cannot be read is refused rather than recorded without one. Nothing is appended |
 | `hook-io` | malformed hook input, or an unreadable log |
 
 `hook-opaque` is the one worth knowing by sight. `eval`, `source`, `sudo`,
 `env`, `xargs`, `node -e`, `python3 -c`, backticks, arithmetic expansion, and
 any `$(…)` that is not purely a read: all deny. The fix is to write the command
 out, or to run the effect through `approval run` with a granted token.
+
+**An operator can open the inline programs as a class of their own** (APRV-510).
+With `exec.code.custody: attested` in the attested policy, `python3 -c`, `node -e`
+/ `--eval`, `bun -e`, `deno eval`, `perl -e`, `ruby -e`, and `python3` / `bun`
+running a file that is not a skill script classify `exec.code` and the policy
+decides (an `exec.code` row, an `exec.*` row, or `defaults.autonomy`). The record
+binds the program's SHA-256 and length and the command line's SHA-256, never the
+program text, and it records that the program existed rather than what it did.
+The shape is exact and everything outside it keeps the refusal above: `bash -c`
+and every shell wrapper, `eval`, `env`, `sudo`, a pipe into an interpreter, stdin
+(`python3 -`), an assignment prefix, a substituted or shell-expanded program word,
+a heredoc, a redirection other than a discard write, a program inside a
+subshell `( … )` or a `{ …; }` group, a word after an inline
+program, an interpreter outside `/usr/bin`, `/bin` and `/usr/local/bin` or
+spelled relatively, and anything after a segment that can
+change what a bare name resolves to. The open window does not reach the class.
+A FILE program is read from the directory the event's `cwd` names, never the
+hook process's own directory, and an event with no absolute `cwd` gets no file
+mode (`hook-exec-code-unreadable`); it must also be the line's sole segment and
+be named by a path with no `..` through directories that are their own
+realpath. `docs/hermes-hook.md` has the payload and the limits.
 
 **A login shell around one inline script is the exception** (APRV-380). When
 the words are exactly a known shell (`bash`, `sh`, `zsh`, `dash`, `ksh`,
