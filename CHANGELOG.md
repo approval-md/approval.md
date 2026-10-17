@@ -27,6 +27,10 @@ before a tag.
   `--retry-grace 5m` for the old behaviour. The `hook-timeout` deny names the
   window and which later calls withdraw. SPEC.md "A harness wait that
   expires" is amended (pending sign-off).
+- **A late tap meets an existing refusal (APRV-410 AC2).** Under the default
+  grace a decision past the grace is refused `expired` and `approval.expired`
+  is recorded; after a withdrawal it is refused `request-withdrawn`. No new
+  refusal code.
 
 ## 0.4.4 — 2026-10-12
 

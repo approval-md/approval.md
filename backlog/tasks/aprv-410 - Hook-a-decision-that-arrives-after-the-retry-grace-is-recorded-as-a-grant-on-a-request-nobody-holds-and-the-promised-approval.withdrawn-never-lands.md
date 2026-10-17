@@ -3,11 +3,11 @@ id: APRV-410
 title: >-
   Hook: a decision that arrives after the retry grace is recorded as a grant on
   a request nobody holds, and the promised approval.withdrawn never lands
-status: To Do
+status: In Progress
 assignee:
-  - '@lane-a'
+  - '@claude-nonav'
 created_date: '2026-09-20 19:06'
-updated_date: '2026-10-16 17:55'
+updated_date: '2026-10-17 01:35'
 labels:
   - hook
   - log
@@ -29,7 +29,7 @@ Observed 2026-09-20 on the request in the sibling classifier task. Timeline from
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 After the retry grace elapses with no decision, an approval.withdrawn with reason timeout is appended for the request by a named actor (daemon or next hook run), and a test proves it without a live phone
-- [ ] #2 A channel decision arriving on a withdrawn or past-grace request is recorded as a distinct machine-readable refusal (or the existing audit.decision_refused with a new code), never as approval.granted, and the sender is told the question expired
+- [x] #2 A channel decision arriving on a withdrawn or past-grace request is recorded as a distinct machine-readable refusal (or the existing audit.decision_refused with a new code), never as approval.granted, and the sender is told the question expired
 - [x] #3 The hook deny text and docs/claude-code-hook.md describe the actual sequence, including who withdraws
 - [x] #4 Log seq 64473 is left as it is (the log is append-only) and the task notes explain what it means
 <!-- AC:END -->
@@ -102,6 +102,10 @@ APRV-409's numbers on the same post-rebase base, for the record, since the two t
 CI verdict on PR #538 (run 35676814830): completed / success, gh pr checks 538 --watch exited 0. classify tier pass 14s; protected paths (grant cross-check) pass 47s; full gate node 22 shard 1/3 pass 5m49s, shard 2/3 pass 10m51s, shard 3/3 pass 8m24s; ci pass 3s. The three skipping jobs are tier gates this change does not trigger. No shard was red, so there are no failing test names to name; the CI full gate is the run that would have carried the known SMTP baseline, and it passed, so nothing is being waved through on a count. The PR is green and the merge is NOT armed, deliberately: the gate daemon is down today and gh pr merge classifies vcs.push.main, which routes to a human who is not there.
 
 2026-10-16 sweep (claude-nonav): moved back to To Do. AC1, AC3, AC4 shipped in PR #538 (2026-09-22). AC2 (a distinct refusal for a decision on a withdrawn or past-grace request) waits on Carter's SPEC ruling for the new refusal code; build it in one lane with APRV-464 and APRV-516 (same hook carry and sweep code).
+
+2026-10-17 (claude-nonav, branch nonav/aprv-464-withdraw-on-non-read): AC2 met with the refusal codes that already exist, per Carter's D-4 ruling (no new member of channel_decision_refusal_codes, no SPEC 11.2 row, no recorded retry window), on top of APRV-464 in the same branch. Under the default retry grace, which APRV-464 ends at the policy TTL, a decision past the grace is a decision on an expired request: decide refuses expired, materialises approval.expired under a system: actor, and every channel tells the sender 'Expired - the approval window has closed' (refusedDecisionLine). A decision after a withdrawal refuses request-withdrawn, nothing is appended, and the channel says 'Withdrawn ... nothing was recorded'. A read between the request and the tap withdraws nothing (APRV-464), so there is no withdrawal to race. Nothing in src needed wiring for this: the two refusals already existed in core/gate.ts decide; what made AC2 reachable is APRV-464's default grace. The residual, documented in docs/claude-code-hook.md and docs/hermes-hook.md: with an operator-shortened --retry-grace, a tap between that grace and the TTL, before any withdrawal, is still recorded as approval.granted and authorizes nothing, since a retry past the grace does not carry it (#538).
+Tests: tests/cli-hook.test.ts 'APRV-410 AC2 (D-4): a decision past the default grace is refused expired, never granted' (4s TTL policy, default grace, a read past the TTL, then grant: refused expired, one approval.expired on the key, no approval.granted, nothing started on the key) and 'APRV-410 AC2 (D-4): past an operator's shorter grace, a write withdraws and the tap is refused request-withdrawn'. Both pass. Honest note: the expired case also passes with APRV-464's code planted back, because the refusal predates this branch; the case pins the criterion's scenario, while APRV-464's own cases carry the planted-bug check.
+Status: In Progress until the PR merges, then the sweep closes it (every AC is now ticked).
 <!-- SECTION:NOTES:END -->
 
 ## Comments
