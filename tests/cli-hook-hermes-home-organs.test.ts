@@ -635,13 +635,17 @@ test("fix round 3 M(L5c-1): a symlink then `..` is judged where the kernel lands
     ["cat ../workspace/note.md", workspace],
     ["echo x > s/s1/../s2.md", dir],
     ["cat .hermes/workspace/../workspace/note.md", dir],
-    ["cd .hermes/workspace && cat ../skills/s1/../../workspace/note.md", dir],
     ["mkdir -p build && echo x > build/out.txt", workspace],
     ["echo x > notes/../out.md", workspace],
   ] as const) {
     const run = ask(dir, terminal(command, workdir));
     assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
   }
+  // Merge of APRV-522 (fix round 2, the narrowed relative-cd rule): after a
+  // plain relative `cd`, a word with a parent step is a credential read, so
+  // this row, an allow control before the merge, is account.credential on main
+  // and here.
+  expectDenied(dir, [terminal("cd .hermes/workspace && cat ../skills/s1/../../workspace/note.md", dir)], "account.credential");
 });
 
 test("fix round 3 S(open) and N-a through the hook: #N outputs, absolute -o under --output-dir, option words; numeric braces stay ordinary", () => {
@@ -670,11 +674,13 @@ test("fix round 3 S(open) and N-a through the hook: #N outputs, absolute -o unde
     "cp ./*.md docs/",
     "echo {1..300}",
     "touch f{1..300}",
-    "cat notes{1..300}.md",
   ]) {
     const run = ask(dir, { tool: "terminal", input: { command, workdir: workspace } });
     assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
   }
+  // Merge of APRV-522 (fix M-D): a READ of a brace list past 64 words is a
+  // credential read, on main and here, so this former allow control is denied.
+  expectDenied(dir, [{ tool: "terminal", input: { command: "cat notes{1..300}.md", workdir: workspace } }], "account.credential");
 });
 
 test("fix round 4 M(L5f-1) through the hook: an upload or body file glued into its option word is denied as the separated spelling is", () => {
@@ -860,19 +866,29 @@ test("cred-asymmetry M1: backtick substitution before a credential stays refused
   }
 });
 
-test("cred-asymmetry M1: an unresolved git read word that names no credential still reads", () => {
+/**
+ * Merge of APRV-522: these were allow controls (an unresolved git read word
+ * that names no credential still reads). APRV-522 (fix round 1, S) makes
+ * git's no-index diff and grep and its patch log readers of the directory they
+ * are handed, and this PR's round 2 makes a recursive reader of a word this
+ * hook cannot expand a credential read outright, since the word may land on a
+ * home. Both rules hold after the merge, so each row is account.credential.
+ * This is the residual the round-2 report left open for a decision.
+ */
+test("cred-asymmetry M1 after the APRV-522 merge: a git directory reader of an unresolved word is account.credential", () => {
   const { dir, home, env } = credentialLab();
-  for (const command of [
-    "git diff --no-index /dev/null $(pwd)/notes.md",
-    "git diff --no-index /dev/null $(pwd)/.envrc",
-    "git grep --no-index -h . $(pwd)/src",
-    "git log -p -- $(pwd)/README.md",
-    "git diff --no-index /dev/null ~/.hermes/workspace/$(echo x)",
-    "git diff --no-index /dev/null ~/.hermes/$(echo workspace)/notes.md",
-  ]) {
-    const run = ask(dir, { tool: "terminal", input: { command, workdir: join(home, "workspace") }, env });
-    assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
-  }
+  expectDenied(
+    dir,
+    [
+      "git diff --no-index /dev/null $(pwd)/notes.md",
+      "git diff --no-index /dev/null $(pwd)/.envrc",
+      "git grep --no-index -h . $(pwd)/src",
+      "git log -p -- $(pwd)/README.md",
+      "git diff --no-index /dev/null ~/.hermes/workspace/$(echo x)",
+      "git diff --no-index /dev/null ~/.hermes/$(echo workspace)/notes.md",
+    ].map((command) => ({ tool: "terminal", input: { command, workdir: join(home, "workspace") }, env })),
+    "account.credential",
+  );
 });
 
 function askClaudeCode(dir: string, command: string, env: Record<string, string>): Run {
@@ -1024,11 +1040,17 @@ test("cred-asymmetry round 3 M1(b): a dot segment under a non-credential directo
   for (const command of [
     "cat ~/.hermes/workspace/./$(echo notes.md)",
     "cat ~/.hermes/skills/../workspace/$(echo notes.md)",
-    "git diff --no-index /dev/null ~/.hermes/workspace/./$(echo notes.md)",
   ]) {
     const run = ask(dir, { tool: "terminal", input: { command, workdir: join(home, "workspace") }, env });
     assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
   }
+  // Merge of APRV-522: git's no-index diff is a directory reader there, so an
+  // unresolved word it reads is account.credential (see the M1 test above).
+  expectDenied(
+    dir,
+    [{ tool: "terminal", input: { command: "git diff --no-index /dev/null ~/.hermes/workspace/./$(echo notes.md)", workdir: join(home, "workspace") }, env }],
+    "account.credential",
+  );
 });
 
 /**
@@ -1062,10 +1084,17 @@ test("cred-asymmetry round 3 S1: an unresolved word whose literal prefix lands o
 test("cred-asymmetry round 3 S1: an unresolved word whose prefix lands outside every home still reads", () => {
   const { dir, home, env } = credentialLab();
   writeFileSync(join(home, "workspace", "notes.md"), "x\n", "utf8");
-  for (const command of ["cat ./$(echo notes.md)", "cat ../workspace/$(echo notes.md)", "git diff --no-index /dev/null ./$(echo notes.md)"]) {
+  for (const command of ["cat ./$(echo notes.md)", "cat ../workspace/$(echo notes.md)"]) {
     const run = ask(dir, { tool: "terminal", input: { command, workdir: join(home, "workspace") }, env });
     assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
   }
+  // Merge of APRV-522: git's no-index diff is a directory reader there, so an
+  // unresolved word it reads is account.credential (see the M1 test above).
+  expectDenied(
+    dir,
+    [{ tool: "terminal", input: { command: "git diff --no-index /dev/null ./$(echo notes.md)", workdir: join(home, "workspace") }, env }],
+    "account.credential",
+  );
 });
 
 /**
@@ -1095,13 +1124,24 @@ test("cred-asymmetry round 3 S2: bash's other tilde prefixes before a credential
   expectDenied(dir, rows, "account.credential");
 });
 
-test("cred-asymmetry round 3 S2: a working-directory tilde outside every home still reads", () => {
+/**
+ * Merge of APRV-522 (fix M-C): these were allow controls. APRV-522 fails
+ * closed on every tilde prefix this hook does not expand, the
+ * working-directory one included, so each row is account.credential on main
+ * and here.
+ */
+test("cred-asymmetry round 3 S2 after the APRV-522 merge: a working-directory tilde fails closed", () => {
   const { dir, home, env } = credentialLab();
   writeFileSync(join(home, "workspace", "notes.md"), "x\n", "utf8");
-  for (const command of ["cat ~+/notes.md", "head -1 ~+/notes.md"]) {
-    const run = ask(dir, { tool: "terminal", input: { command, workdir: join(home, "workspace") }, env });
-    assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
-  }
+  expectDenied(
+    dir,
+    ["cat ~+/notes.md", "head -1 ~+/notes.md"].map((command) => ({
+      tool: "terminal",
+      input: { command, workdir: join(home, "workspace") },
+      env,
+    })),
+    "account.credential",
+  );
 });
 
 /**
@@ -1131,14 +1171,21 @@ test("cred-asymmetry round 3 N2: an operand-less recursive reader in a home is a
 
 test("cred-asymmetry round 3 N2: a recursive reader that names its path, or reads stdin, still reads", () => {
   const { dir, home, env } = credentialLab();
-  for (const [command, workdir] of [
-    ["grep -r SYNTHETIC_TOKEN", join(home, "workspace")],
-    ["grep -rn SYNTHETIC_TOKEN workspace", home],
-    ["grep SYNTHETIC_TOKEN", home],
-    ["rg SYNTHETIC_TOKEN workspace", home],
-    ["find workspace -type f", home],
-  ] as const) {
+  for (const [command, workdir] of [["grep -r SYNTHETIC_TOKEN", join(home, "workspace")]] as const) {
     const run = ask(dir, { tool: "terminal", input: { command, workdir }, env });
     assert.equal(verdictOf(run).permission, "allow", `${command} in ${workdir}: ${run.stdout} ${run.stderr}`);
   }
+  // Merge of APRV-522 (fix M-E): a search reads the working directory, so a
+  // search run from inside a home is account.credential on main and here,
+  // whatever path it names, or none. These rows were allow controls before the merge.
+  expectDenied(
+    dir,
+    [
+      ["grep -rn SYNTHETIC_TOKEN workspace", home],
+      ["grep SYNTHETIC_TOKEN", home],
+      ["rg SYNTHETIC_TOKEN workspace", home],
+      ["find workspace -type f", home],
+    ].map(([command, workdir]) => ({ tool: "terminal", input: { command, workdir }, env })),
+    "account.credential",
+  );
 });

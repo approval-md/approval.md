@@ -529,9 +529,18 @@ serve` the hook runs in the daemon, so a hosted operator sets
 `APPROVAL_HERMES_HOME` on the serve process. Unexpanded, a `$HERMES_HOME` path
 is `policy.core` when written and `account.credential` when read. After a `cd`
 this hook cannot resolve (`cd $X`, `cd "$D"`, `cd -`, `cd $HERMES_HOME` with the
-home unknown), every later relative write is `policy.core` and every later
-relative read `account.credential`; setting `APPROVAL_HERMES_HOME` on the serve
-process removes that conservatism for the home. `APPROVAL_HERMES_HOME` is
+home unknown, or a `cd` with an assignment prefix such as `CDPATH=`), every
+later relative write is `policy.core` and every later relative read
+`account.credential`; setting `APPROVAL_HERMES_HOME` on the serve process
+removes that conservatism for the home. Reads are judged a second time by the
+shared credential pass (APRV-522, see `docs/claude-code-hook.md`), which also
+judges a relative `cd` operand not opening with `./` or `../` as possibly
+found through an inherited `CDPATH`: after `cd project`, a later relative read
+is `account.credential` when `<unknown directory>/project/<word>` could name
+credential material or a gate home, and always for a recursive reader, a word
+holding `..` and a `**` glob; other reads keep their class. The write judgement here does NOT assume an inherited `CDPATH`
+(it would make every write after such a `cd` `policy.core`); a write landed
+through one is a stated limit. `APPROVAL_HERMES_HOME` is
 trusted as given: the operator sets it (under co-location the control plane sets
 it from the tenant's home), and nothing an agent writes reaches the hook
 process's environment. A read pattern (`cat .e*`) is expanded against its
@@ -622,9 +631,10 @@ quotes and in a single-file search) goes to a person. A recursive reader that
 names no path walks the working directory, and that directory is judged as its
 operand (round 3). A single-file read of such a word is judged with every `.`
 dropped and every `..` resolved, with its literal directory landed from each
-working directory (relative, after a `cd`, through a symlink), and with bash's
-`~+` read as the working directory (and as the literal name a quoted one keeps) and `~-`, the directory-stack forms and
-`~name` read as unknown: an unknown span right under a home, a profile home,
+working directory (relative, after a `cd`, through a symlink). Since the
+merge of APRV-522 (#653, its M-C), a word that opens with `~+`, `~-`, a
+directory-stack form or `~name` is `account.credential` outright, whatever it
+spells. Otherwise an unknown span right under a home, a profile home,
 the `hermes-agent/` of either or `.approval`, or two unknown segments in a row
 at the end, is `account.credential` (round 3). The same holds
 for a command substitution that makes up the whole path (`cat $(echo

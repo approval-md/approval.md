@@ -1011,9 +1011,72 @@ export function isCredentialPath(candidate: string): boolean {
   return expansions.some((expansion) => isCredentialWord(expansion));
 }
 
-/** {@link isCredentialPath} for one word that brace expansion has already made. */
-function isCredentialWord(candidate: string): boolean {
-  const segments = pathSegments(collapseBracedVariables(candidate));
+/**
+ * {@link isCredentialPath} for one word that brace expansion has already made.
+ *
+ * Merge of APRV-511 and APRV-522: the word is judged as written and with its
+ * braced variables collapsed (APRV-511), and each of those on every splitting,
+ * as written and with `..` resolved, case folded and not (APRV-522). True when
+ * any reading names credential material, so neither side's rule is narrowed.
+ */
+function isCredentialWord(word: string): boolean {
+  const collapsed = collapseBracedVariables(word);
+  const candidates = collapsed === word ? [word] : [word, collapsed];
+  return candidates.some((candidate) => credentialWordReadings(candidate));
+}
+
+function credentialWordReadings(candidate: string): boolean {
+  // APRV-522 (M3). Judged on two spellings of the same path, and true when
+  // either one names credential material:
+  //
+  // - the segments as written, case folded, which is how the rows always read
+  //   (a `..` before the approval home keeps its `.approval` run);
+  // - the same segments with `..` resolved lexically, so a `..` out of a
+  //   sibling directory inside the approval home lands on the file it names.
+  //   Pure text cannot say what a symlinked parent does to
+  //   a `..`; the hook's disk pass judges the physical landing as well.
+  //
+  // Case is folded on every platform. macOS and Windows volumes are case
+  // insensitive by default, so an upper-case spelling opens the environment map
+  // there; on a case-sensitive volume the fold names a different file as a
+  // credential, which costs an approval prompt and never an exposure.
+  //
+  // APRV-522 fix round 2 (path-parser differential): a backslash separates
+  // segments only on Windows. On macOS and Linux it is a character of a name,
+  // so a profile directory whose name holds one is ONE segment to the kernel
+  // and two to the split above, which moves the profile row's offset. When the
+  // path holds a backslash, the `/`-only reading is judged as well.
+  const splittings = [pathSegments(candidate)];
+  if (candidate.includes("\\")) {
+    splittings.push(candidate.split(/\/+/u).filter((segment) => segment.length > 0 && segment !== "."));
+  }
+  return splittings.some((segments) => credentialSegmentsAsWrittenOrResolved(segments));
+}
+
+/**
+ * The credential rows over one splitting, as written and with `..` resolved,
+ * case folded (APRV-522) and as spelled (APRV-511's rows read an unexpanded
+ * `$HERMES_HOME` by its exact spelling, which the fold would turn into a
+ * "maybe" home).
+ */
+function credentialSegmentsAsWrittenOrResolved(segments: readonly string[]): boolean {
+  const folded = segments.map((segment) => segment.toLowerCase());
+  const spellings = folded.every((segment, index) => segment === segments[index]) ? [folded] : [folded, [...segments]];
+  for (const written of spellings) {
+    if (credentialSegments(written)) return true;
+    if (!written.includes("..")) continue;
+    const resolved: string[] = [];
+    for (const segment of written) {
+      if (segment === ".." && resolved.length > 0 && resolved[resolved.length - 1] !== "..") resolved.pop();
+      else resolved.push(segment);
+    }
+    if (credentialSegments(resolved)) return true;
+  }
+  return false;
+}
+
+/** The credential rows over already-split segments. */
+function credentialSegments(segments: readonly string[]): boolean {
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
     // APRV-398. Hermes Agent's own home holds two files of credential material
@@ -1040,7 +1103,7 @@ function isCredentialWord(candidate: string): boolean {
     }
     if (segment !== ".approval") continue;
     const next = segments[index + 1];
-    if (next === undefined) return false;
+    if (next === undefined) continue;
     if (next.startsWith("vault")) return true;
     if (next === "keys") return true;
     if (next === "env" || next.startsWith("env.")) return true;
@@ -1064,6 +1127,20 @@ function isCredentialWord(candidate: string): boolean {
  * exfiltrating one is the one worth naming: a `cp` touching credential material
  * is `account.credential` in either direction. Both classes are gated, so the
  * choice is about what the approver is told, not about whether they are asked.
+ *
+ * `git` left this list with APRV-522 (M2). It was here for `git add`, `git rm`
+ * and `git checkout -- <path>` (still exempt, through
+ * {@link GIT_PATH_WRITE_OPTIONS}), and it made the credential rule decline every
+ * git verb, the readers included: diff and grep without an index, log with a
+ * patch and show of a `<rev>:<path>` print the file, and classified
+ * `read.shell`. git is direction-blind the way `cp` is, so
+ * it is judged the way `cp` is, and its credential words stay in the protected
+ * scan ({@link credentialProtectedScanKeeps}), so a writing verb keeps its
+ * `policy.core` answer with the credential class carried beside it.
+ *
+ * `ln` left with it. A link to the environment map is a second name for the
+ * secret that a later read can open, so its source is a read of
+ * the material; it is kept in the protected scan for the same reason git is.
  */
 const CREDENTIAL_WRITE_BINS: readonly string[] = [
   "rm",
@@ -1072,11 +1149,9 @@ const CREDENTIAL_WRITE_BINS: readonly string[] = [
   "truncate",
   "chmod",
   "chown",
-  "ln",
   "touch",
   "mkdir",
   "rmdir",
-  "git",
   "dd",
   "install",
 ];
@@ -1192,20 +1267,203 @@ function credentialWritesOnly(basename: string, args: readonly string[]): boolea
     basename === "sed" &&
     (hasFlag(args, ["--in-place"]) ||
       args.some((arg) => arg.startsWith("-i") && !arg.startsWith("--")));
-  return CREDENTIAL_WRITE_BINS.includes(basename) || inPlaceSed;
+  const gitPathWrite = basename === "git" && gitWritesNamedPathsOnly(args);
+  return CREDENTIAL_WRITE_BINS.includes(basename) || inPlaceSed || gitPathWrite;
 }
 
-function credentialTouch(
-  basename: string,
-  args: readonly string[],
-  positionals: readonly string[],
-): CredentialOutcome | null {
-  const writesOnly = credentialWritesOnly(basename, args);
-  if (!writesOnly) {
-    const named = positionals.find((arg) => isCredentialPath(arg));
-    if (named !== undefined) {
-      return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
+/**
+ * Does this git argv only WRITE the paths it names? (APRV-522.) `true` only
+ * when the verb is read unambiguously, is one of
+ * {@link GIT_PATH_WRITE_OPTIONS}, and every option before `--` is on that
+ * verb's allow-list.
+ *
+ * The verb is found the way APRV-520's {@link gitGlobalRefusal} reads the
+ * globals: zero-value globals are skipped, and ANY other flag before the verb
+ * (a global that takes a value, `-C dir`, `-c k=v`, `--git-dir x`, a joined
+ * `--work-tree=`, or one this table does not know) leaves the verb unknown, so
+ * the argv is a READER. `classifySegment` refuses those globals anyway; this
+ * does not rely on that ordering.
+ *
+ * The options are a closed list, never a deny-list: git accepts any unique
+ * prefix of a long option (`--pat` is `--patch`), several verbs print the
+ * file's hunks (`git add -p`, `git checkout -p`, `git restore --patch`), and
+ * `git checkout-index --prefix=/tmp/` writes a copy elsewhere. So an option
+ * not listed for the verb (an abbreviation, a short letter bundled with one
+ * not listed, `-fp`, an unknown flag) makes the argv a reader, and the
+ * credential rule judges what it names.
+ */
+/**
+ * Where git's verb sits in its argv, read the way {@link gitWritesNamedPathsOnly}
+ * reads it (APRV-522 fix round 2): only zero-value globals may come before it,
+ * and any other flag leaves the verb unknown (`null`). The hook's credential
+ * pass uses it so that, under a directory a `CDPATH` lookup may have chosen,
+ * the verb word is not judged as a path: git never opens its verb.
+ */
+export function gitVerbIndex(args: readonly string[]): number | null {
+  let at = 0;
+  while (at < args.length && isFlag(args[at] as string)) {
+    if (!GIT_ZERO_VALUE_GLOBALS.includes(args[at] as string)) return null;
+    at += 1;
+  }
+  return at < args.length ? at : null;
+}
+
+function gitWritesNamedPathsOnly(args: readonly string[]): boolean {
+  let at = 0;
+  while (at < args.length && isFlag(args[at] as string)) {
+    if (!GIT_ZERO_VALUE_GLOBALS.includes(args[at] as string)) return false;
+    at += 1;
+  }
+  const verb = args[at];
+  if (verb === undefined || !Object.hasOwn(GIT_PATH_WRITE_OPTIONS, verb)) return false;
+  const allowed = GIT_PATH_WRITE_OPTIONS[verb] as GitWriteOptions;
+  for (const arg of args.slice(at + 1)) {
+    if (arg === "--") break;
+    if (!isFlag(arg)) continue;
+    if (arg.startsWith("--")) {
+      if (allowed.long.includes(arg)) continue;
+      if (allowed.joined.some((prefix) => arg.startsWith(prefix))) continue;
+      return false;
     }
+    if (!Array.from(arg.slice(1)).every((letter) => allowed.short.includes(letter))) return false;
+  }
+  return true;
+}
+
+interface GitWriteOptions {
+  /** Short letters, each of which may appear alone or bundled. */
+  short: string;
+  /** Long options, matched whole (never as a prefix). */
+  long: readonly string[];
+  /** `--name=` spellings whose value names no file read. */
+  joined: readonly string[];
+}
+
+/**
+ * The git verbs whose named paths are only WRITTEN in the worktree or the
+ * index (APRV-522), each with the options (git 2.50) known not to print file
+ * content or copy it elsewhere. The exemption git had as a whole, narrowed to
+ * the verbs and spellings it was for. Every other verb, an unknown one
+ * included, reads what it names; `stash` is absent on purpose (`git stash
+ * show -p` prints). `--pathspec-from-file=` is never listed: it reads a file.
+ */
+const GIT_PATH_WRITE_OPTIONS: Readonly<Record<string, GitWriteOptions>> = {
+  add: {
+    short: "fuANnv",
+    long: ["--force", "--update", "--all", "--no-all", "--intent-to-add", "--dry-run", "--verbose", "--ignore-errors", "--ignore-missing", "--renormalize", "--sparse", "--ignore-removal", "--no-ignore-removal"],
+    joined: ["--chmod="],
+  },
+  rm: {
+    short: "frnq",
+    long: ["--force", "--dry-run", "--cached", "--quiet", "--ignore-unmatch", "--sparse"],
+    joined: [],
+  },
+  mv: { short: "fknv", long: ["--force", "--dry-run", "--verbose", "--sparse"], joined: [] },
+  restore: {
+    short: "sSWqm",
+    long: ["--source", "--staged", "--worktree", "--quiet", "--ours", "--theirs", "--merge", "--ignore-unmerged", "--overlay", "--no-overlay", "--progress", "--no-progress"],
+    joined: ["--source="],
+  },
+  checkout: {
+    short: "fqmbB",
+    long: ["--force", "--quiet", "--ours", "--theirs", "--merge", "--overlay", "--no-overlay", "--ignore-skip-worktree-bits", "--progress", "--no-progress"],
+    joined: [],
+  },
+  switch: {
+    short: "cCdfqm",
+    long: ["--create", "--force-create", "--detach", "--force", "--discard-changes", "--quiet", "--merge", "--progress", "--no-progress"],
+    joined: [],
+  },
+  reset: { short: "qN", long: ["--quiet", "--soft", "--mixed", "--hard", "--keep", "--merge", "--no-refresh"], joined: [] },
+  clean: { short: "fdxXnq", long: ["--force", "--dry-run", "--quiet"], joined: [] },
+  "update-index": {
+    short: "q",
+    long: ["--add", "--remove", "--force-remove", "--refresh", "--really-refresh", "--assume-unchanged", "--no-assume-unchanged", "--skip-worktree", "--no-skip-worktree"],
+    joined: ["--chmod="],
+  },
+  "checkout-index": { short: "fuqna", long: ["--force", "--index", "--quiet", "--no-create", "--all"], joined: [] },
+};
+
+/**
+ * Binaries whose credential words stay in the protected-path scan although
+ * they READ them (APRV-522). `git` is direction-blind: one verb writes the
+ * gate's directory and another prints the secret, from the same argv shape. Keeping its credential words in the scan means a
+ * writing verb keeps `policy.core` (the stricter surface by
+ * {@link outranksCredential}) with `account.credential` carried beside it, and
+ * a reading verb, which the protected scan never reads, answers
+ * `account.credential`.
+ */
+function credentialProtectedScanKeeps(basename: string): boolean {
+  return basename === "git" || basename === "ln";
+}
+
+/**
+ * The words of a segment the credential rule reads as paths (APRV-522), for
+ * the pure classifier and the hook's disk pass alike: one judgement, so the two
+ * cannot disagree about which words a reader opens.
+ *
+ * Empty for a binary that only WRITES what it names
+ * ({@link credentialWritesOnly}). Otherwise:
+ *
+ * - every positional (the words that are not flags, a flag's separate value
+ *   included);
+ * - the value of every `--name=value` flag and of every short flag carrying
+ *   its value attached (`-fFILE`), because a reader's file operand may arrive
+ *   inside its own option (M6);
+ * - the file half of an upload spelling, `@FILE` and `name=@FILE;type=…`, and
+ *   `name=<FILE`, which curl reads the same way;
+ * - for git, the path half of a `<rev>:<path>` or `:<path>` word, pathspec
+ *   magic (`:(top)`, `:/`) stripped, because show and cat-file print the blob
+ *   such a word names.
+ *
+ * Over-reading a word costs an approval prompt when it happens to spell a
+ * credential path; under-reading one costs the property.
+ */
+export function credentialReadWords(basename: string, args: readonly string[]): string[] {
+  if (credentialWritesOnly(basename, args)) return [];
+  const words: string[] = [];
+  for (const arg of args) {
+    if (!isFlag(arg)) {
+      words.push(arg);
+    } else if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      if (equals !== -1 && equals < arg.length - 1) words.push(arg.slice(equals + 1));
+    } else if (arg.length > 2) {
+      words.push(arg.slice(2));
+      const equals = arg.indexOf("=");
+      if (equals !== -1 && equals < arg.length - 1) words.push(arg.slice(equals + 1));
+    }
+  }
+  // A snapshot: the loop appends to `words`.
+  const spelled = words.slice();
+  for (const word of spelled) {
+    for (let at = word.search(/[@<]/u); at !== -1; ) {
+      const rest = (word.slice(at + 1).split(";")[0] ?? "").trim();
+      if (rest.length > 0) words.push(rest);
+      const next = word.slice(at + 1).search(/[@<]/u);
+      at = next === -1 ? -1 : at + 1 + next;
+    }
+  }
+  if (basename !== "git") return words;
+  const out: string[] = [];
+  for (const word of words) {
+    out.push(word);
+    for (let at = word.indexOf(":"); at !== -1; at = word.indexOf(":", at + 1)) {
+      let rest = word.slice(at + 1);
+      if (rest.startsWith("(")) {
+        const close = rest.indexOf(")");
+        rest = close === -1 ? rest.slice(1) : rest.slice(close + 1);
+      }
+      if (rest.length > 0) out.push(rest);
+    }
+  }
+  return out;
+}
+
+function credentialTouch(basename: string, args: readonly string[]): CredentialOutcome | null {
+  const named = credentialReadWords(basename, args).find((word) => isCredentialPath(word));
+  if (named !== undefined) {
+    return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
   }
 
   for (const word of args) {
@@ -2807,6 +3065,28 @@ function escapedReadTarget(
       case "in-scope":
       case "needs-disk":
         break;
+    }
+  }
+  return null;
+}
+
+/**
+ * The first `<` target the text places outside every root, or `null`
+ * (APRV-522, S2). The same verdict a positional read target gets: a `<` opens
+ * its target for reading, so a reader fed a file through `<` reads the file
+ * it would read named as a positional. A relative target is `needs-disk` and is left to the
+ * hook's disk pass, as a relative positional is.
+ */
+function redirectReadEscape(
+  readTargets: readonly string[],
+  roots: readonly string[],
+): { path: string; rule: string } | null {
+  for (const target of readTargets) {
+    if (readTargetVerdict(target, roots) === "out-of-scope") {
+      return {
+        path: target,
+        rule: isUnreadableTarget(target) ? READ_UNREADABLE_TARGET_RULE : READ_OUT_OF_SCOPE_RULE,
+      };
     }
   }
   return null;
@@ -5312,13 +5592,20 @@ function outrankingProtected(
   writesOnly: boolean,
   protectedPaths: readonly ProtectedPathEntry[],
 ): { surface: string; path: string } | null {
+  // APRV-522: a credential word whose OWN protected class outranks
+  // `policy.core` stays in the scan. Since `..` resolves in the credential
+  // rule, a `..` spelling can name the environment map while its spelling also
+  // names the log directory; the stricter of the two must not be dropped.
+  const isTheRead = (word: string): boolean =>
+    isCredentialPath(word) &&
+    protectedRank(protectedPathClass(word, protectedPaths) ?? "policy.core") >= protectedRank("policy.core");
   const named = strictestProtected(
-    writesOnly ? positionals : positionals.filter((arg) => !isCredentialPath(arg)),
+    writesOnly ? positionals : positionals.filter((arg) => !isTheRead(arg)),
     protectedPaths,
     true,
   );
   const fed = strictestProtected(
-    readTargets.filter((target) => !isCredentialPath(target)),
+    readTargets.filter((target) => !isTheRead(target)),
     protectedPaths,
   );
   const found =
@@ -6283,6 +6570,12 @@ function classifySegment(
     // APRV-504: the `$(…)` of an unquoted heredoc body run when it is read.
     { text: "", quoted: false, substitutions: segment.bodySubstitutions, splits: false, expands: false },
   ];
+  // APRV-522 (S2): the first read inside a substitution that the read scope
+  // places outside every root. A substitution that only reads is inert, and its
+  // out-of-scope read used to vanish with it, and the outer segment was
+  // `read.shell`. It tightens a `read.shell` answer below, as a named target
+  // would.
+  let substitutedEscape: { path: string; rule: string } | null = null;
   for (const word of expanded) {
     for (const inner of word.substitutions) {
       const nested = classifyCommand(inner, protectedPaths, context);
@@ -6300,6 +6593,12 @@ function classifySegment(
           code: "opaque",
           detail: `command substitution $(${inner}) is ${effectful.join(", ")}; only read.* substitutions run unattended`,
         };
+      }
+      if (substitutedEscape === null) {
+        const escaped = nested.segments.find((found) => found.class === READ_OUT_OF_SCOPE_CLASS);
+        if (escaped !== undefined) {
+          substitutedEscape = { path: escaped.path ?? inner, rule: escaped.rule };
+        }
       }
     }
   }
@@ -6373,7 +6672,7 @@ function classifySegment(
     const touched =
       (writer === null
         ? null
-        : credentialTouch(writer, writerArgs, writerArgs.filter((arg) => !isFlag(arg)))) ??
+        : credentialTouch(writer, writerArgs)) ??
       redirectCredentialTouch(readTargets, redirectTargets);
     return {
       ok: true,
@@ -6440,9 +6739,20 @@ function classifySegment(
     }
     // `VAR=value` alone, or a bare redirection. `> file` truncates, so it is a
     // write; an assignment on its own touches nothing.
-    return writeTargets.length > 0
-      ? { ok: true, class: "files.write.workspace", rule: "redirect-write" }
-      : { ok: true, class: "read.shell", rule: "assignment" };
+    if (writeTargets.length > 0) {
+      return { ok: true, class: "files.write.workspace", rule: "redirect-write" };
+    }
+    // APRV-522 (S2): inside a substitution, a bare `<` redirection IS the
+    // read, and an assignment reads through its substitution, so both take
+    // the read scope a named target takes.
+    const bareEscape =
+      (context.readRoots ?? []).length > 0
+        ? (redirectReadEscape(readTargets, context.readRoots ?? []) ?? substitutedEscape)
+        : null;
+    if (bareEscape !== null) {
+      return { ok: true, class: READ_OUT_OF_SCOPE_CLASS, rule: bareEscape.rule, path: bareEscape.path };
+    }
+    return { ok: true, class: "read.shell", rule: "assignment" };
   }
 
   const basename = pathSegments(bin).slice(-1)[0] ?? bin;
@@ -6605,13 +6915,32 @@ function classifySegment(
   const fetchOutranksCredential =
     fetched.unknown !== null || (fetchedOutputProtected !== null && outranksCredential(fetchedOutputProtected.surface));
   const uploadCredential = fetchOutranksCredential ? null : uploadCredentialTouch(fetched.sources, fetched.sourceUnknown);
-  const credential = credentialTouch(basename, args, positionals) ?? uploadCredential;
+  // Merge of APRV-511 and APRV-522: APRV-522's credential read words (option
+  // and redirect targets, git's readers) and APRV-511's upload sources. An
+  // upload option word APRV-522 also reads is named by the file it sends, as
+  // APRV-511 names it; a positional or an environment reference keeps its own.
+  const argCredential = credentialTouch(basename, args);
+  const credential =
+    argCredential === null
+      ? uploadCredential
+      : uploadCredential !== null && argCredential.path !== undefined && !positionals.includes(argCredential.path)
+        ? uploadCredential
+        : argCredential;
   const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets);
   const outranking =
     credential === null && redirectCredential === null
       ? null
-      : outrankingProtected(judged, readTargets, credentialWritesOnly(basename, args), protectedPaths);
-  if (outranking === null) {
+      : outrankingProtected(
+          judged,
+          readTargets,
+          credentialWritesOnly(basename, args) || credentialProtectedScanKeeps(basename),
+          protectedPaths,
+        );
+  // Merge of APRV-511 and APRV-522: APRV-522's credential read words include
+  // an upload's option words, so a credential answer is deferred, never taken
+  // here, while a download output outranks it (`policy.core`,
+  // `fetch-output-unknown` answer below), as APRV-511 keeps the upload's own.
+  if (outranking === null && !fetchOutranksCredential) {
     if (credential !== null) return { ok: true, ...credential };
     if (redirectCredential !== null) return { ok: true, ...redirectCredential };
   }
@@ -6770,7 +7099,13 @@ function classifySegment(
   // and symlinked cases are deliberately NOT decided here; they are left at
   // `read.shell` for the hook's disk pass, which tightens and never loosens.
   if (cls === "read.shell" && (context.readRoots ?? []).length > 0) {
-    const escaped = escapedReadTarget(basename, positionals, args, context.readRoots ?? []);
+    // APRV-522 (S2): a `<` target is opened for reading whatever the binary
+    // is, so it is scoped for every binary, and a substitution's escaped read
+    // counts as the segment's own.
+    const escaped =
+      escapedReadTarget(basename, positionals, args, context.readRoots ?? []) ??
+      redirectReadEscape(readTargets, context.readRoots ?? []) ??
+      substitutedEscape;
     if (escaped !== null) {
       return {
         ok: true,
@@ -6978,6 +7313,30 @@ export interface CommandSegmentShape {
   writes: string[];
   /** Paths read through `<` (APRV-445 recheck 3, SF3c). */
   reads: string[];
+  /** Is this segment's stdin the previous segment's output? (APRV-522.) */
+  stdinFed: boolean;
+  /**
+   * The inner text of every `$(…)` this segment expands: in its words, its
+   * redirection targets and an unquoted heredoc's body (APRV-522), so the
+   * hook's disk pass judges the reads a substitution makes.
+   */
+  substitutions: string[];
+  /**
+   * The `NAME=value` words before the binary (APRV-522 fix round 1, M-B): a
+   * prefix such as `CDPATH=` or `HOME=` steers where a `cd` lands.
+   */
+  assignments: string[];
+  /**
+   * The script of a login-shell wrapper, exactly as {@link loginShellScript}
+   * reads it for `classifyCommand` (APRV-522 fix round 1, M-A), or `null`.
+   */
+  script: string | null;
+  /**
+   * A known shell handed an inline-script flag in a shape
+   * {@link loginShellScript} does not unwrap (APRV-522 fix round 1, M-A): what
+   * its script reads cannot be judged, so the hook's disk pass fails closed.
+   */
+  opaqueShell: boolean;
 }
 
 export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
@@ -6987,6 +7346,7 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
     const words = segment.words.map((word) => word.text);
     let cursor = 0;
     while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+    const script = loginShellScript(segment);
     return {
       text: segment.text,
       bin: words[cursor] ?? null,
@@ -6999,8 +7359,29 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
       reads: segment.redirects
         .filter((redirect) => redirect.op === "<")
         .map((redirect) => redirect.target.text),
+      stdinFed: segment.stdinFed,
+      substitutions: [
+        ...segment.words.flatMap((word) => word.substitutions),
+        ...segment.redirects.flatMap((redirect) => redirect.target.substitutions),
+        ...segment.bodySubstitutions,
+      ],
+      assignments: words.slice(0, cursor),
+      script,
+      opaqueShell: script === null && inlineShellFlagged(words[cursor] ?? null, words.slice(cursor + 1)),
     };
   });
+}
+
+/**
+ * Is this a known shell handed an inline-script flag anywhere in its argv?
+ * (APRV-522 fix round 1, M-A.) Broader than {@link INLINE_SCRIPT_FLAG} on
+ * purpose: any short bundle carrying `c` counts, wherever it sits.
+ */
+function inlineShellFlagged(bin: string | null, args: readonly string[]): boolean {
+  if (bin === null) return false;
+  const base = pathSegments(bin).slice(-1)[0] ?? bin;
+  if (!UNWRAPPABLE_SHELLS.has(base)) return false;
+  return args.some((arg) => /^-[A-Za-z]*c[A-Za-z]*$/u.test(arg) || arg === "--command");
 }
 
 export function commandSegmentWords(command: string): CommandSegmentWords[] | null {
