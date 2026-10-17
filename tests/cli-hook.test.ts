@@ -5027,7 +5027,11 @@ test("APRV-410 residual pin (aprv#646 M1): past an operator's grace a read withd
 
   while (Date.now() <= requestedAt + 3_500) await delay(50);
   const reader = verdictOf(
-    runCli(["hook", "claude-code", ...grace], dir, bashEvent(READ_COMMAND, "tu-r4b-read")),
+    runCli(
+      ["hook", "claude-code", "--timeout", "1s", "--interval", "100ms", ...grace],
+      dir,
+      bashEvent(READ_COMMAND, "tu-r4b-read"),
+    ),
   );
   assert.equal(reader.permission, "allow", reader.reason);
   assert.doesNotMatch(rawLog(dir), /"event":"approval\.withdrawn"/u, "a read withdrew it");
