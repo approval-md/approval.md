@@ -3852,21 +3852,14 @@
     },
     {
       "id": "rewrite-rebase-interactive-env",
-      "description": "an editor assignment does not hide -i from the text",
+      "description": "an editor assignment off APRV-521's closed list (GIT_SEQUENCE_EDITOR) leaves the git segment unclassified, so it cannot hide -i either",
       "input": {
         "command": "GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/main"
       },
       "expect": {
-        "valid": true,
-        "segments": [
-          {
-            "class": "vcs.history.rewrite",
-            "rule": "git-rebase-interactive"
-          }
-        ],
-        "classes": [
-          "vcs.history.rewrite"
-        ]
+        "valid": false,
+        "failure_class": "unclassified",
+        "segments": null
       }
     },
     {

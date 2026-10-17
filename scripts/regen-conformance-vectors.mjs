@@ -3258,7 +3258,8 @@ const commandClassVectors = [
   },
   {
     id: "rewrite-rebase-interactive-env",
-    description: "an editor assignment does not hide -i from the text",
+    description:
+      "an editor assignment off APRV-521's closed list (GIT_SEQUENCE_EDITOR) leaves the git segment unclassified, so it cannot hide -i either",
     input: { command: "GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/main" },
   },
   {
@@ -4733,6 +4734,11 @@ const SUITES = [
     // each from a looser class to the rewrite class (eight of the new
     // vectors; two more pin the spellings that stay where they were, `-ofu`
     // and `--all`).
+    // At the merge with APRV-521 (#652) one of this branch's own new vectors,
+    // `rewrite-rebase-interactive-env`, moved from `vcs.history.rewrite` to an
+    // `unclassified` refusal: GIT_SEQUENCE_EDITOR is off #652's closed list.
+    // That is the stricter direction, inside a version that has not shipped,
+    // so it stays 1.9.0; no vector main already had moves.
     vectors_version: "1.9.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",

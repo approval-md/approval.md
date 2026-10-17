@@ -293,6 +293,16 @@ function assertMember(
   return evidence;
 }
 
+/**
+ * Assert the classifier refuses the line before any judge sees it (APRV-521:
+ * an assignment off its closed list in front of git is `unclassified`).
+ */
+function assertUnclassified(dir: string, command: string): void {
+  const parsed = classifyAll(dir, command);
+  assert.equal(parsed.ok, false, `${command}: ${JSON.stringify(parsed)}`);
+  assert.equal(parsed.code, "unclassified", `${command}: ${JSON.stringify(parsed)}`);
+}
+
 /** Assert a segment is outside the family and carries no evidence. */
 function assertUnrefined(dir: string, command: string, cls: string, index = 0): void {
   const segment = probe(dir, command, index);
@@ -449,7 +459,9 @@ test("cases 17-21: interactive and command-running rebases are always shared", (
   branch(dir, "lane");
   commit(dir, "l1");
   assertMember(dir, "git rebase -i origin/main", "shared", "interactive", BRANCH);
-  assertMember(dir, "GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/main", "shared", "env-assignment", BRANCH);
+  // APRV-521: GIT_SEQUENCE_EDITOR is off the closed assignment list, so the
+  // classifier refuses the line before the split is asked.
+  assertUnclassified(dir, "GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/main");
   assertMember(dir, 'git rebase --exec "npm test" origin/main', "shared", "runs-commands", BRANCH);
   assertMember(dir, "git rebase -s custom origin/main", "shared", "runs-commands", BRANCH);
   // A built-in strategy is still a value-taking option (fix round 3).
@@ -870,13 +882,15 @@ test("adversarial: only a closed list of earlier segments and assignments leaves
   assertMember(lane, "git add a.txt && git commit --amend --no-edit", "local", "range-unpublished", BRANCH, 1);
   assertMember(lane, "git status && git add -A 2>/dev/null && git commit --amend --no-edit", "local", "range-unpublished", BRANCH, 2);
   assertMember(lane, "GIT_EDITOR=true git commit --amend", "local", "range-unpublished", BRANCH);
-  assertMember(lane, "GIT_EDITOR=vim git commit --amend", "shared", "env-assignment", BRANCH);
+  // An editor of the caller's choosing never reaches the split (APRV-521).
+  assertUnclassified(lane, "GIT_EDITOR=vim git commit --amend");
   // On a stopped rebase the same allowed prefixes reach the resume rule, which is shared.
   const dir = stoppedRebase(false);
   assertMember(dir, "git add a.txt && git rebase --continue", "shared", "unreadable-target", BARE, 1);
   assertMember(dir, "GIT_EDITOR=true git rebase --continue", "shared", "unreadable-target", BARE);
-  // An editor that is a program of the caller's choosing is not silenced.
-  assertMember(dir, "GIT_EDITOR=vim git rebase --continue", "shared", "env-assignment", BARE);
+  // An editor that is a program of the caller's choosing is not silenced:
+  // the classifier refuses it before the split is asked (APRV-521).
+  assertUnclassified(dir, "GIT_EDITOR=vim git rebase --continue");
   // A write into the git directory before the check's state is used.
   assertMember(
     dir,
