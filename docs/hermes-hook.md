@@ -232,6 +232,97 @@ a hook command of its own.
 `account.credential`, human-only, because what leaves the machine there is the
 secret rather than the rule. That is the same split `.approval/env` has.
 
+**The home's other organs (APRV-511).** Three more paths change what the
+gateway runs, read off Hermes v2026.9.24's loaders, and on an Agent Village box
+the agent's uid owns all three:
+
+| Path under the home | Why it is an organ | Write | Read |
+|---|---|---|---|
+| `config.yaml`, `config.yml` | the `hooks:` entries and `plugins.enabled` | `policy.core` | out of scope or `read.shell` |
+| `agent-hooks/`, `hooks*`, `shell-hooks-allowlist.json` (and `.lock`), `approval/` | the hook scripts, the consent allowlist, the hook's own configuration | `policy.core` | unchanged |
+| `.env`, `.env.*`, `auth.json` | the home's secrets; `.env` loads with `override=True` | `policy.core` | `account.credential` |
+| `hermes-agent/` (all of it) | the runtime's source install: its code, its venv, its bundled `plugins/`, and its PROJECT_ROOT `.env`, which `load_hermes_dotenv` loads after the home's and which sets any name the home's left absent | `policy.core` | `hermes-agent/.env` and `.env.*` (except `.env.example`) `account.credential`; the rest unchanged |
+| `plugins/` (all of it) | user plugins load from here (`plugins_discovery.py`), the gate's own `av-approval` and its `custody_keys.json` among them | `policy.core` | unchanged |
+| `.op.env` (and `.op.env.*`) | the 1Password bootstrap file, loaded into the gateway with `override=False` | `policy.core` | `account.credential` |
+| `scripts/` | scheduled job scripts run with no `pre_tool_call` | `cron.manage` | unchanged |
+
+Reading the runtime's or a plugin's source is not an edit, so those reads keep
+their class. `skills/`, `plugin-data/` (Hermes's per-plugin state), `memories/`,
+`sessions/` and `workspace/` stay ordinary work. A project's own
+`.hermes/plugins/` (`HERMES_ENABLE_PROJECT_PLUGINS`) matches the same row. The
+home and these names compare without case (a case-insensitive filesystem opens
+`~/.Hermes/Plugins` as the home's), and a `..` below the home is resolved
+before the rows are read (`~/.hermes/workspace/../plugins/x` is the plugin
+directory), the stricter of the two readings winning. An unexpanded
+`$HERMES_HOME` or `${HERMES_HOME}` is the home in the pure classifier too, so
+`approval hook classify -- 'echo x >> $HERMES_HOME/config.yaml'` answers
+`policy.core` without a disk pass; any other unexpanded variable (`$X/.env`,
+`${D}/plugins/x`) may be the home, so its organ and credential rows apply.
+A command substitution in a path word is read the same way (`$(echo
+~/.hermes)/plugins/x`, `$(pwd)/../plugins/x`), and an unquoted brace group is
+expanded first, each word judged (`~/.hermes/plugin{s,s}/x`,
+`~/.hermes/.op.en{v,v}`), the strictest answering (APRV-511 refuter round 1).
+
+Other write forms that reach the organs, and are judged as writes: a download's
+output (`curl -o F`, `-O`, `--output-dir D`; `wget -O F`, `-P D`, and wget's
+default name in the working directory), GNU `cp -t<dir>`, and a link whose
+SOURCE is an organ or a credential (`ln -s ../plugins p`, `ln ../.op.env h`,
+`cp -s`, `cp -l`), which is refused when it is planted because a later write
+through it may be one the hook cannot see. Under the Hermes hook, a
+side-effecting command run from inside `hermes-agent/`, `plugins/` or another
+`policy.core` directory other than the home root (`git pull`, `git apply`,
+`git reset --hard`, `npm install`, `git clone x`), and `git --work-tree` or
+`--git-dir` naming one, is `policy.core`, as `hermes update` is. curl and wget
+options are read from a table (long options by unique prefix, every short
+cluster); a download with an option the table does not know, an ambiguous
+prefix, or a config source (`curl -K`, `wget -e`) is `policy.core` under rule
+`fetch-output-unknown`, since its output cannot be placed. An unmatched brace
+stays literal, and a word only a stray brace keeps from an organ or a
+credential is judged as that organ. A brace sequence that makes one word
+(`plugin{s..s}`) is judged as that word; a word whose groups would make more
+than 256 words, or take more than 1,024 expansions, is `policy.core` to write
+(`account.credential` to read), unless every group yields plain numbers
+(`echo {1..300}`, `touch f{1..300}`): those words differ only in digits, which
+no organ or credential name turns on, so the first one answers for all. Every file curl or wget writes by option is a
+write target through the landing check (`-o` placed in `--output-dir`, `-D`,
+`-c`, `--trace`, `--trace-ascii`, `--libcurl`, `--etag-save`, `--stderr`,
+`--hsts`, `--alt-svc`, `-w '%output{FILE}'`; wget `-O`, `-o`, `-a`, `-P`); an
+output a variable decides, or a `-w @FILE` format, is `policy.core`, and so is
+one holding `#<digit>`, which curl fills from a URL glob (`curl
+'https://e/{s}' -o ~/.hermes/plugin#1/x`); `--output-dir` is joined onto an
+absolute `-o` as well, as curl does. `cp`, `mv`, `ln` and `install` read `-t`
+anywhere in a short cluster and `--target-directory` by unique prefix. The
+class rule that ends the spelling chase (fix round 3): a `curl`, `wget`, `cp`,
+`mv`, `ln` or `install` argv word the shell may still turn into an option (an
+unquoted variable or `$(…)` anywhere in it, a variable at its head quoted or
+not, an unquoted glob at its head, a brace group making a word that begins
+with `-`, or an unquoted expansion in an option's value) makes the write
+target unknown, so the command is `policy.core` (`fetch-output-unknown`,
+`copy-target-unknown`) unless the word follows `--` (`cp -- "$f" bak/`,
+`cp ./*.md docs/`, `curl -o out.json -- "$URL"` stay ordinary).
+
+**The `hermes` CLI and `skill_manage`.** The CLI writes the same files, so the
+verbs that rewrite an organ take the organ's class, `policy.core`, under rule
+`hermes-organ-write`: `hermes plugins install|update|remove|rm|uninstall|enable|disable`,
+`plugins pack install`, bare `hermes plugins` (the interactive toggle),
+`hermes config set|unset|edit|migrate`, `hermes hooks revoke|remove|rm`,
+`hermes update` and `hermes uninstall`. Their read verbs (`plugins list|show|search|doctor`,
+`config`, `config show|get|path`, `hooks list|test|doctor`) keep
+`harness.launch.hermes`, and so does an unknown group. A help flag keeps the
+earlier answer only as a flag in its own right (argparse prints usage and
+exits), never after `--` or directly after another flag, where it may be that
+flag's value; an organ group's argv carrying `--` is the write. On an Agent
+Village box the overlay installs and enables plugins at provisioning, outside
+any hooked tool call, so no village flow needs the agent to run these. (The
+village template has no `harness.launch.hermes` row, so today every `hermes` call
+there is refused `hook-harness-launch-unruled` before any of this applies; the
+rows above matter the day a policy grants the launch class.)
+`skill_manage` stays `skill.manage`: Hermes confines it to `skills/<name>/`
+(`references`, `templates`, `scripts`, `assets`) and refuses `..`, so it cannot
+reach `plugins/` or `hermes-agent/`. What a skill script or other agent code
+does once it runs is outside the classifier: it runs as the same uid, which is
+the custody lane's residual, not a classification.
+
 ```yaml
 plugins:
   hook_callback_timeout: 600
@@ -408,11 +499,26 @@ every `tee`/`touch`/`rm`/`mkdir`/`truncate` operand, `sed -i` files, `chmod`
 paths, `dd of=`) are resolved against the call's `workdir`, through every `cd`
 before them in the command (both the directory before and after a `cd` are kept,
 as a `cd` may not have run), and through `realpath` of the deepest existing
-ancestor, so a symlinked parent or workdir is judged by where it lands. A read
+ancestor, so a symlinked parent or workdir is judged by where it lands. Because
+`realpath` cancels a `..` before it reads the link in front of it, every path
+(and a file tool's path) is ALSO resolved component by component as the kernel
+does, a link replaced by its target and a `..` taken from what has been
+resolved so far (`k/../.op.env` with `k -> ~/.hermes/skills` is the home's
+`.op.env`; past a link to a file, `..` is its directory), and the stricter of
+the two answers wins (fix round 3). A `..` out of something an earlier segment
+of the same command writes, links, moves, deletes or extracts into (`ln -s
+~/.hermes/skills k && cat k/../.op.env`), or after a program whose file effects
+this pass does not model (`git`, `npm`, a script), and any path through
+`/proc/<pid>/cwd` or `root`, is unknowable: `policy.core` to write and
+`account.credential` to read. A read
 segment's operands and a copy's sources that land on a credential are
 `account.credential`, and so is a directory of credentials (see below) handed
 to a recursive reader (`grep -r`, `rg`, `find`, `tar`, ...) or to a read tool
-(`search_files`, Claude Code's `Grep`/`Glob`). The binary and ordinary
+(`search_files`, Claude Code's `Grep`/`Glob`). The file a `curl` or `wget`
+upload or body option reads (`curl -T ../.op.env`, `--data @F`, `-F f=@F`,
+`wget --post-file F`) is judged as a read in the same way, and also takes the
+class of an organ or protected path it lands on and, under a read scope,
+`read.file.out_of_scope` outside it (APRV-511 fix round 5). The binary and ordinary
 arguments are never resolved, so `./scripts/x.sh` or `echo approval > out.txt`
 in the home are what they look like.
 
@@ -456,10 +562,17 @@ home, a home's `approval/`, and its `scripts/`. A recursive read or a read tool
 over a directory is `account.credential` only for the home root, an approval
 home, a home's `approval/`, or a directory under a home that directly holds a
 credential file (`.env`, `auth.json`, `config.yaml`, the allowlist or its lock).
-A glob or an unexpandable variable in a write is `policy.core` only when the
-write lands in one of the gate's own directories, or when a pattern in the path
-could itself name `.hermes`, `.approval` or an organ (`../.h*/.env`); anywhere
-else under the home it is a workspace write.
+A glob in a write is `policy.core` only when the write lands in one of the
+gate's own directories or in any `policy.core` directory (`agent-hooks/`,
+`hermes-agent/`, `plugins/` and below, APRV-511), or when a pattern in the path
+could itself name `.hermes`, `.approval` or an organ, in its last component
+(`../.h*/.env`) or in a directory component right under the home
+(`~/.hermes/plu*/x`); anywhere else under the home it is a workspace write. An
+unexpandable variable that decides the DIRECTORY a write lands in (`> "$OUT"`,
+`>> $X/.env`, `cp f "$D/"`, `tar -C "$D"`) is `policy.core` wherever it is
+written from (APRV-511, the custody recheck's M1'), since it can expand to an
+organ; a variable inside a final name after a literal prefix (`out_$N.txt`)
+leaves the directory known and is judged as above.
 
 **Skill scripts run as `exec.local` (APRV-502).** The overlay's AGENTS.md routes
 every skill script through `terminal` (`bun skills/index-network/scripts/welcome.ts`,
@@ -500,11 +613,33 @@ same is true after a `cd` whose target the text cannot name.
 What stays unclassified or out of reach, stated so nobody assumes otherwise:
 inline programs (`python3 -c`, `node -e`) are refused as opaque unless the policy opens `exec.code` (APRV-510, below); `dd` and
 `install` have no classifier rule and are denied as unclassified; a recursive
-search of an ANCESTOR of the home with a filename filter (`search_files` over
+search of an ANCESTOR of the home reads the secrets without naming a
+directory this hook can recognise: with a filename filter (`search_files` over
 `$HOME` with `file_glob: .env`, Claude Code's `Grep` over the repository with
-`glob: **/env`, or `Grep` with no path) reads the secrets without naming a
-directory this hook can recognise; and a write through a variable other than
-`HERMES_HOME`/`HOME` from outside the home is judged by its spelling.
+`glob: **/env`, or `Grep` with no path), and equally a recursive shell reader
+or a link handed a literal ancestor of the home; and a READ through a variable this hook
+cannot expand is judged by its spelling unless the name is a credential's
+(`cat $X/.env` is `account.credential`, `cat "$F"` is not). A RECURSIVE
+reader of such a word (`grep -r`, `rg`, `find`, `tar`, `du`, a copy, move or
+sync source) is `account.credential` whatever it spells, since the word may
+land on or above a home, and so is a recursive reader of a pattern this hook
+cannot expand; a matched directory that holds credentials is judged as its
+plain spelling is (cred-asymmetry round 2). The cost: `grep`, `rg` and `find`
+count as recursive readers whatever their flags, so ANY operand of theirs that
+holds a `$` (a variable search pattern, or a regex anchor `'x$'` even in single
+quotes and in a single-file search) goes to a person. A recursive reader that
+names no path walks the working directory, and that directory is judged as its
+operand (round 3). A single-file read of such a word is judged with every `.`
+dropped and every `..` resolved, with its literal directory landed from each
+working directory (relative, after a `cd`, through a symlink). Since the
+merge of APRV-522 (#653, its M-C), a word that opens with `~+`, `~-`, a
+directory-stack form or `~name` is `account.credential` outright, whatever it
+spells. Otherwise an unknown span right under a home, a profile home,
+the `hermes-agent/` of either or `.approval`, or two unknown segments in a row
+at the end, is `account.credential` (round 3). The same holds
+for a command substitution that makes up the whole path (`cat $(echo
+~/.hermes/.op.en)v`), an accepted design limit: `cat $(ls | head -1)` must stay
+a read.
 
 **SIGTERM while the hook waits withdraws the question (APRV-473).** Hermes
 sends SIGTERM on its own hook timeout and on gateway shutdown, and from that
@@ -1318,8 +1453,10 @@ A recorder: `defaults.autonomy: autonomous`, so every hooked tool call is
 written to the resident's own hash-chained log and none waits. The three gate
 organs (`policy.core`, `log.mutate`, `account.credential`) are human-only, which
 is mandatory under an autonomous default because the Hermes home's
-`config.yaml`, `agent-hooks/` and consent allowlist classify `policy.core`, and
-`.env` and `auth.json` classify `account.credential`. The Hermes tool classes
+`config.yaml`, `agent-hooks/`, consent allowlist, `hermes-agent/`, `plugins/`
+and `.op.env` classify `policy.core` to write (APRV-511 added the last three),
+and `.env`, `auth.json`, `.op.env` and `hermes-agent/.env` classify
+`account.credential` to read. The Hermes tool classes
 (`cron.manage`, `process.write`, `browser.exec`, `skill.manage`,
 `agent.delegate`, `message.send`) and `network.call` and `read.web` have
 explicit autonomous rows. The one live gate is on the propose path:

@@ -26,7 +26,12 @@ What it says, in one line each:
   human-only. Under an autonomous default these three rows are mandatory: the
   Hermes home's `config.yaml`, `agent-hooks/` and consent allowlist classify
   `policy.core`, and `.env` and `auth.json` classify `account.credential`, so
-  without them the agent could edit its own gate.
+  without them the agent could edit its own gate. Since APRV-511 the same rows
+  cover the home's other organs: a write under `hermes-agent/` (the runtime's
+  source install) or `plugins/` (where `av-approval` loads from), or onto
+  `.op.env`, is `policy.core`, and so are the `hermes plugins
+  install|enable|disable|remove`, `config set`, `hooks revoke` and `update`
+  verbs; a read of `.op.env` or `hermes-agent/.env` is `account.credential`.
 - **One live gate, on the propose path only.** `intent.publish.*` is manual and
   agent-requestable, with the two explicit day-one rows: an inferred intent (the
   agent's inference of what the resident wants published to Index) waits for
