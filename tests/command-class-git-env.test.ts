@@ -169,6 +169,55 @@ const ALLOWED: readonly string[] = [
   "TZ=EST5EDT",
 ];
 
+/**
+ * bash's other assignment-word spellings (review-b M1): the append operator
+ * `+=` and a `[subscript]`, each of which bash puts in the environment of the
+ * command it precedes. The cursor once stopped at them and took the word for
+ * the program, so a value ending in a read-only program's name (the
+ * `PROGRAM_VALUES` below) answered `read.shell`. Every one is `unclassified`.
+ */
+const appendOf = (word: string): string => word.replace("=", "+=");
+const subscriptOf = (word: string): string => word.replace("=", "[0]=");
+const APPENDED: readonly string[] = [...STEERING, ...ALLOWED].map(appendOf);
+const SUBSCRIPTED: readonly string[] = [
+  ...[...STEERING, ...ALLOWED].map(subscriptOf),
+  ...STEERING.map((word) => appendOf(subscriptOf(word))),
+  "GIT_PAGER['k']=evil",
+  "GIT_PAGER[k=v]=evil",
+];
+/** Values whose last path segment names a program the read table admits. */
+const PROGRAM_VALUES: readonly string[] = [
+  "GIT_PAGER+=/tmp/x/cat",
+  "GIT_PAGER+=x/ls",
+  "GIT_SSH_COMMAND+=/tmp/x/echo",
+  "PATH+=:/tmp/x/cat",
+  "HOME+=/tmp/x/cat",
+  "n+=/tmp/x/cat",
+  "GIT_PAGER[0]=/tmp/x/cat",
+  "GIT_PAGER[0]+=/tmp/x/cat",
+];
+/** Subscripts bash reads as one word in command position and this tokenizer splits. */
+const SPLIT_SUBSCRIPTS: readonly string[] = [
+  "GIT_PAGER[x y]=evil",
+  "GIT_PAGER[x /tmp/x/cat]=evil",
+  "GIT_PAGER[x;y]=evil",
+  "GIT_PAGER[x|y]=evil",
+  "GIT_PAGER[x&&y]=evil",
+  "GIT_PAGER[x\ny]=evil",
+  "GIT_PAGER[]]=evil",
+  "GIT_PAGER[",
+];
+/** The compound (array) assignment, refused by the tokenizer. */
+const COMPOUND: readonly string[] = [
+  "GIT_PAGER=(evil)",
+  "GIT_PAGER+=(evil)",
+  "GIT_DIR=(/tmp/x)",
+  "PATH=(/tmp/x)",
+  "n=(cat)",
+  "n=(cat x)",
+  "n=([0]=cat)",
+];
+
 const READS = ["log", "status", "diff", "show", "log --oneline -5", "diff HEAD~1"] as const;
 const WRITES = [
   "commit -m x",
@@ -232,6 +281,100 @@ test("near misses of the allow-list are unclassified", () => {
       assert.equal(code, "unclassified", `${word} git ${tail}`);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// Criterion 1b: every assignment spelling, not only NAME=value (review-b M1)
+// ---------------------------------------------------------------------------
+
+test("the append and subscripted spellings are unclassified in front of every git subcommand", () => {
+  for (const word of [...APPENDED, ...SUBSCRIPTED, ...PROGRAM_VALUES]) {
+    for (const tail of [...READS, ...WRITES]) {
+      for (const command of [`${word} git ${tail}`, `${word} /usr/bin/git ${tail}`, `GIT_PAGER=cat ${word} git ${tail}`, `${word} GIT_PAGER=cat git ${tail}`]) {
+        const { code, detail } = failure(command);
+        assert.equal(code, "unclassified", `${command}: ${detail}`);
+        assert.match(detail, /an append or subscripted assignment/u, command);
+      }
+    }
+  }
+  assertUnclassified("GIT_PAGER+=evil git log", "no rule for GIT_PAGER+=…");
+  assertUnclassified("GIT_DIR[0]=/tmp/x git status", "no rule for GIT_DIR[0]=…");
+});
+
+test("an allow-listed word is refused in any spelling but the plain one", () => {
+  for (const word of ALLOWED) {
+    for (const spelled of [appendOf(word), subscriptOf(word), appendOf(subscriptOf(word))]) {
+      assert.equal(failure(`${spelled} git log`).code, "unclassified", spelled);
+      assert.equal(failure(`${spelled} git status`).code, "unclassified", spelled);
+    }
+  }
+});
+
+test("a value ending in a read-only program's name no longer becomes the program", () => {
+  for (const word of PROGRAM_VALUES) {
+    for (const tail of ["log", "status", "show HEAD", "push origin lane"]) {
+      assert.equal(failure(`${word} git ${tail}`).code, "unclassified", word);
+    }
+    // Nor in front of any other program, nor on its own.
+    assert.equal(failure(`${word} cat README.md`).code, "unclassified", word);
+    assert.equal(failure(word).code, "unclassified", word);
+    assert.equal(failure(`${word}; git log`).code, "unclassified", word);
+  }
+});
+
+test("a subscript the tokenizer splits is refused, never read as the program", () => {
+  for (const word of SPLIT_SUBSCRIPTS) {
+    for (const tail of ["log", "status", "push origin lane"]) {
+      const command = `${word} git ${tail}`;
+      const result = classifyCommand(command);
+      assert.equal(result.ok, false, `${command}: ${JSON.stringify(result)}`);
+    }
+  }
+  assertUnclassified("GIT_PAGER[x y]=evil git log", "no rule for GIT_PAGER[…");
+});
+
+test("the compound (array) assignment is refused by the tokenizer", () => {
+  for (const word of COMPOUND) {
+    for (const command of [`${word} git log`, `${word}; git log`, `${word} && git status`, `git log; ${word}`, `${word}`]) {
+      assert.equal(failure(command).code, "unparseable", command);
+    }
+  }
+});
+
+test("the line scan reads every spelling of a write to a git-read variable", () => {
+  for (const write of [
+    "GIT_PAGER+=evil",
+    "PAGER+=evil",
+    "HOME+=/x",
+    "PATH+=:/tmp/x",
+    "GIT_DIR[0]=/tmp/x",
+    "export GIT_PAGER+=evil",
+    "export PAGER+=evil",
+    "declare -x GIT_DIR[0]=/tmp/x",
+    "GIT_PAGER+=evil :",
+    "echo ${GIT_PAGER[0]:=evil}",
+    "echo ${GIT_DIR[0]=x}",
+    "GNUPGHOME=/tmp/x",
+    "GCONV_PATH=/tmp/x",
+  ]) {
+    for (const tail of ["log", "status", "commit -m x", "push origin lane"]) {
+      for (const command of [`${write}; git ${tail}`, `${write} && git ${tail}`, `git ${tail}; ${write}`, `${write}; echo "$(git ${tail})"`]) {
+        assert.equal(failure(command).code, "unclassified", command);
+      }
+    }
+  }
+  // N2: the subscripted default-assignment names the variable.
+  assertUnclassified("echo ${GIT_PAGER[0]:=evil}; git log", "after GIT_PAGER is set on the same command line");
+  // N5: gpg's home, which names the signing helper's configuration.
+  assertUnclassified("GNUPGHOME=/tmp/x; git log", "the assignment GNUPGHOME=");
+});
+
+test("the plain spelling of an ordinary variable is unchanged", () => {
+  assert.equal(answer("n=5; git log -n 5"), "read.shell/assignment read.shell/git-read");
+  assert.equal(answer("n=5 cat README.md"), "read.shell/read-shell");
+  // A word that only contains `+` or `[` after a non-name is an ordinary argument.
+  assert.equal(answer("echo a+=b x[0]=y"), "read.shell/read-shell");
+  assert.equal(answer("git log --grep=a+=b"), "read.shell/git-read");
 });
 
 // ---------------------------------------------------------------------------
@@ -584,6 +727,12 @@ test("hook: under this repository's policy every steering spelling is refused an
     "GIT_PAGER=evil git rebase main",
     "GIT_PAGER=evil git commit --amend",
     "GIT_DIR=/tmp/x git reset --hard",
+    // review-b M1: the append and subscripted spellings.
+    "GIT_PAGER+=evil git log",
+    "GIT_PAGER+=/tmp/x/cat git log",
+    "GIT_DIR[0]=/tmp/x git status",
+    "GIT_PAGER[x y]=evil git log",
+    "PATH+=:/tmp/x; git log",
   ];
   for (const command of refused) {
     const before = logText(dir);
@@ -631,10 +780,27 @@ function* prefixes(alphabet: readonly string[], max: number): Generator<string[]
 }
 
 /** One steering word per variable, every near miss, every allowed word. */
+const ONE_PER_NAME: readonly string[] = [...new Map(STEERING.map((word) => [nameOf(word), word])).values()];
+
+/**
+ * ...and every other assignment spelling (review-b M1): the append and the
+ * subscript of each of those, the program-named values, the split subscripts
+ * (a `GIT_PAGER[x` token joins a `y]=evil` token at depth 2) and the compound
+ * assignment.
+ */
 const CORPUS_ALPHABET: readonly string[] = [
-  ...new Map(STEERING.map((word) => [nameOf(word), word])).values(),
+  ...ONE_PER_NAME,
   ...NEAR_MISSES,
   ...ALLOWED,
+  ...[...ONE_PER_NAME, ...ALLOWED].map(appendOf),
+  ...[...ONE_PER_NAME, ...ALLOWED].map(subscriptOf),
+  ...PROGRAM_VALUES,
+  "GIT_PAGER[x",
+  "y]=evil",
+  "GIT_PAGER[x/tmp/x/cat",
+  "n+=1",
+  "n[0]=1",
+  ...COMPOUND,
 ];
 
 const CORPUS_TAILS: readonly string[] = [
@@ -659,6 +825,17 @@ const LINE_WRITES: readonly string[] = [
   "echo ${n:=5}",
   "n=5",
   "b=lane",
+  // review-b M1, N2, N4, N5.
+  ...ONE_PER_NAME.map(appendOf),
+  ...ONE_PER_NAME.map((word) => `export ${appendOf(word)}`),
+  ...ONE_PER_NAME.map(subscriptOf),
+  ...PROGRAM_VALUES,
+  ...COMPOUND,
+  "echo ${GIT_PAGER[0]:=evil}",
+  "GNUPGHOME=/tmp/x",
+  "GCONV_PATH=/tmp/x",
+  "n+=5",
+  "n[0]=5",
 ];
 
 function* corpus(depth: number): Generator<string> {
@@ -691,12 +868,17 @@ function carriesRefusedEnvironment(command: string): boolean {
     if (/^TZ=(?::?[A-Za-z_][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)*|[A-Z]{3,}\d(?:[A-Z]{3,})?)$/u.test(unquoted)) return true;
     return /^(?:LANG|LC_(?:ALL|COLLATE|CTYPE|MESSAGES|MONETARY|NUMERIC|TIME))=[A-Za-z][A-Za-z0-9_@.-]*$/u.test(unquoted) && !unquoted.includes("..");
   };
+  // review-b M1: a compound assignment, refused by the tokenizer.
+  if (/=\(/u.test(command)) return true;
   const words = command.split(/[\s;&]+/u).filter((word) => word !== "");
+  // Any append or subscripted assignment word, or a split subscript, anywhere
+  // a command word could stand.
+  if (words.some((word) => /^[A-Za-z_][A-Za-z0-9_]*(?:\[|\+=)/u.test(word))) return true;
   const gitAt = words.indexOf("git");
   // A prefix word in front of git.
   if (words.slice(0, Math.max(gitAt, 0)).some((word) => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(word) && !harmless(word))) return true;
   // A line write (export, bare, printf -v, ${NAME:=}) of a variable git reads.
-  return /(?:^|[;&]\s*|export )(?:GIT_|PAGER|EDITOR|VISUAL|LESS|HOME|XDG_|PATH|LD_|DYLD_|BASH_ENV|TMPDIR|SSH_ASKPASS|LANG|LC_|TZ)/u.test(command) ||
+  return /(?:^|[;&]\s*|export )(?:GIT_|PAGER|EDITOR|VISUAL|LESS|HOME|XDG_|PATH|LD_|DYLD_|BASH_ENV|TMPDIR|SSH_ASKPASS|LANG|LC_|TZ|GNUPGHOME|GCONV_PATH)/u.test(command) ||
     /printf -v GIT_|\$\{GIT_/u.test(command);
 }
 
@@ -730,7 +912,9 @@ test("differential: stricter-only against the base classifier", async (t) => {
       counts.okToRefused += 1;
       const key = before.classes.join("+");
       okToRefusedBy.set(key, (okToRefusedBy.get(key) ?? 0) + 1);
-      if (now.code !== "unclassified") problems.push(`refused as ${now.code}: ${command}`);
+      // The compound assignment is the tokenizer's refusal; every other move is unclassified.
+      const expected = /=\(/u.test(command) ? "unparseable" : "unclassified";
+      if (now.code !== expected) problems.push(`refused as ${now.code}: ${command}`);
     } else {
       counts.refusedToRefused += 1;
     }

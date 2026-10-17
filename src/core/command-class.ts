@@ -1326,6 +1326,18 @@ function lex(command: string): LexResult {
       continue;
     }
 
+    // APRV-521 (review-b M1): `NAME=(…)` and `NAME+=(…)` are bash's compound
+    // (array) assignment, not a word followed by a subshell. Read as a
+    // subshell, the list's words became a command and whatever followed the
+    // `)` lost the assignment in front of it. Refused: a `(` straight after an
+    // unquoted `=` is that assignment or a syntax error to bash.
+    if (ch === "(" && command[index - 1] === "=") {
+      return {
+        ok: false,
+        detail: "a compound (array) assignment NAME=(…) is not read by this classifier; assign the elements one by one",
+      };
+    }
+
     if (ch === "&" || ch === "|" || ch === ";" || ch === "(" || ch === ")") {
       const boundary = index;
       // APRV-510: a single `|` (or `|&`) pipes the previous segment into the next.
@@ -2532,6 +2544,8 @@ const PLAIN_LOCALE = /^[A-Za-z][A-Za-z0-9_@.-]*$/u;
 function isHarmlessGitAssignment(word: LexWord): boolean {
   if (word.substitutions.length > 0) return false;
   const text = word.text;
+  // Only the plain `NAME=value` spelling ({@link PLAIN_ASSIGNMENT}).
+  if (!PLAIN_ASSIGNMENT.test(text)) return false;
   if (GIT_HARMLESS_ASSIGNMENTS.includes(text)) return true;
   const equals = text.indexOf("=");
   if (equals <= 0) return false;
@@ -2549,8 +2563,7 @@ function isHarmlessGitAssignment(word: LexWord): boolean {
 function gitAssignmentRefusal(prefix: readonly LexWord[]): string | null {
   const word = prefix.find((candidate) => !isHarmlessGitAssignment(candidate));
   if (word === undefined) return null;
-  const name = word.text.slice(0, word.text.indexOf("="));
-  return `no rule for ${name}=… in front of git: an environment assignment can run a program, repoint the repository or its configuration, or write a file`;
+  return `no rule for ${assignmentHead(word.text)}… in front of git: an environment assignment can run a program, repoint the repository or its configuration, or write a file`;
 }
 
 /**
@@ -2581,6 +2594,8 @@ function isGitInheritedName(name: string): boolean {
     "TZ",
     "TZDIR",
     "LOCPATH",
+    "GCONV_PATH",
+    "GNUPGHOME",
   ].includes(name);
 }
 
@@ -2610,8 +2625,11 @@ const POSIX_SPECIAL_BUILTINS: readonly string[] = [
   "unset",
 ];
 
-/** `${NAME=word}` and `${NAME:=word}` assign NAME in the shell that expands them. */
-const PARAMETER_ASSIGNMENT = /\$\{([A-Za-z_][A-Za-z0-9_]*):?=/u;
+/**
+ * `${NAME=word}` and `${NAME:=word}` assign NAME in the shell that expands
+ * them, and so do `${NAME[i]=word}` and `${NAME[i]:=word}` (review-b N2).
+ */
+const PARAMETER_ASSIGNMENT = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?:?=/u;
 
 /**
  * The first variable git could inherit ({@link isGitInheritedName}) that this
@@ -2628,7 +2646,7 @@ const PARAMETER_ASSIGNMENT = /\$\{([A-Za-z_][A-Za-z0-9_]*):?=/u;
  * refuses more.
  */
 function gitEnvironmentWrite(segments: readonly LexSegment[]): string | null {
-  const nameOf = (text: string): string => (text.includes("=") ? text.slice(0, text.indexOf("=")) : text);
+  const nameOf = assignedName;
   for (const segment of segments) {
     const words = segment.words;
     let cursor = 0;
@@ -2644,7 +2662,9 @@ function gitEnvironmentWrite(segments: readonly LexSegment[]): string | null {
       for (const word of words.slice(cursor + 1)) {
         if (isFlag(word.text)) continue;
         const name = nameOf(word.text);
-        if (/[$`]/u.test(name)) return name;
+        // The name as written, subscript included: `a[$x]` is not a name the text settles.
+        const written = word.text.includes("=") ? word.text.slice(0, word.text.indexOf("=")) : word.text;
+        if (/[$`]/u.test(written)) return name;
         if (isGitInheritedName(name) && !isHarmlessGitAssignment(word)) return name;
       }
     }
@@ -4672,8 +4692,50 @@ const INLINE_SOURCE_BINS: Readonly<Record<string, readonly string[]>> = {
 // Classification
 // ===========================================================================
 
-/** `VAR=value` prefixes, which are not the command. */
-const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+/**
+ * `VAR=value` prefixes, which are not the command: every spelling of bash's
+ * assignment word (APRV-521, review-b M1). A name, an optional `[subscript]`,
+ * then `=` or the append operator `+=`: `NAME=v`, `NAME+=v`, `NAME[i]=v`,
+ * `NAME[i]+=v`. bash puts each one in the environment of the command it
+ * precedes, so a cursor that stopped at `NAME+=v` took that word for the
+ * program and judged the real one as its argument. The compound form
+ * `NAME=(…)` never reaches here: the tokenizer refuses it ({@link lex}).
+ */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u;
+
+/**
+ * The one spelling a rule may read past: a bare name and `=`. An append keeps
+ * whatever value the name already had, so its text does not say what the
+ * command will see, and a subscript writes an array element. Either one in
+ * front of a command leaves the segment `unclassified`.
+ */
+const PLAIN_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+
+/**
+ * A command word that opens like an assignment with a subscript (`NAME[`) but
+ * is not one {@link ASSIGNMENT} reads. bash reads the subscript as a bracketed
+ * pair in command position, spaces and operators included, so a word this
+ * tokenizer split there may still be one assignment to bash, ahead of the
+ * real program. No program is named like this, so it is refused, not guessed.
+ */
+const ASSIGNMENT_LIKE = /^[A-Za-z_][A-Za-z0-9_]*\[/u;
+
+/**
+ * The variable an assignment word sets: the name in front of `=`, of the
+ * append operator `+=`, or of a `[subscript]`. `GIT_PAGER+=x` sets GIT_PAGER
+ * and `PATH[0]=x` sets PATH. A word with no `=` is returned without its
+ * subscript and `+`.
+ */
+function assignedName(word: string): string {
+  const equals = word.indexOf("=");
+  const head = equals === -1 ? word : word.slice(0, equals);
+  return head.replace(/\[.*$/su, "").replace(/\+$/u, "");
+}
+
+/** The assignment word's spelling up to its value (`NAME=`, `NAME+=`, `NAME[i]=`), for a refusal detail. */
+function assignmentHead(word: string): string {
+  return ASSIGNMENT.exec(word)?.[0] ?? `${assignedName(word)}=`;
+}
 
 /**
  * Redirection targets that create no file (APRV-283).
@@ -5139,7 +5201,7 @@ function sandboxWrapper(words: readonly string[], start: number): SandboxWrapper
  * goes? (APRV-508 refutation S1; `HOME` and `CDPATH` from the recheck.)
  */
 function isSteeringAssignment(word: string): boolean {
-  const name = word.slice(0, word.indexOf("="));
+  const name = assignedName(word);
   if (["TZ", "TZDIR", "PATH", "LOCPATH", "GCONV_PATH", "LANG", "LANGUAGE", "HOME", "CDPATH"].includes(name)) {
     return true;
   }
@@ -5289,6 +5351,9 @@ function classifySegment(
   const assigned = cursor > 0;
   // APRV-508: the same words, for a `shape` row that admits some.
   const assignments = words.slice(0, cursor);
+  // APRV-521 (review-b M1): the word after the assignments, before a sandbox
+  // wrapper moves the cursor. Judged below the protected-redirect answer.
+  const afterAssignments = words[cursor];
 
   // APRV-193. A sandbox wrapper is not a command: it is a room, and what
   // matters is what runs inside it. `approval sandbox -- npm install` is
@@ -5359,6 +5424,29 @@ function classifySegment(
     };
   }
 
+  // APRV-521 (review-b M1). Every spelling of bash's assignment word is read
+  // past by the cursor above ({@link ASSIGNMENT}), and only the plain one is
+  // judged by the rules below. An append (`NAME+=v`) or a subscripted write
+  // (`NAME[i]=v`) leaves the segment `unclassified`, in front of git or any
+  // other program and on its own: its text does not say what value the
+  // command inherits. So does a command word that opens like a subscripted
+  // assignment the grammar cannot read in full ({@link ASSIGNMENT_LIKE}).
+  const unplain = assignments.find((word) => !PLAIN_ASSIGNMENT.test(word));
+  if (unplain !== undefined) {
+    return {
+      ok: false,
+      code: "unclassified",
+      detail: `no rule for ${assignmentHead(unplain)}…: an append or subscripted assignment, whose value the text does not settle`,
+    };
+  }
+  if (afterAssignments !== undefined && ASSIGNMENT_LIKE.test(afterAssignments)) {
+    return {
+      ok: false,
+      code: "unclassified",
+      detail: `no rule for ${afterAssignments.slice(0, afterAssignments.indexOf("[") + 1)}…: a subscripted assignment this classifier cannot read in full`,
+    };
+  }
+
   if (bin === undefined) {
     // A bare input redirection opens its target, and inside `$(…)` it IS the
     // read: `$(< ~/.hermes/.env)` is bash for "the file's contents" (APRV-503).
@@ -5381,13 +5469,13 @@ function classifySegment(
       assignments.find((word) => isSteeringAssignment(word)) ??
       segment.words
         .slice(0, cursor)
-        .find((word) => isGitInheritedName(word.text.slice(0, word.text.indexOf("="))) && !isHarmlessGitAssignment(word))
+        .find((word) => isGitInheritedName(assignedName(word.text)) && !isHarmlessGitAssignment(word))
         ?.text;
     if (steering !== undefined) {
       return {
         ok: false,
         code: "unclassified",
-        detail: `no rule for the assignment ${steering.slice(0, steering.indexOf("="))}=…: it steers which program or file later commands use`,
+        detail: `no rule for the assignment ${assignmentHead(steering)}…: it steers which program or file later commands use`,
       };
     }
     // `VAR=value` alone, or a bare redirection. `> file` truncates, so it is a

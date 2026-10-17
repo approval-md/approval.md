@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude-approval'
 created_date: '2026-10-17 14:00'
-updated_date: '2026-10-17 14:00'
+updated_date: '2026-10-17 11:24'
 labels:
   - classifier
   - security
@@ -72,4 +72,6 @@ Differential (tests/command-class-git-env.test.ts, APPROVAL_DIFF_BASE = a build 
 Usability cost: any assignment off the list in front of git (`FOO=1 git status`, `GIT_AUTHOR_NAME=x git commit`) now needs a person, and a bare `GIT_*=` or `PAGER=` assignment on its own is refused like a bare `PATH=`.
 
 Out of scope, not fixed: other binaries that honor PAGER/EDITOR or run git underneath (`PAGER=evil gh pr view 1` is read.vcs.remote; `GIT_SSH_COMMAND=evil npm install` is deps.install). No conformance vector moved and none was added (no version claimed).
+
+Fold of review-b M1 (T2 read at 9c31383b). The assignment cursor read only the plain `NAME=value` spelling, so an append-operator word, or a subscripted name, in front of git was taken for the program and the APRV-521 check never ran; this was equally open on main. `ASSIGNMENT` now reads every bash assignment-word spelling (name, optional subscript, `=` or `+=`), so every cursor in the module (classifySegment, the line scan, movesNameResolution, commandSegmentShapes/Words) agrees with bash. Only the plain spelling is judged by the rules: an append or subscripted word leaves the segment `unclassified` in front of any program and on its own, a command word that opens like a subscripted assignment the tokenizer cannot read in full is `unclassified`, and the tokenizer refuses the compound array form as `unparseable`. Folded one-liners: N2 (subscripted default-assignment in the line scan), N4 and N5 (`GCONV_PATH`, `GNUPGHOME` join `isGitInheritedName`). Left for follow-up: N3 (heredoc body default-assignment), N6 (network and trust names), N9 (shell differential `/` filter and bash 4), N10 (the generic prefix rule for non-git programs), and a quoted-name word that bash takes for a command while this classifier takes it for an assignment (pre-existing, plain spelling included). Differential depth 2 against main 2179e128 with the new spellings in the alphabet: 1,533,105 lines, 272,300 ok to refused, 0 loosened, 0 reclassified.
 <!-- SECTION:NOTES:END -->

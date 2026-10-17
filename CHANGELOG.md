@@ -132,6 +132,20 @@ on the hook for enforcement.
   21,868,560 generated lines moved 18,534,298 from an answer to `unclassified`
   and loosened or reclassified none. Cost: `FOO=1 git ...` and any other
   assignment off the list now needs a person.
+  The assignment is read in every spelling bash accepts (review-b M1). The
+  append operator (`NAME+=value`) and a subscripted name (`NAME[i]=value`,
+  `NAME[i]+=value`) used to stop the classifier's cursor, which took the word
+  for the program and judged the real one as its argument; this was on 0.4.5
+  too. Either spelling now leaves the segment `unclassified`, in front of git,
+  in front of any other program, and on its own. A command word that opens
+  like a subscripted assignment the tokenizer cannot read in full is refused
+  the same way, and the compound array form (`NAME=(…)`) is `unparseable`. The
+  line scan reads the same spellings, a subscripted `${NAME[i]:=x}`, and two
+  more names (`GCONV_PATH`, `GNUPGHOME`). Stricter only: a depth-2 differential
+  against main (2179e128), with those spellings added to its alphabet, moved
+  272,300 of 1,533,105 generated lines to a refusal and loosened or
+  reclassified none. Cost: `n+=1` and other append or array writes now need
+  a person.
 
 ### Harnesses
 
