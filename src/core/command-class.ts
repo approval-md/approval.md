@@ -2106,6 +2106,107 @@ function refineRm(ctx: RuleContext): Refinement {
   return { class: "files.write.workspace", rule: "rm-workspace" };
 }
 
+// ---------------------------------------------------------------------------
+// git global options (APRV-520)
+// ---------------------------------------------------------------------------
+
+/**
+ * The git global options that take a value, read from git 2.50.1's
+ * `handle_options` table (the options git(1) lists between `git` and
+ * `<command>`, plus the undocumented `--shallow-file`; the strings are in the
+ * installed binary). The separate spelling consumes the NEXT argv word, so the
+ * first positional this classifier reads is that value and not the subcommand:
+ * `git -C status push --force origin main` is a force push in the directory
+ * `status`, and it classified as `read.shell`. The `=`-joined long spellings
+ * shift nothing, but they repoint the repository, its configuration or (for
+ * `--exec-path=`) the directory git runs its helpers and hooks from, which is
+ * the same question this table answers for the separate spelling: what does
+ * the command act on? So every one of them leaves the segment `unclassified`,
+ * which the hook refuses (`hook-unclassified`, in every mode, an open window
+ * included), rather than this classifier re-deriving the subcommand.
+ * `--super-prefix` is gone from git 2.50 and kept here because an older git
+ * still consumes its value.
+ */
+const GIT_VALUE_GLOBALS: readonly string[] = [
+  "-C",
+  "-c",
+  "--config-env",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--super-prefix",
+  "--attr-source",
+  "--shallow-file",
+];
+
+/** The `=`-joined long spellings git accepts for a value-taking global. */
+const GIT_JOINED_VALUE_GLOBALS: readonly string[] = [
+  "--config-env=",
+  "--git-dir=",
+  "--work-tree=",
+  "--namespace=",
+  "--super-prefix=",
+  "--attr-source=",
+  "--exec-path=",
+];
+
+/**
+ * The git global options that take no value, exactly as git 2.50.1 spells
+ * them (no prefix abbreviation: git compares each one whole). Each is skipped
+ * as it was before APRV-520. `--html-path`, `--man-path`, `--info-path`, a bare
+ * `--exec-path` and `--list-cmds=` print and exit before any subcommand runs,
+ * so reading on past them only ever answers stricter than git behaves.
+ */
+const GIT_ZERO_VALUE_GLOBALS: readonly string[] = [
+  "-p",
+  "--paginate",
+  "-P",
+  "--no-pager",
+  "--no-replace-objects",
+  "--no-lazy-fetch",
+  "--bare",
+  "--literal-pathspecs",
+  "--no-literal-pathspecs",
+  "--glob-pathspecs",
+  "--noglob-pathspecs",
+  "--icase-pathspecs",
+  "--no-optional-locks",
+  "--no-advice",
+  "--html-path",
+  "--man-path",
+  "--info-path",
+  "--exec-path",
+];
+
+/**
+ * The options at which git stops reading globals: it runs `git version` or
+ * `git help` with the rest of the line as that command's arguments. Left to
+ * the handling they had before APRV-520.
+ */
+const GIT_GLOBALS_END: readonly string[] = ["-h", "--help", "-v", "--version"];
+
+/**
+ * Why the git global options in front of the subcommand leave this segment
+ * `unclassified`, or `null` when they do not (APRV-520). Only the words before
+ * the first non-flag word are globals; after it they belong to the subcommand
+ * (`git commit -C <commit>` is the commit's own option).
+ */
+function gitGlobalRefusal(args: readonly string[]): string | null {
+  for (const word of args) {
+    if (!isFlag(word) || GIT_GLOBALS_END.includes(word)) return null;
+    if (GIT_ZERO_VALUE_GLOBALS.includes(word) || word.startsWith("--list-cmds=")) continue;
+    if (GIT_VALUE_GLOBALS.includes(word)) {
+      return `no rule for git ${word} <value>: the global option takes the next word as its value, so the first positional is not the subcommand`;
+    }
+    const joined = GIT_JOINED_VALUE_GLOBALS.find((prefix) => word.startsWith(prefix));
+    if (joined !== undefined) {
+      return `no rule for git ${joined}<value>: the global option repoints what the subcommand acts on`;
+    }
+    return `no rule for the git global option ${word}: an option this classifier does not know may take the next word as its value`;
+  }
+  return null;
+}
+
 /** `git commit --amend` rewrites; a plain commit does not. */
 function refineGitCommit(ctx: RuleContext): Refinement {
   return hasFlag(ctx.args, ["--amend"])
@@ -4600,6 +4701,17 @@ function classifySegment(
   }
 
   const positionals = args.filter((arg) => !isFlag(arg));
+
+  // APRV-520: a git global option that takes a value, or one this table does
+  // not know, leaves the segment unclassified ({@link gitGlobalRefusal}). It is
+  // checked before the credential and table reads below, because the first
+  // positional they would read may be the option's value rather than the
+  // subcommand, and refused rather than parsed so no spelling of it can turn
+  // into an answer.
+  if (basename === "git") {
+    const refusal = gitGlobalRefusal(args);
+    if (refusal !== null) return { ok: false, code: "unclassified", detail: refusal };
+  }
 
   // APRV-508 recheck S-R1: `printf -v NAME` assigns NAME, so `printf -v PATH
   // %s /tmp/x; cat f` is the bare `PATH=/tmp/x` the assignment rule above

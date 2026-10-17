@@ -15,6 +15,28 @@ before a tag.
 
 ## Unreleased
 
+### Security
+
+- **A git global option that takes a value no longer moves the subcommand
+  (APRV-520).** The classifier reads a git subcommand as the first positional
+  after `git`. A global option that consumes the next word (`-C <path>`, `-c
+  <name>=<value>`, `--config-env`, `--git-dir`, `--work-tree`, `--namespace`,
+  `--super-prefix`, `--attr-source`, `--shallow-file`) made that first
+  positional the option's value. So `git -C status push --force origin main`, a
+  force push, classified `read.shell` and ran unattended, and `git -C commit
+  reset --hard` classified as a plain commit. This is on 0.4.5. Now every
+  value-taking global, in its separate or `=`-joined spelling
+  (`--exec-path=<path>` included), leaves the segment `unclassified`, and the
+  hook refuses it. So does any flag in global position that the classifier does
+  not know (`-Cdir`, `--`, `-$X`). The zero-value globals (`--no-pager`, `-p`,
+  `-P`, `--bare`, `--no-optional-locks` and the rest of git 2.50's table) are
+  skipped as before. Options after the subcommand are unchanged (`git commit -C
+  HEAD`, `git grep -C 3`). Stricter only: a differential against main's
+  classifier (5fd8a6f1) over 2,150,475 generated git lines moved 1,113,378 from
+  an answer to `unclassified` and loosened or reclassified none. Cost: `git
+  --git-dir=.git status` and the other `=`-joined spellings, which used to
+  classify as their subcommand, now need `cd` or a person.
+
 ### Harnesses
 
 - **A Hermes record carries its harness version (APRV-419).** `hermes
