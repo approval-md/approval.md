@@ -541,14 +541,39 @@ Five overrides sit on top of the table:
   read past the globals and with every option on that verb's closed list, keep
   their `policy.core` answer. A file named inside a reader's own option
   (`--name=FILE`, an attached short value, curl's `@FILE` forms) is a read. The
-  hook then lands every path a segment reads, whatever class the segment took
-  and inside every `$(…)`: through earlier `cd`s, symlinks (lexical and
-  physical `..`), globs, brace lists, `$PWD` and `${VAR:-default}`, and adds
-  `credential-path-resolved` → `account.credential` beside the segment's own
-  class when one lands on credential material. After a `cd` the hook cannot
-  resolve (a variable, `-`, `popd`), a later relative read is a credential
-  read. A path held in a variable, or produced by a substitution's output,
-  stays out of reach.
+  hook then lands every path a segment reads, whatever class the segment took,
+  inside every `$(…)` and inside the script of every `bash -c`-style wrapper
+  the classifier unwraps: through earlier `cd`s, symlinks (lexical and
+  physical `..`), globs, brace lists, `~`, `$HOME`, `$PWD` and
+  `${VAR:-default}`, and adds `credential-path-resolved` → `account.credential`
+  beside the segment's own class when one lands on credential material. A
+  directory handed to a recursive reader (the grep family, `rg`, `find`,
+  `tar`, a copier, git and `diff` among them) is a read of what it holds; a
+  recursive search and `git grep` read the working directory too, whether or
+  not they name a path; a one-operand `ln` reads its only operand. The pass
+  starts from the hook process's directory AND the envelope's `cwd`.
+
+  Where the hook cannot know where a read lands, the read is a credential
+  read. After a `cd` it cannot resolve, every later relative read word is one,
+  a word holding an unexpandable `$` included. A `cd` is unresolvable when its
+  operand is a variable, `-`, a glob, a brace list or an unexpanded tilde
+  prefix; when it carries an assignment prefix (`CDPATH=`, `HOME=`); and when
+  its operand is relative and does not open with `./` or `../` (or is not
+  exactly `.` or `..`): the shell looks such an operand up through `CDPATH`,
+  which the hook cannot see. `popd` always is. So `cd src && npm test` asks a
+  human under a policy that makes `account.credential` human-only; write `cd
+  ./src && npm test`, or an absolute `cd`. A word opening with `~+`, `~-` or
+  `~name`, a brace list past 64 words, `$(…)` or script nesting past 8 levels,
+  and a shell handed an inline script in a shape the classifier does not
+  unwrap are credential reads too.
+
+  Out of reach, stated so nobody assumes otherwise: a path held in a variable,
+  or produced by a substitution's output, is judged by its text alone (an
+  absolute one always, a relative one unless the directory is unknown); a
+  recursive search of an ANCESTOR of a credential directory with a filename
+  filter; and a Bash directory that is neither the hook process's nor the
+  envelope's `cwd` (the Bash tool keeps its directory between calls, and the
+  hook sees only what the envelope reports).
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
   `>>` writes a file, and the class says so. Since APRV-283 a redirection onto a
   DISCARD device is exempt, because it creates nothing: `/dev/null`,

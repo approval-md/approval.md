@@ -423,9 +423,17 @@ serve` the hook runs in the daemon, so a hosted operator sets
 `APPROVAL_HERMES_HOME` on the serve process. Unexpanded, a `$HERMES_HOME` path
 is `policy.core` when written and `account.credential` when read. After a `cd`
 this hook cannot resolve (`cd $X`, `cd "$D"`, `cd -`, `cd $HERMES_HOME` with the
-home unknown), every later relative write is `policy.core` and every later
-relative read `account.credential`; setting `APPROVAL_HERMES_HOME` on the serve
-process removes that conservatism for the home. `APPROVAL_HERMES_HOME` is
+home unknown, or a `cd` with an assignment prefix such as `CDPATH=`), every
+later relative write is `policy.core` and every later relative read
+`account.credential`; setting `APPROVAL_HERMES_HOME` on the serve process
+removes that conservatism for the home. Reads are judged a second time by the
+shared credential pass (APRV-522, see `docs/claude-code-hook.md`), which also
+treats a relative `cd` operand not opening with `./` or `../` as unresolvable,
+because the shell may look it up through an inherited `CDPATH`: after `cd
+project`, every later relative read is `account.credential`, so write `cd
+./project`. The write judgement here does NOT assume an inherited `CDPATH`
+(it would make every write after such a `cd` `policy.core`); a write landed
+through one is a stated limit. `APPROVAL_HERMES_HOME` is
 trusted as given: the operator sets it (under co-location the control plane sets
 it from the tenant's home), and nothing an agent writes reaches the hook
 process's environment. A read pattern (`cat .e*`) is expanded against its

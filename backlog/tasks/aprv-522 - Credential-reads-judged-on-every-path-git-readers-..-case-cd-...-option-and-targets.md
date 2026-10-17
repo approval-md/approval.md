@@ -54,10 +54,22 @@ Decisions the diff alone does not show:
 - Known limits, unchanged: a path held in a variable or produced by a substitution's output (N3), inline programs (N1), and ~/.ssh and kin are not credential locations (N2).
 - Write-side case variants stay open: protectedPathClass is exact-case, so a write to an upper-case spelling of the approval home is a workspace write. Follow-up, not in this brief.
 - Touches SPEC §11.1 (ambiguity resolves to the stricter path): every change only adds classes or tightens read.shell; the differential shows 0 milder in 11 modes.
+
+Fix round 1 (APRV-653 read: 6 M / 3 S / 3 N, none looser than main). Rule throughout: when the hook cannot know where a read lands, the read is account.credential.
+- M-A: commandSegmentShapes carries the login-shell script (loginShellScript) and an opaqueShell flag; the credential pass walks the script like a substitution body, and a known shell given an inline script in any other shape is a credential read. The Hermes pass splices the script's shapes in place of the wrapper so they line up with the classifier's spliced segments (its write half too).
+- M-B: a cd/pushd with any assignment prefix, or with a relative operand not opening with ./ or ../ (or exactly . / ..), is an unknown cd (CDPATH). Main usability cost of the round: `cd src && ...` followed by any relative word is now a credential read in the Claude Code hook, hook classify and the Hermes read judgement. The Hermes WRITE pass takes the assignment-prefix rule only; assuming an inherited CDPATH there would make every write after `cd sub` policy.core, so it is a stated limit. Every segment reassigning HOME or CDPATH on its own (bare assignment, export, declare, unset, read, printf -v, for) is already refused by the classifier, so no HOME-taint tracking was added.
+- M-C: expandHookWord reports landingUnknown for ~+, ~-, ~name (and a bare ~ with no HOME); both passes fail closed on it (reads credential, Hermes writes policy.core).
+- M-D: braceWords answers null past 64 words and the caller records a credential read; the walk records one past depth 8 (and for a nested body the lexer cannot read).
+- M-E: grep family, rg, ag, ack, find, tree, du and git grep also judge the working directory as a recursive read, whatever operands they name (option arity is not known for every reader).
+- M-F: a WRITE_LAST_OPERAND binary with one operand and no -t keeps that operand as a source (both passes; Hermes lands it into the working directory).
+- S: git and diff are recursive readers in both passes (git only when it reads at all).
+- S-2: the unknown-cd check runs before the unresolved-word check, as in the Hermes pass; $PWD after an unknown cd fails closed too.
+- S-1: classifyForHook takes extra credential cwds; where the harness sends no per-call directory, the envelope cwd is judged alongside the hook process cwd. Limit: a Bash directory that is neither is not followed.
+- N-2: the scratchpad differential analyser reports refusal->class and class->refusal as their own columns (not a repo change).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Credential reads are judged on every path. Pure classifier: credential rows resolve .. and fold case; credentialReadWords is the one list of read words (positionals, option values, upload sources, git path halves); git and ln are judged as direction-blind readers with the path-writing git verbs exempt only through a closed option allow-list; < targets and substitution reads take the read scope. Hook: credentialReadLandings lands every read word through cd, symlinks, globs, braces, $PWD and parameter defaults, inside every substitution, for Claude Code, Hermes and hook classify. Differential: 0 milder of 177,888 comparisons. Tests: 19 new, 16 fail on main.
+Credential reads are judged on every path. Pure classifier: credential rows resolve .. and fold case; credentialReadWords is the one list of read words (positionals, option values, upload sources, git path halves); git and ln are judged as direction-blind readers with the path-writing git verbs exempt only through a closed option allow-list; < targets and substitution reads take the read scope. Hook: credentialReadLandings lands every read word through cd, symlinks, globs, braces, $PWD and parameter defaults, inside every substitution, for Claude Code, Hermes and hook classify. Differential: 0 milder of 177,888 comparisons. Tests: 19 new, 16 fail on main. Fix round 1 closed the six M and three S classes of the APRV-653 read fail-closed, with 9 more hook-level tests that fail on ecbf0029; differential 0 milder vs main, refusals reported in their own column.
 <!-- SECTION:FINAL_SUMMARY:END -->

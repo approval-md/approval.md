@@ -2558,23 +2558,52 @@ export const CREDENTIAL_RESOLVED_RULE = "credential-path-resolved";
  * `$HERMES_HOME` / `${HERMES_HOME}` expand to `APPROVAL_HERMES_HOME`, else
  * `HERMES_HOME`, from this process's environment; `~`, `$HOME` and `${HOME}`
  * to `HOME`. `unresolved` is set while any `$` or backtick is left.
+ *
+ * `landingUnknown` (APRV-522 fix round 1, M-C) is set when the word opens with
+ * a tilde prefix this hook does not expand (`~+`, `~-`, `~name`, or a bare `~`
+ * with no `HOME`). Where such a word lands is unknown, so callers fail closed
+ * on it rather than judge its text.
  */
 function expandHookWord(
   word: string,
   env: NodeJS.ProcessEnv,
-): { text: string; hermesUnknown: boolean; unresolved: boolean } {
+): { text: string; hermesUnknown: boolean; unresolved: boolean; landingUnknown: boolean } {
   const hermesHome = env["APPROVAL_HERMES_HOME"] ?? env["HERMES_HOME"] ?? null;
   const home = env["HOME"] ?? null;
   let text = word;
   let hermesUnknown = false;
+  let landingUnknown = false;
   const hermesRef = /^\$(?:\{HERMES_HOME\}|HERMES_HOME)(?=\/|$)/u;
   if (hermesRef.test(text)) {
     if (hermesHome !== null && hermesHome.length > 0) text = text.replace(hermesRef, hermesHome);
     else hermesUnknown = true;
   }
   const homeRef = /^(?:~|\$\{HOME\}|\$HOME)(?=\/|$)/u;
-  if (homeRef.test(text) && home !== null && home.length > 0) text = text.replace(homeRef, home);
-  return { text, hermesUnknown, unresolved: hermesUnknown || /[$`]/u.test(text) };
+  if (homeRef.test(text)) {
+    if (home !== null && home.length > 0) text = text.replace(homeRef, home);
+    else landingUnknown = true;
+  }
+  if (text.startsWith("~")) landingUnknown = true;
+  return {
+    text,
+    hermesUnknown,
+    unresolved: hermesUnknown || landingUnknown || /[$`]/u.test(text),
+    landingUnknown,
+  };
+}
+
+/**
+ * Is a `cd`/`pushd` operand one whose landing the hook can name? (APRV-522 fix
+ * round 1, M-B.) A relative operand that does not open with `.` or `..` is
+ * looked up through `CDPATH` first, and the shell's `CDPATH` (set in its
+ * profile, inherited, or assigned on the line) is not visible here, so only an
+ * absolute operand, `.`, `..`, `./…` and `../…` land where they are spelled.
+ * POSIX `cd` and bash both skip `CDPATH` for those.
+ */
+function cdOperandLandsAsSpelled(text: string): boolean {
+  return (
+    isAbsolute(text) || text === "." || text === ".." || text.startsWith("./") || text.startsWith("../")
+  );
 }
 
 /**
@@ -2611,10 +2640,11 @@ function physicalLanding(from: string, text: string): string {
 /**
  * The words of a `{a,b}` brace list, expanded the way bash expands one before
  * anything else sees the word (APRV-522), or `[text]` when it carries none.
- * Bounded: past 64 words the rest are dropped, which is safe because the
- * caller judges the unexpanded spelling as well.
+ * Bounded: past {@link BRACE_WORD_CAP} words it answers `null`, and the caller
+ * fails closed (APRV-522 fix round 1, M-D): the unexpanded spelling never
+ * matches a credential row, so a dropped word would be a read never judged.
  */
-function braceWords(text: string): string[] {
+function braceWords(text: string): string[] | null {
   const open = text.indexOf("{");
   if (open === -1) return [text];
   let depth = 0;
@@ -2646,7 +2676,9 @@ function braceWords(text: string): string[] {
   } else {
     const sequence = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])$/u.exec(body);
     if (sequence === null) {
-      return braceWords(tail).map((rest) => `${head}{${body}}${rest}`).slice(0, 64);
+      const rests = braceWords(tail);
+      if (rests === null || rests.length > BRACE_WORD_CAP) return null;
+      return rests.map((rest) => `${head}{${body}}${rest}`);
     }
     const [from, to] = [sequence[1] as string, sequence[2] as string];
     const numeric = /^-?\d+$/u.test(from) && /^-?\d+$/u.test(to);
@@ -2655,18 +2687,25 @@ function braceWords(text: string): string[] {
     parts = [];
     for (let v = a; a <= b ? v <= b : v >= b; v += a <= b ? 1 : -1) {
       parts.push(numeric ? String(v) : String.fromCharCode(v));
-      if (parts.length >= 64) break;
+      if (parts.length > BRACE_WORD_CAP) return null;
     }
   }
   const out: string[] = [];
   for (const part of parts) {
-    for (const rest of braceWords(`${part}${tail}`)) {
+    const rests = braceWords(`${part}${tail}`);
+    if (rests === null) return null;
+    for (const rest of rests) {
       out.push(`${head}${rest}`);
-      if (out.length >= 64) return out;
+      if (out.length > BRACE_WORD_CAP) return null;
     }
   }
   return out;
 }
+
+/** The most words {@link braceWords} expands before it fails closed. */
+const BRACE_WORD_CAP = 64;
+/** The deepest `$(…)` or shell-script nesting the credential pass walks. */
+const SUBSTITUTION_DEPTH_CAP = 8;
 
 /**
  * A word opening with `${NAME:-default}` (or `-`, `:=`, `=`) for a variable
@@ -2760,24 +2799,52 @@ const DIRECTORY_COPIERS: ReadonlySet<string> = new Set(["cp", "rsync", "scp"]);
  *   expanded against its directory (or, where that is unknown, judged by
  *   whether its pattern could name a credential);
  * - a directory handed to a recursive reader or a directory copier, when it
- *   {@link holdsCredentials};
+ *   {@link holdsCredentials}. git and diff count as recursive readers here
+ *   (fix round 1, S): git's no-index grep and diff walk a directory, and diff
+ *   compares a directory's files. A recursive search also reads the working
+ *   directory (fix round 1, M-E), whether or not it names a path, because
+ *   which of its words are option values cannot be known for every reader;
+ * - a one-operand link or copy keeps its only operand as a read, because the
+ *   destination is the working directory (fix round 1, M-F);
  * - `cd` and `pushd` move the directory for later segments, the directories
  *   before and after both kept (a `cd` may fail, or sit behind `||`). After a
  *   `cd` this hook cannot resolve, every later RELATIVE read word is a
- *   credential read: where it lands is unknown, and it may be the vault;
- * - the body of every `$(…)`, walked the same way from the directory it runs
- *   in.
+ *   credential read: where it lands is unknown, and it may be the vault. A
+ *   `cd` is unresolvable when its operand is a variable, `-`, a glob or a
+ *   brace list, or a tilde prefix this hook does not expand; when it carries
+ *   an assignment prefix; when its operand is relative and does not open with
+ *   `.` or `..`, because the shell looks it up through a `CDPATH` this hook
+ *   cannot see (fix round 1, M-B). `popd` is always unresolvable. (A segment
+ *   that reassigns `HOME` or `CDPATH` on its own, `export`, `unset` or `read`
+ *   of either included, is refused by the classifier before this pass runs.)
+ * - the body of every `$(…)`, and the script of every login-shell wrapper the
+ *   classifier unwraps (fix round 1, M-A), walked the same way from the
+ *   directory it runs in. A known shell handed an inline script in any other
+ *   shape is a credential read, since what it reads cannot be judged;
+ * - past {@link BRACE_WORD_CAP} brace words, or {@link SUBSTITUTION_DEPTH_CAP}
+ *   levels of nesting, a credential read (fix round 1, M-D).
  *
- * A word left with a `$` this hook cannot expand is judged by its text alone,
- * as the pure rule judges it.
+ * A word opening with a tilde prefix this hook does not expand (`~+`, `~-`,
+ * `~name`) is a credential read (fix round 1, M-C). A relative word read after an
+ * unresolvable `cd` is a credential read even when it holds a `$` this hook
+ * cannot expand (fix round 1, S-2). Otherwise a word left with such a `$` is
+ * judged by its text alone, as the pure rule judges it: a path held in a
+ * variable, or produced by a substitution's output, is the accepted limit.
+ *
+ * `cwd` may name several directories (fix round 1, S-1): every one is a place
+ * the command may start in, and each is judged.
  */
 export function credentialReadLandings(
   command: string,
-  cwd: string,
+  cwd: string | readonly string[],
   env: NodeJS.ProcessEnv = process.env,
 ): Array<{ segment: string; path: string }> {
   const found: Array<{ segment: string; path: string }> = [];
-  const home = env["HOME"] ?? null;
+  const record = (segment: string, path: string): void => {
+    if (!found.some((entry) => entry.segment === segment && entry.path === path)) {
+      found.push({ segment, path });
+    }
+  };
 
   // `substituted`: the text is a `$(…)` body, whose output becomes words of the
   // command around it, so a printed word is as good as a piped one.
@@ -2788,25 +2855,54 @@ export function credentialReadLandings(
     depth: number,
     substituted: boolean,
   ): void => {
-    if (depth > 8) return;
+    // M-D: past the cap the body is not walked, so what it reads is unknown.
+    if (depth > SUBSTITUTION_DEPTH_CAP) {
+      record(text, text);
+      return;
+    }
     const shapes = commandSegmentShapes(text);
-    if (shapes === null) return;
+    if (shapes === null) {
+      // The whole line is refused before this pass runs; a nested body the
+      // lexer cannot read is a read this pass cannot judge.
+      if (depth > 0) record(text, text);
+      return;
+    }
     let cwds = [...startCwds];
     let cwdUnknown = startUnknown;
-    for (const shape of shapes) {
+    for (const [index, shape] of shapes.entries()) {
+      const feedsPipe = shapes[index + 1]?.stdinFed === true;
       for (const inner of shape.substitutions) walk(inner, cwds, cwdUnknown, depth + 1, true);
+      // M-A: a login-shell wrapper runs its script in a child shell, from the
+      // directory the wrapper runs in; its `cd`s stay inside it.
+      if (shape.script !== null) {
+        walk(shape.script, cwds, cwdUnknown, depth + 1, substituted || feedsPipe);
+        continue;
+      }
+      if (shape.opaqueShell) {
+        record(shape.text, shape.text);
+        continue;
+      }
       const bin = shape.bin === null ? null : basename(shape.bin);
       if (bin === "cd" || bin === "pushd") {
         const target = shape.args.find((arg) => !arg.startsWith("-"));
-        if (target === undefined) {
-          if (bin === "cd" && !shape.args.includes("-") && home !== null) {
+        const home = env["HOME"] ?? null;
+        if (shape.assignments.length > 0) {
+          // M-B: `CDPATH=…`, `HOME=…` or any other prefix steers this `cd`.
+          cwdUnknown = true;
+        } else if (target === undefined) {
+          if (bin === "cd" && !shape.args.includes("-") && home !== null && home.length > 0) {
             cwds = [...new Set([...cwds, canonicalPath(home)])];
           } else {
             cwdUnknown = true;
           }
         } else {
           const expanded = expandHookWord(target, env);
-          if (expanded.unresolved || hasGlobChars(expanded.text) || expanded.text.includes("{")) {
+          if (
+            expanded.unresolved ||
+            hasGlobChars(expanded.text) ||
+            expanded.text.includes("{") ||
+            !cdOperandLandsAsSpelled(expanded.text)
+          ) {
             cwdUnknown = true;
           } else {
             const next = cwds.flatMap((from) => [
@@ -2822,11 +2918,7 @@ export function credentialReadLandings(
         cwdUnknown = true;
         continue;
       }
-      const hit = (path: string): void => {
-        if (!found.some((entry) => entry.segment === shape.text && entry.path === path)) {
-          found.push({ segment: shape.text, path });
-        }
-      };
+      const hit = (path: string): void => record(shape.text, path);
       const lands = (path: string, recursive: boolean): boolean => {
         const canonical = canonicalPath(path);
         return (
@@ -2839,6 +2931,10 @@ export function credentialReadLandings(
         // `$PWD` is the directory the segment runs in, which is each of `cwds`.
         const pwdRef = /^\$(?:\{PWD\}|PWD)(?=\/|$)/u;
         if (pwdRef.test(word)) {
+          if (cwdUnknown) {
+            hit(word);
+            return;
+          }
           for (const from of cwds) judgeOne(word.replace(pwdRef, from), recursive);
           return;
         }
@@ -2852,12 +2948,19 @@ export function credentialReadLandings(
           if (isCredentialPath(spelled) || (recursive && kind !== null && kind !== "scripts")) hit(word);
           return;
         }
-        if (target.unresolved) {
-          if (isCredentialPath(target.text)) hit(word);
+        // M-C: a tilde prefix this hook does not expand lands somewhere unknown.
+        if (target.landingUnknown) {
+          hit(word);
           return;
         }
+        // S-2: the unknown directory first, so an unexpandable relative word
+        // after an unresolvable `cd` fails closed, as the Hermes pass does.
         if (!isAbsolute(target.text) && cwdUnknown) {
           hit(word);
+          return;
+        }
+        if (target.unresolved) {
+          if (isCredentialPath(target.text)) hit(word);
           return;
         }
         for (const from of cwds) {
@@ -2884,7 +2987,13 @@ export function credentialReadLandings(
         const spellings = new Set<string>();
         for (const parameter of parameterSpellings(word)) {
           spellings.add(parameter);
-          for (const braced of braceWords(parameter)) spellings.add(braced);
+          const braced = braceWords(parameter);
+          // M-D: a brace list past the cap is a read this pass cannot list.
+          if (braced === null) {
+            hit(word);
+            continue;
+          }
+          for (const spelling of braced) spellings.add(spelling);
         }
         for (const spelling of spellings) judgeOne(spelling, recursive);
       };
@@ -2893,9 +3002,9 @@ export function credentialReadLandings(
       // A builtin that never opens its words, unless what it prints becomes
       // another command's input or words (a pipe into a reader, or the output
       // of a substitution); see {@link NON_OPENING_BINS}.
-      const feedsPipe = shapes[shapes.indexOf(shape) + 1]?.stdinFed === true;
       if (NON_OPENING_BINS.has(bin) && !(PRINTING_BINS.has(bin) && (feedsPipe || substituted))) continue;
-      const recursive = RECURSIVE_READERS.has(bin) || DIRECTORY_COPIERS.has(bin);
+      const recursive =
+        RECURSIVE_READERS.has(bin) || DIRECTORY_COPIERS.has(bin) || DIRECTORY_READING_BINS.has(bin);
       const words = credentialReadWords(bin, shape.args);
       // A copy's destination is WRITTEN, and the write half (the protected
       // scan, the Hermes organ pass) prices it; judged as a read it would make
@@ -2905,15 +3014,49 @@ export function credentialReadLandings(
         // `-t` names the target directory for the GNU copiers; for rsync it
         // preserves times and names nothing.
         const targetDir = bin === "rsync" ? null : flagValue(shape.args, "-t", "--target-directory");
-        const destination = targetDir ?? operands[operands.length - 1];
-        const at = destination === undefined ? -1 : words.indexOf(destination);
-        if (at !== -1) words.splice(at, 1);
+        // M-F: with one operand and no `-t`, that operand is the SOURCE (a
+        // one-operand `ln` links it into the working directory), so it stays.
+        if (targetDir !== null || operands.length > 1) {
+          const destination = targetDir ?? operands[operands.length - 1];
+          const at = destination === undefined ? -1 : words.indexOf(destination);
+          if (at !== -1) words.splice(at, 1);
+        }
       }
       for (const word of words) judge(word, recursive);
+      // M-E: a recursive search reads the working directory.
+      if (readsWorkingDirectory(bin, shape.args, words)) judge(".", true);
     }
   };
-  walk(command, [canonicalPath(cwd)], false, 0, false);
+  const starts = typeof cwd === "string" ? [cwd] : [...cwd];
+  walk(command, [...new Set(starts.map((start) => canonicalPath(start)))], false, 0, false);
   return found;
+}
+
+/**
+ * Binaries the credential passes read as recursive although
+ * {@link RECURSIVE_READERS} does not list them (APRV-522 fix round 1, S): git
+ * (its no-index grep and diff modes walk a directory they are handed; every
+ * verb that reads at all is read this way, the closed reading) and diff (a
+ * directory operand compares the directory's files, and `-r` walks it).
+ */
+const DIRECTORY_READING_BINS: ReadonlySet<string> = new Set(["git", "diff"]);
+
+/** Searches that read the working directory when they name no path (M-E). */
+const WORKING_DIRECTORY_SEARCHERS: ReadonlySet<string> = new Set([
+  "grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "tree", "du",
+]);
+
+/**
+ * Does this reader read the working directory? (APRV-522 fix round 1, M-E.)
+ * A recursive search with no path operand searches the working directory, and
+ * which of its words are option values is not known for every reader, so the
+ * closed reading is that every search does; `git grep` too, which reads the
+ * repository (or, outside one, the directory) it runs in. `words` is what the
+ * credential rule reads of the argv: empty for a git verb that only writes.
+ */
+function readsWorkingDirectory(bin: string, args: readonly string[], words: readonly string[]): boolean {
+  if (WORKING_DIRECTORY_SEARCHERS.has(bin)) return true;
+  return bin === "git" && words.length > 0 && args.includes("grep");
 }
 
 /**
@@ -2925,7 +3068,7 @@ export function credentialReadLandings(
 export function refineCredentialReads(
   result: CommandClassification,
   command: string,
-  cwd: string,
+  cwd: string | readonly string[],
   env: NodeJS.ProcessEnv = process.env,
 ): RefinedClassification {
   if (!result.ok) return { result, notes: [] };
@@ -3478,6 +3621,13 @@ export function classifyForHook(
    * today's answer, a refusal.
    */
   execCode = false,
+  /**
+   * Further directories the command may start in, judged by the credential
+   * pass only (APRV-522 fix round 1, S-1): the envelope's `cwd` where the
+   * harness sends no per-call directory. It only ever adds reads, so a stale
+   * or absent directory costs nothing.
+   */
+  credentialCwds: readonly string[] = [],
 ): RefinedClassification {
   const roots = resolveScratchRoots(cwd);
   const classified = classifyCommand(command, protectedPaths, {
@@ -3499,7 +3649,7 @@ export function classifyForHook(
   const scripted = refineSkillScripts(written.result, cwd, protectedPaths);
   // APRV-522. Last, and it only ever adds: every path a segment reads, judged
   // where the disk lands it, against the same credential rule the text was.
-  const credentialed = refineCredentialReads(scripted.result, command, cwd);
+  const credentialed = refineCredentialReads(scripted.result, command, [cwd, ...credentialCwds]);
   return {
     result: credentialed.result,
     notes: [
@@ -6624,7 +6774,21 @@ function describeToolCall(
         (value) => value !== undefined && value !== false,
       );
     const callGate = laterStdin ? closedExecCodeGate("silent") : execGate;
-    const refined = classifyForHook(raw, protectedPaths, shellCwd ?? cwd, readRoots, callGate.shell);
+    // APRV-522 fix round 1 (S-1). Where the harness sends no per-call
+    // directory (Claude Code), the classification stays on the hook process's
+    // own cwd as above, and the credential pass ALSO judges from the
+    // envelope's `cwd`: a `cd` made in an earlier Bash call can leave the
+    // session's directory somewhere the hook process is not. It only adds.
+    const credentialCwds =
+      shellCwd === null && isAbsolute(input.cwd) && input.cwd !== cwd ? [input.cwd] : [];
+    const refined = classifyForHook(
+      raw,
+      protectedPaths,
+      shellCwd ?? cwd,
+      readRoots,
+      callGate.shell,
+      credentialCwds,
+    );
     const classified = refined.result;
     if (!classified.ok) {
       // APRV-510. A policy that NAMES `exec.code` without attesting custody is
@@ -6632,7 +6796,7 @@ function describeToolCall(
       // `exec.code` segment with it. Every other policy keeps today's refusal,
       // byte for byte.
       if (callGate.closed === "unattested" && classified.code !== "unparseable") {
-        const opened = classifyForHook(raw, protectedPaths, shellCwd ?? cwd, readRoots, true).result;
+        const opened = classifyForHook(raw, protectedPaths, shellCwd ?? cwd, readRoots, true, credentialCwds).result;
         const program = opened.ok
           ? opened.segments.find((segment) => segment.execCode !== undefined)
           : undefined;
@@ -6942,14 +7106,21 @@ function resolvedPathClasses(
   const add = (cls: string | null): void => {
     if (cls !== null && !found.includes(cls)) found.push(cls);
   };
-  const shapes = commandSegmentShapes(raw) ?? [];
+  // APRV-522 fix round 1 (M-A): a login-shell wrapper is classified by the
+  // segments of its script, spliced in place of the wrapper, so the shapes are
+  // spliced the same way and line up with the classified segments again.
+  const shapes = (commandSegmentShapes(raw) ?? []).flatMap((shape) =>
+    shape.script === null ? [shape] : (commandSegmentShapes(shape.script) ?? [shape]),
+  );
   // Trusted as given: the operator sets it (under co-location, the control
   // plane sets it from the tenant's home), and nothing the agent writes reaches
   // this process's environment.
   const home = env["HOME"] ?? null;
 
   /** The word with the variables this hook can know expanded. */
-  const expand = (word: string): { text: string; hermesUnknown: boolean; unresolved: boolean } =>
+  const expand = (
+    word: string,
+  ): { text: string; hermesUnknown: boolean; unresolved: boolean; landingUnknown: boolean } =>
     expandHookWord(word, env);
 
   // After a `cd` this hook cannot resolve (`cd $X`, `cd "$D"`, `cd -`), the
@@ -6967,7 +7138,10 @@ function resolvedPathClasses(
 
     if (bin === "cd" || bin === "pushd") {
       const target = operands[0];
-      if (target === undefined) {
+      if (shape.assignments.length > 0) {
+        // Fix round 1 (M-B): `CDPATH=…`, `HOME=…` or any prefix steers it.
+        cwdUnknown = true;
+      } else if (target === undefined) {
         // A bare `cd` goes HOME; `cd -` and `pushd` with no operand go to a
         // directory recorded earlier in a shell this hook never saw.
         if (bin === "cd" && !shape.args.includes("-") && home !== null) {
@@ -6977,6 +7151,12 @@ function resolvedPathClasses(
         }
       } else {
         const expanded = expand(target);
+        // Fix round 1 (M-B): an inherited CDPATH is NOT assumed here. Every
+        // READ this pass judges is judged again, fail-closed on CDPATH, by
+        // credentialReadLandings (classifyForHook runs it for every adapter);
+        // assuming it for this pass's WRITES would make every later relative
+        // write after `cd sub` `policy.core`. That write-side reading is a
+        // stated limit (docs/hermes-hook.md), not a claim of this pass.
         if (expanded.unresolved || hasGlobChars(expanded.text)) {
           cwdUnknown = true;
         } else {
@@ -6990,7 +7170,7 @@ function resolvedPathClasses(
 
     const judgeWrite = (word: string): void => {
       const target = expand(word);
-      if (target.hermesUnknown) {
+      if (target.hermesUnknown || target.landingUnknown) {
         add("policy.core");
         return;
       }
@@ -7040,7 +7220,8 @@ function resolvedPathClasses(
     };
     const judgeRead = (word: string, recursive: boolean): void => {
       const target = expand(word);
-      if (target.hermesUnknown) {
+      // Fix round 1 (M-C): an unexpanded tilde prefix lands somewhere unknown.
+      if (target.hermesUnknown || target.landingUnknown) {
         add("account.credential");
         return;
       }
@@ -7087,12 +7268,20 @@ function resolvedPathClasses(
       for (const operand of operands) judgeWrite(operand);
     } else if (WRITE_LAST_OPERAND.has(bin)) {
       const targetDir = targetDirFlag();
-      const sources = targetDir === null ? operands.slice(0, -1) : operands.filter((operand) => operand !== targetDir);
-      const destination = targetDir ?? operands[operands.length - 1];
+      // Fix round 1 (M-F): one operand and no `-t` is a SOURCE, landed in the
+      // working directory under its own name (a one-operand `ln`).
+      const single = targetDir === null && operands.length === 1;
+      const sources = single
+        ? operands
+        : targetDir === null
+          ? operands.slice(0, -1)
+          : operands.filter((operand) => operand !== targetDir);
+      const destination = single ? "." : (targetDir ?? operands[operands.length - 1]);
       for (const source of sources) judgeRead(source, true);
       if (destination !== undefined) {
         const expanded = expand(destination);
         const intoDirectory =
+          single ||
           targetDir !== null ||
           destination.endsWith("/") ||
           (!expanded.unresolved &&
@@ -7118,9 +7307,16 @@ function resolvedPathClasses(
       judgeExtractInto(flagValue(shape.args, "-d", null) ?? ".");
     }
 
-    if (segment.class.startsWith("read.") || RECURSIVE_READERS.has(bin)) {
-      for (const operand of operands) judgeRead(operand, RECURSIVE_READERS.has(bin));
+    // Fix round 1 (S): git and diff walk a directory they are handed, unless
+    // git only writes the paths it names. (M-E): a search reads the working
+    // directory.
+    const readWords = credentialReadWords(bin, shape.args);
+    const recursive =
+      RECURSIVE_READERS.has(bin) || (DIRECTORY_READING_BINS.has(bin) && readWords.length > 0);
+    if (segment.class.startsWith("read.") || recursive) {
+      for (const operand of operands) judgeRead(operand, recursive);
     }
+    if (readsWorkingDirectory(bin, shape.args, readWords)) judgeRead(".", true);
   }
   return found;
 }

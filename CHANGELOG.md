@@ -62,15 +62,44 @@ on the hook for enforcement.
   in the read tools; a `..` spelling through the log directory keeps
   `log.mutate`. (M4) The Claude Code hook and `hook classify` gain the disk pass
   the Hermes hook had: every path a segment reads is landed through earlier
-  `cd`s, symlinks (lexical and physical `..`), globs, brace lists, `$PWD` and
-  `${VAR:-default}`, and judged by the credential rule
-  (`credential-path-resolved`). After a `cd` the hook cannot resolve, a later
-  relative read is a credential read. (M5) The same pass judges a reader whose
-  segment also writes, and a reader inside `$(…)`, which the Hermes pass
-  skipped. (M6) A file named inside a reader's own option (`--name=FILE`, an
-  attached short value, curl's `@FILE` forms) is judged as a read. (S2) A `<`
-  target, and a read inside `$(…)`, take the read scope a positional target
-  takes. No credential location was added.
+  `cd`s, symlinks (lexical and physical `..`), globs, brace lists, `~`,
+  `$HOME`, `$HERMES_HOME`, `$PWD` and `${VAR:-default}`, inside every `$(…)`
+  and inside the script of every login-shell wrapper the classifier unwraps,
+  and judged by the credential rule (`credential-path-resolved`). A directory
+  handed to a recursive reader (the grep family, `rg`, `ag`, `ack`, `find`,
+  `tar`, `zip`, `du`, `tree`, a directory copier, and now git and `diff`) is
+  judged as a directory read; a recursive search (`tar` and `zip` aside) and
+  `git grep` also read the working directory, whether or not they name a path;
+  a one-operand link or copy reads its only operand. In the Claude Code arm
+  the pass judges from the hook process's directory and from the envelope's
+  `cwd`. (M5) The same pass judges a reader whose segment also writes, and a
+  reader inside `$(…)`, which the Hermes pass skipped. (M6) A file named inside
+  a reader's own option (`--name=FILE`, an attached short value, curl's `@FILE`
+  forms) is judged as a read. (S2) A `<` target, and a read inside `$(…)`, take
+  the read scope a positional target takes. No credential location was added.
+
+  Where the hook cannot know where a read lands, the read is
+  `account.credential` (fail closed). After a `cd` it cannot resolve, every
+  later relative read is a credential read, an unexpandable `$` in the word
+  included. A `cd` is unresolvable when its operand is a variable, `-`, a glob,
+  a brace list or an unexpanded tilde prefix; when it carries an assignment
+  prefix (`CDPATH=`, `HOME=`, any other); and when its operand is relative and
+  does not open with `./` or `../` (or is not exactly `.` or `..`), because the
+  shell looks such an operand up through a `CDPATH` the hook cannot see. `popd`
+  is always unresolvable. **This is a usability cost: in the Claude Code hook,
+  `hook classify` and the Hermes hook's read judgement, `cd src && …` followed
+  by any relative word is now `account.credential`; write `cd ./src`.** A word
+  opening with `~+`, `~-` or `~name`, a brace list past 64 words, nesting of
+  `$(…)` or shell scripts past 8 levels, and a known shell handed an inline
+  script in a shape the classifier does not unwrap are credential reads too.
+
+  Still out of reach, stated so nobody assumes otherwise: a path held in a
+  variable, or produced by a substitution's output, is judged by its text alone
+  (an absolute one always, a relative one unless the directory is unknown); a
+  recursive search of an ANCESTOR of a credential directory; a Claude Code
+  Bash directory that is neither the hook process's nor the envelope's `cwd`;
+  and, in the Hermes hook's WRITE judgement, a relative `cd` steered by an
+  inherited `CDPATH` (its reads are judged fail-closed as above).
 
 - **`git push` is read through git 2.50's own option grammar (APRV-517).** The
   `git-push` row matched flags by exact spelling (`--delete`, `-d`, `--force`,

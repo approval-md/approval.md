@@ -5883,6 +5883,22 @@ export interface CommandSegmentShape {
    * hook's disk pass judges the reads a substitution makes.
    */
   substitutions: string[];
+  /**
+   * The `NAME=value` words before the binary (APRV-522 fix round 1, M-B): a
+   * prefix such as `CDPATH=` or `HOME=` steers where a `cd` lands.
+   */
+  assignments: string[];
+  /**
+   * The script of a login-shell wrapper, exactly as {@link loginShellScript}
+   * reads it for `classifyCommand` (APRV-522 fix round 1, M-A), or `null`.
+   */
+  script: string | null;
+  /**
+   * A known shell handed an inline-script flag in a shape
+   * {@link loginShellScript} does not unwrap (APRV-522 fix round 1, M-A): what
+   * its script reads cannot be judged, so the hook's disk pass fails closed.
+   */
+  opaqueShell: boolean;
 }
 
 export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
@@ -5892,6 +5908,7 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
     const words = segment.words.map((word) => word.text);
     let cursor = 0;
     while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+    const script = loginShellScript(segment);
     return {
       text: segment.text,
       bin: words[cursor] ?? null,
@@ -5909,8 +5926,23 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
         ...segment.redirects.flatMap((redirect) => redirect.target.substitutions),
         ...segment.bodySubstitutions,
       ],
+      assignments: words.slice(0, cursor),
+      script,
+      opaqueShell: script === null && inlineShellFlagged(words[cursor] ?? null, words.slice(cursor + 1)),
     };
   });
+}
+
+/**
+ * Is this a known shell handed an inline-script flag anywhere in its argv?
+ * (APRV-522 fix round 1, M-A.) Broader than {@link INLINE_SCRIPT_FLAG} on
+ * purpose: any short bundle carrying `c` counts, wherever it sits.
+ */
+function inlineShellFlagged(bin: string | null, args: readonly string[]): boolean {
+  if (bin === null) return false;
+  const base = pathSegments(bin).slice(-1)[0] ?? bin;
+  if (!UNWRAPPABLE_SHELLS.has(base)) return false;
+  return args.some((arg) => /^-[A-Za-z]*c[A-Za-z]*$/u.test(arg) || arg === "--command");
 }
 
 export function commandSegmentWords(command: string): CommandSegmentWords[] | null {

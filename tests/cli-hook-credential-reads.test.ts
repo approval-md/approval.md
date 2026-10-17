@@ -203,19 +203,19 @@ test("M4: ordinary work stays ordinary", () => {
   const at = lab();
   for (const command of [
     "cat src/x.ts",
-    "cd src && cat x.ts",
+    "cd ./src && cat x.ts",
     "cat k/s1/SKILL.md",
     "grep -r . src",
     "cat $(echo src/x.ts)",
     "echo .approval/README > notes.md",
     "ls .approval",
     "cp src/x.ts /tmp/y.ts",
-    "cd .hermes && cat skills/s1/SKILL.md",
+    "cd ./.hermes && cat skills/s1/SKILL.md",
   ]) {
     const classes = classify(at, command);
     assert.equal(classes.includes("account.credential"), false, `${command}: ${JSON.stringify(classes)}`);
   }
-  const allowed = claude(at, "Bash", { command: "cd src && cat x.ts" });
+  const allowed = claude(at, "Bash", { command: "cd ./src && cat x.ts" });
   assert.match(allowed.stdout, /"permissionDecision":"allow"/u, allowed.stdout + allowed.stderr);
 });
 
@@ -304,10 +304,158 @@ test("S2: a `<` target outside the read scope is read.file.out_of_scope, as its 
 
 test("credentialReadLandings reports the resolved path, never file contents", () => {
   const at = lab();
-  const found = credentialReadLandings("cd ap && cat env", at.dir, { HOME: at.home });
+  const found = credentialReadLandings("cd ./ap && cat env", at.dir, { HOME: at.home });
   assert.ok(found.length > 0);
   for (const entry of found) {
     assert.equal(entry.segment, "cat env");
     assert.match(entry.path, /\.approval[/\\]env$/u);
   }
+});
+
+// ===========================================================================
+// Fix round 1 (APRV-653 read): each class the PR claims, closed fail-closed.
+// When the hook cannot know where a read lands, the read is account.credential.
+// ===========================================================================
+
+function isCredential(at: Lab, command: string, env: Record<string, string> = {}): boolean {
+  return classify(at, command, env).includes("account.credential");
+}
+
+function hermesClasses(at: Lab, command: string, workdir: string): string {
+  const run = hermes(at, "terminal", { command, workdir });
+  return `${run.stdout} ${run.stderr}`;
+}
+
+test("fix M-A: a login-shell wrapper's inline script is judged segment by segment", () => {
+  const at = lab();
+  for (const command of [
+    "bash -c 'cd ./ap && cat env'",
+    "sh -c 'cat ap/env'",
+    "bash -lc 'cat .approval/en?'",
+    "zsh -c 'cat $PWD/ap/vault.enc'",
+    "echo \"$(sh -c 'cat ap/env')\"",
+  ]) {
+    assert.ok(isCredential(at, command), `${command}: ${JSON.stringify(classify(at, command))}`);
+  }
+  deniedAsCredential(claude(at, "Bash", { command: "bash -c 'cat ap/env'" }), "claude wrapper");
+  deniedAsCredential(hermes(at, "terminal", { command: "bash -c 'cat .env > /tmp/z'", workdir: at.hermes }), "hermes wrapper");
+  // The Hermes write half lines its shapes up with the spliced segments too.
+  assert.match(hermesClasses(at, "bash -c 'echo X=1 >> .env'", at.hermes), /policy\.core/u);
+  assert.equal(isCredential(at, "bash -c 'cat src/x.ts'"), false);
+});
+
+test("fix M-B: a cd steered by CDPATH or HOME leaves the directory unknown", () => {
+  const at = lab();
+  for (const command of [
+    "CDPATH=.approval cd keys && cat k1",
+    "cd src && cat x.ts",
+    "cd .approval && cat env",
+    `HOME=${join(at.dir, ".approval")} cd && cat env`,
+  ]) {
+    assert.ok(isCredential(at, command), `${command}: ${JSON.stringify(classify(at, command))}`);
+  }
+  deniedAsCredential(claude(at, "Bash", { command: "CDPATH=.approval cd keys && cat k1" }), "claude CDPATH");
+  deniedAsCredential(
+    hermes(at, "terminal", { command: "CDPATH=. cd .hermes && cat .env", workdir: at.dir }),
+    "hermes CDPATH",
+  );
+  // A cd that names its landing outright is still followed exactly.
+  for (const command of ["cd ./src && cat x.ts", "cd .. && cat src/x.ts", `cd ${join(at.dir, "src")} && cat x.ts`]) {
+    assert.equal(isCredential(at, command), false, command);
+  }
+});
+
+test("fix M-C: the ~+, ~- and ~user tilde prefixes fail closed", () => {
+  const at = lab();
+  for (const command of ["cd ./.approval && cat ~+/env", "cat ~-/env", "cat ~nobody/.approval/env", "cd ~+/ap && cat env"]) {
+    assert.ok(isCredential(at, command), `${command}: ${JSON.stringify(classify(at, command))}`);
+  }
+  deniedAsCredential(claude(at, "Bash", { command: "cd ./.approval && cat ~+/env" }), "claude ~+");
+  deniedAsCredential(hermes(at, "terminal", { command: "cat ~+/.env", workdir: at.hermes }), "hermes ~+");
+  // A bare ~ with HOME known is still expanded and judged where it lands.
+  assert.equal(isCredential(at, "cat ~/notes.txt"), false);
+});
+
+test("fix M-D: a brace list past 64 words, or nesting past depth 8, is a credential read", () => {
+  const at = lab();
+  const many = Array.from({ length: 70 }, (_, n) => `a${String(n)}`).join(",");
+  assert.ok(isCredential(at, `cat ap/{${many},env}`), "long brace list");
+  assert.ok(isCredential(at, "cat ap/{1..100}"), "long brace sequence");
+  let nested = "cat ap/env";
+  for (let level = 0; level < 10; level += 1) nested = `echo "$(${nested})"`;
+  assert.ok(isCredential(at, nested), `deep nesting: ${JSON.stringify(classify(at, nested))}`);
+  deniedAsCredential(claude(at, "Bash", { command: `cat ap/{${many},env}` }), "claude long brace");
+  // A short list is still expanded exactly.
+  assert.equal(isCredential(at, "cat src/{x,y}.ts"), false);
+});
+
+test("fix M-E: a recursive search with no path operand reads the working directory", () => {
+  const at = lab();
+  for (const command of ["cd ./.approval && grep -r needle", "cd ./ap && rg needle", "cd ./.hermes && grep -rn needle"]) {
+    assert.ok(isCredential(at, command), `${command}: ${JSON.stringify(classify(at, command))}`);
+  }
+  deniedAsCredential(claude(at, "Bash", { command: "cd ./.approval && grep -r needle" }), "claude grep -r");
+  deniedAsCredential(hermes(at, "terminal", { command: "rg needle", workdir: at.hermes }), "hermes rg");
+  assert.equal(isCredential(at, "cd ./src && grep -r needle"), false);
+});
+
+test("fix M-F: a one-operand link's only operand is judged as its source", () => {
+  const at = lab();
+  for (const command of ["ln ap/env", "ln -s ap/env", "ln .approval/en?", "cd ./ap && ln vault.enc"]) {
+    assert.ok(isCredential(at, command), `${command}: ${JSON.stringify(classify(at, command))}`);
+  }
+  deniedAsCredential(claude(at, "Bash", { command: "ln ap/env" }), "claude ln");
+  deniedAsCredential(hermes(at, "terminal", { command: "ln .env", workdir: at.hermes }), "hermes ln");
+  // Two operands: the last is still the destination, and only the source is read.
+  assert.equal(isCredential(at, "ln src/x.ts ap"), false);
+});
+
+test("fix S: git's no-index modes and diff walk a directory they are handed", () => {
+  const at = lab();
+  for (const command of [
+    "git diff --no-index .approval /tmp/x",
+    "git diff --no-index ap /tmp/x",
+    "diff -r .approval /tmp/x",
+    "diff -r ap /tmp/x",
+    "diff .hermes /tmp/x",
+  ]) {
+    assert.ok(isCredential(at, command), `${command}: ${JSON.stringify(classify(at, command))}`);
+  }
+  deniedAsCredential(claude(at, "Bash", { command: "diff -r ap /tmp/x" }), "claude diff -r");
+  deniedAsCredential(
+    hermes(at, "terminal", { command: "git diff --no-index . /tmp/x", workdir: at.hermes }),
+    "hermes git diff --no-index",
+  );
+  for (const command of ["git diff src", "diff -r src /tmp/x"]) {
+    assert.equal(isCredential(at, command), false, command);
+  }
+});
+
+test("fix S-2: after an unknown cd, a relative word holding an unexpandable $ fails closed", () => {
+  const at = lab();
+  assert.ok(isCredential(at, 'cd "$X" && cat "$Y/env"'));
+  assert.ok(isCredential(at, 'cd - && cat "${Y:-x}/env"'));
+  deniedAsCredential(claude(at, "Bash", { command: 'cd "$X" && cat "$Y/env"' }), "claude S-2");
+  // Absolute, it is still judged by its text alone (the accepted variable limit).
+  assert.equal(isCredential(at, 'cd "$X" && cat "/tmp/$Y"'), false);
+});
+
+test("fix S-1: the Claude Code arm also judges from the envelope's cwd", () => {
+  const at = lab();
+  const run = runCli(
+    ["hook", "claude-code", "--as", "agent:cc"],
+    at.dir,
+    at.home,
+    JSON.stringify({
+      hook_event_name: "PreToolUse",
+      session_id: "cc-cred",
+      tool_use_id: `cc-${String(Math.random()).slice(2)}`,
+      cwd: join(at.dir, ".approval"),
+      tool_name: "Bash",
+      tool_input: { command: "cat env" },
+      transcript_path: "/dev/null",
+      permission_mode: "default",
+    }),
+  );
+  deniedAsCredential(run, "envelope cwd in the approval home");
 });
