@@ -72,7 +72,6 @@
  * auditor holding the log alone. See `docs/claude-code-hook.md`.
  */
 
-import { spawnSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -185,8 +184,14 @@ import {
 import {
   harnessLaunchNeedsRule,
   harnessLaunchUnruledRefusal,
+  HISTORY_REWRITE_LOCAL,
+  HISTORY_REWRITE_SHARED,
+  historyRewriteAdopted,
   humanOnlyRefusal,
   resolve as resolvePolicy,
+  STRICTNESS,
+  type HistoryRewriteEvidence,
+  type HistoryRewriteSegmentEvidence,
   type Resolution,
 } from "../core/policy-match.js";
 import {
@@ -202,6 +207,7 @@ import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
 import { HOOK_GROK_HELP, HOOK_HELP, HOOK_HERMES_HELP, HOOK_MUSE_HELP } from "./help.js";
+import { refineHistoryRewrite } from "./history-rewrite.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
 import { refusal as renderRefusal, style, table, type Style } from "./style.js";
@@ -1847,65 +1853,24 @@ function parseHookInput(raw: string, camelCase = false): ParsedInput {
 }
 
 // ===========================================================================
-// History-rewrite refinement (APRV-108)
+// History-rewrite refinement (APRV-108, split by APRV-433)
 // ===========================================================================
 
 /*
- * Rewriting history nobody else holds is a commit.
+ * APRV-108 downgraded a local rewrite of unpublished history to
+ * `vcs.commit.branch`, which left no trace in the log that a rewrite happened.
+ * APRV-433 (amended SPEC.md §7) replaces that downgrade with the split: every
+ * bare `vcs.history.rewrite` segment leaves this step as exactly one member,
+ * `vcs.history.rewrite.local` or `vcs.history.rewrite.shared`, with the
+ * evidence that decided it and the class APRV-108 would have answered. The
+ * work lives in `src/cli/history-rewrite.ts`; this wrapper keeps the name both
+ * callers use and passes the credential-stripped git environment (APRV-205).
  *
- * `vcs.history.rewrite` exists to guard SHARED history: a force push, a rebase
- * of a branch other people have pulled, an amend of a commit that is already on
- * the remote. An agent amending its own unpublished worktree branch destroys
- * nothing anyone can observe, and pricing that at a human's attention spends the
- * audit budget SPEC.md §11 asks to protect on a non-event.
- *
- * The classifier cannot answer this, and deliberately does not try: it is pure,
- * and "is this branch published" is a fact about a checkout, not about a string.
- * So the refinement lives HERE, in the impure layer that already runs git
- * (`primaryRoot`, APRV-101), and is applied to the classifier's output rather
- * than folded into it. `classifyCommand` keeps returning `vcs.history.rewrite`
- * for these verbs, its fixture table keeps meaning what it says, and everything
- * environment-dependent is in one named step a reader can audit.
- *
- * What downgrades, and only this:
- *
- *  - the branch has NO upstream at all — nothing was ever published from it, so
- *    no rewrite of it can reach anyone else; or
- *  - the command is `git commit --amend` and HEAD is not reachable from the
- *    upstream — the one commit an amend rewrites has not been pushed.
- *
- * What never downgrades: anything push-side (`git push --force` and friends),
- * a detached HEAD, the repository's default branch, a rebase or reset whose
- * target the text does not name (a `git reset --hard HEAD~5` on a branch with an
- * upstream may well be rewriting published commits, and the text cannot say), and
- * every case where git declines to answer. Fail closed on each: a wrong
- * downgrade removes a human from a decision that needed one, and a wrong
- * `rewrite` costs one approval prompt.
+ * The classifier stays pure: it keeps returning the bare class, and this step
+ * is applied to its output rather than folded into it, so the fixture table
+ * keeps meaning what it says and everything that reads the disk is in one
+ * named step a reader can audit.
  */
-
-/**
- * Classifier rules whose rewrite is LOCAL, and so can be refined.
- *
- * `git-push-force` is deliberately absent: a push is a rewrite of the remote by
- * construction, whatever this checkout's branch state is.
- */
-const LOCAL_REWRITE_RULES: readonly string[] = [
-  /** `git commit --amend`. */
-  "git-commit-amend",
-  /** `git reset --hard`. */
-  "git-reset-hard",
-  /** `git rebase` / `filter-branch` / `filter-repo` (the table row's own id). */
-  "git-rewrite",
-];
-
-/** The one rule whose rewritten commit is exactly HEAD. */
-const AMEND_RULE = "git-commit-amend";
-
-/** The rule name a refined segment reports, in `hook classify` and in tests. */
-const REWRITE_UNPUBLISHED_RULE = "rewrite-unpublished";
-
-const REWRITE_CLASS = "vcs.history.rewrite";
-const UNPUBLISHED_CLASS = "vcs.commit.branch";
 
 /**
  * The environment every git child of this verb receives (APRV-205).
@@ -1920,135 +1885,110 @@ function gitEnvironment(): Record<string, string> {
   return childEnvironment().env;
 }
 
-/** Trimmed stdout of a successful git command, or `null` for any failure. */
-function gitOutput(cwd: string, args: readonly string[]): string | null {
-  const result = spawnSync("git", [...args], { cwd, encoding: "utf8", env: gitEnvironment() });
-  if (result.error !== undefined || result.status !== 0) return null;
-  return result.stdout.trim();
-}
-
-/**
- * `git merge-base --is-ancestor` as three values, not two.
- *
- * Exit 0 is yes and exit 1 is no; every other exit (a missing ref, a broken
- * repository, no git at all) is `null`, which the caller reads as "stay a
- * rewrite" rather than as "no".
- */
-function isAncestor(cwd: string, ancestor: string, descendant: string): boolean | null {
-  const result = spawnSync("git", ["merge-base", "--is-ancestor", ancestor, descendant], {
-    cwd,
-    encoding: "utf8",
-    env: gitEnvironment(),
-  });
-  if (result.error !== undefined) return null;
-  if (result.status === 0) return true;
-  if (result.status === 1) return false;
-  return null;
-}
-
-/**
- * Is this the branch a rewrite must never be quiet about?
- *
- * `main` and `master` always count, whatever the remote says, so a local-only
- * repository (and a branch someone named `main` in a scratch checkout) is
- * covered. `refs/remotes/origin/HEAD` adds the remote's own answer when it is
- * set, which is how a repository whose trunk is `develop` or `trunk` is read.
- */
-function isDefaultBranch(cwd: string, branch: string): boolean {
-  if (branch === "main" || branch === "master") return true;
-  const head = gitOutput(cwd, ["symbolic-ref", "refs/remotes/origin/HEAD"]);
-  if (head === null || head.length === 0) return false;
-  return head.replace(/^refs\/remotes\/origin\//u, "") === branch;
-}
-
-/** How far the current branch has been published. */
-type RewriteReach =
-  /** Published, unreadable, default, or detached: no refinement. */
-  | { kind: "shared" }
-  /** The branch tracks nothing; nothing on it was ever published. */
-  | { kind: "no-upstream"; branch: string }
-  /** The branch tracks `upstream`, but HEAD has not reached it. */
-  | { kind: "head-unpushed"; branch: string; upstream: string };
-
-/**
- * Ask git how far the checkout at `cwd` has been published.
- *
- * Every step that cannot be answered returns `shared`, which refines nothing.
- * `for-each-ref` rather than `@{u}` on purpose: `rev-parse @{u}` exits non-zero
- * both when there is no upstream and when the repository cannot be read, and
- * those two must not collapse — one downgrades, the other must not.
- */
-function rewriteReach(cwd: string): RewriteReach {
-  const branch = gitOutput(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  // No git, not a repository, or a detached HEAD (which prints `HEAD`): a
-  // detached rewrite has no branch whose publication could be checked.
-  if (branch === null || branch.length === 0 || branch === "HEAD") return { kind: "shared" };
-  if (isDefaultBranch(cwd, branch)) return { kind: "shared" };
-
-  // Exits 0 and prints an empty line when the branch tracks nothing, so an
-  // empty result is a real answer and a failure is not.
-  const upstream = gitOutput(cwd, [
-    "for-each-ref",
-    "--format=%(upstream:short)",
-    `refs/heads/${branch}`,
-  ]);
-  if (upstream === null) return { kind: "shared" };
-  if (upstream.length === 0) return { kind: "no-upstream", branch };
-
-  // An upstream is configured. HEAD reachable from it (or unanswerable, e.g. a
-  // tracking ref that was never fetched) stays a rewrite.
-  return isAncestor(cwd, "HEAD", upstream) === false
-    ? { kind: "head-unpushed", branch, upstream }
-    : { kind: "shared" };
-}
-
 /** A classification plus a human-readable note for every segment refined. */
 export interface RefinedClassification {
   result: CommandClassification;
-  /** One line per downgraded segment; empty when nothing was refined. */
+  /** One line per refined segment; empty when nothing was refined. */
   notes: string[];
 }
 
 /**
- * Downgrade local rewrites of unpublished history to `vcs.commit.branch`.
+ * Map every rewrite segment to a `vcs.history.rewrite` member (APRV-433).
  *
  * IMPURE by design and by contract: it runs git in `cwd`. Both callers pass the
  * same directory the hook itself resolves from, so what `hook classify` prints
  * is what `hook claude-code` decides.
  */
-export function refineRewrite(result: CommandClassification, cwd: string): RefinedClassification {
-  if (!result.ok) return { result, notes: [] };
-  const refinable = result.segments.some(
-    (segment) => segment.class === REWRITE_CLASS && LOCAL_REWRITE_RULES.includes(segment.rule),
-  );
-  if (!refinable) return { result, notes: [] };
-
-  const reach = rewriteReach(cwd);
-  if (reach.kind === "shared") return { result, notes: [] };
-
-  const notes: string[] = [];
-  const segments = result.segments.map((segment) => {
-    if (segment.class !== REWRITE_CLASS || !LOCAL_REWRITE_RULES.includes(segment.rule)) {
-      return segment;
-    }
-    // With an upstream, only an amend is narrow enough to be sure: it rewrites
-    // HEAD and nothing else. A rebase or reset names a base the text cannot
-    // resolve, so it may reach commits that ARE on the upstream.
-    if (reach.kind === "head-unpushed" && segment.rule !== AMEND_RULE) return segment;
-    notes.push(
-      reach.kind === "no-upstream"
-        ? `${REWRITE_UNPUBLISHED_RULE}: branch ${reach.branch} has no upstream, so \`${segment.text}\` rewrites only unpublished history`
-        : `${REWRITE_UNPUBLISHED_RULE}: HEAD is not yet on ${reach.upstream}, so \`${segment.text}\` amends only unpublished history`,
-    );
-    return { ...segment, class: UNPUBLISHED_CLASS, rule: REWRITE_UNPUBLISHED_RULE };
+export function refineRewrite(
+  result: CommandClassification,
+  cwd: string,
+  command?: string,
+): RefinedClassification {
+  return refineHistoryRewrite(result, cwd, {
+    env: gitEnvironment(),
+    ...(command === undefined ? {} : { command }),
   });
-  if (notes.length === 0) return { result, notes };
+}
 
-  const classes: string[] = [];
-  for (const segment of segments) {
-    if (!classes.includes(segment.class)) classes.push(segment.class);
+/** The classes a refined command is gated under, and the evidence per class. */
+export interface HistoryGate {
+  classes: string[];
+  evidence: Map<string, HistoryRewriteEvidence>;
+  notes: string[];
+}
+
+/**
+ * The classes the gate is asked about for a command the history-rewrite step
+ * refined (amended SPEC.md §7, APRV-433).
+ *
+ * Under a policy with an own line of the split (`vcs.history.rewrite.local`,
+ * `.shared` or `.*`), a member is asked about under its own class. Under any
+ * other policy it is asked about under the class the pre-split runtime
+ * answered for its segment (`legacy_class`): the resolver's legacy rule says a
+ * member resolves exactly as that class does, and recording the member while
+ * resolving it as another class would leave every later reader of the log (the
+ * write boundary's own re-check, the retrospective sampler, the budget scope)
+ * resolving a class the hook never resolved. Recording the class the verdict
+ * was drawn from keeps the log the truth; `payload.history_rewrite` still says
+ * a rewrite happened and which member it was (`reach`).
+ *
+ * Two segments of one member with different pre-split classes are gated under
+ * the one that resolves strictest under this policy, which is the verdict the
+ * pre-split runtime gave the whole command. A class covering several refined
+ * segments carries the first one's evidence.
+ */
+export function gateHistoryClasses(
+  classes: readonly string[],
+  segments: readonly ClassifiedSegment[] | undefined,
+  load: PolicyLoadResult,
+): HistoryGate {
+  const refined = (segments ?? []).filter((segment) => segment.history_rewrite !== undefined);
+  if (refined.length === 0) return { classes: [...classes], evidence: new Map(), notes: [] };
+  const adopted = historyRewriteAdopted(load);
+  const gatedOf = new Map<string, string>();
+  const notes: string[] = [];
+  if (!adopted) {
+    for (const member of [HISTORY_REWRITE_LOCAL, HISTORY_REWRITE_SHARED]) {
+      let picked: { cls: string; rank: number } | null = null;
+      for (const segment of refined) {
+        if (segment.class !== member) continue;
+        const legacy = (segment.history_rewrite as HistoryRewriteSegmentEvidence).legacy_class;
+        const rank = STRICTNESS[resolvePolicy(load, legacy).declaredAutonomy];
+        if (picked === null || rank < picked.rank) picked = { cls: legacy, rank };
+      }
+      if (picked === null) continue;
+      gatedOf.set(member, picked.cls);
+      notes.push(
+        `rewrite-resolution: this policy has no vcs.history.rewrite.local, .shared or .* line, so ${member} is asked about as its pre-split class ${picked.cls} (legacy, APRV-433)`,
+      );
+    }
   }
-  return { result: { ok: true, segments, classes }, notes };
+  const gated = (cls: string): string => gatedOf.get(cls) ?? cls;
+  const evidence = new Map<string, HistoryRewriteEvidence>();
+  for (const segment of refined) {
+    const cls = gated(segment.class);
+    if (evidence.has(cls)) continue;
+    const { legacy_class: _legacy, ...logged } = segment.history_rewrite as HistoryRewriteSegmentEvidence;
+    evidence.set(cls, logged);
+  }
+  const out: string[] = [];
+  for (const cls of classes) {
+    const mapped = gated(cls);
+    if (!out.includes(mapped)) out.push(mapped);
+  }
+  return { classes: out, evidence, notes };
+}
+
+/** `consumeHarnessGrant`'s history-rewrite option for one spent key. */
+function historyRewriteOption(
+  run: HookRun,
+  key: string,
+): { historyRewrite?: HistoryRewriteEvidence } {
+  if (run.historyRewrite === undefined) return {};
+  for (const [cls, evidence] of run.historyRewrite) {
+    if (key.endsWith(`:${cls}`)) return { historyRewrite: evidence };
+  }
+  return {};
 }
 
 // ===========================================================================
@@ -2989,7 +2929,7 @@ export function classifyForHook(
     scratchRoots: roots,
     ...(readRoots.length === 0 ? {} : { readRoots }),
   });
-  const rewritten = refineRewrite(classified, cwd);
+  const rewritten = refineRewrite(classified, cwd, command);
   const scratched = refineScratchDelete(rewritten.result, roots);
   const scoped = refineReadScope(scratched.result, readRoots, cwd);
   // APRV-402. Its roots are not `readRoots`: a read scope is a read notion and
@@ -3104,12 +3044,21 @@ function commandClassify(argv: string[], streams: Streams, cwd: string): number 
     policyRootOf(load, root),
     load.ok ? load.policy.read_scope?.roots : undefined,
   );
-  streams.out(
-    renderClassification(
-      classifyForHook(command, protectedPaths, cwd, readRoots).result,
-      boolFlag(parsed.flags, "--json"),
-    ),
-  );
+  const json = boolFlag(parsed.flags, "--json");
+  const refined = classifyForHook(command, protectedPaths, cwd, readRoots);
+  streams.out(renderClassification(refined.result, json));
+  // APRV-433: the member, the basis, the witness and the pre-split class, in
+  // words, from the same refinement the hook decides with. `--json` already
+  // carries them on each segment as `history_rewrite`.
+  if (!json && refined.result.ok) {
+    for (const segment of refined.result.segments) {
+      const evidence = segment.history_rewrite;
+      if (evidence === undefined) continue;
+      streams.out(
+        `history_rewrite: ${segment.class} basis=${evidence.basis} ref=${evidence.ref ?? "-"} lost=${evidence.lost === null ? "-" : String(evidence.lost)} lost_shared=${evidence.lost_shared === null ? "-" : String(evidence.lost_shared)} witness=${evidence.witness ?? "-"} legacy=${evidence.legacy_class}  (${segment.text})\n`,
+      );
+    }
+  }
   return EXIT_OK;
 }
 
@@ -4099,6 +4048,12 @@ interface HookRun {
    * as `harness_tool` (refutation S3).
    */
   harnessTool?: string;
+  /**
+   * The history-rewrite evidence per gated class (APRV-433). Every
+   * `execution.started` and `approval.requested` this invocation writes for one
+   * of these classes carries it as `payload.history_rewrite`.
+   */
+  historyRewrite?: ReadonlyMap<string, HistoryRewriteEvidence>;
 }
 
 /**
@@ -4331,6 +4286,9 @@ function* consumeGrants(
         spendingTask: task,
         // APRV-499 (refutation S3): a mapped or unmapped spend names its tool.
         ...(run.harnessTool === undefined ? {} : { harnessTool: run.harnessTool }),
+        // APRV-433: the rewrite evidence of THIS call, by the class the key
+        // was asked under.
+        ...historyRewriteOption(run, key),
       }),
     );
     if (!spent.ok) return { code: spent.code, message: `${key}: ${spent.message}` };
@@ -4541,6 +4499,9 @@ function* recordUnattended(
           cls,
           payload_hash: hash,
           ...(harnessTool === undefined ? {} : { harness_tool: harnessTool }),
+          ...(run.historyRewrite?.get(cls) === undefined
+            ? {}
+            : { history_rewrite: run.historyRewrite.get(cls) as HistoryRewriteEvidence }),
         },
         run.actor,
         { ...run.options, append },
@@ -5008,6 +4969,10 @@ function* gateHarnessSteps(
         // shape, and the policy's TTL governs alone.
         ...(run.harnessCapMs === null ? {} : { harnessCapMs: run.harnessCapMs }),
         ...(floorApplies(action.cls) ? { loopFloor: true } : {}),
+        // APRV-433: what the prompt can show about the rewrite it asks about.
+        ...(run.historyRewrite?.get(action.cls) === undefined
+          ? {}
+          : { historyRewrite: run.historyRewrite.get(action.cls) as HistoryRewriteEvidence }),
       },
       run.actor,
       run.options,
@@ -6923,7 +6888,10 @@ function* runBypass(
   if (described.kind === "allow") {
     return allow(streams, described.reason, adapter.kind, codexCommand);
   }
-  const classes = described.classes;
+  // APRV-433: the bypass record names the class the ordinary path would have
+  // asked about, so a member becomes its pre-split class here too when the
+  // policy has not adopted the split.
+  const classes = gateHistoryClasses(described.classes, described.segments, load).classes;
   if (classes.length === 0) {
     // The gate's own CLI, including `approval gate close`. Allowed with no
     // record for the reason it is allowed outside a window: gating the gate
@@ -7624,9 +7592,16 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
       detail: `the policy file changed while ${input.toolName} was being decided; nothing was appended, and a retry is decided against the file as it then stands`,
     };
   }
-  const { classes, payload, headline } = described;
+  const { payload, headline } = described;
   /** What the history-rewrite refinement did, for the decision reason. */
   const notes: string[] = [...described.notes];
+  // APRV-433 (amended SPEC.md §7): a member is asked about under its own class
+  // once the policy carries an own line of the split, and under the class the
+  // pre-split runtime answered otherwise, so the record's class is always the
+  // class it was resolved under and shipping the split changes no verdict.
+  const historyGate = gateHistoryClasses(described.classes, described.segments, load);
+  const classes = historyGate.classes;
+  notes.push(...historyGate.notes);
 
   if (classes.length === 0) {
     return {
@@ -7684,6 +7659,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     // state.
     channels: Object.keys(load.policy.channels ?? {}).sort(),
     ...(described.harnessTool === undefined ? {} : { harnessTool: described.harnessTool }),
+    ...(historyGate.evidence.size === 0 ? {} : { historyRewrite: historyGate.evidence }),
   };
 
   const resolutions = classes.map((cls) => resolvePolicy(load, cls));
@@ -7727,10 +7703,14 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     (_cls, index) => autonomies[index] === "human-only",
   );
   if (reserved !== undefined) {
+    // APRV-433: a refused rewrite appends nothing (SPEC §5.2), so the deny
+    // reason is where its evidence goes: the basis and the witness, for the
+    // requester to hand the step to a person.
+    const rewriteNotes = notes.filter((line) => line.startsWith("rewrite-"));
     return {
       permission: "deny",
       code: "hook-class-human-only",
-      detail: `${humanOnlyRefusal(reserved, "this command may not run under an agent")} The gate's own code for this fact is \`class-human-only\`.`,
+      detail: `${humanOnlyRefusal(reserved, "this command may not run under an agent")} The gate's own code for this fact is \`class-human-only\`.${rewriteNotes.length === 0 ? "" : ` (${rewriteNotes.join("; ")})`}`,
     };
   }
 

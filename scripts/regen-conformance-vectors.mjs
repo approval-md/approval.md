@@ -2652,6 +2652,202 @@ const commandClassVectors = [
     input: { command: 'paste -- a.txt' },
     control: true,
   },
+  // --- history rewrites name their spelling (APRV-433) -----------------------
+  // The pure classifier keeps answering the bare vcs.history.rewrite: whether
+  // the history a rewrite removes is shared is a fact about a repository, and
+  // the member is derived by the runtime layer that may read one. What the
+  // text CAN say is which spelling it saw, and these pin the rule ids an
+  // implementation's impure step keys on.
+  {
+    id: "rewrite-rebase-plain",
+    description: "a plain rebase is vcs.history.rewrite, rule git-rebase",
+    input: { command: "git rebase origin/main" },
+  },
+  {
+    id: "rewrite-rebase-onto",
+    description: "--onto with an upstream and a branch is still a plain rebase",
+    input: { command: "git rebase --onto origin/main base lane" },
+  },
+  {
+    id: "rewrite-rebase-autosquash-without-i",
+    description: "--autosquash without -i opens no editor: a plain rebase",
+    input: { command: "git rebase --autosquash origin/main" },
+  },
+  {
+    id: "rewrite-rebase-strategy-option-is-not-interactive",
+    description: "-Xtheirs is a strategy option, not a bundle of -i and -r",
+    input: { command: "git rebase -Xtheirs origin/main" },
+  },
+  {
+    id: "rewrite-rebase-interactive",
+    description: "-i is git-rebase-interactive",
+    input: { command: "git rebase -i origin/main" },
+  },
+  {
+    id: "rewrite-rebase-interactive-env",
+    description: "an editor assignment does not hide -i from the text",
+    input: { command: "GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/main" },
+  },
+  {
+    id: "rewrite-rebase-merges",
+    description: "--rebase-merges is git-rebase-interactive",
+    input: { command: "git rebase --rebase-merges origin/main" },
+  },
+  {
+    id: "rewrite-rebase-edit-todo",
+    description: "--edit-todo is git-rebase-interactive",
+    input: { command: "git rebase --edit-todo" },
+  },
+  {
+    id: "rewrite-rebase-exec",
+    description: "--exec runs a command: git-rebase-exec",
+    input: { command: 'git rebase --exec "npm test" origin/main' },
+  },
+  {
+    id: "rewrite-rebase-exec-short",
+    description: "-x runs a command: git-rebase-exec",
+    input: { command: "git rebase -x make origin/main" },
+  },
+  {
+    id: "rewrite-rebase-custom-strategy",
+    description: "-s naming a strategy git does not ship runs git-merge-<name>: git-rebase-exec",
+    input: { command: "git rebase -s custom origin/main" },
+  },
+  {
+    id: "rewrite-rebase-builtin-strategy",
+    description: "-s ort is a built-in strategy: a plain rebase",
+    input: { command: "git rebase -s ort origin/main" },
+  },
+  {
+    id: "rewrite-rebase-continue",
+    description: "--continue resumes the rebase in progress: git-rebase-continue",
+    input: { command: "git rebase --continue" },
+  },
+  {
+    id: "rewrite-rebase-skip",
+    description: "--skip resumes the rebase in progress: git-rebase-continue",
+    input: { command: "git rebase --skip" },
+  },
+  {
+    id: "rewrite-rebase-abort",
+    description: "--abort restores the pre-rebase branch: git-rebase-abort",
+    input: { command: "git rebase --abort" },
+  },
+  {
+    id: "rewrite-rebase-quit",
+    description: "--quit keeps the branch where it is: git-rebase-abort",
+    input: { command: "git rebase --quit" },
+  },
+  {
+    id: "rewrite-filter-branch",
+    description: "filter-branch is git-filter",
+    input: { command: "git filter-branch --tree-filter 'rm x' HEAD" },
+  },
+  {
+    id: "rewrite-filter-repo",
+    description: "filter-repo is git-filter",
+    input: { command: "git filter-repo --path x" },
+  },
+  {
+    id: "rewrite-pull-rebase",
+    description: "pull --rebase rebases the branch onto what it fetched: vcs.history.rewrite, rule git-pull-rebase (the pure class moved from vcs.commit.branch)",
+    input: { command: "git pull --rebase" },
+  },
+  {
+    id: "rewrite-pull-rebase-short",
+    description: "pull -r is pull --rebase",
+    input: { command: "git pull -r origin main" },
+  },
+  {
+    id: "rewrite-pull-rebase-interactive",
+    description: "pull --rebase=interactive is a rebasing pull",
+    input: { command: "git pull --rebase=interactive" },
+  },
+  {
+    id: "rewrite-pull-no-rebase-is-a-merge",
+    description: "unmoved: --no-rebase is a merging pull, vcs.commit.branch, rule git-write",
+    input: { command: "git pull --no-rebase origin main" },
+  },
+  {
+    id: "rewrite-pull-plain-is-a-merge",
+    description: "unmoved: a bare pull is vcs.commit.branch from the text; configuration is the runtime layer's to read",
+    input: { command: "git pull" },
+  },
+  {
+    id: "rewrite-restack-by-merge-unmoved",
+    description: "unmoved: restacking by merge adds a commit and removes none, vcs.commit.branch",
+    input: { command: "git merge origin/main" },
+  },
+  {
+    id: "rewrite-amend-unmoved",
+    description: "unmoved: commit --amend keeps its rule id",
+    input: { command: "git commit --amend --no-edit" },
+  },
+  {
+    id: "rewrite-reset-hard-unmoved",
+    description: "unmoved: reset --hard keeps its rule id",
+    input: { command: "git reset --hard HEAD~2" },
+  },
+  // --- spellings git's option parser accepts (APRV-433 build) ----------------
+  // git takes any unambiguous prefix of a long option and bundles short ones,
+  // so these are the same commands as their full spellings and classify as
+  // them. Each was a looser class before: a bundled or abbreviated force push
+  // was a plain push, `--am` a plain commit, `--h` a soft reset.
+  {
+    id: "rewrite-push-force-bundle",
+    description: "-fu is -f -u: a force push, git-push-force",
+    input: { command: "git push -fu origin lane" },
+  },
+  {
+    id: "rewrite-push-force-bundle-reversed",
+    description: "-uf is -u -f: a force push, git-push-force",
+    input: { command: "git push -uf origin lane" },
+  },
+  {
+    id: "rewrite-push-option-bundle-is-not-a-force",
+    description: "unmoved: -o takes the rest of the bundle as its value, so -ofu is a push option and a plain branch push",
+    input: { command: "git push -ofu origin lane" },
+  },
+  {
+    id: "rewrite-push-force-with-lease-abbreviated",
+    description: "--force-w is --force-with-lease to git: git-push-force",
+    input: { command: "git push --force-w origin lane" },
+  },
+  {
+    id: "rewrite-push-mirror-abbreviated",
+    description: "--m is --mirror to git: git-push-force",
+    input: { command: "git push --m origin" },
+  },
+  {
+    id: "rewrite-push-forced-head-refspec",
+    description: "a + on a HEAD:dst refspec forces it: git-push-force",
+    input: { command: "git push origin +HEAD:lane" },
+  },
+  {
+    id: "rewrite-amend-abbreviated",
+    description: "--am is --amend to git: git-commit-amend",
+    input: { command: "git commit --am --no-edit" },
+  },
+  {
+    id: "rewrite-reset-hard-abbreviated",
+    description: "--h is --hard to git: git-reset-hard",
+    input: { command: "git reset --h HEAD~1" },
+  },
+  {
+    id: "rewrite-pull-rebase-abbreviated",
+    description: "--reb is --rebase to git: git-pull-rebase",
+    input: { command: "git pull --reb" },
+  },
+  {
+    id: "rewrite-commit-all-is-not-an-amend",
+    description: "unmoved: --all is not a prefix of --amend, a plain commit",
+    input: { command: "git commit --all -m x" },
+  },
+  {
+    id: "rewrite-phase-two-unmoved",
+    description: "unmoved: soft resets, forced branch moves and reflog expiry are outside the family until a later task",
+    input: { command: "git reset --soft HEAD~1; git branch -f lane main; git switch -C lane main; git reflog expire --expire=now --all" },
+  },
 ];
 
 const gateVectors = [
@@ -3622,7 +3818,14 @@ const SUITES = [
     // `audit.reviewed` records (`verdict_source: model`, a `model:` actor),
     // which pin that the reserved values are not admitted at the write
     // boundary. No existing expectation moves: the key is OPTIONAL.
-    vectors_version: "3.3.0",
+    // 3.4.0 (APRV-433): a MINOR bump. Seven new fixtures for the optional
+    // `payload.history_rewrite`: an accepted `execution.started` (a local
+    // reach) and an accepted `approval.requested` (a shared reach with a
+    // witness), and five refused starts: a basis outside the closed set, a
+    // non-hex `old_tip`, a negative `lost`, a local reach carrying a shared
+    // basis, and an extra field. No existing expectation moves: the field is
+    // OPTIONAL and additive.
+    vectors_version: "3.4.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",
@@ -3881,7 +4084,21 @@ const SUITES = [
     // beside the protected class as a second entry, so `classes` carries both.
     // Still 1.6.0, for the same reason: none of those vectors has ever been
     // merged, so no implementation was held to the single-class answer.
-    vectors_version: "1.7.0",
+    // 1.8.0 (APRV-433): a MINOR bump. Thirty-seven new `rewrite-*` vectors
+    // pin the rule ids the history-rewrite split keys on (`git-rebase`,
+    // `git-rebase-interactive`, `git-rebase-exec`, `git-rebase-continue`,
+    // `git-rebase-abort`, `git-filter`, `git-pull-rebase`), and every one of
+    // them still answers the bare `vcs.history.rewrite`: the members are
+    // derived by the runtime layer, never by this classifier. No committed
+    // expectation in this file moves (regenerating leaves every 1.7.0 vector
+    // byte-identical; the suite never carried a rebase, a filter or a pull).
+    // What moved outside the file is `git pull --rebase`, from
+    // `vcs.commit.branch` to `vcs.history.rewrite`, the stricter direction,
+    // and the abbreviated and bundled spellings git accepts for a force push,
+    // an amend, a hard reset and a rebasing pull, each from a looser class to
+    // the rewrite class (eight of the new vectors; two more pin the spellings
+    // that stay where they were, `-ofu` and `--all`).
+    vectors_version: "1.8.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:

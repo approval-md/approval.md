@@ -105,8 +105,20 @@ export type Provenance =
   | "inherited"
   /** The policy failed to load; everything is `manual`. */
   | "fail-closed"
-  /** The §7 irreversibility floor overrode the resolved autonomy. */
-  | "floor";
+  /**
+   * The §7 irreversibility floor overrode the resolved autonomy, or (APRV-433,
+   * with {@link Resolution.historyFloor}) `vcs.history.rewrite.shared` was
+   * raised to `manual` because only the family key `vcs.history.rewrite.*`
+   * would have set it lower.
+   */
+  | "floor"
+  /**
+   * Amended SPEC.md §7 (APRV-433): a `vcs.history.rewrite` member under a
+   * policy with no own line of the split resolved as the class the pre-split
+   * runtime answered for the same segment ({@link ResolveOptions.legacyClass}),
+   * so a policy that has not adopted the split keeps the verdicts it had.
+   */
+  | "legacy";
 
 /**
  * Specificity key: `[literalSegments, wildcardSegments, totalSegments]`.
@@ -175,6 +187,13 @@ export interface Resolution {
   /** The maximum-specificity rule group governing that permission. */
   irreversiblePatterns: string[];
   candidates: Candidate[];
+  /**
+   * APRV-433: set when `vcs.history.rewrite.shared` was raised to `manual`
+   * because the only line lowering it was the family key
+   * `vcs.history.rewrite.*` (provenance `"floor"`). Absent otherwise, which is
+   * what keeps every other resolution byte-identical to the pre-split one.
+   */
+  historyFloor?: true;
 }
 
 /** Options for {@link resolve}. */
@@ -184,6 +203,14 @@ export interface ResolveOptions {
    * irreversibility floor; `true` and `undefined` do not.
    */
   reversible?: boolean;
+  /**
+   * APRV-433: the class the pre-split runtime answered for this segment (a
+   * `vcs.history.rewrite` member's `legacy_class`). Read only for a member,
+   * and only under a policy with no own line of the split; absent, a member
+   * falls back to the bare `vcs.history.rewrite`, which is the class the text
+   * classifier answers. A member is never its own legacy class.
+   */
+  legacyClass?: string;
 }
 
 /**
@@ -347,6 +374,112 @@ export function harnessLaunchUnruledRefusal(actionClass: string, whatWasRefused:
   );
 }
 
+/**
+ * The `vcs.history.rewrite` split (amended SPEC.md §7, APRV-433).
+ *
+ * The text classifier answers the bare class for every rewrite spelling; the
+ * hook's impure step (`src/cli/history-rewrite.ts`) derives one of the two
+ * members from the repository. Defined here, beside the resolver that gives
+ * them their own resolution rule, so the hook, the classifier's reachability
+ * list and the resolver spell the family once.
+ */
+export const HISTORY_REWRITE_CLASS = "vcs.history.rewrite";
+/** A rewrite whose lost range holds a shared commit, or that could not be proved local. */
+export const HISTORY_REWRITE_SHARED = "vcs.history.rewrite.shared";
+/** A rewrite the runtime proved touches no shared commit; `rebase --abort` / `--quit`. */
+export const HISTORY_REWRITE_LOCAL = "vcs.history.rewrite.local";
+/** The family key. */
+export const HISTORY_REWRITE_FAMILY = "vcs.history.rewrite.*";
+
+/** The three `classes` keys that are own lines of the split. */
+export const HISTORY_REWRITE_OWN_LINES: readonly string[] = [
+  HISTORY_REWRITE_LOCAL,
+  HISTORY_REWRITE_SHARED,
+  HISTORY_REWRITE_FAMILY,
+];
+
+/** Is `actionClass` one of the two members? */
+export function isHistoryRewriteMember(actionClass: string): boolean {
+  return actionClass === HISTORY_REWRITE_SHARED || actionClass === HISTORY_REWRITE_LOCAL;
+}
+
+/**
+ * Has this policy adopted the split, by carrying at least one own line?
+ * A policy that did not load has adopted nothing.
+ */
+export function historyRewriteAdopted(load: PolicyLoadResult): boolean {
+  if (!load.ok) return false;
+  const classes = load.policy.classes ?? {};
+  return HISTORY_REWRITE_OWN_LINES.some((key) =>
+    Object.prototype.hasOwnProperty.call(classes, key),
+  );
+}
+
+/** The closed set of basis codes for a `local` verdict (APRV-433). */
+export const HISTORY_REWRITE_LOCAL_BASES = [
+  "range-unpublished",
+  "no-commits-lost",
+  "rebase-in-progress-unpublished",
+  "abort-restores",
+] as const;
+
+/** The closed set of basis codes for a `shared` verdict (APRV-433). */
+export const HISTORY_REWRITE_SHARED_BASES = [
+  "push-side",
+  "default-branch",
+  "shared-commit",
+  "upstream-gone",
+  "detached-head",
+  "interactive",
+  "runs-commands",
+  "todo-unvetted",
+  "whole-history",
+  "unreadable-target",
+  "global-option",
+  "env-assignment",
+  "compound-state",
+  "range-too-large",
+  "check-timeout",
+  "git-unavailable",
+  // APRV-433 build: an option outside the closed list the check understands
+  // (an abbreviation git accepts, a flag whose value the text hides), and a
+  // rebase that would also move refs other than the one it names.
+  "option-unvetted",
+  "updates-other-refs",
+] as const;
+
+export type HistoryRewriteBasis =
+  | (typeof HISTORY_REWRITE_LOCAL_BASES)[number]
+  | (typeof HISTORY_REWRITE_SHARED_BASES)[number];
+
+/**
+ * `payload.history_rewrite` (amended SPEC.md §8, APRV-433): written by the
+ * runtime from its own repository queries, never from a caller's parameter.
+ */
+export interface HistoryRewriteEvidence {
+  reach: "shared" | "local";
+  basis: HistoryRewriteBasis;
+  /** The full ref name moved, or `null` when detached or not read. */
+  ref: string | null;
+  old_tip: string | null;
+  base: string | null;
+  lost: number | null;
+  lost_shared: number | null;
+  /** The full name of one shared ref holding a lost commit, or `null`. */
+  witness: string | null;
+}
+
+/**
+ * What a refined segment carries in the hook: the logged evidence plus the
+ * class the pre-split runtime answered for it. `legacy_class` is not part of
+ * the logged object: the hook records a segment under it when the policy has
+ * no own line, and under the member otherwise, so the class on the record is
+ * always the class the record was resolved under.
+ */
+export interface HistoryRewriteSegmentEvidence extends HistoryRewriteEvidence {
+  legacy_class: string;
+}
+
 const WILDCARD = "*";
 
 /** Split a dotted class or pattern into segments. */
@@ -475,6 +608,10 @@ export function resolve(
 ): Resolution {
   if (!load.ok) return { ...FAIL_CLOSED, candidates: [] };
 
+  if (isHistoryRewriteMember(actionClass)) {
+    return applyFloor(resolveHistoryRewriteMember(load, actionClass, options), options);
+  }
+
   const classes = load.policy.classes ?? {};
   const candidates: Candidate[] = [];
   for (const pattern of Object.keys(classes)) {
@@ -490,6 +627,81 @@ export function resolve(
     : fromRules(candidates);
 
   return applyFloor(resolution, options);
+}
+
+/**
+ * The `vcs.history.rewrite` members (amended SPEC.md §7, APRV-433), as a
+ * resolution rule. The irreversibility floor is applied by the caller.
+ *
+ * 1. **No own line** (`.local`, `.shared` or `.*`) in the policy: the member
+ *    resolves exactly as its `legacyClass` resolves, provenance `"legacy"`.
+ *    A policy that has not adopted the split keeps every verdict it had.
+ * 2. **An own line**: the member resolves by its exact key, then by
+ *    `vcs.history.rewrite.*`. Neither present: exactly as the bare
+ *    `vcs.history.rewrite` resolves, provenance `"inherited"` when a rule of
+ *    the policy decided it. Less specific patterns (`vcs.*`, `vcs.history.*`,
+ *    `*`) are never consulted for the member directly, which is what stops
+ *    `vcs.*: autonomous` from making `.shared` autonomous the day an author
+ *    adds only a `.local` line.
+ * 3. **Floor**: `.shared` is never inferred below `manual` from the family
+ *    key; only its exact key may set it lower. The floor does not apply
+ *    through inheritance from the bare class.
+ *
+ * A second named parent-inheritance namespace beside `policy.edit.`, and it
+ * differs on purpose: it also screens out non-own patterns. Still no
+ * universal parent walk (see {@link ROUTED_NAMESPACE}).
+ */
+function resolveHistoryRewriteMember(
+  load: Extract<PolicyLoadResult, { ok: true }>,
+  member: string,
+  options: ResolveOptions,
+): Resolution {
+  if (!historyRewriteAdopted(load)) {
+    const stated = options.legacyClass;
+    const legacy =
+      stated === undefined || stated.length === 0 || isHistoryRewriteMember(stated)
+        ? HISTORY_REWRITE_CLASS
+        : stated;
+    const resolution = resolve(load, legacy);
+    return { ...resolution, provenance: "legacy" };
+  }
+
+  const classes = load.policy.classes ?? {};
+  const own: Candidate[] = [];
+  for (const pattern of [member, HISTORY_REWRITE_FAMILY]) {
+    if (!Object.prototype.hasOwnProperty.call(classes, pattern)) continue;
+    const rule = classes[pattern];
+    if (rule === undefined) continue;
+    own.push({ pattern, rule, specificity: specificityOf(pattern) });
+  }
+  own.sort(compareCandidates);
+
+  if (own.length === 0) {
+    const bare = resolve(load, HISTORY_REWRITE_CLASS);
+    return {
+      ...bare,
+      provenance: bare.provenance === "rule" ? "inherited" : bare.provenance,
+      // The member's own candidates, which are none: the bare line decided,
+      // and `matched` still names it so a trace can say which line that was.
+      candidates: [],
+    };
+  }
+
+  const decided = fromRules(own);
+  if (
+    member === HISTORY_REWRITE_SHARED &&
+    decided.matched?.pattern === HISTORY_REWRITE_FAMILY &&
+    STRICTNESS[decided.declaredAutonomy] > STRICTNESS.manual
+  ) {
+    return {
+      ...decided,
+      ...supervisionOf("manual", null),
+      declaredAutonomy: "manual",
+      provenance: "floor",
+      historyFloor: true,
+    };
+  }
+  return decided;
 }
 
 /**

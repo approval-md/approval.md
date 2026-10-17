@@ -15,6 +15,28 @@ before a tag.
 
 ## Unreleased
 
+### Security
+
+- A force push spelled as a short bundle (`git push -fu`, `-uf`) or as an
+  abbreviated long option (`--force-w`, `--m` for `--mirror`) classified as a
+  plain push (`vcs.push.branch` or `vcs.push.main`). Three more spellings were
+  read loosely the same way: `git commit --am` was a plain commit,
+  `git reset --h` a non-hard reset and `git pull --reb` a merging pull.
+  git's option parser accepts every one of them, and the classifier now reads
+  them as git does (APRV-433).
+
+### Changed
+
+- `vcs.history.rewrite` is split into `vcs.history.rewrite.local` and
+  `vcs.history.rewrite.shared` by the hook, from the checkout's own refs
+  (amended SPEC.md §7 and §8, APRV-433, pending sign-off). It replaces
+  APRV-108's quiet downgrade of an unpublished rewrite to `vcs.commit.branch`.
+  A policy with no `vcs.history.rewrite.local`, `.shared` or `.*` line gets
+  exactly the verdicts it got before; every refined start and request now
+  carries `payload.history_rewrite`. The text classifier's rebase row is split
+  into rule ids by spelling, and `git pull --rebase` is now
+  `vcs.history.rewrite` from the text (it was `vcs.commit.branch`).
+
 ## 0.4.4 — 2026-10-12
 
 ### Security

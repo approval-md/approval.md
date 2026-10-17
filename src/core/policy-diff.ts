@@ -112,7 +112,14 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import type { Autonomy, Policy, PolicyLoadErrorCode, PolicyLoadResult } from "./policy-load.js";
-import { agentRequestability, resolve, type Provenance } from "./policy-match.js";
+import {
+  agentRequestability,
+  HISTORY_REWRITE_LOCAL,
+  HISTORY_REWRITE_OWN_LINES,
+  HISTORY_REWRITE_SHARED,
+  resolve,
+  type Provenance,
+} from "./policy-match.js";
 import { UNMAPPED_TOOL_CLASS } from "./tool-map.js";
 
 /**
@@ -511,6 +518,21 @@ function toolClasses(policy: Policy | null): string[] {
   return reached;
 }
 
+/**
+ * Both `vcs.history.rewrite` members whenever either version carries an own
+ * line of the split (amended SPEC.md §7, APRV-433).
+ *
+ * Adding the first own line changes how BOTH members resolve (from the
+ * pre-split fallback to the split's own rule), and a probe set drawn from
+ * `classes` keys alone would probe only the member the author named. So
+ * adopting the split always shows as a resolution change for both.
+ */
+function historyRewriteProbes(before: Policy | null, after: Policy | null): string[] {
+  const owns = (policy: Policy | null): boolean =>
+    HISTORY_REWRITE_OWN_LINES.some((key) => policy?.classes?.[key] !== undefined);
+  return owns(before) || owns(after) ? [HISTORY_REWRITE_LOCAL, HISTORY_REWRITE_SHARED] : [];
+}
+
 function channelsOf(policy: Policy | null, approver: string): string[] | null {
   const entry = policy?.approvers?.[approver];
   return entry === undefined ? null : [...entry.channels];
@@ -642,6 +664,7 @@ export function diffPolicies(
     classKeys(afterPolicy),
     toolClasses(beforePolicy),
     toolClasses(afterPolicy),
+    historyRewriteProbes(beforePolicy, afterPolicy),
     sampleClasses,
   );
   const classes: ClassResolutionChange[] = [];

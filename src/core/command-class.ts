@@ -40,12 +40,15 @@
  * hook and the policy explainer can ask the same questions this file asks, of
  * the same table, rather than each growing a copy of it.
  *
- * `core/policy-match.ts` (APRV-354) is imported for ONE name, the
- * `harness.launch.` prefix. The classifier emits the family and two enforcement
- * paths refuse a member of it that no policy rule names, so the three have to
- * agree on what the family is; a second spelling of the prefix would close one
- * of those doors and leave the other open. The import is type-safe in the
- * dependency sense as well: `policy-match.ts` itself imports only types.
+ * `core/policy-match.ts` (APRV-354) is imported for the `harness.launch.`
+ * prefix. The classifier emits the family and two enforcement paths refuse a
+ * member of it that no policy rule names, so the three have to agree on what
+ * the family is; a second spelling of the prefix would close one of those doors
+ * and leave the other open. APRV-433 adds the two `vcs.history.rewrite`
+ * member names (listed in {@link RUNTIME_CLASSES}, never emitted here) and the
+ * evidence type the hook attaches to a segment, for the same reason. The import
+ * is type-safe in the dependency sense as well: `policy-match.ts` itself
+ * imports only types.
  */
 
 import { isDateDisplay } from "./date-argv.js";
@@ -57,7 +60,12 @@ import {
   isPasteRead,
   isSeqDisplay,
 } from "./sysinfo-argv.js";
-import { HARNESS_LAUNCH_PREFIX } from "./policy-match.js";
+import {
+  HARNESS_LAUNCH_PREFIX,
+  HISTORY_REWRITE_LOCAL,
+  HISTORY_REWRITE_SHARED,
+  type HistoryRewriteSegmentEvidence,
+} from "./policy-match.js";
 import {
   READ_OUT_OF_SCOPE_CLASS,
   isUnreadableTarget,
@@ -105,6 +113,15 @@ export interface ClassifiedSegment {
    * profile is the caller's, and a profile a caller wrote can allow anything.
    */
   sandbox?: SandboxWrapper;
+  /**
+   * What the impure history-rewrite step established about this segment
+   * (APRV-433). NEVER set by this file: the classifier decides from text and
+   * keeps answering the bare `vcs.history.rewrite`. The hook's refinement
+   * (`src/cli/history-rewrite.ts`) sets it on every segment it moves into the
+   * family, together with the member class, so `hook classify --json` prints
+   * the member, the basis, the witness and the pre-split class in one place.
+   */
+  history_rewrite?: HistoryRewriteSegmentEvidence;
 }
 
 /**
@@ -941,7 +958,8 @@ interface LexSegment {
 }
 
 type LexResult =
-  | { ok: true; segments: LexSegment[] }
+  /** `concurrent`: some segment is joined by `|` or a background `&` (APRV-433). */
+  | { ok: true; segments: LexSegment[]; concurrent: boolean }
   | { ok: false; detail: string };
 
 const OPERATOR_CHARS = new Set(["&", "|", ";", "(", ")", "<", ">", "\n"]);
@@ -1003,6 +1021,8 @@ function lex(command: string): LexResult {
   let redirects: LexRedirect[] = [];
   let bodySubstitutions: string[] = [];
   let opaque: string | null = null;
+  /** Set when a segment is joined by `|` or a background `&` (APRV-433). */
+  let concurrent = false;
   let segmentStart = 0;
   let index = 0;
   const pending: PendingHeredoc[] = [];
@@ -1234,6 +1254,7 @@ function lex(command: string): LexResult {
 
     if (ch === "&" || ch === "|" || ch === ";" || ch === "(" || ch === ")") {
       const boundary = index;
+      if ((ch === "&" || ch === "|") && command[index + 1] !== ch) concurrent = true;
       index += ch === "&" && command[index + 1] === "&" ? 2 : ch === "|" && command[index + 1] === "|" ? 2 : 1;
       flush(boundary);
       segmentStart = index;
@@ -1265,7 +1286,7 @@ function lex(command: string): LexResult {
     return { ok: false, detail: `heredoc <<${heredoc.terminator} is never terminated` };
   }
   flush(command.length);
-  return { ok: true, segments };
+  return { ok: true, segments, concurrent };
 }
 
 /**
@@ -1612,6 +1633,25 @@ function hasFlag(args: readonly string[], names: readonly string[]): boolean {
   });
 }
 
+/**
+ * Does any argument spell one of these long options, in full or as the
+ * abbreviation git's option parser accepts (APRV-433)?
+ *
+ * git takes any unambiguous prefix of a long option: `git push --m` is a
+ * mirror push, `git push --force-w` is `--force-with-lease`, `git commit --am`
+ * amends and `git reset --h` is a hard reset. A prefix git would reject as
+ * ambiguous is matched too, which only ever picks the stricter class for a
+ * command git refuses to run. `minLength` counts the leading `--`.
+ */
+function hasLongOption(args: readonly string[], names: readonly string[], minLength = 3): boolean {
+  return args.some((arg) => {
+    if (!arg.startsWith("--") || arg === "--") return false;
+    const equals = arg.indexOf("=");
+    const name = equals === -1 ? arg : arg.slice(0, equals);
+    return name.length >= minLength && names.some((full) => full.startsWith(name));
+  });
+}
+
 /** Does any short-flag bundle (`-rf`) carry one of these letters? */
 function hasShortFlag(args: readonly string[], letters: readonly string[]): boolean {
   return args.some((arg) => {
@@ -1686,7 +1726,15 @@ function deletedRef(refspec: string): string | null {
 /** `git push` — force, release, deletion, trunk and branch turn on flags and refspecs. */
 function refineGitPush(ctx: RuleContext): Refinement {
   const args = ctx.args.slice(1);
-  if (hasFlag(args, ["--force", "-f", "--force-with-lease", "--force-if-includes", "--mirror"])) {
+  // APRV-433: every push-side rewrite is shared, so every spelling of one has
+  // to be read as one: an abbreviated long option (`--force-w`, `--m`) and a
+  // short bundle carrying `f` (`-fu`, `-uf`) included. In a bundle, `-o`
+  // takes the rest of the word as its value, so the scan stops there.
+  if (
+    hasFlag(args, ["--force", "-f", "--force-with-lease", "--force-if-includes", "--mirror"]) ||
+    hasLongOption(args, ["--force", "--force-with-lease", "--force-if-includes", "--mirror"]) ||
+    args.some((arg) => isFlag(arg) && !arg.startsWith("--") && pushBundleForces(arg))
+  ) {
     return { class: "vcs.history.rewrite", rule: "git-push-force" };
   }
   const positionals = args.filter((arg) => !isFlag(arg));
@@ -1745,6 +1793,15 @@ function refineGitPush(ctx: RuleContext): Refinement {
   return sawMain
     ? { class: "vcs.push.main", rule: "git-push-main" }
     : { class: "vcs.push.branch", rule: "git-push-branch" };
+}
+
+/** Does a `git push` short-flag bundle (`-fu`) force? `-o` ends the scan: its value is the rest. */
+function pushBundleForces(bundle: string): boolean {
+  for (const letter of bundle.slice(1)) {
+    if (letter === "o") return false;
+    if (letter === "f") return true;
+  }
+  return false;
 }
 
 /**
@@ -2108,16 +2165,164 @@ function refineRm(ctx: RuleContext): Refinement {
 
 /** `git commit --amend` rewrites; a plain commit does not. */
 function refineGitCommit(ctx: RuleContext): Refinement {
-  return hasFlag(ctx.args, ["--amend"])
+  // APRV-433: `--am` is `--amend` to git's option parser.
+  return hasFlag(ctx.args, ["--amend"]) || hasLongOption(ctx.args, ["--amend"])
     ? { class: "vcs.history.rewrite", rule: "git-commit-amend" }
     : { class: "vcs.commit.branch", rule: "git-commit" };
 }
 
 /** `git reset --hard` discards committed work; a soft reset moves a pointer. */
 function refineGitReset(ctx: RuleContext): Refinement {
-  return hasFlag(ctx.args, ["--hard"])
+  // APRV-433: `--h` and `--ha` are `--hard` to git's option parser.
+  return hasFlag(ctx.args, ["--hard"]) || hasLongOption(ctx.args, ["--hard"])
     ? { class: "vcs.history.rewrite", rule: "git-reset-hard" }
     : { class: "vcs.commit.branch", rule: "git-reset" };
+}
+
+/**
+ * The words after a git subcommand: everything past the first positional.
+ *
+ * `ctx.args` starts with any global option that preceded the subcommand
+ * (`--no-pager`, `--git-dir=x`), so slicing off one word is not enough.
+ */
+function gitSubArgs(args: readonly string[]): string[] {
+  const at = args.findIndex((arg) => !isFlag(arg));
+  return at === -1 ? [] : args.slice(at + 1);
+}
+
+/**
+ * The merge strategies git ships (APRV-433). Any other `-s <name>` makes
+ * `git rebase` run `git-merge-<name>` from PATH, a program of the caller's
+ * choosing, so it is classified as a command-running rebase.
+ */
+export const BUILTIN_MERGE_STRATEGIES: readonly string[] = [
+  "ort",
+  "recursive",
+  "resolve",
+  "octopus",
+  "ours",
+  "subtree",
+];
+
+/**
+ * The value-taking short flags of `git rebase` whose value is attached
+ * (`-Xtheirs`, `-Skey`, `-C4`, `-sours`). Their letters are a value, not a
+ * bundle, so the bundle scans below skip them.
+ */
+const REBASE_ATTACHED_VALUE_FLAGS: readonly string[] = ["-X", "-S", "-C", "-s"];
+
+/** Short-flag bundles of a rebase argv, with attached-value flags left out. */
+function rebaseShortBundles(args: readonly string[]): string[] {
+  return args.filter(
+    (arg) =>
+      arg.startsWith("-") &&
+      !arg.startsWith("--") &&
+      !REBASE_ATTACHED_VALUE_FLAGS.some((flag) => arg.startsWith(flag)),
+  );
+}
+
+/**
+ * Does this rebase argv name a merge strategy outside {@link BUILTIN_MERGE_STRATEGIES},
+ * or one the text cannot read? Exported for the impure step, which must agree.
+ */
+export function rebaseRunsStrategy(args: readonly string[]): boolean {
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    let value: string | undefined;
+    if (arg === "-s" || arg === "--strategy") value = args[at + 1] ?? "";
+    else if (arg.startsWith("--strategy=")) value = arg.slice("--strategy=".length);
+    else if (arg.startsWith("-s") && !arg.startsWith("--") && arg.length > 2) value = arg.slice(2);
+    if (value === undefined) continue;
+    if (!BUILTIN_MERGE_STRATEGIES.includes(value)) return true;
+  }
+  return false;
+}
+
+/**
+ * `git rebase`: one class, five rule ids (APRV-433).
+ *
+ * Checked strictest first, because git refuses most combinations and a
+ * spelling the text cannot settle takes the stricter reading:
+ *
+ *  - `git-rebase-exec`: `--exec` / `-x` (any spelling), or `-s` naming a
+ *    strategy git does not ship. The rebase runs a program.
+ *  - `git-rebase-interactive`: `-i`, `--interactive`, `--edit-todo`,
+ *    `--rebase-merges` / `-r`. A sequence editor or the sequencer's own
+ *    `label` / `reset` lines can reach outside the range being rebased.
+ *  - `git-rebase-continue`: `--continue`, `--skip`. Resumes a rebase in
+ *    progress, whose state lives on disk.
+ *  - `git-rebase-abort`: `--abort`, `--quit`. Restores or keeps the
+ *    pre-rebase branch.
+ *  - `git-rebase`: everything else.
+ */
+function refineGitRebase(ctx: RuleContext): Refinement {
+  const rest = gitSubArgs(ctx.args);
+  const bundles = rebaseShortBundles(rest);
+  const rewrite = (rule: string): Refinement => ({ class: "vcs.history.rewrite", rule });
+  if (
+    hasFlag(rest, ["--exec", "-x"]) ||
+    bundles.some((bundle) => bundle.includes("x")) ||
+    rebaseRunsStrategy(rest)
+  ) {
+    return rewrite("git-rebase-exec");
+  }
+  if (
+    hasFlag(rest, ["--interactive", "--edit-todo", "--rebase-merges", "-i", "-r"]) ||
+    bundles.some((bundle) => bundle.includes("i") || bundle.includes("r"))
+  ) {
+    return rewrite("git-rebase-interactive");
+  }
+  if (hasFlag(rest, ["--continue", "--skip"])) return rewrite("git-rebase-continue");
+  if (hasFlag(rest, ["--abort", "--quit"])) return rewrite("git-rebase-abort");
+  return rewrite("git-rebase");
+}
+
+/**
+ * The rebase mode a `git pull` argv asks for, or `null` for a merging pull
+ * (APRV-433). `"interactive"` for `--rebase=interactive` / `=i`; `"merges"`
+ * for `--rebase=merges` / `=m` (a `--rebase-merges` rebase); `"rebase"`
+ * for `--rebase`, `-r`, `--rebase=true` and any other value git might read
+ * as a rebase. `--no-rebase` and `--rebase=false` are a merge, and so is a
+ * pull that says nothing (the impure step reads the configuration).
+ * Exported for the impure step, which must read the flags the same way.
+ */
+export function pullRebaseMode(args: readonly string[]): "rebase" | "interactive" | "merges" | null {
+  let mode: "rebase" | "interactive" | "merges" | null = null;
+  for (const arg of args) {
+    const equals = arg.indexOf("=");
+    const name = equals === -1 ? arg : arg.slice(0, equals);
+    // git takes an unambiguous prefix of a long option (`--reb`, `--no-reb`).
+    // `--no-r` and `--no-re` are ambiguous to git, so only `--no-reb` and
+    // longer read as the merging pull; a shorter prefix of `--rebase` reads as
+    // the rebasing one, the stricter answer for a command git refuses.
+    if (arg === "--no-rebase" || (name.length >= 8 && "--no-rebase".startsWith(name))) {
+      mode = null;
+      continue;
+    }
+    if (arg === "--rebase" || arg === "-r" || (equals === -1 && name.length >= 3 && "--rebase".startsWith(name))) {
+      mode = "rebase";
+      continue;
+    }
+    if (name.length >= 3 && "--rebase".startsWith(name) && equals !== -1) {
+      const value = arg.slice(equals + 1);
+      if (value === "false" || value === "no" || value === "off" || value === "0") mode = null;
+      else if (value === "interactive" || value === "i") mode = "interactive";
+      else if (value === "merges" || value === "m") mode = "merges";
+      else mode = "rebase";
+      continue;
+    }
+    if (rebaseShortBundles([arg]).some((bundle) => bundle.slice(1).includes("r"))) {
+      mode = "rebase";
+    }
+  }
+  return mode;
+}
+
+/** `git pull`: a rebasing pull is a rewrite; a merging pull keeps `git-write` (APRV-433). */
+function refineGitPull(ctx: RuleContext): Refinement {
+  return pullRebaseMode(gitSubArgs(ctx.args)) === null
+    ? { class: "vcs.commit.branch", rule: "git-write" }
+    : { class: "vcs.history.rewrite", rule: "git-pull-rebase" };
 }
 
 /** `git branch` reads until it is asked to delete, rename or force-set one. */
@@ -3276,12 +3481,18 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     emits: ["vcs.push.branch", "vcs.push.main", "vcs.history.rewrite", "vcs.ref.delete"],
     refine: refineGitPush,
   },
+  // APRV-433 split the old `git-rewrite` row so the impure history-rewrite
+  // step (`src/cli/history-rewrite.ts`) knows which spelling it is judging.
+  // Every rule id here still answers the bare `vcs.history.rewrite`: the text
+  // alone cannot say whether the history a rewrite removes is shared.
   {
-    id: "git-rewrite",
+    id: "git-rebase",
     bins: ["git"],
-    subs: ["rebase", "filter-branch", "filter-repo"],
+    subs: ["rebase"],
     class: "vcs.history.rewrite",
+    refine: refineGitRebase,
   },
+  { id: "git-filter", bins: ["git"], subs: ["filter-branch", "filter-repo"], class: "vcs.history.rewrite" },
   { id: "git-reset", bins: ["git"], subs: ["reset"], class: "vcs.commit.branch", emits: ["vcs.history.rewrite"], refine: refineGitReset },
   { id: "git-commit", bins: ["git"], subs: ["commit"], class: "vcs.commit.branch", emits: ["vcs.history.rewrite"], refine: refineGitCommit },
   { id: "git-branch", bins: ["git"], subs: ["branch"], class: "read.shell", emits: ["vcs.commit.branch"], refine: refineGitBranch },
@@ -3296,6 +3507,17 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     refine: refineGitTag,
   },
   { id: "git-clone", bins: ["git"], subs: ["clone"], class: "network.call" },
+  // APRV-433: `git pull --rebase` rebases the current branch onto what it just
+  // fetched, which is a history rewrite; a plain pull merges and keeps its
+  // `git-write` rule id. Above `git-write`, which no longer lists `pull`.
+  {
+    id: "git-pull",
+    bins: ["git"],
+    subs: ["pull"],
+    class: "vcs.commit.branch",
+    emits: ["vcs.history.rewrite"],
+    refine: refineGitPull,
+  },
   {
     id: "git-write",
     bins: ["git"],
@@ -3306,7 +3528,6 @@ export const COMMAND_RULES: readonly CommandRule[] = [
       "cherry-pick",
       "merge",
       "mv",
-      "pull",
       "restore",
       "revert",
       "rm",
@@ -4209,7 +4430,13 @@ export const ADVANCE_DAEMON_CLASS = "log.advance.daemon";
  * Adding a name here is a claim that some path in this codebase asks the gate
  * for that class, and widening it is a reviewable diff.
  */
-export const RUNTIME_CLASSES: readonly string[] = [ADVANCE_DAEMON_CLASS];
+export const RUNTIME_CLASSES: readonly string[] = [
+  ADVANCE_DAEMON_CLASS,
+  // APRV-433: the hook's history-rewrite step derives one of these two for
+  // every bare `vcs.history.rewrite` segment; no command spells either.
+  HISTORY_REWRITE_SHARED,
+  HISTORY_REWRITE_LOCAL,
+];
 
 /**
  * Can the classifier emit `actionClass` for a project whose policy carries
@@ -5000,4 +5227,106 @@ export function commandSegmentWords(command: string): CommandSegmentWords[] | nu
     out.push({ text: segment.text, bin, args: words.slice(cursor + 1) });
   }
   return out;
+}
+
+/**
+ * One git invocation as the impure history-rewrite step needs to see it
+ * (APRV-433): the `NAME=value` words before the binary, the options between
+ * `git` and its subcommand, the subcommand, and the words after it.
+ */
+export interface GitInvocationShape {
+  /** `NAME=value` words before `git`, verbatim. */
+  assignments: string[];
+  /** Every word between `git` and the subcommand (`--no-pager`, `--git-dir=x`). */
+  globalOptions: string[];
+  /** The subcommand, or `null` when there is none. */
+  sub: string | null;
+  /** Every word after the subcommand, quotes removed. */
+  args: string[];
+  /**
+   * Per word of `args`: could the shell change it before git sees it? True
+   * for a `$` (a parameter or a `$(…)`, kept verbatim by the lexer), a
+   * backtick, a glob character, or a leading `~`.
+   */
+  unreadable: boolean[];
+  /**
+   * The target of every `>` / `>>` on the segment, verbatim (a dup such as
+   * `2>&1` is not a write and is absent). The impure step lets an earlier
+   * segment through only when it writes nowhere, or only to `/dev/null`.
+   */
+  writeTargets: string[];
+  /** Does the segment carry a construct whose effect the lexer cannot read? */
+  opaque: boolean;
+}
+
+/** How a whole command line is joined, for the impure step (APRV-433). */
+export interface CommandLineShape {
+  /** Segments the lexer found (before any wrapper is spliced open). */
+  segments: number;
+  /**
+   * Is any segment joined by a pipe (`|`) or a background `&`? Those run at
+   * the same time as their neighbours, so a later segment can change the
+   * state an earlier one reads while it is reading it.
+   */
+  concurrent: boolean;
+}
+
+/**
+ * The lexer's view of a command line's joints, from the SAME parse
+ * {@link classifyCommand} uses, or `null` when the lexer refuses it. Pure.
+ */
+export function commandLineShape(command: string): CommandLineShape | null {
+  const lexed = lex(command);
+  if (!lexed.ok) return null;
+  return { segments: lexed.segments.length, concurrent: lexed.concurrent };
+}
+
+/**
+ * The shape of a segment that runs `git` directly, from the SAME parse
+ * {@link classifyCommand} uses, or `null` when the text is not exactly one
+ * segment whose binary is `git` (a wrapper, a builtin, an unparseable line).
+ *
+ * Pure, like everything in this file. The hook reads a rewrite segment's
+ * environment and global options from here so that it judges the git
+ * invocation the classifier judged, rather than a re-split of its own.
+ */
+export function gitInvocationShape(segmentText: string): GitInvocationShape | null {
+  const lexed = lex(segmentText);
+  if (!lexed.ok || lexed.segments.length !== 1) return null;
+  const segment = lexed.segments[0] as LexSegment;
+  const words = segment.words;
+  let cursor = 0;
+  const assignments: string[] = [];
+  while (cursor < words.length && ASSIGNMENT.test((words[cursor] as LexWord).text)) {
+    assignments.push((words[cursor] as LexWord).text);
+    cursor += 1;
+  }
+  const bin = words[cursor];
+  if (bin === undefined) return null;
+  const base = pathSegments(bin.text).slice(-1)[0] ?? bin.text;
+  if (base !== "git") return null;
+  cursor += 1;
+  const globalOptions: string[] = [];
+  while (cursor < words.length && isFlag((words[cursor] as LexWord).text)) {
+    globalOptions.push((words[cursor] as LexWord).text);
+    cursor += 1;
+  }
+  const subWord = words[cursor];
+  const rest = words.slice(cursor + 1);
+  return {
+    assignments,
+    globalOptions,
+    sub: subWord === undefined ? null : subWord.text,
+    args: rest.map((word) => word.text),
+    unreadable: rest.map(
+      (word) =>
+        word.substitutions.length > 0 ||
+        /[$`*?[]/u.test(word.text) ||
+        word.text.startsWith("~"),
+    ),
+    writeTargets: segment.redirects
+      .filter((redirect) => redirect.op !== "<")
+      .map((redirect) => redirect.target.text),
+    opaque: segment.opaque !== null || segment.bodySubstitutions.length > 0,
+  };
 }
