@@ -1011,6 +1011,50 @@ function* generalCorpus(depth: number): Generator<string> {
   }
 }
 
+/**
+ * Login-shell wrappers, `[shell, flag, script]` (review-b S1 and N6): the shell
+ * word bare, at a system-bin path, at any other path, and assignment-shaped
+ * with a plain, quoted or escaped name whose value ends in a shell name.
+ */
+const WRAPPER_SHELLS: readonly string[] = [
+  "bash",
+  "sh",
+  "zsh",
+  '"bash"',
+  "/bin/bash",
+  "/usr/bin/sh",
+  "/usr/local/bin/zsh",
+  "x/bash",
+  "./sh",
+  "/tmp/x/bash",
+  "/tmp/x/bin/zsh",
+  "n=x/bash",
+  ...quotedNameSpellings("n=x/bash"),
+  ...quotedNameSpellings("n=/bin/bash"),
+];
+
+function* wrapperCorpus(): Generator<string> {
+  for (const shell of WRAPPER_SHELLS) {
+    for (const flag of ["-c", "-lc", "-ic"]) {
+      for (const script of ["ls", "cat f", "wc -l f", "rm f", "git log", "cat f > out.txt"]) {
+        const command = `${shell} ${flag} '${script}'`;
+        yield command;
+        yield `${command}; ls`;
+        yield `ls && ${command}`;
+        yield `m=6 ${command}`;
+      }
+    }
+  }
+}
+
+/** A shell spelled by a path outside the system-bin directories, which the wrapper rule no longer unwraps. */
+function isPathSpelledShell(word: string): boolean {
+  const text = word.replace(/["'\\]/gu, "");
+  const value = text.includes("=") ? text.slice(text.indexOf("=") + 1) : text;
+  if (!/\/(?:bash|sh|zsh|dash|ksh|fish)$/u.test(text)) return false;
+  return text !== value || !/^\/(?:usr\/(?:local\/)?)?s?bin\/[^/]+$/u.test(value);
+}
+
 test("differential: a quoted or escaped name is stricter-only against #652 and main (APRV-523)", async (t) => {
   const bases = [
     { label: "base", path: process.env["APPROVAL_DIFF_QUOTED_BASE"] },
@@ -1028,6 +1072,7 @@ test("differential: a quoted or escaped name is stricter-only against #652 and m
     const commands = function* (): Generator<string> {
       yield* corpus(depth);
       yield* generalCorpus(depth);
+      yield* wrapperCorpus();
     };
     for (const command of commands()) {
       counts.total += 1;
@@ -1041,7 +1086,9 @@ test("differential: a quoted or escaped name is stricter-only against #652 and m
       const words = command.split(/[\s;&()]+/u).filter((word) => word !== "");
       const fromAprv521 =
         carriesRefusedEnvironment(command) || words.some((word) => /^[A-Za-z_][A-Za-z0-9_]*(?:\[|\+=)/u.test(word));
-      const carried = words.some(hasQuotedName) || (label === "main" && fromAprv521);
+      // The fix round (review-b S1): a path-spelled shell is no longer unwrapped.
+      const pathShell = words.some(isPathSpelledShell);
+      const carried = words.some(hasQuotedName) || pathShell || (label === "main" && fromAprv521);
       if (!carried) problems.push(`${label}: moved without a quoted name: ${command}`);
       if (now.ok && !before.ok) {
         counts.loosened += 1;
@@ -1052,7 +1099,9 @@ test("differential: a quoted or escaped name is stricter-only against #652 and m
       } else if (!now.ok && before.ok) {
         counts.okToRefused += 1;
         const expected = /=\(/u.test(command) ? "unparseable" : "unclassified";
-        if (now.code !== expected) problems.push(`${label}: refused as ${now.code}: ${command}`);
+        // A path-spelled shell, kept wrapped, is refused as the opaque shell it is.
+        const accepted = now.code === expected || (pathShell && !words.some(hasQuotedName) && now.code === "opaque");
+        if (!accepted) problems.push(`${label}: refused as ${now.code}: ${command}`);
       } else {
         counts.refusedToRefused += 1;
       }

@@ -4924,7 +4924,16 @@ const INLINE_SCRIPT_FLAG = /^-[li]*c$/u;
  * - a substitution in any of the three words, whose effect happens before the
  *   shell even starts;
  * - a nested shell inside the script, refused by {@link ClassifierContext} when
- *   the recursion runs (the inner classification unwraps nothing).
+ *   the recursion runs (the inner classification unwraps nothing);
+ * - a shell word that is not the system's binary ({@link isSystemBinWord}): a
+ *   relative path, or an absolute one outside the system-bin directories, is
+ *   whatever program sits there, which its last path segment does not name
+ *   (APRV-523 fix round, review-b S1);
+ * - a shell word that is assignment-shaped, in its source spelling
+ *   ({@link LexWord.assignment}) or its dequoted text ({@link ASSIGNMENT}).
+ *   bash runs a word whose name is quoted or escaped as a program named by the
+ *   whole word, and {@link classifySegment} refuses that segment; unwrapping
+ *   it here would answer before that check runs.
  *
  * The BINDING does not move. `cli/hook.ts` binds the outer command and argv
  * exactly as APRV-362 built them; what this changes is only which text is
@@ -4939,6 +4948,10 @@ export function loginShellScript(segment: LexSegment): string | null {
   if (shell.substitutions.length > 0) return null;
   if (flag.substitutions.length > 0) return null;
   if (script.substitutions.length > 0) return null;
+  // APRV-523 fix round (review-b S1): only the system's shell, named as
+  // written. A bare name and a system-bin path keep the route.
+  if (shell.assignment || ASSIGNMENT.test(shell.text)) return null;
+  if (!isSystemBinWord(shell.text)) return null;
   const base = pathSegments(shell.text).slice(-1)[0] ?? shell.text;
   if (!UNWRAPPABLE_SHELLS.has(base)) return null;
   if (!INLINE_SCRIPT_FLAG.test(flag.text)) return null;

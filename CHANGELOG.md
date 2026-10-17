@@ -229,7 +229,16 @@ on the hook for enforcement.
   the source spelling. A segment where the classifier's reading and bash's
   stop at different words is `unclassified` (the hook refuses it), on its own,
   after a real assignment, and inside a substitution; a protected redirect
-  still answers first, as for the plain spelling. The segment shapes the hook,
+  still answers first, as for the plain spelling. One path ran before that
+  check (review-b S1). A login-shell wrapper, exactly a shell, an
+  inline-script flag and a script, was unwrapped and answered with the
+  script's class whenever the first word's last path segment named a shell.
+  That held for an assignment-shaped first word with a quoted or escaped name
+  and for a relative path, so the script's class was given to a program the
+  agent can place. The wrapper is now unwrapped only when its shell word is
+  the system's: a bare name, or a path in `/bin`, `/usr/bin`, `/usr/local/bin`,
+  `/sbin` or `/usr/sbin`, with no assignment shape. Any other shell word keeps
+  the wrapper opaque or `unclassified`. The segment shapes the hook,
   the approval breakdown and the channels read now name the word bash runs as
   the binary. A quoted value, or a quoted subscript, keeps the word an
   assignment, unchanged. Stricter only: a depth-2 differential over
@@ -237,8 +246,13 @@ on the hook for enforcement.
   spellings added to its alphabet, and a corpus of other programs) moved
   51,226 from an answer to `unclassified` against #652's head (3a9c33c3) and
   586,454 against main (2179e128, #652's moves included), and loosened or
-  reclassified none. Cost: none expected; an agent has no reason to quote the
-  name of an assignment.
+  reclassified none. With login-shell wrappers added to that corpus
+  (2,423,543 lines), it moved 52,468 against main after #653 (7ab156eb) and
+  1,242 against this change before the wrapper rule (e0cb9923), and loosened
+  or reclassified none. Cost: none expected for the quoted name; an agent has
+  no reason to quote the name of an assignment. A shell spelled by any other
+  path (a relative one, or a Homebrew shell under `/opt`) is no longer
+  unwrapped, and its inline script needs a person.
 
 ### Harnesses
 

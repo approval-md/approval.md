@@ -177,6 +177,68 @@ test("the segment shapes name the word bash runs as the binary", () => {
   assert.equal(commandSegmentWords("n=5")?.length, 0);
 });
 
+test("review-b N6: a substitution, a mid-name backslash, an escaped + and a continuation in the name are unclassified", () => {
+  // A `$(…)` in the name: the dequoted text drops it and reads an assignment;
+  // bash, seeing a `$` in the name, runs the word.
+  // A backslash inside the name, and one in front of the `+` of an append.
+  // A backslash-newline inside the name: refused, the fail-closed choice.
+  for (const command of ["n$(printf m)=5 ls", "n\\m=5 ls", "n\\+=5 ls", "n\\\nm=5 ls"]) {
+    const refused = failure(command);
+    assert.equal(refused.code, "unclassified", JSON.stringify(command));
+    assert.match(refused.detail, /quoted or escaped is a command word/u, JSON.stringify(command));
+  }
+  // The control: the same name unescaped is an assignment.
+  assert.equal(answer("nm=5 ls"), answer("n=5 ls"));
+});
+
+test("review-b S1: a login-shell wrapper unwraps only the system's shell, named as written", () => {
+  // The controls: a bare shell name or a system-bin path keeps the route
+  // (APRV-380), and so does a quoted bare name, which bash runs as that name.
+  for (const command of [
+    "bash -c 'ls'",
+    "sh -lc 'ls'",
+    "/bin/bash -c 'ls'",
+    "/usr/bin/sh -lc 'ls'",
+    "/usr/local/bin/zsh -lc 'ls'",
+    "\"bash\" -c 'ls'",
+  ]) {
+    assert.equal(answer(command), "read.shell/read-shell", command);
+  }
+  // The control row with a class of its own: the route hands back the inner
+  // script's class, the same for a bare name and a system-bin path.
+  const written = classifyCommand("bash -lc 'rm f'");
+  assert.equal(written.ok, true);
+  assert.equal(answer("/bin/bash -lc 'rm f'"), answer("bash -lc 'rm f'"));
+  assert.equal(answer("/usr/bin/sh -c 'rm f'"), answer("rm f"));
+  // Its deny row: the same script under a path-spelled shell stays wrapped.
+  assert.equal(failure("x/bash -lc 'rm f'").code, "opaque");
+  // An assignment-shaped first word whose value ends in a shell name: with a
+  // quoted or escaped name bash runs the whole word, and the segment is
+  // refused as any other quoted-name segment is.
+  for (const spelling of quotedSpellings("n=x/bash")) {
+    for (const flag of ["-c", "-lc"]) {
+      const command = `${spelling} ${flag} 'ls'`;
+      const refused = failure(command);
+      assert.equal(refused.code, "unclassified", command);
+      assert.match(refused.detail, /quoted or escaped is a command word/u, command);
+    }
+  }
+  // A real assignment in front of the flag: bash runs the flag word, so it is no wrapper.
+  assert.equal(failure("n=x/bash -c 'ls'").code, "unclassified");
+  // A path outside the system-bin directories is whatever program sits there.
+  for (const command of ["x/bash -c 'ls'", "./zsh -c 'ls'", "/tmp/x/bash -c 'ls'", "/tmp/x/bin/sh -lc 'ls'"]) {
+    assert.equal(failure(command).code, "opaque", command);
+  }
+  // The segment shapes the hook reads: no unwrapped script for such a word.
+  for (const command of ["\"n\"=x/bash -c 'ls'", "x/bash -c 'ls'"]) {
+    const shape = commandSegmentShapes(command)?.[0];
+    assert.ok(shape !== undefined, command);
+    assert.equal(shape.script, null, command);
+    assert.equal(shape.opaqueShell, true, command);
+  }
+  assert.equal(commandSegmentShapes("bash -c 'ls'")?.[0]?.script, "ls");
+});
+
 // ---------------------------------------------------------------------------
 // The hook refuses under this repository's APPROVAL.md
 // ---------------------------------------------------------------------------
@@ -233,6 +295,7 @@ test("hook: under this repository's policy a quoted or escaped name is refused a
     "\\LANG=C git status",
     '"n"=5',
     '"n"=5; ls',
+    "\"n\"=x/bash -c 'ls'",
   ];
   for (const command of refused) {
     const before = logText(dir);

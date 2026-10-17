@@ -1411,7 +1411,9 @@ realpath. `docs/hermes-hook.md` has the payload and the limits.
 
 **A login shell around one inline script is the exception** (APRV-380). When
 the words are exactly a known shell (`bash`, `sh`, `zsh`, `dash`, `ksh`,
-`fish`, with or without a path), one inline-script flag (`-c`, `-lc`, `-ic` and
+`fish`, bare or at a path in `/bin`, `/usr/bin`, `/usr/local/bin`, `/sbin` or
+`/usr/sbin`; APRV-523: any other path, or an assignment-shaped word, keeps
+the wrapper opaque), one inline-script flag (`-c`, `-lc`, `-ic` and
 the like), and one script, the SCRIPT is classified, through this same
 classifier and the same segment rules. So `/bin/zsh -lc 'git push origin main'`
 is `vcs.push.main`, and the command bound in the record is still the outer one
