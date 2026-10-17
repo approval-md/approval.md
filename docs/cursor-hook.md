@@ -338,7 +338,8 @@ the classifier is the same file for both harnesses.
 A `git push` that removes a remote ref is `vcs.ref.delete`, rule
 `git-ref-delete`, with the ref names bound to the segment's `path`. Every
 spelling lands there: `--delete`, `-d`, a colon refspec (`:refs/heads/x`, `:x`),
-and bulk forms mixing several. A force push stays `vcs.history.rewrite` and a
+bulk forms mixing several, `--prune`, and every bundle (`-ud`) or unique-prefix
+abbreviation (`--del`) git's option parser accepts (APRV-517). A force push stays `vcs.history.rewrite` and a
 tag deletion stays `release.publish`. The full account, including why the class
 exists and what a policy that has no line for it resolves to, is in
 [docs/claude-code-hook.md](claude-code-hook.md#deleting-a-remote-ref-aprv-352);

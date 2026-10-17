@@ -70,7 +70,9 @@ const FIXTURES: readonly Fixture[] = [
   { command: "git push origin refs/heads/main", class: "vcs.push.main", rule: "git-push-main", row: "git-push" },
   { command: "git push", class: "vcs.push.main", rule: "git-push-implicit", row: "git-push" },
   { command: "git push origin", class: "vcs.push.main", rule: "git-push-implicit", row: "git-push" },
-  { command: "git push origin $BRANCH", class: "vcs.push.main", rule: "git-push-main", row: "git-push" },
+  // APRV-517: `$BRANCH` may hold `+main`, `:main` or `-d`, so it is read as the
+  // strictest push this row emits rather than as an unknown destination.
+  { command: "git push origin $BRANCH", class: "vcs.history.rewrite", rule: "git-push-unreadable", row: "git-push" },
   // APRV-352 moved these two off `vcs.push.main`: a deletion is not a push at
   // the trunk, and a policy that sampled trunk pushes was sampling irreversible
   // removals. `tests/command-class-ref-delete.test.ts` holds the rest.
