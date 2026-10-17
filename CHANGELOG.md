@@ -63,6 +63,60 @@ on the hook for enforcement.
 - Conformance: `command-class` 1.8.0, twelve new `push-*` vectors; no existing
   expectation moved.
 
+**Two more push holes in 0.4.5, closed here (APRV-518).** `git remote add
+--mirror=push m <url>` classified `read.vcs.remote` (autonomous), and the
+`git push m` after it read as an implicit `vcs.push.main` while it was a
+mirror push that deleted remote branches: a two-step way around
+`vcs.ref.delete` and `vcs.history.rewrite`. And `git push origin HEAD` (or `@`)
+was `vcs.push.branch` even on main.
+
+- **Writing `git remote` is `vcs.history.rewrite` (rule `git-remote-write`).**
+  Only a closed list still reads: `git remote`, `-v` / `--verbose`, `show
+  [-n]`, `get-url [--push] [--all]`, and `update` without `--prune`. `add`
+  (any `--mirror`), `rename`, `remove` / `rm`, `set-url`, `set-head`,
+  `set-branches`, `prune`, `update --prune`, an unknown subcommand and an
+  expandable subcommand word take the class of the mirror push they can arm.
+  `git config remote.…` writes were already refused as `unclassified` and stay
+  so; `git -c remote.…=… push` stays refused.
+- **The hook reads the checkout before it answers a push.** A new impure pass
+  (`src/cli/push-repo.ts`, first in `classifyForHook`) reads the current
+  branch, `remote.*.mirror`, `remote.*.push`, local tags, `push.followTags` and
+  submodule recursion in every directory the push may run in (the hook's own
+  and each literal `cd` before it), and answers each `git push` segment again,
+  the strictest reading winning. A push to a mirror remote is
+  `vcs.history.rewrite`; a refspec-less or colon-less push takes the class of
+  the configured refspecs (`+refs/heads/lane:refs/heads/main` makes `git push
+  origin lane` a forced trunk update, so `vcs.history.rewrite`); a colon-less
+  word naming a local tag, or `push.followTags`, is `release.publish`. When the
+  checkout cannot be read, or a `cd` cannot be followed (`cd "$D"`, `cd -`), a
+  push whose configuration decides its refs is `vcs.history.rewrite` (rule
+  `git-push-config-unreadable`).
+- **A write into a `.git` directory is `vcs.history.rewrite` (rule
+  `git-dir-write`).** `printf '[remote "origin"]\n\tpush =
+  :refs/heads/lane\n' >> .git/config && git push origin` deleted `lane` while
+  it read as a workspace write and an implicit trunk push. A redirection,
+  `tee`, `cp`, `mv`, `sed -i`, `rm`, `ln`, `curl -o` or `wget -O` whose target
+  has a `.git` segment now takes the class of the push it can arm. Reads are
+  unmoved. In the same command, code that runs first (`npm test && git push
+  -u origin lane`) or a write to a path the shell expands makes the push's
+  configuration unreadable, so a push it decides is `vcs.history.rewrite`.
+- **Push destinations are read through git's ref DWIM.** `git push origin
+  lane:heads/main` moved the remote trunk and read as `vcs.push.branch`.
+  `heads/x` is `refs/heads/x`, case is ignored (`MAIN`), `tags/x` is a tag,
+  and the hook adds the branch `origin/HEAD` names to main and master.
+- **`HEAD` and `@` are the current branch.** The pure classifier reads a
+  colon-less `HEAD` / `@` (any case: `head` resolves on a case-insensitive
+  filesystem) as the trunk push, rule `git-push-head`. The hook resolves it:
+  main, master, the `origin/HEAD` branch or a detached HEAD stay
+  `vcs.push.main`; any other branch is `vcs.push.branch`, the answer it had.
+- **Every verdict that moved, moved stricter.** Against #649's head, 0 looser
+  under the class order and under this repository's APPROVAL.md: over 24,689
+  pure command lines (4,528 `git push`, 2,344 `git remote` and 15 `.git`-write
+  lines stricter), and over 3,627 hook-level command lines in nine checkout
+  states (1,003 stricter). Real-git tests on a bare local remote prove each
+  case's effect. Conformance: `command-class` 1.9.0, twelve new vectors; no
+  existing expectation moved.
+
 ### Harnesses
 
 - **A Hermes record carries its harness version (APRV-419).** `hermes

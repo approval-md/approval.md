@@ -306,7 +306,7 @@ an addition).
 | `git-tag` | git | tag | read.shell for a LISTING (`-l`, `--list`, `-n`, `-n<num>`, `--contains`, `--points-at`, `--merged`, `--sort`, `--format`, `--color`, `--ignore-case`, `--omit-empty`, or no argument at all, rule `git-tag-read`); release.publish for everything else, which is every creation, deletion, force-move and signature, a bare tag name, and any flag the listing allowlist does not name (APRV-397) |
 | `git-clone` | git | clone | network.call |
 | `git-write` | git | add \| apply \| checkout \| cherry-pick \| merge \| mv \| pull \| restore \| revert \| rm \| stash \| switch \| worktree | vcs.commit.branch |
-| `git-remote-read` | git | fetch \| ls-remote \| remote | read.vcs.remote |
+| `git-remote-read` | git | fetch \| ls-remote \| remote | read.vcs.remote; vcs.history.rewrite for every `git remote` form outside the read list (`-v`, `show [-n]`, `get-url`, `update` without `--prune`), rule `git-remote-write` (APRV-518) |
 | `git-read` | git | blame \| describe \| diff \| grep \| log \| ls-files \| reflog \| rev-list \| rev-parse \| shortlog \| show \| status | read.shell |
 | `gh-release` | gh | release | release.publish |
 | `gh-api` | gh | api \| auth \| gist \| secret \| workflow | read.vcs.remote for a `gh api` with no method flag (or `GET`) and no `-f`/`-F`/`--field`/`--raw-field`/`--input`; vcs.remote.meta § for `gh api graphql` on the checkout's own repository whose document carries no `mutation`; every other call, and every other subcommand on the row, network.call |
@@ -757,6 +757,94 @@ A policy that has no `vcs.ref.delete` line resolves the class by
 explicit act and shipping the class ahead of the line is safe in the strict
 direction. This repository's line is proposed in
 `docs/proposals/vcs-ref-delete-2026-09.md`.
+
+### What the checkout says about a push (APRV-518)
+
+Some pushes send what the repository's configuration says rather than what the
+command line says, so the text alone cannot class them. Each of these was
+proven on git 2.50.1 against a bare local remote
+(`tests/git-push-remote-config.test.ts`):
+
+- `remote.<name>.mirror` makes a refspec-less push to that remote a mirror
+  push: every remote branch the checkout lacks is deleted and the rest are
+  force-updated, `--tags` and `--all` included. `git remote add --mirror=push
+  m <url>` followed by `git push m` deleted remote branches while it read as an
+  implicit `vcs.push.main`.
+- `remote.<name>.push` is the refspec list of a refspec-less push
+  (`:refs/heads/x` deletes, `+…` forces), and a colon-less refspec on the line
+  takes its destination and its force from the configured refspec that maps
+  it: under `+refs/heads/lane:refs/heads/main`, `git push origin lane` is a
+  forced update of the trunk.
+- `HEAD` and `@` push the current branch, which may be main. They take no
+  configured mapping.
+- A colon-less word that names a local tag publishes the tag, and
+  `push.followTags` / `push.recurseSubmodules` add tags or submodule trunks to
+  an ordinary push.
+
+Two rules close this.
+
+**Writing `git remote` is `vcs.history.rewrite`** (rule `git-remote-write`),
+the class of the mirror push it can arm. The read list is closed: `git remote`,
+`-v` / `--verbose`, `show [-n] <name>…`, `get-url [--push] [--all] <name>`, and
+`update [--no-prune] [<group>|<remote>…]` (a fetch, like `git fetch`). Every
+other form (`add`, `rename`, `remove` / `rm`, `set-url`, `set-head`,
+`set-branches`, `prune`, `update --prune`, an unknown subcommand, a word the
+shell may expand where the subcommand or an `update` option goes) writes.
+`git config` has no row, so a `git config remote.…` write stays `unclassified`
+and refused, and `git -c remote.…=… push` is refused too.
+
+**A write into a `.git` directory is `vcs.history.rewrite`** (rule
+`git-dir-write`, the path bound). `printf '[remote "origin"]\n\tpush =
+:refs/heads/lane\n' >> .git/config && git push origin` deleted `lane` on git
+2.50.1 while it read as a workspace write and an implicit trunk push, and a
+file under `.git/hooks/` runs on the next push. Any redirection target with a
+`.git` path segment (any case), and any positional or `--flag=value` value of
+a segment that is not a read (`tee`, `cp`, `mv`, `sed -i`, `rm`, `ln`, and
+`curl -o` / `wget -O`, which otherwise read as `read.web`), takes the class.
+Reads (`cat .git/config`), `.gitignore`, and prose with spaces in it are
+unmoved. `rm -f .git/index.lock` is in the class too.
+
+**The hook reads the checkout before it answers a push.** After the pure
+classifier, `refinePushRepo` (`src/cli/push-repo.ts`) re-reads every `git push`
+segment under what the checkout says: `git rev-parse --git-common-dir`, `git
+symbolic-ref --quiet HEAD`, `git config -z --get-regexp` over the mirror, push,
+followTags and submodule keys, `git for-each-ref refs/tags
+refs/remotes/origin/HEAD`, and the legacy `remotes/` and `branches/`
+directories. It reads every directory the push may run in: the hook's own, and
+each literal `cd` before it (a `cd` that fails leaves the shell where it was,
+so both count). The strictest answer wins. Because it reads the checkout
+before the command runs, an earlier segment of the same command that may
+change the configuration makes it unreadable: one that runs code the runtime
+did not author (`npm test`, `node x.js`, the `CODE_EXECUTING_RULES`), or one
+that writes to or names a path the shell expands (`>> "$(git rev-parse
+--git-dir)/config"`, `cp x "$D"`).
+
+Destinations are read the way git's ref DWIM reads them, in the pure
+classifier too: `heads/main` is `refs/heads/main` (git tries `refs/<name>`
+first, and `git push origin lane:heads/main` moved the remote trunk), the
+comparison ignores case (`MAIN` is the same loose ref as `main` on a
+case-insensitive filesystem), `tags/x` on either side is a tag, and the
+branch `refs/remotes/origin/HEAD` names is a trunk beside main and master when
+the hook can read it.
+
+| what the checkout shows | class | rule |
+|---|---|---|
+| the push may use a mirror remote | `vcs.history.rewrite` | `git-push-config-mirror` |
+| a refspec-less or colon-less push, under configured push refspecs | the class of those refspecs | `git-push-config-refspec` |
+| a colon-less word that names a local tag | `release.publish` | `git-push-local-tag` |
+| `push.followTags` on | `release.publish` | `git-push-config-tags` |
+| submodule recursion on | `vcs.push.main` | `git-push-config-submodules` |
+| `HEAD` / `@` on main, master, the branch `origin/HEAD` names, or detached | `vcs.push.main` | `git-push-head` |
+| `HEAD` / `@` on any other branch | `vcs.push.branch` | `git-push-branch` |
+| a legacy remotes file the push may use, a `cd` it cannot follow (`cd "$D"`, `cd -`, `pushd`), earlier code or an expanded write path in the same command, or a checkout git cannot read, for a push its configuration decides | `vcs.history.rewrite` | `git-push-config-unreadable` |
+
+Without a checkout to read, the pure classifier reads `HEAD` / `@` as the trunk
+(`git-push-head`), because the text cannot show it is not main. A directory
+that is not a repository at all adds nothing: git refuses the push there for
+the same reason `rev-parse` did. Every answer is at least as strict as the
+pure classifier's, with one exception, and it is the answer the classifier
+gave before this task: a `HEAD` / `@` that every directory shows to be a
+feature branch is that branch's `vcs.push.branch`.
 
 ### Rewriting unpublished history
 

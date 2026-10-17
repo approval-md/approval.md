@@ -201,6 +201,7 @@ import {
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
+import { refinePushRepo } from "./push-repo.js";
 import { HOOK_GROK_HELP, HOOK_HELP, HOOK_HERMES_HELP, HOOK_MUSE_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
@@ -2965,12 +2966,12 @@ export function refineSkillScripts(
 }
 
 /**
- * The classifier, its context, and all five impure refinements, in the one
+ * The classifier, its context, and all six impure refinements, in the one
  * order every caller must use.
  *
  * `hook classify` printing a different class from the one `hook claude-code`
  * decides would make the explainer a different program (APRV-108's note), and
- * that stays true now there are five refinements in the chain.
+ * that stays true now there are six refinements in the chain.
  *
  * `readRoots` is the one argument whose ABSENCE is the loose answer rather than
  * the strict one (APRV-347), so it is passed explicitly at every call site: an
@@ -2989,7 +2990,11 @@ export function classifyForHook(
     scratchRoots: roots,
     ...(readRoots.length === 0 ? {} : { readRoots }),
   });
-  const rewritten = refineRewrite(classified, cwd);
+  // APRV-518. A `git push` whose refs its remote configuration or its current
+  // branch decides is answered from the checkout it runs in. First, because it
+  // reads only push segments, which no pass below changes.
+  const pushed = refinePushRepo(classified, cwd);
+  const rewritten = refineRewrite(pushed.result, cwd);
   const scratched = refineScratchDelete(rewritten.result, roots);
   const scoped = refineReadScope(scratched.result, readRoots, cwd);
   // APRV-402. Its roots are not `readRoots`: a read scope is a read notion and
@@ -3004,6 +3009,7 @@ export function classifyForHook(
   return {
     result: scripted.result,
     notes: [
+      ...pushed.notes,
       ...rewritten.notes,
       ...scratched.notes,
       ...scoped.notes,
