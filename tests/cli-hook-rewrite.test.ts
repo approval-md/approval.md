@@ -506,39 +506,37 @@ function stoppedRebase(pushed: boolean, policy = THIS_REPO): string {
   return dir;
 }
 
-test("cases 22, 26, 29: --continue and --skip on an unpushed branch are local; --abort with no rebase too", () => {
-  const dir = stoppedRebase(false);
-  const evidence = assertMember(dir, "git rebase --continue", "local", "rebase-in-progress-unpublished", BARE);
-  assert.equal(evidence.ref, "refs/heads/lane");
-  assert.equal(evidence.lost, 2);
-  assertMember(dir, "git rebase --skip", "local", "rebase-in-progress-unpublished", BARE);
-  // Lane B's add-then-continue: `git add` moves no ref.
-  assertMember(dir, "git add a.txt && git rebase --continue", "local", "rebase-in-progress-unpublished", BARE, 1);
-  // 29: no rebase in progress, --abort is still local (git errors, harmlessly).
-  const clean = newRepo();
-  assertMember(clean, "git rebase --abort", "local", "abort-restores", BARE);
-});
+// APRV-648 fix round 2, a deliberate departure from the D-6 spec text: a step
+// that resumes a rebase in progress acts on state files under the git
+// directory, which anything that can write the checkout can forge, and the
+// check reads none of them. So `--continue`, `--skip`, `--abort` and `--quit`
+// are shared, `unreadable-target`, on a real stop as much as on a forged one.
+const RESUME_STEPS = ["git rebase --continue", "git rebase --skip", "git rebase --abort", "git rebase --quit"] as const;
 
-test("case 23: --continue whose orig-head is on origin/lane is shared", () => {
-  const dir = stoppedRebase(true);
-  assertMember(dir, "git rebase --continue", "shared", "shared-commit", BARE);
-});
+/** Every resume step is shared and reads nothing from the rebase state. */
+function assertResumeShared(dir: string, legacy: string): void {
+  for (const command of RESUME_STEPS) {
+    const evidence = assertMember(dir, command, "shared", "unreadable-target", legacy);
+    assert.equal(evidence.ref, null, `${command}: no ref is read from the rebase state`);
+    assert.equal(evidence.lost, null, `${command}: nothing is counted from the rebase state`);
+  }
+}
 
-test("cases 24-25: a todo with any command outside the vetted set is shared", () => {
+test("cases 22-29 (APRV-648 round 2): every resume step is shared, on a real stop pushed or not, and with no rebase in progress", () => {
+  const unpushed = stoppedRebase(false);
+  assertResumeShared(unpushed, BARE);
+  assertResumeShared(stoppedRebase(true), BARE);
+  // Lane B's add-then-continue: the earlier segment is allowed, the resume is not.
+  assertMember(unpushed, "git add a.txt && git rebase --continue", "shared", "unreadable-target", BARE, 1);
+  assertMember(unpushed, "git rebase --continue -q", "shared", "unreadable-target", BARE);
+  // A todo carrying a command outside any vetted set.
   const exec = stoppedRebase(false);
   appendFileSync(join(exec, ".git", "rebase-merge", "git-rebase-todo"), "exec echo hi\n", "utf8");
-  assertMember(exec, "git rebase --continue", "shared", "todo-unvetted", BARE);
-  const updateRef = stoppedRebase(false);
-  appendFileSync(join(updateRef, ".git", "rebase-merge", "git-rebase-todo"), "update-ref refs/heads/main\n", "utf8");
-  assertMember(updateRef, "git rebase --continue", "shared", "todo-unvetted", BARE);
-});
-
-test("cases 27-28: --abort and --quit are local even on a pushed branch (option c, folded in)", () => {
-  const dir = stoppedRebase(true);
-  assertMember(dir, "git rebase --abort", "local", "abort-restores", BARE);
-  assertMember(dir, "git rebase --quit", "local", "abort-restores", BARE);
-  // An earlier segment that moves the cwd makes even an abort shared.
-  assertMember(dir, "cd . && git rebase --abort", "shared", "compound-state", BARE, 1);
+  assertResumeShared(exec, BARE);
+  // 29: no rebase in progress at all (HEAD on main).
+  assertResumeShared(newRepo(), BARE);
+  // An earlier segment that moves the cwd still names its own basis.
+  assertMember(unpushed, "cd . && git rebase --abort", "shared", "compound-state", BARE, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -848,11 +846,20 @@ test("adversarial: reset --hard and commit --amend in the abbreviations git acce
 });
 
 test("adversarial: only a closed list of earlier segments and assignments leaves a rewrite judgeable", () => {
+  // The allowed: index-only git, and assignments that only silence a prompt,
+  // shown on an amend of an unpushed branch, which stays local.
+  const lane = newRepo();
+  branch(lane, "lane");
+  commit(lane, "l1");
+  writeFileSync(join(lane, "a.txt"), "staged\n", "utf8");
+  assertMember(lane, "git add a.txt && git commit --amend --no-edit", "local", "range-unpublished", BRANCH, 1);
+  assertMember(lane, "git status && git add -A 2>/dev/null && git commit --amend --no-edit", "local", "range-unpublished", BRANCH, 2);
+  assertMember(lane, "GIT_EDITOR=true git commit --amend", "local", "range-unpublished", BRANCH);
+  assertMember(lane, "GIT_EDITOR=vim git commit --amend", "shared", "env-assignment", BRANCH);
+  // On a stopped rebase the same allowed prefixes reach the resume rule, which is shared.
   const dir = stoppedRebase(false);
-  // The allowed: index-only git, and assignments that only silence a prompt.
-  assertMember(dir, "git add a.txt && git rebase --continue", "local", "rebase-in-progress-unpublished", BARE, 1);
-  assertMember(dir, "git status && git add -A 2>/dev/null && git rebase --continue", "local", "rebase-in-progress-unpublished", BARE, 2);
-  assertMember(dir, "GIT_EDITOR=true git rebase --continue", "local", "rebase-in-progress-unpublished", BARE);
+  assertMember(dir, "git add a.txt && git rebase --continue", "shared", "unreadable-target", BARE, 1);
+  assertMember(dir, "GIT_EDITOR=true git rebase --continue", "shared", "unreadable-target", BARE);
   // An editor that is a program of the caller's choosing is not silenced.
   assertMember(dir, "GIT_EDITOR=vim git rebase --continue", "shared", "env-assignment", BARE);
   // A write into the git directory before the check's state is used.
@@ -876,8 +883,8 @@ test("adversarial: only a closed list of earlier segments and assignments leaves
   assert.equal(blind.result.ok ? blind.result.segments[1]?.history_rewrite?.basis : null, "compound-state");
 });
 
-test("adversarial: a rebase state written by hand cannot make --abort or --continue a quiet rewrite", () => {
-  // --abort with a forged head-name and orig-head: a hard reset of main.
+test("adversarial: a rebase state written by hand cannot make any resume step a quiet rewrite", () => {
+  // A forged head-name and orig-head that would make --abort a hard reset of main.
   const forged = newRepo();
   commit(forged, "m2");
   git(forged, "push", "--quiet", "origin", "main");
@@ -891,38 +898,24 @@ test("adversarial: a rebase state written by hand cannot make --abort or --conti
   // The pre-split class is APRV-108's downgrade (HEAD is on `lane`, which has
   // no upstream): a policy with no own line still answers what it answered
   // before, and adopting the split is what closes this.
-  const aborted = assertMember(forged, "git rebase --abort", "shared", "shared-commit", BRANCH);
-  assert.equal(aborted.ref, "refs/heads/main");
-  assert.equal(aborted.lost, 1);
-  assert.equal(aborted.witness, "refs/remotes/origin/main");
-  // --quit moves no ref, whatever the state says.
-  assertMember(forged, "git rebase --quit", "local", "abort-restores", BRANCH);
-  // A head-name that is not a branch is not read.
-  writeFileSync(join(state, "head-name"), "refs/tags/v1\n", "utf8");
-  assertMember(forged, "git rebase --abort", "shared", "unreadable-target", BRANCH);
-  // git's own "no branch" spelling while HEAD is on a branch: git would
-  // hard-reset that branch, so it is not read as a restore (APRV-648 M1).
-  writeFileSync(join(state, "head-name"), "detached HEAD\n", "utf8");
-  assertMember(forged, "git rebase --abort", "shared", "unreadable-target", BRANCH);
+  assertResumeShared(forged, BRANCH);
+  for (const headName of ["refs/tags/v1\n", "detached HEAD\n"]) {
+    writeFileSync(join(state, "head-name"), headName, "utf8");
+    assertResumeShared(forged, BRANCH);
+  }
 
-  // --continue with a forged onto: R is read from the branch tip and HEAD, so
-  // an onto equal to orig-head does not make the pushed lane's commits vanish.
+  // A forged onto, a strategy git does not ship, refs queued by --update-refs.
   const pushed = stoppedRebase(true);
   const origHead = readFileSync(join(pushed, ".git", "rebase-merge", "orig-head"), "utf8");
   writeFileSync(join(pushed, ".git", "rebase-merge", "onto"), origHead, "utf8");
-  const continued = assertMember(pushed, "git rebase --continue", "shared", "shared-commit", BARE);
-  assert.equal(continued.lost, 2);
-
-  // A strategy git does not ship, or refs queued by --update-refs, in the state.
+  assertResumeShared(pushed, BARE);
   const strategy = stoppedRebase(false);
   writeFileSync(join(strategy, ".git", "rebase-merge", "strategy"), "evil\n", "utf8");
-  assertMember(strategy, "git rebase --continue", "shared", "runs-commands", BARE);
+  assertResumeShared(strategy, BARE);
   const queued = stoppedRebase(false);
   writeFileSync(join(queued, ".git", "rebase-merge", "update-refs"), "refs/heads/main\n", "utf8");
-  assertMember(queued, "git rebase --continue", "shared", "todo-unvetted", BARE);
-  // Extra options on a resume or an abort are outside the closed list.
-  assertMember(queued, "git rebase --continue -q", "shared", "option-unvetted", BARE);
-  assertMember(queued, "git rebase --abort -q", "shared", "option-unvetted", BARE);
+  assertResumeShared(queued, BARE);
+  assertMember(queued, "git rebase --abort -q", "shared", "unreadable-target", BARE);
 });
 
 /**
@@ -1002,29 +995,23 @@ function forgedBothDirsContinue(policy = THIS_REPO): string {
 
 test("APRV-648 M1: --abort with head-name `detached HEAD` while HEAD is on main is shared, and git really resets main", () => {
   const { dir, c1 } = forgedDetachedAbort();
-  const evidence = assertMember(dir, "git rebase --abort", "shared", "unreadable-target", BARE);
-  assert.equal(evidence.ref, "refs/heads/main");
+  assertResumeShared(dir, BARE);
   // The CLI answers the same.
   assert.equal(classifyCli(dir, "git rebase --abort").segments?.[0]?.class, SHARED);
-  // --quit still moves no ref.
-  assertMember(dir, "git rebase --quit", "local", "abort-restores", BARE);
   // What the verdict guards against: git hard-resets main by two pushed commits.
   assert.equal(gitMayFail(dir, "rebase", "--abort"), 0);
   assert.equal(git(dir, "rev-parse", "main"), c1, "git reset the branch HEAD was on");
 
-  // The same state with HEAD really detached is git's own: only HEAD moves.
+  // The same state with HEAD really detached is git's own shape, and still
+  // shared since round 2: the check no longer tells the two apart.
   const detached = forgedDetachedAbort();
-  const tip = git(detached.dir, "rev-parse", "main");
   git(detached.dir, "checkout", "--quiet", "--detach", "main");
-  assertMember(detached.dir, "git rebase --abort", "local", "abort-restores", BARE);
-  assert.equal(gitMayFail(detached.dir, "rebase", "--abort"), 0);
-  assert.equal(git(detached.dir, "rev-parse", "main"), tip, "no branch moved");
+  assertResumeShared(detached.dir, BARE);
 });
 
-test("APRV-648 M1: with both rebase-apply and rebase-merge present, --abort is shared; git acts on rebase-apply", () => {
+test("APRV-648 M1: with both rebase-apply and rebase-merge present, every resume step is shared; git acts on rebase-apply", () => {
   const { dir, c1, lane } = forgedBothDirs();
-  const evidence = assertMember(dir, "git rebase --abort", "shared", "unreadable-target", BARE);
-  assert.equal(evidence.lost, null, "nothing is counted from an ambiguous state");
+  assertResumeShared(dir, BARE);
   assert.equal(classifyCli(dir, "git rebase --abort").segments?.[0]?.class, SHARED);
   // git 2.50 reads rebase-apply first: main loses two pushed commits, lane is
   // untouched, and the rebase-merge decoy is left behind.
@@ -1035,9 +1022,7 @@ test("APRV-648 M1: with both rebase-apply and rebase-merge present, --abort is s
   assert.ok(!existsSync(join(dir, ".git", "rebase-apply")));
 });
 
-test("APRV-648 M1: rebase-apply alone is read, a state path that is not a directory is shared, and a branch abort needs a detached HEAD", () => {
-  // A forged rebase-apply alone, naming main, with HEAD detached: read from
-  // rebase-apply and counted.
+test("APRV-648 M1: a lone rebase-apply, a state path that is not a directory, and an attached HEAD are all shared", () => {
   const apply = newRepo(THIS_REPO, 3);
   const c1 = git(apply, "rev-parse", "main~2");
   git(apply, "checkout", "--quiet", "--detach", "main");
@@ -1047,40 +1032,24 @@ test("APRV-648 M1: rebase-apply alone is read, a state path that is not a direct
   writeFileSync(join(applyDir, "orig-head"), `${c1}\n`, "utf8");
   writeFileSync(join(applyDir, "onto"), `${c1}\n`, "utf8");
   writeFileSync(join(applyDir, "rebasing"), "", "utf8");
-  const counted = assertMember(apply, "git rebase --abort", "shared", "shared-commit", BARE);
-  assert.equal(counted.ref, "refs/heads/main");
-  assert.equal(counted.lost, 2);
+  assertResumeShared(apply, BARE);
 
-  // A rebase-merge that is a plain file: git sees no rebase, but the state is
-  // not one git wrote, so it is not read as one.
   const file = newRepo();
   writeFileSync(join(file, ".git", "rebase-merge"), "x\n", "utf8");
-  assertMember(file, "git rebase --abort", "shared", "unreadable-target", BARE);
-  assertMember(file, "git rebase --continue", "shared", "unreadable-target", BARE);
+  assertResumeShared(file, BARE);
 
-  // A branch head-name with HEAD attached (git leaves every stopped rebase
-  // detached): shared even when the move would lose nothing.
   const attached = stoppedRebase(false);
   git(attached, "symbolic-ref", "HEAD", "refs/heads/main");
-  const abort = assertMember(attached, "git rebase --abort", "shared", "unreadable-target", BARE);
-  assert.equal(abort.ref, "refs/heads/lane");
+  assertResumeShared(attached, BARE);
 });
 
-test("APRV-648 S1: --continue and --skip read the state git reads and refuse an attached HEAD", () => {
+test("APRV-648 S1: --continue and --skip are shared with both state directories present", () => {
   const both = forgedBothDirsContinue();
-  assertMember(both, "git rebase --continue", "shared", "unreadable-target", BARE);
-  assertMember(both, "git rebase --skip", "shared", "unreadable-target", BARE);
+  assertResumeShared(both, BARE);
   assert.equal(classifyCli(both, "git rebase --continue").segments?.[0]?.class, SHARED);
-
-  // A stopped rebase whose HEAD was attached to main by hand: the picks
-  // would land on main and a fixup would amend its tip.
-  const attached = stoppedRebase(false);
-  git(attached, "symbolic-ref", "HEAD", "refs/heads/main");
-  assertMember(attached, "git rebase --continue", "shared", "unreadable-target", BARE);
-  assertMember(attached, "git rebase --skip", "shared", "unreadable-target", BARE);
 });
 
-test("APRV-648: a real apply-backend stop is read from rebase-apply: --continue and --abort stay local on an unpushed branch", () => {
+test("APRV-648 round 2: a real apply-backend stop is shared for every resume step too", () => {
   const dir = newRepo();
   commit(dir, "a", "base\n", "a.txt");
   git(dir, "push", "--quiet", "origin", "main");
@@ -1093,9 +1062,124 @@ test("APRV-648: a real apply-backend stop is read from rebase-apply: --continue 
   assert.notEqual(gitMayFail(dir, "rebase", "--apply", "main"), 0, "the apply rebase stops on the conflict");
   assert.ok(existsSync(join(dir, ".git", "rebase-apply")));
   assert.ok(!existsSync(join(dir, ".git", "rebase-merge")));
-  const continued = assertMember(dir, "git rebase --continue", "local", "rebase-in-progress-unpublished", BARE);
-  assert.equal(continued.ref, "refs/heads/lane");
-  assertMember(dir, "git rebase --abort", "local", "abort-restores", BARE);
+  assertResumeShared(dir, BARE);
+});
+
+/**
+ * APRV-648 M-A: `main` with three pushed commits, HEAD detached at its tip, a
+ * branch whose NAME is `main~2`'s id plus 24 more hex digits pointing at
+ * main's tip, and a forged `rebase-merge` naming `main` whose orig-head is
+ * that 64-character name. In a SHA-1 repository rev-list reads the name as
+ * that branch (nothing lost), while git's abort parses only the first 40
+ * characters and hard-resets main to `main~2`.
+ */
+function forgedLongOrigHead(policy = THIS_REPO): { dir: string; c1: string } {
+  const dir = newRepo(policy, 3);
+  const c1 = git(dir, "rev-parse", "main~2");
+  const longName = `${c1}${"abcdef".repeat(4)}`;
+  git(dir, "branch", longName, "main");
+  git(dir, "checkout", "--quiet", "--detach", "main");
+  const state = join(dir, ".git", "rebase-merge");
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, "head-name"), "refs/heads/main\n", "utf8");
+  writeFileSync(join(state, "orig-head"), `${longName}\n`, "utf8");
+  writeFileSync(join(state, "onto"), `${c1}\n`, "utf8");
+  writeFileSync(join(state, "interactive"), "", "utf8");
+  return { dir, c1 };
+}
+
+/**
+ * APRV-648 M-B: a pushed `lane` whose tip H is HEAD (detached), and a forged
+ * `rebase-merge` for lane with orig-head H. `amend`: an `amend` file naming H,
+ * a message, an author script and a staged change, so the resume amends H.
+ * `fixup`: a todo whose first line is a fixup, with a `done` file, so the
+ * resume folds a commit into H. Either way git moves lane to a rewrite of H,
+ * and lane no longer holds the pushed H.
+ */
+function forgedAmendingResume(kind: "amend" | "fixup", policy = THIS_REPO): { dir: string; h: string } {
+  const dir = newRepo(policy);
+  branch(dir, "side");
+  const side = commit(dir, "s1");
+  git(dir, "checkout", "--quiet", "main");
+  branch(dir, "lane");
+  const h = commit(dir, "l1");
+  pushUpstream(dir, "lane");
+  git(dir, "checkout", "--quiet", "--detach", h);
+  const state = join(dir, ".git", "rebase-merge");
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, "head-name"), "refs/heads/lane\n", "utf8");
+  writeFileSync(join(state, "orig-head"), `${h}\n`, "utf8");
+  writeFileSync(join(state, "onto"), `${h}\n`, "utf8");
+  writeFileSync(join(state, "interactive"), "", "utf8");
+  if (kind === "amend") {
+    writeFileSync(join(state, "git-rebase-todo"), `pick ${side}\n`, "utf8");
+    writeFileSync(join(state, "amend"), `${h}\n`, "utf8");
+    writeFileSync(join(state, "message"), "amended\n", "utf8");
+    writeFileSync(
+      join(state, "author-script"),
+      "GIT_AUTHOR_NAME='Test'\nGIT_AUTHOR_EMAIL='test@example.com'\nGIT_AUTHOR_DATE='@1700000000 +0000'\n",
+      "utf8",
+    );
+    writeFileSync(join(dir, "l1.txt"), "l1\nchanged\n", "utf8");
+    git(dir, "add", "l1.txt");
+  } else {
+    writeFileSync(join(state, "git-rebase-todo"), `fixup ${side}\n`, "utf8");
+    writeFileSync(join(state, "done"), "", "utf8");
+  }
+  return { dir, h };
+}
+
+/**
+ * A stopped-rebase shape whose `refs-to-delete` lists `refs/heads/main`: git
+ * deletes every ref listed there when it removes the merge state, which
+ * `--quit` and `--abort` both do (sequencer.c `sequencer_remove_state`).
+ */
+function forgedRefsToDelete(policy = THIS_REPO): string {
+  const dir = newRepo(policy, 2);
+  const tip = git(dir, "rev-parse", "main");
+  git(dir, "checkout", "--quiet", "--detach", "main");
+  const state = join(dir, ".git", "rebase-merge");
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(state, "head-name"), "detached HEAD\n", "utf8");
+  writeFileSync(join(state, "orig-head"), `${tip}\n`, "utf8");
+  writeFileSync(join(state, "onto"), `${tip}\n`, "utf8");
+  writeFileSync(join(state, "refs-to-delete"), "refs/heads/main\n", "utf8");
+  return dir;
+}
+
+test("APRV-648 M-A: an orig-head longer than the repository's object id is shared, and git really resets main", () => {
+  const { dir, c1 } = forgedLongOrigHead();
+  // At 40efb973 this --abort was local, abort-restores (0 commits lost).
+  assertMember(dir, "git rebase --abort", "shared", "unreadable-target", BARE);
+  assertResumeShared(dir, BARE);
+  assert.equal(classifyCli(dir, "git rebase --abort").segments?.[0]?.class, SHARED);
+  assert.equal(gitMayFail(dir, "rebase", "--abort"), 0);
+  assert.equal(git(dir, "rev-parse", "main"), c1, "git parsed the first 40 characters and reset main");
+});
+
+test("APRV-648 M-B: a resume that amends HEAD (an amend file, or a leading fixup) is shared, and git really drops the pushed tip", () => {
+  for (const kind of ["amend", "fixup"] as const) {
+    const { dir, h } = forgedAmendingResume(kind);
+    // At 40efb973 this --continue was local, rebase-in-progress-unpublished (R empty).
+    assertMember(dir, "git rebase --continue", "shared", "unreadable-target", BARE);
+    assertResumeShared(dir, BARE);
+    assert.equal(classifyCli(dir, "git rebase --continue").segments?.[0]?.class, SHARED, kind);
+    assert.equal(gitMayFail(dir, "rebase", "--continue"), 0, kind);
+    assert.notEqual(
+      gitMayFail(dir, "merge-base", "--is-ancestor", h, "lane"),
+      0,
+      `${kind}: lane no longer holds the pushed commit`,
+    );
+  }
+});
+
+test("APRV-648 round 2: --quit is shared, because git deletes every ref a forged refs-to-delete lists", () => {
+  const dir = forgedRefsToDelete();
+  // At 40efb973 --quit was local whatever the state said.
+  assertMember(dir, "git rebase --quit", "shared", "unreadable-target", BARE);
+  assertResumeShared(dir, BARE);
+  assert.equal(gitMayFail(dir, "rebase", "--quit"), 0);
+  assert.notEqual(gitMayFail(dir, "rev-parse", "--verify", "--quiet", "refs/heads/main"), 0, "git deleted main");
 });
 
 // ---------------------------------------------------------------------------
@@ -1315,8 +1399,9 @@ test("E5: hook classify prints what the hook decides, for cases 1, 3, 22, 27 and
   expectFor(one, "git commit --amend --no-edit", "e5-1");
   pushUpstream(one, "lane");
   expectFor(one, "git commit --amend", "e5-3");
-  // 22 and 27 on one stopped rebase (an abort is local whether or not the
-  // branch was pushed), and 37 in the same checkout.
+  // 22 and 27 on one stopped rebase (both shared since APRV-648 round 2, so
+  // this pins that the hook names the member classify printed), and 37 in
+  // the same checkout.
   const stopped = stoppedRebase(false, BOTH_AUTONOMOUS);
   git(stopped, "config", "remote.origin.push", "+refs/heads/*:refs/heads/*");
   attest(stopped);
@@ -1344,8 +1429,7 @@ test("adversarial, in the hook: under the proposed lines a bundled force push an
   assert.equal(rawLog(dir), before, "a human-only refusal appends nothing");
 });
 
-test("APRV-648 M1 and S1, in the hook: under the proposed lines a forged-state abort or continue is denied as .shared", () => {
-  const before = (dir: string): string => rawLog(dir);
+test("APRV-648, in the hook: under the proposed lines every resume step is denied as .shared, forged state or real", () => {
   const cases: [string, string, string][] = [];
   const detached = forgedDetachedAbort(PROPOSED).dir;
   attest(detached);
@@ -1356,8 +1440,25 @@ test("APRV-648 M1 and S1, in the hook: under the proposed lines a forged-state a
   const resume = forgedBothDirsContinue(PROPOSED);
   attest(resume);
   cases.push([resume, "git rebase --continue", "s1-both"]);
+  // Round 2: M-A, both M-B shapes, and a forged refs-to-delete.
+  const longOrig = forgedLongOrigHead(PROPOSED).dir;
+  attest(longOrig);
+  cases.push([longOrig, "git rebase --abort", "ma-long-orig-head"]);
+  const amend = forgedAmendingResume("amend", PROPOSED).dir;
+  attest(amend);
+  cases.push([amend, "git rebase --continue", "mb-amend"]);
+  const fixup = forgedAmendingResume("fixup", PROPOSED).dir;
+  attest(fixup);
+  cases.push([fixup, "git rebase --continue", "mb-fixup"], [fixup, "git rebase --skip", "mb-fixup-skip"]);
+  const deleting = forgedRefsToDelete(PROPOSED);
+  attest(deleting);
+  cases.push([deleting, "git rebase --quit", "quit-refs-to-delete"]);
+  // A real stop on an unpushed branch, the departure from the D-6 text.
+  const real = stoppedRebase(false, PROPOSED);
+  attest(real);
+  for (const command of RESUME_STEPS) cases.push([real, command, `real-${command.slice("git rebase --".length)}`]);
   for (const [dir, command, id] of cases) {
-    const log = before(dir);
+    const log = rawLog(dir);
     const verdict = hook(dir, command, id);
     assert.equal(verdict.permission, "deny", `${id}: ${verdict.reason}`);
     assert.match(verdict.reason, /^hook-class-human-only: class vcs\.history\.rewrite\.shared /u, id);

@@ -9,7 +9,9 @@
  * - `vcs.history.rewrite.local` when it PROVED, from local refs and without the
  *   network, that no commit of the rewrite's lost range is shared, that the ref
  *   it moves is not a default branch, and that the command moves no ref other
- *   than the one it names; `git rebase --abort` / `--quit` always;
+ *   than the one it names; never for a step that resumes a rebase in
+ *   progress (`--continue`, `--skip`, `--abort`, `--quit`), whose target lives
+ *   in state files anyone who can write the checkout can forge;
  * - `vcs.history.rewrite.shared` otherwise, including every case where a check
  *   could not run, timed out, or answered ambiguously (fail closed: a wrong
  *   `local` takes a human out of a decision that needed one, a wrong `shared`
@@ -40,11 +42,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { lstatSync, readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
-
 import {
-  BUILTIN_MERGE_STRATEGIES,
   commandLineShape,
   gitInvocationShape,
   pullRebaseMode,
@@ -109,8 +107,8 @@ function steersConfiguration(assignment: string): boolean {
 /**
  * `NAME=value` words a rewrite segment may carry and still be judged local: a
  * CLOSED list, exact values only. Each one only silences a prompt or a pager
- * (`GIT_EDITOR=true git rebase --continue` is how a session continues a rebase
- * without a terminal); none points git at another repository, other
+ * (`GIT_EDITOR=true git commit --amend` keeps the message without a
+ * terminal); none points git at another repository, other
  * configuration, another program search path or a sequence editor. Any other
  * assignment is shared, basis `env-assignment`.
  */
@@ -130,8 +128,8 @@ const HARMLESS_ASSIGNMENTS: readonly string[] = [
  * The git subcommands an EARLIER segment of the same command line may run and
  * leave a later rewrite segment judgeable: a CLOSED list. Each changes only the
  * index or the work tree, never a ref, the working directory, the environment
- * or a file under the git directory. Lane B's `git add <file> && git rebase
- * --continue` is the case it exists for. Any other earlier segment (a `cd`,
+ * or a file under the git directory, as in `git add <file> && git commit
+ * --amend`. Any other earlier segment (a `cd`,
  * an `export`, a redirect into `.git`, a script that might run git) makes the
  * rewrite shared, basis `compound-state`, because the check reads the state
  * before the command line runs.
@@ -217,20 +215,6 @@ const REBASE_ATTACHED_LONG: readonly string[] = [
 /** Plain-rebase short options whose value is attached (`-Xtheirs`, `-C4`, `-sort`, `-Skey`). */
 const REBASE_ATTACHED_SHORT: readonly string[] = ["-X", "-C", "-s", "-S"];
 
-/** The todo commands a resumed rebase may carry and still be judged local. */
-const VETTED_TODO_COMMANDS: readonly string[] = [
-  "pick",
-  "p",
-  "edit",
-  "e",
-  "squash",
-  "s",
-  "fixup",
-  "f",
-  "drop",
-  "d",
-];
-
 const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 
 /** A git query that could not be answered at all; the segment is shared. */
@@ -301,38 +285,21 @@ interface BranchFacts {
 interface RepoFacts {
   /** Full ref HEAD names (`refs/heads/x`), or `null` when detached. */
   head: string | null;
-  /**
-   * HEAD is a commit id and names no ref at all. `head === null` alone does
-   * not say this: a HEAD that is a symbolic ref outside `refs/heads/` is
-   * `null` too, and a ref update through it moves the ref it names.
-   */
-  detached: boolean;
-  rebaseMerge: string;
-  rebaseApply: string;
   branches: Map<string, BranchFacts>;
   /** The local branch name `refs/remotes/origin/HEAD` points at, or `null`. */
   originDefault: string | null;
 }
 
-/** C1 + C2: current ref, rebase state directories, upstream map, origin default. */
-function readRepoFacts(git: Git, cwd: string): RepoFacts {
-  const c1 = git.run([
-    "rev-parse",
-    "--symbolic-full-name",
-    "HEAD",
-    "--absolute-git-dir",
-    "--git-path",
-    "rebase-merge",
-    "--git-path",
-    "rebase-apply",
-  ]);
+/**
+ * C1 + C2: current ref, upstream map, origin default. No rebase state file is
+ * read (see `judgeResume`).
+ */
+function readRepoFacts(git: Git): RepoFacts {
+  const c1 = git.run(["rev-parse", "--symbolic-full-name", "HEAD", "--absolute-git-dir"]);
   if (c1.status !== 0) throw new ProbeFailure("git-unavailable");
   const lines = c1.stdout.split("\n").map((line) => line.trim());
-  const [headLine, , mergeLine, applyLine] = lines;
-  if (headLine === undefined || mergeLine === undefined || applyLine === undefined) {
-    throw new ProbeFailure("git-unavailable");
-  }
-  const place = (path: string): string => (isAbsolute(path) ? path : join(cwd, path));
+  const [headLine, gitDirLine] = lines;
+  if (headLine === undefined || gitDirLine === undefined) throw new ProbeFailure("git-unavailable");
 
   const c2 = git.run([
     "for-each-ref",
@@ -361,9 +328,6 @@ function readRepoFacts(git: Git, cwd: string): RepoFacts {
   }
   return {
     head: headLine.startsWith("refs/heads/") ? headLine : null,
-    detached: headLine === "HEAD",
-    rebaseMerge: place(mergeLine),
-    rebaseApply: place(applyLine),
     branches,
     originDefault,
   };
@@ -462,9 +426,7 @@ function judgeRange(git: Git, facts: RepoFacts, range: LostRange, legacy: string
   if (lost === 0) {
     return evidence(
       "local",
-      range.localBasis === "rebase-in-progress-unpublished" || range.localBasis === "abort-restores"
-        ? range.localBasis
-        : "no-commits-lost",
+  "no-commits-lost",
       0,
       0,
       null,
@@ -757,7 +719,7 @@ export function refineHistoryRewrite(
   const repo = (): RepoFacts => {
     if (facts === undefined) {
       try {
-        facts = readRepoFacts(git, cwd);
+        facts = readRepoFacts(git);
       } catch (cause) {
         facts = null;
         factsFailure = cause instanceof ProbeFailure ? cause : new ProbeFailure("git-unavailable");
@@ -903,7 +865,7 @@ function judgeSegment(
       case "git-rebase-exec":
         return sharedOf("runs-commands", legacyOf());
       case "git-rebase-abort":
-        return judgeAbort(git, repo(), live, legacyOf());
+        return judgeResume(legacyOf());
       case "git-pull-rebase": {
         const mode = pullRebaseMode(live.args);
         if (mode === "interactive" || mode === "merges") return sharedOf("interactive", legacyOf());
@@ -916,7 +878,7 @@ function judgeSegment(
       case "git-rebase":
         return judgeRebase(git, repo(), live, legacyOf());
       case "git-rebase-continue":
-        return judgeContinue(git, repo(), live, legacyOf());
+        return judgeResume(legacyOf());
       default:
         // A rewrite spelling this step does not know: shared, and named.
         return sharedOf("unreadable-target", legacyOf());
@@ -1031,166 +993,28 @@ function judgeRebase(git: Git, facts: RepoFacts, shape: GitInvocationShape, lega
 }
 
 /**
- * The rebase in progress, found the way git finds it (`builtin/rebase.c`):
- * a `rebase-apply` directory first, then `rebase-merge`. Verified with git
- * 2.50: with both present, `git rebase --abort` acts on `rebase-apply` and
- * leaves `rebase-merge` behind.
+ * `git rebase --continue`, `--skip`, `--abort` and `--quit`: always shared
+ * (APRV-648 fix round 2, a deliberate departure from the D-6 spec text).
  *
- * git never leaves both behind, and git reads only a directory, so anything
- * else is a state written by hand and is `ambiguous`, which every caller
- * judges shared: both paths present, or a path that is a file, a symbolic
- * link or unreadable. Reading the "wrong" directory would let a harmless
- * `rebase-merge` be checked while git acts on a `rebase-apply` that names
- * `main` (APRV-648 M1, S1).
+ * Each of them acts on a rebase in progress, and git reads what it will do
+ * from plain files under the git directory: which directory is the rebase
+ * (`rebase-apply` before `rebase-merge`), the branch to move (`head-name`),
+ * the commit to move it to (`orig-head`, of which git parses only the first
+ * object-id-length characters), a pending amend of HEAD (`amend`), the steps
+ * left (`git-rebase-todo`, `done`), a root to rebuild from (`squash-onto`) and
+ * the refs to delete when the state is removed (`refs-to-delete`, which
+ * `--quit` and `--abort` honour too). Anything that can write a file in the
+ * checkout can write every one of them, and HEAD and the refs with them, so no
+ * fact git uses for a resume is one the check could prove the way git reads
+ * it. Two rounds of holes in reading that state (APRV-648 M1, S1, M-A, M-B)
+ * are why the check no longer tries: it reads no rebase state at all.
+ *
+ * The starting `git rebase` is still judged (see `judgeRebase`), from refs
+ * and configuration only; it never reads a state file, and git refuses to
+ * start a rebase while one is in progress.
  */
-type RebaseState =
-  | { kind: "none" }
-  | { kind: "ambiguous" }
-  | { kind: "apply" | "merge"; dir: string };
-
-function rebaseState(facts: RepoFacts): RebaseState {
-  const probe = (path: string): "absent" | "dir" | "other" => {
-    try {
-      return lstatSync(path).isDirectory() ? "dir" : "other";
-    } catch (cause) {
-      return (cause as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "other";
-    }
-  };
-  const apply = probe(facts.rebaseApply);
-  const merge = probe(facts.rebaseMerge);
-  if (apply === "absent" && merge === "absent") return { kind: "none" };
-  if (apply === "dir" && merge === "absent") return { kind: "apply", dir: facts.rebaseApply };
-  if (merge === "dir" && apply === "absent") return { kind: "merge", dir: facts.rebaseMerge };
-  return { kind: "ambiguous" };
-}
-
-/** One trimmed state file of a rebase in progress, or `null` when it cannot be read. */
-function readState(dir: string, name: string): string | null {
-  try {
-    return readFileSync(join(dir, name), "utf8").trim();
-  } catch {
-    return null;
-  }
-}
-
-/**
- * `git rebase --continue` / `--skip`: the rebase in progress, from its state
- * directory.
- *
- * What a resumed rebase can lose is what its branch reaches now and the result
- * will not: the result is built on top of the detached HEAD, so R is
- * `<branch tip> --not HEAD`. That is the spec's `orig-head --not onto` for a
- * rebase git started and nobody touched, and it stays a sound bound when the
- * state files or HEAD were moved by hand, which `orig-head --not onto` (both
- * read from files anyone can write) is not.
- */
-function judgeContinue(git: Git, facts: RepoFacts, shape: GitInvocationShape, legacy: string): Judged {
-  if (shape.args.length !== 1) return sharedOf("option-unvetted", legacy);
-  const state = rebaseState(facts);
-  if (state.kind === "none" || state.kind === "ambiguous") return sharedOf("unreadable-target", legacy);
-  const dir = state.dir;
-  const headName = readState(dir, "head-name");
-  if (headName === null || !headName.startsWith("refs/heads/")) return sharedOf("detached-head", legacy);
-  const gated = refGate(facts, headName, legacy);
-  if (gated !== null) return gated;
-  // A rebase git started keeps HEAD detached until it finishes. An attached
-  // HEAD is a state git did not leave: every pick would commit onto that
-  // branch, and a squash or fixup would amend its tip, so the range below
-  // would not bound what the resume can lose.
-  if (!facts.detached) return sharedOf("unreadable-target", legacy, headName);
-  if (state.kind === "merge") {
-    const todo = readState(dir, "git-rebase-todo");
-    if (todo === null) return sharedOf("todo-unvetted", legacy, headName);
-    for (const raw of todo.split("\n")) {
-      const line = raw.trim();
-      if (line.length === 0 || line.startsWith("#")) continue;
-      const command = line.split(/\s+/u)[0] ?? "";
-      if (!VETTED_TODO_COMMANDS.includes(command)) return sharedOf("todo-unvetted", legacy, headName);
-    }
-    // `--update-refs` leaves the refs it will move in a state file of its own.
-    const updateRefs = readState(dir, "update-refs");
-    if (updateRefs !== null && updateRefs.length > 0) return sharedOf("todo-unvetted", legacy, headName);
-    // A strategy git does not ship runs `git-merge-<name>` for every pick left.
-    const strategy = readState(dir, "strategy");
-    if (strategy !== null && strategy.length > 0 && !BUILTIN_MERGE_STRATEGIES.includes(strategy)) {
-      return sharedOf("runs-commands", legacy, headName);
-    }
-  }
-  const oldTip = resolveCommit(git, headName);
-  const head = resolveCommit(git, "HEAD");
-  if (oldTip === null || head === null) return sharedOf("unreadable-target", legacy, headName);
-  return judgeRange(
-    git,
-    facts,
-    { ref: headName, oldTip, bases: [head], localBasis: "rebase-in-progress-unpublished" },
-    legacy,
-  );
-}
-
-/**
- * `git rebase --abort` / `--quit`.
- *
- * `--quit` moves no ref. `--abort` puts the branch named in `head-name` back
- * at `orig-head`; for a rebase git started, that is where the branch already
- * is, so nothing is lost. Both files are plain files under the git directory,
- * though, and a `head-name` of `refs/heads/main` with a hand-written
- * `orig-head` would make `--abort` a hard reset of main. So the branch's
- * current tip is checked against `orig-head` like any other lost range, and
- * only a `head-name` that is a branch, or git's own `detached HEAD`, is read.
- *
- * git reads any `head-name` outside `refs/` as "no branch" and then resets
- * whatever HEAD points at (verified with git 2.50: `detached HEAD` while HEAD
- * is on `main` hard-resets `main` to `orig-head`). So that case is local only
- * when HEAD really is detached, and a branch `head-name` is local only when
- * HEAD is detached too, which is how git leaves every rebase it stops
- * (APRV-648 M1). Anything else is a state git did not write: shared.
- */
-function judgeAbort(git: Git, facts: RepoFacts, shape: GitInvocationShape, legacy: string): Judged {
-  const restores = (): Judged => ({
-    reach: "local",
-    basis: "abort-restores",
-    ref: null,
-    old_tip: null,
-    base: null,
-    lost: null,
-    lost_shared: null,
-    witness: null,
-    legacy_class: legacy,
-  });
-  if (shape.args.length !== 1) return sharedOf("option-unvetted", legacy);
-  if (shape.args[0] === "--quit") return restores();
-  const state = rebaseState(facts);
-  // No rebase in progress: git refuses, and nothing moves.
-  if (state.kind === "none") return restores();
-  if (state.kind === "ambiguous") return sharedOf("unreadable-target", legacy);
-  const dir = state.dir;
-  const headName = readState(dir, "head-name");
-  if (headName === null) return sharedOf("unreadable-target", legacy);
-  if (!headName.startsWith("refs/")) {
-    // git's "no branch": only a detached HEAD moves, and no branch with it.
-    return facts.detached ? restores() : sharedOf("unreadable-target", legacy, facts.head);
-  }
-  if (!headName.startsWith("refs/heads/")) return sharedOf("unreadable-target", legacy);
-  const origHead = readState(dir, "orig-head");
-  const tip = resolveCommit(git, headName);
-  if (origHead === null || !OBJECT_ID.test(origHead) || tip === null) {
-    return sharedOf("unreadable-target", legacy, headName);
-  }
-  const judged = judgeRange(
-    git,
-    facts,
-    { ref: headName, oldTip: tip, bases: [origHead], localBasis: "abort-restores" },
-    legacy,
-  );
-  // Moving a default branch, or one whose upstream is gone, by commits it
-  // would lose is shared whatever those commits are.
-  if (judged.reach === "local" && (judged.lost ?? 0) > 0) {
-    const gated = refGate(facts, headName, legacy);
-    if (gated !== null) return gated;
-  }
-  // HEAD attached during a rebase is a state git did not leave (see above).
-  if (judged.reach === "local" && !facts.detached) return sharedOf("unreadable-target", legacy, headName);
-  return judged;
+function judgeResume(legacy: string): Judged {
+  return sharedOf("unreadable-target", legacy);
 }
 
 /** `git pull --rebase` (or a pull configuration rebases): R = HEAD --not <upstream before the fetch>. */
@@ -1229,7 +1053,9 @@ function judgePullRebase(git: Git, facts: RepoFacts, shape: GitInvocationShape, 
 const BASIS_TEXT: Readonly<Record<HistoryRewriteBasis, string>> = {
   "range-unpublished": "no commit it removes is on a shared ref",
   "no-commits-lost": "it removes no commit",
-  "rebase-in-progress-unpublished": "the rebase in progress removes no commit that is on a shared ref, and its todo holds only picks, edits, squashes, fixups and drops",
+  // Never emitted since APRV-648 fix round 2 (every resume step is shared);
+  // kept because the event schema still lists them.
+  "rebase-in-progress-unpublished": "the rebase in progress removes no commit that is on a shared ref",
   "abort-restores": "it restores or keeps the pre-rebase branch",
   "push-side": "a push-side rewrite moves a ref other people hold, whatever this checkout says",
   "default-branch": "the ref it moves is a default branch",
@@ -1240,7 +1066,7 @@ const BASIS_TEXT: Readonly<Record<HistoryRewriteBasis, string>> = {
   "runs-commands": "it runs a command of the caller's choosing",
   "todo-unvetted": "the rebase todo carries a command other than pick, edit, squash, fixup or drop",
   "whole-history": "it rewrites whole histories and runs filter code",
-  "unreadable-target": "the text or the rebase state names a target the check cannot resolve",
+  "unreadable-target": "the text names a target the check cannot resolve, or the step resumes a rebase in progress, whose target git reads from state files under the git directory that the check does not trust",
   "global-option": "a global option or a wrapper points git somewhere the check does not read",
   "env-assignment": "an environment assignment points git somewhere the check does not read",
   "compound-state": "an earlier part of the command line can change the state the check reads",

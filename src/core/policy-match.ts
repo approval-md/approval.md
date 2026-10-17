@@ -386,7 +386,7 @@ export function harnessLaunchUnruledRefusal(actionClass: string, whatWasRefused:
 export const HISTORY_REWRITE_CLASS = "vcs.history.rewrite";
 /** A rewrite whose lost range holds a shared commit, or that could not be proved local. */
 export const HISTORY_REWRITE_SHARED = "vcs.history.rewrite.shared";
-/** A rewrite the runtime proved touches no shared commit; `rebase --abort` / `--quit`. */
+/** A rewrite the runtime proved touches no shared commit. No resume of a rebase in progress is one. */
 export const HISTORY_REWRITE_LOCAL = "vcs.history.rewrite.local";
 /** The family key. */
 export const HISTORY_REWRITE_FAMILY = "vcs.history.rewrite.*";

@@ -43,12 +43,14 @@ before a tag.
   in the default classes and in this repository's policy, where
   `git push -fu origin lane` goes from autonomous to human-only.
   Every refined start and request now carries `payload.history_rewrite`.
-  The rebase state is read as git reads it (`rebase-apply` before
-  `rebase-merge`), and a state git does not leave behind (both directories,
-  an attached HEAD, a `detached HEAD` head-name while HEAD is on a branch)
-  makes `--abort`, `--continue` and `--skip` shared. The text classifier's
-  rebase row is split into rule ids by spelling, and `git pull --rebase` is
-  now `vcs.history.rewrite` from the text (it was `vcs.commit.branch`).
+  A step that resumes a rebase in progress (`git rebase --continue`,
+  `--skip`, `--abort`, `--quit`) is always shared: git reads what it does
+  from files under the git directory that anything able to write the
+  checkout can forge, so the hook reads no rebase state at all (APRV-648,
+  a deliberate departure from the split as first decided). The text
+  classifier's rebase row is split into rule ids by spelling, and
+  `git pull --rebase` is now `vcs.history.rewrite` from the text (it was
+  `vcs.commit.branch`).
 
 ## 0.4.5 — 2026-10-17
 

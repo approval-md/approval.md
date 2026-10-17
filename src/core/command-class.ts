@@ -2251,8 +2251,8 @@ export function rebaseRunsStrategy(args: readonly string[]): boolean {
  *    `label` / `reset` lines can reach outside the range being rebased.
  *  - `git-rebase-continue`: `--continue`, `--skip`. Resumes a rebase in
  *    progress, whose state lives on disk.
- *  - `git-rebase-abort`: `--abort`, `--quit`. Restores or keeps the
- *    pre-rebase branch.
+ *  - `git-rebase-abort`: `--abort`, `--quit`. Ends a rebase in progress
+ *    from the same on-disk state; the hook judges both resume rules shared.
  *  - `git-rebase`: everything else.
  */
 function refineGitRebase(ctx: RuleContext): Refinement {

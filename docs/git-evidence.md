@@ -297,10 +297,11 @@ So the route for a pushed branch that has fallen behind, a stacked pull request
 whose base moved included, is a merge: `git merge origin/main` (or the base
 branch), then a plain `git push`. It removes nothing, runs no rewrite check, and
 the merge it adds is judged on its dense combined patch exactly as the section
-above describes. A rebase that has stopped on a conflict is cleared with `git
-rebase --abort`, which the split makes local; it proceeds without a person once
-the proposed `vcs.history.rewrite.local` line is attested, and until then it is
-the human-only class it was, so do not start a rebase at all.
+above describes. A rebase that has stopped is a person's to finish: `git rebase
+--continue`, `--skip`, `--abort` and `--quit` are always shared, because git
+reads what each one does from files under the git directory that the check
+cannot trust (APRV-648), so they stay human-only under the proposed lines. Do
+not start a rebase at all.
 
 Every rewrite the hook records carries `payload.history_rewrite` on its
 `execution.started` (`reach`, `basis`, `ref`, `old_tip`, `base`, `lost`,

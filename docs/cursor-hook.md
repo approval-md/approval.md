@@ -361,8 +361,7 @@ every such segment, in the directory it runs in, to exactly one member
 - **`vcs.history.rewrite.local`**: the hook proved from local refs, with no
   network, that no commit of the rewrite's lost range is shared, that the ref
   it moves is not a default branch, and that the command moves no other ref.
-  `git rebase --quit` is always local, and so is a `--abort` that loses no
-  shared commit.
+  No step that resumes a rebase in progress is ever local (see the table).
 - **`vcs.history.rewrite.shared`**: everything else, including every case a
   check could not run, timed out (1500 ms for the whole command) or answered
   ambiguously.
@@ -377,9 +376,7 @@ spelling:
 | `git commit --amend` | `git-commit-amend` | HEAD alone |
 | `git reset --hard [<rev>]` | `git-reset-hard` | `HEAD --not <rev>`; nothing lost is `no-commits-lost` |
 | `git rebase [--onto <x>] [<upstream> [<branch>]]` | `git-rebase` | `<branch> --not <upstream>`, or `--not $(merge-base --all <x> <upstream>)` with `--onto`; an option outside a closed list is shared, `option-unvetted`; `--update-refs` or `rebase.updateRefs` is shared, `updates-other-refs`; `rebase.rebaseMerges` is shared, `interactive` |
-| `git rebase --continue` / `--skip` | `git-rebase-continue` | `<head-name tip> --not HEAD`, from the rebase state directory (read as git reads it, `rebase-apply` before `rebase-merge`; both present, or either one not a plain directory, is shared for `--continue`, `--skip` and `--abort` alike) and the detached HEAD (the same range as `orig-head --not onto` for a rebase git started, and still a sound one when the state files were edited by hand); a todo line other than pick, edit, squash, fixup or drop, a queued `update-refs` file, a `strategy` file naming a strategy git does not ship, or an attached HEAD is shared |
-| `git rebase --quit` | `git-rebase-abort` | always local, `abort-restores` (moves no ref) |
-| `git rebase --abort` | `git-rebase-abort` | `<head-name tip> --not orig-head`, `abort-restores` when local; no rebase in progress is local; a `head-name` git reads as no branch (`detached HEAD`) is local only while HEAD really is detached, because git hard-resets the branch an attached HEAD names; a branch `head-name` is local only with HEAD detached, as git leaves every rebase it stops; a `head-name` under `refs/` that is not a branch is shared |
+| `git rebase --continue`, `--skip`, `--abort`, `--quit` | `git-rebase-continue`, `git-rebase-abort` | always shared, `unreadable-target`, on a real stop as much as on a forged one (APRV-648 fix round 2, a deliberate departure from the D-6 spec text): git reads what each one does from files under the git directory (the branch to move, the commit to move it to, a pending amend of HEAD, the steps left, the refs to delete), and anything that can write the checkout can write those, so the check reads none of them |
 | `git rebase -i`, `--edit-todo`, `--rebase-merges` | `git-rebase-interactive` | always shared, `interactive` |
 | `git rebase --exec`, `-x`, `-s <not built in>` | `git-rebase-exec` | always shared, `runs-commands` |
 | `git filter-branch`, `git filter-repo` | `git-filter` | always shared, `whole-history` |
@@ -394,7 +391,7 @@ A segment carrying a global option other than `--no-pager`,
 on a closed list of assignments that only silence a prompt or a pager
 (`GIT_EDITOR=true`, `GIT_EDITOR=:`, `EDITOR=true`, `EDITOR=:`, `VISUAL=true`,
 `VISUAL=:`, `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`, `PAGER=cat`), which is
-what lets `GIT_EDITOR=true git rebase --continue` be judged. The check reads the
+what lets `GIT_EDITOR=true git commit --amend` be judged. The check reads the
 state before the command line runs, so an earlier segment of the same line
 leaves a rewrite judgeable only when it is `git add`, `git rm` or `git status`
 with no assignment, no global option, no word the shell could change and no
