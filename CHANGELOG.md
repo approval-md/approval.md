@@ -272,6 +272,18 @@ on the hook for enforcement.
   landing helpers, a credential `account.credential`, an organ or protected
   path its class, and a file outside the read scope `read.file.out_of_scope`.
   Only ever stricter than 84856f9f; the pure classifier is unchanged.
+- **Security (cred-asymmetry): an unresolved read word under the Hermes
+  hook.** The `$(…)` sentinel left a read word the disk pass could not expand,
+  and the pass returned with no class, so a git reader (exempt from the text
+  credential rule) of `$(…)/.hermes/.env` read as `read.shell`. Such a word is
+  now judged by what it spells, and `account.credential` when it could name a
+  credential. A RECURSIVE reader (`grep`, `rg`, `find`, `tar`, `du`, a copy,
+  move or sync source) of an unresolved word is `account.credential` outright,
+  because the word may land on or above a home, a profile home or an approval
+  home; so is a recursive reader of a pattern the hook cannot expand, and one
+  whose pattern matches a directory holding credentials. Cost: a recursive
+  reader's variable search pattern (`grep -r "$P" src`) or `$` regex anchor
+  (`grep -rn 'x$' src`) now goes to a person. Only ever stricter.
 - **Conformance.** `command-class` 1.9.0 (one hundred and forty new
   vectors, thirty-two of them unmoved controls; no existing vector
   expectation moved, 0.4.4's 1.7.0 set and APRV-517's 1.8.0 `push-*` set

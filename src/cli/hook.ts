@@ -6524,6 +6524,9 @@ function describeToolCall(
  *   resolve to a credential take `account.credential`, and so does a directory
  *   that holds credentials ({@link holdsCredentials}) handed to a binary that
  *   reads directories recursively (`grep -r`, `rg`, `find`, `tar`, ...).
+ *   Such a reader of a word this hook cannot expand, or of a pattern it cannot
+ *   expand, is `account.credential` outright (APRV-511 cred-asymmetry round
+ *   2): the word may land on, or above, a home.
  *   The files a `curl`/`wget` upload or body option reads (`-T F`, `-d @F`,
  *   `--post-file F`) are read paths too, and also take the class of a
  *   protected path or organ they land on and, under a read scope, the
@@ -6763,6 +6766,14 @@ function resolvedPathClasses(
         // `git diff --no-index /dev/null $(echo ~)/.hermes/.env` (whose `$(...)`
         // the lexer leaves as the substitution sentinel) passed as `read.shell`.
         if (unresolvedReadCouldNameCredential(target.text)) add("account.credential");
+        // APRV-511 (cred-asymmetry round 2): a RECURSIVE reader (a recursive
+        // search, a copy or move of a directory, an archive, a walk) of a word
+        // this hook cannot expand reads everything under wherever the word
+        // lands. That may be a Hermes home, a profile home, an approval home or
+        // a directory above one, and the shape of the text cannot rule any of
+        // them out: an unexpanded span can always hold a `/` or a `..`. So it
+        // fails closed, whatever the word spells.
+        if (recursive) add("account.credential");
         return;
       }
       for (const from of cwds) {
@@ -6774,12 +6785,18 @@ function resolvedPathClasses(
           if (hasGlobChars(target.text)) {
             // SF3b: expand against the directory when it is known; otherwise a
             // pattern that could name a credential is read as one.
+            // Round 2: a recursive reader of a matched directory is judged as
+            // the plain spelling is (a home, or a directory holding credential
+            // files), and one whose pattern cannot be expanded here fails
+            // closed, as an unresolved word does.
             const candidates = expandGlob(absoluteTarget);
             if (candidates === null) {
-              if (globCouldNameCredential(absoluteTarget)) add("account.credential");
+              if (recursive || globCouldNameCredential(absoluteTarget)) add("account.credential");
             } else {
               for (const candidate of candidates) {
-                if (isCredentialPath(canonicalPath(candidate))) add("account.credential");
+                const resolvedCandidate = canonicalPath(candidate);
+                if (isCredentialPath(resolvedCandidate)) add("account.credential");
+                else if (recursive && holdsCredentials(resolvedCandidate)) add("account.credential");
               }
             }
             continue;

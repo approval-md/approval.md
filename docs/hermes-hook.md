@@ -609,7 +609,14 @@ search of an ANCESTOR of the home with a filename filter (`search_files` over
 `glob: **/env`, or `Grep` with no path) reads the secrets without naming a
 directory this hook can recognise; and a READ through a variable this hook
 cannot expand is judged by its spelling unless the name is a credential's
-(`cat $X/.env` is `account.credential`, `cat "$F"` is not). The same holds
+(`cat $X/.env` is `account.credential`, `cat "$F"` is not). A RECURSIVE
+reader of such a word (`grep -r`, `rg`, `find`, `tar`, `du`, a copy, move or
+sync source) is `account.credential` whatever it spells, since the word may
+land on or above a home, and so is a recursive reader of a pattern this hook
+cannot expand; a matched directory that holds credentials is judged as its
+plain spelling is (cred-asymmetry round 2). The cost: such a word that is a
+search pattern (`grep -r "$P" src`, or a regex anchor `'x$'`) goes to a
+person. The same holds
 for a command substitution that makes up the whole path (`cat $(echo
 ~/.hermes/.op.en)v`), an accepted design limit: `cat $(ls | head -1)` must stay
 a read.

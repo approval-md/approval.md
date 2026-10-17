@@ -920,3 +920,47 @@ test(
     }
   },
 );
+
+/**
+ * Round 2: a RECURSIVE reader of a directory word the hook cannot expand was
+ * judged by credential file-name shape only, so a recursive search, walk,
+ * archive or copy of `$(…)/.hermes` (or of a profile home) read every secret
+ * under it as an ordinary read. Such a word may land on, or above, a home, so
+ * the reader is `account.credential` whatever the word spells. (A copy of one,
+ * `cp -r "$H" copy`, was and stays refused as `policy.core`, which the deny
+ * names first.) Synthetic files only, HOME pointed at the scratch gate.
+ */
+const RECURSIVE_UNRESOLVED_READS = [
+  "grep -r SYNTHETIC_TOKEN $(echo ~)/.hermes",
+  "grep -rl SYNTHETIC_TOKEN $(echo ~/.hermes)",
+  'grep -r SYNTHETIC_TOKEN "$(pwd)/.hermes"',
+  "grep -r SYNTHETIC_TOKEN $(echo ~)/.hermes/profiles/p",
+  "grep -r SYNTHETIC_TOKEN $(echo ~)",
+  "grep -r SYNTHETIC_TOKEN $H",
+  'rg SYNTHETIC_TOKEN "${H:-.hermes}"',
+  "find $(echo ~)/.hermes/profiles -type f",
+  "du -a $(pwd)/.hermes",
+  'tar czf out.tgz "$H"',
+  'tree "${H:-.hermes}"',
+  // A pattern the hook cannot expand, and one that matches a home.
+  "grep -r SYNTHETIC_TOKEN ~/.hermes/pro*/p",
+  "grep -r SYNTHETIC_TOKEN ~/.herm*",
+];
+
+test("cred-asymmetry round 2: a recursive reader of an unresolved directory under the Hermes home is account.credential", () => {
+  const { dir, env } = credentialLab();
+  expectDenied(
+    dir,
+    RECURSIVE_UNRESOLVED_READS.map((command) => ({ tool: "terminal", input: { command, workdir: dir }, env })),
+    "account.credential",
+  );
+});
+
+test("cred-asymmetry round 2: a single-file read of an unresolved word that names no credential still reads", () => {
+  const { dir, home, env } = credentialLab();
+  writeFileSync(join(home, "workspace", "notes.md"), "x\n", "utf8");
+  for (const command of ["cat $(pwd)/notes.md", "head -1 $(pwd)/notes.md", "wc -l $(pwd)/notes.md"]) {
+    const run = ask(dir, { tool: "terminal", input: { command, workdir: join(home, "workspace") }, env });
+    assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
+  }
+});
