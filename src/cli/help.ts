@@ -1609,7 +1609,7 @@ Commands:
 Codex opt-in: register exact Bash|apply_patch synchronously with timeout 600s (default wait 9m). Bash is denied because native events hide per-call workdir; direct apply_patch is experimental. PostToolUse is diagnostic.
 
 Deny: hook-unclassified, hook-class-human-only, hook-harness-launch-unruled, hook-opaque, hook-unparseable, hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout, hook-harness-cap-too-short,
-hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable, hook-unsupported-execution-context, hook-muse-contributor-model, hook-hermes-execute-code-unbound, hook-io.
+hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable, hook-unsupported-execution-context, hook-muse-contributor-model, hook-hermes-execute-code-unbound, hook-exec-code-custody-unattested, hook-exec-code-unreadable, hook-io.
 
 ${EXIT_CODES_POINTER} (harness verbs use 0 and 2 only; 0 is a verdict, never "ask")
 ${why("hook")}`;
@@ -1673,8 +1673,8 @@ Usage:
 snake_case in (hook_event_name pre_tool_call|post_tool_call, tool_name, tool_input).
 ONE dialect out: {"action":"block","message":"…"} AT EXIT 2 deny, {} at exit 0 allow
 (no allow directive; reason on stderr). Tools: terminal (command + ABSOLUTE workdir),
-write_file, patch, read_file, search_files. REFUSED: execute_code
-(hook-hermes-execute-code-unbound), and a call with no absolute workdir or a relative
+write_file, patch, read_file, search_files. REFUSED: execute_code, unless both exec.code
+keys are set (hook-hermes-execute-code-unbound), and a call with no absolute workdir or a relative
 or missing path (hook-unsupported-execution-context): Hermes resolves those against a session directory no event reports.
 OBSERVED on main 118984d7: fail_closed: true BLOCKS hook crash, timeout and garbage.
 ITS DEFAULT IS false, and v0.21.3 (2026.9.14) fails open SILENTLY: run a 2026-09-20+ build.
