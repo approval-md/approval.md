@@ -15,6 +15,31 @@ before a tag.
 
 ## Unreleased
 
+### Added
+
+- **`exec.code`, a custody-gated class for opaque agent code (APRV-510; 0.4.5
+  candidate).** `python3 -c`, `python -c`, `node -e`/`--eval`, `bun -e`/`--eval`,
+  `deno eval`, `perl -e`/`-E`, `ruby -e`, and `python`/`python3`/`bun` running a
+  file that is not a skill script were refused before policy on every harness, and
+  Hermes `execute_code` with them. A new policy block opens them key by key:
+  `exec.code.custody: attested` (the operator's statement that credential custody
+  is in place) classifies the shell forms `exec.code`, resolved like any class;
+  `exec.code.execute_code: hooked` beside it opens Hermes `execute_code`. A record
+  binds the program's SHA-256 and length and the command line's SHA-256, never the
+  program text, and says the program existed rather than what it did. A policy
+  that never names `exec.code` keeps every refusal byte for byte; one that names it
+  without custody refuses the new `hook-exec-code-custody-unattested`; a file
+  program the hook cannot read, or cannot place by the kernel's reading (a path
+with `..`, a symlinked directory, a program that is not the line's sole segment,
+no stated working directory), refuses the new `hook-exec-code-unreadable`. `bash
+  -c`, `sh -c`, `eval`, pipes into an interpreter, stdin and a program inside a
+subshell stay refused, the open
+  window does not reach the class, and Codex stays closed. **Rollout order:** a
+  core without this release refuses the `exec` key and fails the whole policy
+  closed, so a tenant gets the block only after its pinned core carries it. New
+  conformance suite `hook-exec-code` 1.0.0; `refusal-unions` 29.0.0;
+  `schema-validation` 3.4.0. SPEC.md §5.2, §7 and §11.2 amended, pending sign-off.
+
 ### Security
 
 **A hole in 0.4.5 that this closes.** A `git push` that deleted a remote
@@ -62,6 +87,25 @@ on the hook for enforcement.
   strictly.
 - Conformance: `command-class` 1.8.0, twelve new `push-*` vectors; no existing
   expectation moved.
+- **A git global option that takes a value no longer moves the subcommand
+  (APRV-520).** The classifier reads a git subcommand as the first positional
+  after `git`. A global option that consumes the next word (`-C <path>`, `-c
+  <name>=<value>`, `--config-env`, `--git-dir`, `--work-tree`, `--namespace`,
+  `--super-prefix`, `--attr-source`, `--shallow-file`) made that first
+  positional the option's value. So `git -C status push --force origin main`, a
+  force push, classified `read.shell` and ran unattended, and `git -C commit
+  reset --hard` classified as a plain commit. This is on 0.4.5. Now every
+  value-taking global, in its separate or `=`-joined spelling
+  (`--exec-path=<path>` included), leaves the segment `unclassified`, and the
+  hook refuses it. So does any flag in global position that the classifier does
+  not know (`-Cdir`, `--`, `-$X`). The zero-value globals (`--no-pager`, `-p`,
+  `-P`, `--bare`, `--no-optional-locks` and the rest of git 2.50's table) are
+  skipped as before. Options after the subcommand are unchanged (`git commit -C
+  HEAD`, `git grep -C 3`). Stricter only: a differential against main's
+  classifier (98d12562) over 2,150,475 generated git lines moved 997,840 from an
+  answer to `unclassified` and loosened or reclassified none. Cost: `git
+  --git-dir=.git status` and the other `=`-joined spellings, which used to
+  classify as their subcommand, now need `cd` or a person.
 - A force push spelled as a short bundle (`git push -fu`, `-uf`) or as an
   abbreviated long option (`--force-w`, `--m` for `--mirror`) classified as a
   plain push (`vcs.push.branch` or `vcs.push.main`). Three more spellings were
@@ -110,8 +154,9 @@ on the hook for enforcement.
   does, never answering milder than before, and only the bare word `git`
   counts as git for the earlier-segment list and the judges (`./git
   status && …` is shared).
-- Conformance: `command-class` 1.9.0, thirty-seven new `rewrite-*` vectors;
-  no existing expectation moved.
+- Conformance: `command-class` 1.9.0, thirty-seven new `rewrite-*` vectors,
+  and `schema-validation` 3.5.0, seven new `payload.history_rewrite` fixtures
+  (3.4.0 went to APRV-510 at merge); no existing expectation moved.
 
 ### Harnesses
 

@@ -643,8 +643,13 @@ test("cases 45-48: a global option, an env assignment or an earlier state change
   const dir = newRepo();
   branch(dir, "lane");
   commit(dir, "l1");
-  // 45: answered from this checkout before (APRV-108's gap); shared now.
-  assertMember(dir, "git --git-dir=../x/.git reset --hard", "shared", "global-option", BRANCH);
+  // 45: answered from this checkout before (APRV-108's gap). Since APRV-520
+  // (#651) a value-taking global leaves the command unclassified, which the
+  // hook refuses; a zero-value global outside the inert list is shared.
+  const forty5 = classifyAll(dir, "git --git-dir=../x/.git reset --hard");
+  assert.equal(forty5.ok, false);
+  assert.equal(forty5.code, "unclassified");
+  assertMember(dir, "git --bare reset --hard", "shared", "global-option", BRANCH);
   // Inert global options change nothing.
   assertMember(dir, "git --no-pager commit --amend", "local", "range-unpublished", BRANCH);
   // 46: unchanged, the classifier refuses it.

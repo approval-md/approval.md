@@ -161,6 +161,13 @@ import { settleTerminationGuards } from "../core/log-lock.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import {
+  closedExecCodeGate,
+  EXEC_CODE_CUSTODY_KEY,
+  EXEC_CODE_EXECUTE_KEY,
+  execCodeGate,
+  type ExecCodeGate,
+} from "../core/exec-code.js";
+import {
   loadPolicy,
   loadPolicyText,
   parseDuration,
@@ -219,6 +226,7 @@ import {
   CODEX_POST_TOOL_EVENT,
   readCodexReportedOutcome,
 } from "./hook-codex.js";
+import { bindExecCodeCommand, bindExecuteCode, describeProgram } from "./hook-exec-code.js";
 
 /** Identity accepted for the proposing side: a person or an agent. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -479,6 +487,28 @@ export const HOOK_DENY_CODES = [
    * say about bytes it could see. Here there are no bytes to see.
    */
   "hook-hermes-execute-code-unbound",
+  /**
+   * An opaque program (`python3 -c`, `node -e` and kin, an interpreter running a
+   * file that is not a skill script, or a Hermes `execute_code` call with
+   * `exec.code.execute_code: hooked`) under a policy that NAMES the `exec.code`
+   * class but does not declare `exec.code.custody: attested` (APRV-510).
+   *
+   * Distinct from `hook-opaque`, and the distinction is the repair: that one
+   * says rewrite the command, this one says the operator has asked for the
+   * class and the one line that opens it is missing. A policy that does not
+   * name `exec.code` at all keeps today's refusal byte for byte, so this code
+   * is never a surprise to an operator who has not opted in. Nothing appends.
+   */
+  "hook-exec-code-custody-unattested",
+  /**
+   * An `exec.code` file program this hook cannot read and hash (APRV-510): it
+   * is absent, unreadable by this process (EACCES under co-location), not a
+   * regular file, too large, or relative after a `cd` the hook cannot place.
+   * A record of an opaque program binds its hash, and a program whose bytes
+   * cannot be read is one nothing could bind, so it is refused rather than
+   * recorded without one. Nothing appends.
+   */
+  "hook-exec-code-unreadable",
   /** Malformed hook input, or a log/filesystem fact that stopped the check. */
   "hook-io",
 ] as const;
@@ -967,6 +997,13 @@ function hermesToolRule(toolName: string, toolInput: Record<string, unknown>): T
   }
   if (toolName === "send_message") {
     return { kind: "gated", cls: "message.send", headline: headline("message.send") };
+  }
+  // APRV-510. Claimed here so no `tools` entry can name it and the post half
+  // closes the start it wrote. It reaches the gated path only through the
+  // pre-dispatch refusal in `runHarnessHook`, which lets it by only when the
+  // policy declares both `exec.code` keys; `describeToolCall` binds it.
+  if (toolName === HERMES_EXECUTE_CODE_TOOL) {
+    return { kind: "gated", cls: "exec.code", headline: headline("exec.code") };
   }
   return null;
 }
@@ -1540,6 +1577,39 @@ export const HERMES_EXECUTE_CODE_REFUSAL = "hook-hermes-execute-code-unbound";
 
 /** The tool that carries a program and no path, no argv and no directory. */
 const HERMES_EXECUTE_CODE_TOOL = "execute_code";
+
+/**
+ * The words of a `hook-hermes-execute-code-unbound` refusal (APRV-398, APRV-510).
+ *
+ * `unhooked` is the refusal as it stood before APRV-510, byte for byte, and it
+ * is what a policy that says nothing about `exec.code` still gets.
+ * `unhooked-attested` adds one sentence for a policy that attests custody and
+ * has not declared the second key. `window` is the open window's.
+ */
+function executeCodeRefusal(
+  why: "unhooked" | "unhooked-attested" | "window",
+  shellTool = "terminal",
+): string {
+  const base = `Hermes ${HERMES_EXECUTE_CODE_TOOL} is refused because the call carries a program and nothing else: no path, no argv and no working directory, so no class can be resolved and no payload can bind what it would do. Run the work through the \`${shellTool}\` tool, where the words are visible to the classifier, or through \`approval run\` with a granted token. No policy or open window authorizes bytes the hook cannot read`;
+  if (why === "unhooked") return base;
+  if (why === "window") {
+    return `${base}. exec.code is not reached through an open window: opening it is a policy statement, and the window suspends the policy`;
+  }
+  return `${base}. This policy attests credential custody (\`${EXEC_CODE_CUSTODY_KEY}\`) and does not declare \`${EXEC_CODE_EXECUTE_KEY}\`, which the operator sets only once a probe has shown that a tool call made inside the ${HERMES_EXECUTE_CODE_TOOL} kernel re-fires this hook`;
+}
+
+/**
+ * What `policy` opens of `exec.code` on this adapter (APRV-510).
+ *
+ * Codex is closed whatever the policy says: its allow carries the native
+ * command bytes back (`codexBinding`), and the `exec.code` payload replaces
+ * the program text with its hash, so the two bindings would disagree. The
+ * class stays refused there until a task reconciles them.
+ */
+function execGateOf(adapter: HarnessAdapter, policy: Policy | null): ExecCodeGate {
+  if (adapter.bindToolName === true) return closedExecCodeGate("harness");
+  return execCodeGate(policy);
+}
 
 /**
  * The retry a Hermes session makes after one of these refusals, in one place.
@@ -2923,11 +2993,18 @@ export function classifyForHook(
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
   readRoots: readonly string[] = [],
+  /**
+   * May an opaque program classify `exec.code`? (APRV-510.) `true` only when
+   * the loaded policy opens the class ({@link execCodeGate}); the default is
+   * today's answer, a refusal.
+   */
+  execCode = false,
 ): RefinedClassification {
   const roots = resolveScratchRoots(cwd);
   const classified = classifyCommand(command, protectedPaths, {
     scratchRoots: roots,
     ...(readRoots.length === 0 ? {} : { readRoots }),
+    ...(execCode ? { execCode: true } : {}),
   });
   const rewritten = refineRewrite(classified, cwd, command);
   const scratched = refineScratchDelete(rewritten.result, roots);
@@ -3045,7 +3122,14 @@ function commandClassify(argv: string[], streams: Streams, cwd: string): number 
     load.ok ? load.policy.read_scope?.roots : undefined,
   );
   const json = boolFlag(parsed.flags, "--json");
-  const refined = classifyForHook(command, protectedPaths, cwd, readRoots);
+  const refined = classifyForHook(
+    command,
+    protectedPaths,
+    cwd,
+    readRoots,
+    // APRV-510: the class the policy opens is the class the hook decides.
+    execCodeGate(load.ok ? load.policy : null).shell,
+  );
   streams.out(renderClassification(refined.result, json));
   // APRV-433: the member, the basis, the witness and the pre-split class, in
   // words, from the same refinement the hook decides with. `--json` already
@@ -5941,7 +6025,36 @@ function describeToolCall(
    * run unrecorded on the word of a file nobody vouched for.
    */
   ungatedAllowed = true,
+  /**
+   * What the policy opens of `exec.code` (APRV-510). Closed by default, which
+   * is every answer this function gave before the class existed. The closed
+   * path passes {@link execGateOf} the loaded policy; the open window passes
+   * it closed, because opening the class is a policy statement and a window
+   * suspends the policy.
+   */
+  execGate: ExecCodeGate = closedExecCodeGate("silent"),
 ): ToolDescription {
+  // APRV-510. A Hermes `execute_code` call, first, because it is claimed by the
+  // rule table below and must never be described by it: the rule table binds
+  // the whole `tool_input`, and this call's input is a program.
+  if (adapter.kind === "hermes" && input.toolName === HERMES_EXECUTE_CODE_TOOL) {
+    if (!execGate.executeCode) {
+      return {
+        kind: "deny",
+        code: HERMES_EXECUTE_CODE_REFUSAL,
+        detail: executeCodeRefusal(execGate.closed === "window" ? "window" : "unhooked"),
+      };
+    }
+    const bound = bindExecuteCode(input.toolInput, payloadHash(input.toolInput));
+    if (!bound.ok) return { kind: "deny", code: bound.code, detail: bound.detail };
+    return {
+      kind: "gated",
+      classes: ["exec.code"],
+      payload: bound.payload,
+      headline: bound.headline,
+      notes: bound.notes,
+    };
+  }
   if (adapter.kind === "codex" && input.toolName === "apply_patch") {
     // APRV-363. The app-server's LEGACY `applyPatchApproval` carries its change
     // as a MAP of path to change, inline on the request, and never as an
@@ -6043,14 +6156,68 @@ function describeToolCall(
     // hook's own, so a relative path in the command resolves the way the shell
     // will resolve it. For every adapter without a per-call working directory
     // this is `input.cwd` or the hook's own cwd exactly as before.
-    const refined = classifyForHook(raw, protectedPaths, shellCwd ?? cwd, readRoots);
+    // Refuter S3. A Hermes `terminal` call with `background` or `pty` set keeps
+    // a process whose stdin a later `process` call writes, outside any hash, so
+    // the call is not the `exec.code` shape: any value of either key but
+    // absent or `false` closes the class for it, and it keeps today's answer.
+    const laterStdin =
+      adapter.kind === "hermes" &&
+      [input.toolInput["background"], input.toolInput["pty"]].some(
+        (value) => value !== undefined && value !== false,
+      );
+    const callGate = laterStdin ? closedExecCodeGate("silent") : execGate;
+    const refined = classifyForHook(raw, protectedPaths, shellCwd ?? cwd, readRoots, callGate.shell);
     const classified = refined.result;
     if (!classified.ok) {
+      // APRV-510. A policy that NAMES `exec.code` without attesting custody is
+      // told which line is missing, where the same command would have been an
+      // `exec.code` segment with it. Every other policy keeps today's refusal,
+      // byte for byte.
+      if (callGate.closed === "unattested" && classified.code !== "unparseable") {
+        const opened = classifyForHook(raw, protectedPaths, shellCwd ?? cwd, readRoots, true).result;
+        const program = opened.ok
+          ? opened.segments.find((segment) => segment.execCode !== undefined)
+          : undefined;
+        if (program !== undefined) {
+          return {
+            kind: "deny",
+            code: "hook-exec-code-custody-unattested",
+            detail: `${program.execCode === undefined ? "the command" : describeProgram(program.execCode)} runs a program (exec.code), and this policy names exec.code without declaring \`${EXEC_CODE_CUSTODY_KEY}\`. Opaque code is not run before the operator attests that credential custody is in place; the operator adds that line to the policy and attests it. Nothing was appended.`,
+          };
+        }
+      }
       return {
         kind: "deny",
         code: `hook-${classified.code}`,
         detail: `${classified.detail} (segment: ${classified.segment}). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
       };
+    }
+    // APRV-510: a program segment is bound by its hash and length, never its
+    // text, so the payload is the exec.code shape rather than `{command, cwd}`.
+    // A FILE program is resolved against the directory the harness states
+    // (the per-call key, else the envelope's `cwd`), never the hook process's
+    // own cwd, and gets no file mode when the harness states none (fix round
+    // 2, refuter N8: Claude Code declares no per-call key, and the hook's cwd
+    // is a guess at where its Bash tool runs). Where the adapter declares a
+    // per-call key and the call CARRIES it, that value is the only statement:
+    // a relative or non-string value gets no file mode at all, never the
+    // envelope's `cwd` (fix round 3, refuter S1: Muse runs `workdir: "a"` in
+    // `<cwd>/a`, and the fallback hashed `<cwd>/x.py` while bash ran
+    // `<cwd>/a/x.py`). The envelope's `cwd` stands only when the key is absent.
+    const perCallKeyCarried =
+      adapter.shellCwdKey !== undefined && Object.hasOwn(input.toolInput, adapter.shellCwdKey);
+    const fileWorkdir =
+      shellCwd ?? (perCallKeyCarried ? null : isAbsolute(input.cwd) ? input.cwd : null);
+    const execBound = bindExecCodeCommand(
+      raw,
+      classified.segments,
+      shellCwd ?? cwd,
+      shellCwd ?? input.cwd,
+      protectedPaths,
+      fileWorkdir,
+    );
+    if (execBound !== null && !execBound.ok) {
+      return { kind: "deny", code: execBound.code, detail: execBound.detail };
     }
     const classes = classified.classes.filter((cls) => cls !== GATE_SELF_CLASS);
     // APRV-445 refutation (B2, L10). The classifier matches protected paths by
@@ -6139,6 +6306,16 @@ function describeToolCall(
           }
         }
       }
+    }
+    if (execBound !== null) {
+      return {
+        kind: "gated",
+        classes,
+        payload: execBound.payload,
+        headline: execBound.headline,
+        notes: [...refined.notes, ...execBound.notes],
+        segments: classified.segments,
+      };
     }
     return {
       kind: "gated",
@@ -6723,7 +6900,11 @@ export function sandboxRequirement(
   if (unwrapped.length === 0) return null;
   const first = unwrapped[0] as ClassifiedSegment;
   const external = first.sandbox === "external";
-  return `${REQUIRE_SANDBOX_ENV}=1, and this command runs code the runtime did not author: ${JSON.stringify(first.text)} (rule ${first.rule}), ${external ? "under a profile this runtime did not write, which is a permission you granted yourself" : "with the session's own network"}. A command like this executes whatever is in the files it names, so its class describes what was typed rather than what will happen. Re-run it as \`approval sandbox -- <command>\`: it classifies the same, it is allowed the same, and it runs with no way out to the network (docs/sandboxed-exec.md). Nothing was appended.`;
+  // Refuter S1: an `exec.code` segment is named by its program's hash, never
+  // by its text (the segment text IS the program for an inline form).
+  const named =
+    first.execCode === undefined ? JSON.stringify(first.text) : describeProgram(first.execCode);
+  return `${REQUIRE_SANDBOX_ENV}=1, and this command runs code the runtime did not author: ${named} (rule ${first.rule}), ${external ? "under a profile this runtime did not write, which is a permission you granted yourself" : "with the session's own network"}. A command like this executes whatever is in the files it names, so its class describes what was typed rather than what will happen. Re-run it as \`approval sandbox -- <command>\`: it classifies the same, it is allowed the same, and it runs with no way out to the network (docs/sandboxed-exec.md). Nothing was appended.`;
 }
 
 /** The window standing over `logPath`, and the records it was derived from. */
@@ -6876,6 +7057,10 @@ function* runBypass(
     // window being open does not let a call run unrecorded.
     unclaimedStanding(scope.options, cwd, input.toolName, decidedOn?.records ?? null).kind ===
       "ungated",
+    // APRV-510: the window does not reach `exec.code`. Opening the class is a
+    // policy statement, and the window suspends the policy; an opaque program is
+    // the case this path already names as one nothing here can vouch for.
+    closedExecCodeGate("window"),
   );
   if (described.kind === "deny") {
     return deny(
@@ -7276,13 +7461,35 @@ function* runHarnessHook(
   // appends on this path and no gate lifecycle opens. An OPEN WINDOW does not
   // reach it either, which is the strict reading a window deserves here: a
   // window suspends the policy, and this refusal is not a policy question.
+  //
+  // APRV-510: the ONE exception is a policy declaring both `exec.code` keys
+  // (`custody: attested` and `execute_code: hooked`). That call goes on to be
+  // classified `exec.code` with its program's hash bound; the policy is read
+  // here for this one tool, and a policy that does not load opens nothing.
   if (adapter.kind === "hermes" && input.toolName === HERMES_EXECUTE_CODE_TOOL) {
-    return deny(
-      streams,
-      HERMES_EXECUTE_CODE_REFUSAL,
-      `Hermes ${HERMES_EXECUTE_CODE_TOOL} is refused because the call carries a program and nothing else: no path, no argv and no working directory, so no class can be resolved and no payload can bind what it would do. Run the work through the \`${adapter.shellTool}\` tool, where the words are visible to the classifier, or through \`approval run\` with a granted token. No policy or open window authorizes bytes the hook cannot read`,
-      adapter.kind,
+    const early = hookScope(parsed.flags, cwd);
+    const loaded = loadPolicy(
+      early.options.policy?.file === undefined
+        ? { dir: early.options.policy?.dir ?? cwd }
+        : { file: early.options.policy.file },
     );
+    const gate = execGateOf(adapter, loaded.ok ? loaded.policy : null);
+    if (!gate.executeCode) {
+      if (gate.closed === "unattested") {
+        return deny(
+          streams,
+          "hook-exec-code-custody-unattested",
+          `Hermes ${HERMES_EXECUTE_CODE_TOOL} runs a program (exec.code), and this policy names exec.code without declaring \`${EXEC_CODE_CUSTODY_KEY}\`. Opaque code is not run before the operator attests that credential custody is in place, and \`${HERMES_EXECUTE_CODE_TOOL}\` additionally needs \`${EXEC_CODE_EXECUTE_KEY}\`. Nothing was appended`,
+          adapter.kind,
+        );
+      }
+      return deny(
+        streams,
+        HERMES_EXECUTE_CODE_REFUSAL,
+        executeCodeRefusal(gate.shell ? "unhooked-attested" : "unhooked", adapter.shellTool),
+        adapter.kind,
+      );
+    }
   }
 
   // APRV-415, and placed here for the reason the two refusals above are: before
@@ -7557,7 +7764,16 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
   // both paths since APRV-214 (see `describeToolCall`): the open window
   // classifies exactly as the closed one does, and a second copy of this would
   // be a second answer to "what is this command".
-  const described = describeToolCall(input, adapter, protectedPaths, cwd, readRoots, load.policy);
+  const described = describeToolCall(
+    input,
+    adapter,
+    protectedPaths,
+    cwd,
+    readRoots,
+    load.policy,
+    true,
+    execGateOf(adapter, load.policy),
+  );
   if (described.kind === "deny") {
     return { permission: "deny", code: described.code, detail: described.detail };
   }

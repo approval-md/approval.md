@@ -363,6 +363,9 @@ const FIXTURES: readonly Fixture[] = [
   { command: "bun skills/agent-profile/scripts/profile.ts", class: "exec.local", rule: "skill-script" },
   { command: "python3 skills/agent-commons/scripts/search_forum.py --q x", class: "exec.local", rule: "skill-script" },
   { command: "node skills/x/scripts/f.ts", class: "exec.local", rule: "node-skill-script", row: "node" },
+  // APRV-510: only with the class opened; tests/command-class-exec-code.test.ts holds the rest.
+  { command: "python3 -c 'print(1)'", class: "exec.code", rule: "exec-code-inline", row: "exec-code", context: { execCode: true } },
+  { command: "python3 tools/x.py", class: "exec.code", rule: "exec-code-file", row: "exec-code", context: { execCode: true } },
   { command: "node dist/src/cli/main.js log verify", class: GATE_SELF_CLASS, rule: "node-approval-cli", row: "node" },
   { command: "node ./cli.js status", class: GATE_SELF_CLASS, rule: "node-approval-cli", row: "node" },
   { command: "approval queue --json", class: GATE_SELF_CLASS, rule: "approval" },
@@ -990,6 +993,21 @@ test("a GET-shaped fetch redirected into a file is a workspace write, not a read
 // ---------------------------------------------------------------------------
 // Coverage: no row of the table is unexercised
 // ---------------------------------------------------------------------------
+
+test("APRV-510: opening exec.code changes no fixture outside the exec-code row", () => {
+  // Security review finding 3c: the row sits above `node`, so every argv the
+  // table already classified from its arguments must answer byte for byte the
+  // same with the class closed and opened.
+  for (const fixture of FIXTURES) {
+    if ((fixture.row ?? fixture.rule) === "exec-code") continue;
+    const base = fixture.context ?? {};
+    assert.deepEqual(
+      classifyCommand(fixture.command, [], { ...base, execCode: true }),
+      classifyCommand(fixture.command, [], { ...base, execCode: false }),
+      fixture.command,
+    );
+  }
+});
 
 test("every rule in COMMAND_RULES has at least one positive fixture", () => {
   const covered = new Set(FIXTURES.map((fixture) => fixture.row ?? fixture.rule));
