@@ -558,20 +558,44 @@ Five overrides sit on top of the table:
   a word holding an unexpandable `$` included. A `cd` is unresolvable when its
   operand is a variable, `-`, a glob, a brace list or an unexpanded tilde
   prefix; when it carries an assignment prefix (`CDPATH=`, `HOME=`); and when
-  its operand is relative and does not open with `./` or `../` (or is not
-  exactly `.` or `..`): the shell looks such an operand up through `CDPATH`,
-  which the hook cannot see. `popd` always is. So `cd src && npm test` asks a
-  human under a policy that makes `account.credential` human-only; write `cd
-  ./src && npm test`, or an absolute `cd`. A word opening with `~+`, `~-` or
-  `~name`, a brace list past 64 words, `$(…)` or script nesting past 8 levels,
-  and a shell handed an inline script in a shape the classifier does not
-  unwrap are credential reads too.
+  its argv is one bash and zsh read differently from a plain directory (an
+  option other than `-L`, `-P`, `-e`, `-q`, `-s`; two or more operands; an
+  operand that is empty or opens with `-` or `+`). `popd` always is.
+
+  A relative operand that does not open with `./` or `../` (and is not exactly
+  `.` or `..`) may be found through `CDPATH`, which the hook cannot see. The
+  hook keeps the directory the operand names from the known one, and also
+  judges each later relative word as `<unknown directory>/<operand>/<word>`.
+  That word is a credential read only when the path could name credential
+  material or a gate home: the operand carries a credential name (`keys`,
+  `vault*`, `env*`, `.env*`, `auth.json`); the joined path matches a
+  credential row with the unknown directory taken as an approval, Hermes or
+  profiles directory; the word reaches `.env*` or `auth.json` directly below
+  the operand's directory, which may be a profile home of any name; or the
+  path ends in `.approval`, `.hermes`, the configured Hermes home's name or
+  `profiles/<name>`. So `cd src && npm test` keeps its normal class. What this
+  still costs: after such a `cd`, a recursive reader (the grep family, `rg`,
+  `find`, `tar`, a copier such as `cp`, git or `diff` with a path or message
+  word), a word holding `..`, and a `**` glob are credential reads, because
+  what they reach below an unknown directory cannot be bounded. A `./`
+  spelling or an absolute `cd` avoids that.
+
+  `$OLDPWD` and the directory stack fail closed as `~-` does. A `cd ..` is
+  judged against the directory as spelled (the shell's logical `cd`) as well
+  as with its symlinks resolved. A recursive `**` glob judges the directory it
+  starts from as a recursive read. A word opening with `~+`, `~-` or `~name`,
+  a brace list past 64 words, `$(…)` or script nesting past 8 levels, and a
+  shell handed an inline script in a shape the classifier does not unwrap are
+  credential reads too.
 
   Out of reach, stated so nobody assumes otherwise: a path held in a variable,
   or produced by a substitution's output, is judged by its text alone (an
   absolute one always, a relative one unless the directory is unknown); a
   recursive search of an ANCESTOR of a credential directory with a filename
-  filter; and a Bash directory that is neither the hook process's nor the
+  filter; after a `CDPATH`-steerable `cd`, a symlink inside the unknown
+  directory, a `CDPATH` entry that itself lies inside a credential subtree,
+  and a `cdable_vars` option or `cd` function from the user's profile; and a
+  Bash directory that is neither the hook process's nor the
   envelope's `cwd` (the Bash tool keeps its directory between calls, and the
   hook sees only what the envelope reports).
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or

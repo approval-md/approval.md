@@ -203,19 +203,19 @@ test("M4: ordinary work stays ordinary", () => {
   const at = lab();
   for (const command of [
     "cat src/x.ts",
-    "cd ./src && cat x.ts",
+    "cd src && cat x.ts",
     "cat k/s1/SKILL.md",
     "grep -r . src",
     "cat $(echo src/x.ts)",
     "echo .approval/README > notes.md",
     "ls .approval",
     "cp src/x.ts /tmp/y.ts",
-    "cd ./.hermes && cat skills/s1/SKILL.md",
+    "cd .hermes && cat skills/s1/SKILL.md",
   ]) {
     const classes = classify(at, command);
     assert.equal(classes.includes("account.credential"), false, `${command}: ${JSON.stringify(classes)}`);
   }
-  const allowed = claude(at, "Bash", { command: "cd ./src && cat x.ts" });
+  const allowed = claude(at, "Bash", { command: "cd src && cat x.ts" });
   assert.match(allowed.stdout, /"permissionDecision":"allow"/u, allowed.stdout + allowed.stderr);
 });
 
@@ -304,7 +304,7 @@ test("S2: a `<` target outside the read scope is read.file.out_of_scope, as its 
 
 test("credentialReadLandings reports the resolved path, never file contents", () => {
   const at = lab();
-  const found = credentialReadLandings("cd ./ap && cat env", at.dir, { HOME: at.home });
+  const found = credentialReadLandings("cd ap && cat env", at.dir, { HOME: at.home });
   assert.ok(found.length > 0);
   for (const entry of found) {
     assert.equal(entry.segment, "cat env");
@@ -348,7 +348,6 @@ test("fix M-B: a cd steered by CDPATH or HOME leaves the directory unknown", () 
   const at = lab();
   for (const command of [
     "CDPATH=.approval cd keys && cat k1",
-    "cd src && cat x.ts",
     "cd .approval && cat env",
     `HOME=${join(at.dir, ".approval")} cd && cat env`,
   ]) {
@@ -359,8 +358,14 @@ test("fix M-B: a cd steered by CDPATH or HOME leaves the directory unknown", () 
     hermes(at, "terminal", { command: "CDPATH=. cd .hermes && cat .env", workdir: at.dir }),
     "hermes CDPATH",
   );
-  // A cd that names its landing outright is still followed exactly.
-  for (const command of ["cd ./src && cat x.ts", "cd .. && cat src/x.ts", `cd ${join(at.dir, "src")} && cat x.ts`]) {
+  // A cd that names its landing outright is still followed exactly, and since
+  // fix round 2 a plain relative cd keeps a non-credential word's normal class.
+  for (const command of [
+    "cd ./src && cat x.ts",
+    "cd .. && cat src/x.ts",
+    `cd ${join(at.dir, "src")} && cat x.ts`,
+    "cd src && cat x.ts",
+  ]) {
     assert.equal(isCredential(at, command), false, command);
   }
 });
@@ -458,4 +463,119 @@ test("fix S-1: the Claude Code arm also judges from the envelope's cwd", () => {
     }),
   );
   deniedAsCredential(run, "envelope cwd in the approval home");
+});
+
+// ===========================================================================
+// Fix round 2 (CLAIMS L10626): the M-B rule narrowed, still fail closed, and
+// the path-parser differentials the round's review named, closed fail-closed.
+// ===========================================================================
+
+test("fix round 2: after a plain relative cd, ordinary words keep their normal class", () => {
+  const at = lab();
+  for (const command of [
+    "cd src && cat x.ts",
+    "cd src && npm test",
+    "cd src && git status",
+    "cd src && cat env",
+    "cd src && cat keys/a",
+    "cd src && jq . x.ts",
+    "cd src && cat ./x.ts",
+    "cd .approval && cat queue/x",
+    "cd .hermes && cat skills/s1/SKILL.md",
+    "cd src && cd ./lib && cat x.ts",
+  ]) {
+    assert.equal(isCredential(at, command), false, `${command}: ${JSON.stringify(classify(at, command))}`);
+  }
+  const allowed = claude(at, "Bash", { command: "cd src && npm test" });
+  assert.doesNotMatch(`${allowed.stdout} ${allowed.stderr}`, /account\.credential/u, allowed.stdout + allowed.stderr);
+  assert.doesNotMatch(hermesClasses(at, "cd src && cat x.ts", at.dir), /account\.credential/u);
+  assert.doesNotMatch(hermesClasses(at, "cd skills && cat s1/SKILL.md", at.hermes), /account\.credential/u);
+});
+
+test("fix round 2: a plain relative cd before a credential-shaped operand or word is still a credential read", () => {
+  const at = lab();
+  for (const command of [
+    // The operand carries a credential name: the unknown prefix may be its home.
+    "cd keys && cat k1",
+    "cd vault.d && cat x",
+    // The joined path matches a credential row.
+    "cd .approval && cat env",
+    "cd .approval && cat keys/k1",
+    "cd .hermes && cat .env",
+    "cd src && cat profiles/p/.env",
+    // The operand's own directory may be a Hermes or profile home of any name.
+    "cd src && cat .env",
+    "cd src && cat auth.json",
+    "cd src && cat .env.local",
+    // The path names a gate home.
+    "cd src && cat .approval",
+    // A `..`, a recursive reader and a glob that could name a credential.
+    "cd src && cat ../x.ts",
+    "cd src && grep -r needle x.ts",
+    "cd src && rg needle",
+    "cd src && cat *",
+    "cd src && cat .e*",
+    "cd src && cat **/x.ts",
+    // A cd below the steered directory keeps it steered; a `..` above it does not resolve.
+    "cd src && cd ./lib && cat .env",
+    "cd src && cd .. && cat x.ts",
+    // `$PWD` under the steered directory.
+    "cd src && cat $PWD/.env",
+  ]) {
+    assert.ok(isCredential(at, command), `${command}: ${JSON.stringify(classify(at, command))}`);
+  }
+  // A configured Hermes home's basename is judged as the Hermes home.
+  assert.ok(isCredential(at, "cd src && cat hh/.env", { HERMES_HOME: join(at.dir, "hh") }));
+  assert.equal(isCredential(at, "cd src && cat hh/.env"), false);
+  deniedAsCredential(claude(at, "Bash", { command: "cd src && cat .env" }), "claude steered .env");
+  deniedAsCredential(claude(at, "Bash", { command: "cd keys && cat k1" }), "claude steered keys");
+  deniedAsCredential(hermes(at, "terminal", { command: "cd src && cat auth.json", workdir: at.dir }), "hermes steered auth.json");
+});
+
+test("fix round 2: cd argv forms the shell reads differently leave the directory unknown", () => {
+  const at = lab();
+  for (const command of [
+    "cd -- -x && cat env",
+    "cd a b && cat x.ts",
+    "cd +1 && cat x.ts",
+    "cd -2 && cat x.ts",
+    "cd -@ x && cat x.ts",
+    'cd "" && cat x.ts',
+  ]) {
+    assert.ok(isCredential(at, command), `${command}: ${JSON.stringify(classify(at, command))}`);
+  }
+  // The options that keep the landing where the operand says are still read.
+  for (const command of ["cd -P ./src && cat x.ts", "cd -L -- ./src && cat x.ts"]) {
+    assert.equal(isCredential(at, command), false, command);
+  }
+});
+
+test("fix round 2: $OLDPWD and the directory stack fail closed, as ~- does", () => {
+  const at = lab();
+  for (const command of ["cat $OLDPWD/env", "cat ${OLDPWD}/env", "cat ${DIRSTACK[1]}/env", "cat $dirstack[1]/env"]) {
+    assert.ok(isCredential(at, command), `${command}: ${JSON.stringify(classify(at, command))}`);
+  }
+  deniedAsCredential(hermes(at, "terminal", { command: "cat $OLDPWD/.env", workdir: at.hermes }), "hermes OLDPWD");
+});
+
+test("fix round 2: a logical `cd ..` climbs the directory as spelled, not its symlink's target", () => {
+  const at = lab();
+  // `sub/link` points into the Hermes home; `sub/x` points at the environment map.
+  mkdirSync(join(at.dir, "sub"));
+  symlinkSync(join(at.hermes, "skills"), join(at.dir, "sub", "link"));
+  symlinkSync(join(at.dir, ".approval", "env"), join(at.dir, "sub", "x"));
+  assert.ok(isCredential(at, "cd ./sub/link && cd .. && cat x"));
+  // A start directory that is itself a symlink climbs as spelled too.
+  symlinkSync(join(at.hermes, "skills", "s1"), join(at.dir, "lnk"));
+  const found = credentialReadLandings("cd .. && cat ap/env", join(at.dir, "lnk"), { HOME: at.home });
+  assert.ok(found.length > 0, JSON.stringify(found));
+});
+
+test("fix round 2: a recursive ** glob judges the directory it starts from", () => {
+  const at = lab();
+  mkdirSync(join(at.dir, ".approval", "keys", "deep"));
+  writeFileSync(join(at.dir, ".approval", "keys", "deep", "k2"), "SYNTHETIC=1\n", "utf8");
+  assert.ok(isCredential(at, "cat .approval/**/k2"));
+  assert.ok(isCredential(at, "cat ap/**/k2"));
+  assert.equal(isCredential(at, "cat src/**/x.ts"), false);
 });

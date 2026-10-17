@@ -217,3 +217,10 @@ test("S2: a here-string stays refused rather than read", () => {
   const result = classifyCommand("cat <<< /home/u/.ssh/id_ed25519");
   assert.equal(result.ok, false);
 });
+
+test("fix round 2: a backslash in a profile name is judged on the kernel's `/`-only split too", () => {
+  // On macOS and Linux `a\b` is one directory name; the rows split it in two.
+  assert.equal(isCredentialPath(".hermes/profiles/a\\b/.env"), true);
+  assert.equal(isCredentialPath(".hermes/profiles/a\\b/auth.json"), true);
+  assert.equal(isCredentialPath(".hermes/profiles/a\\b/notes.md"), false);
+});

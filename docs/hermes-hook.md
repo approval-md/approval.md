@@ -428,10 +428,11 @@ later relative write is `policy.core` and every later relative read
 `account.credential`; setting `APPROVAL_HERMES_HOME` on the serve process
 removes that conservatism for the home. Reads are judged a second time by the
 shared credential pass (APRV-522, see `docs/claude-code-hook.md`), which also
-treats a relative `cd` operand not opening with `./` or `../` as unresolvable,
-because the shell may look it up through an inherited `CDPATH`: after `cd
-project`, every later relative read is `account.credential`, so write `cd
-./project`. The write judgement here does NOT assume an inherited `CDPATH`
+judges a relative `cd` operand not opening with `./` or `../` as possibly
+found through an inherited `CDPATH`: after `cd project`, a later relative read
+is `account.credential` when `<unknown directory>/project/<word>` could name
+credential material or a gate home, and always for a recursive reader, a word
+holding `..` and a `**` glob; other reads keep their class. The write judgement here does NOT assume an inherited `CDPATH`
 (it would make every write after such a `cd` `policy.core`); a write landed
 through one is a stated limit. `APPROVAL_HERMES_HOME` is
 trusted as given: the operator sets it (under co-location the control plane sets

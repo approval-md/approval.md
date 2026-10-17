@@ -83,23 +83,41 @@ on the hook for enforcement.
   later relative read is a credential read, an unexpandable `$` in the word
   included. A `cd` is unresolvable when its operand is a variable, `-`, a glob,
   a brace list or an unexpanded tilde prefix; when it carries an assignment
-  prefix (`CDPATH=`, `HOME=`, any other); and when its operand is relative and
-  does not open with `./` or `../` (or is not exactly `.` or `..`), because the
-  shell looks such an operand up through a `CDPATH` the hook cannot see. `popd`
-  is always unresolvable. **This is a usability cost: in the Claude Code hook,
-  `hook classify` and the Hermes hook's read judgement, `cd src && …` followed
-  by any relative word is now `account.credential`; write `cd ./src`.** A word
-  opening with `~+`, `~-` or `~name`, a brace list past 64 words, nesting of
-  `$(…)` or shell scripts past 8 levels, and a known shell handed an inline
-  script in a shape the classifier does not unwrap are credential reads too.
+  prefix (`CDPATH=`, `HOME=`, any other); when it carries an option other than
+  `-L`, `-P`, `-e`, `-q` or `-s`, two or more operands (zsh's substitution
+  form), or an operand that is empty or opens with `-` or `+` (zsh's stack
+  forms, and `cd -- -x`, which was read as a bare `cd`). `popd` is always
+  unresolvable. A relative operand that does not open with `./` or `../` may
+  be found through a `CDPATH` the hook cannot see; the hook then also judges
+  each later relative word as `<unknown directory>/<operand>/<word>`, and it is
+  a credential read only when that path could name credential material or a
+  gate home: the operand carries a credential name (`keys`, `vault*`, `env*`,
+  `.env*`, `auth.json`), the joined path matches a credential row with the
+  unknown directory taken as a home, the word reaches `.env*` or `auth.json`
+  directly below the operand's directory (which may be a profile home of any
+  name), or the path ends in `.approval`, `.hermes`, the configured Hermes
+  home's name or `profiles/<name>`. **The remaining cost of that rule:** after
+  such a `cd`, a recursive reader (the grep family, `rg`, `find`, `tar`, a
+  copier such as `cp`, git or `diff` with a path or message word), a word
+  holding `..` and a `**` glob are credential reads. `cd src && npm test` keeps
+  its normal class. `$OLDPWD` and the directory stack (`$DIRSTACK`,
+  `$dirstack`) fail closed as `~-` does; a logical `cd ..` is judged against
+  the directory as spelled as well as its symlink's target; a recursive `**`
+  glob judges the directory it starts from; and a backslash, a separator only
+  on Windows, is no longer split on in the kernel's reading. A word opening
+  with `~+`, `~-` or `~name`, a brace list past 64 words, nesting of `$(…)` or
+  shell scripts past 8 levels, and a known shell handed an inline script in a
+  shape the classifier does not unwrap are credential reads too.
 
   Still out of reach, stated so nobody assumes otherwise: a path held in a
   variable, or produced by a substitution's output, is judged by its text alone
   (an absolute one always, a relative one unless the directory is unknown); a
   recursive search of an ANCESTOR of a credential directory; a Claude Code
   Bash directory that is neither the hook process's nor the envelope's `cwd`;
-  and, in the Hermes hook's WRITE judgement, a relative `cd` steered by an
-  inherited `CDPATH` (its reads are judged fail-closed as above).
+  in the Hermes hook's WRITE judgement, a relative `cd` steered by an inherited
+  `CDPATH` (its reads are judged as above); after such a `cd`, a symlink inside
+  the unknown directory, a `CDPATH` entry that itself lies inside a credential
+  subtree, and a user's `cdable_vars` option or a `cd` function from a profile.
 
 - **`git push` is read through git 2.50's own option grammar (APRV-517).** The
   `git-push` row matched flags by exact spelling (`--delete`, `-d`, `--force`,

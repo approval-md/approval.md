@@ -698,7 +698,22 @@ export function isCredentialPath(candidate: string): boolean {
   // insensitive by default, so an upper-case spelling opens the environment map
   // there; on a case-sensitive volume the fold names a different file as a
   // credential, which costs an approval prompt and never an exposure.
-  const written = pathSegments(candidate).map((segment) => segment.toLowerCase());
+  //
+  // APRV-522 fix round 2 (path-parser differential): a backslash separates
+  // segments only on Windows. On macOS and Linux it is a character of a name,
+  // so a profile directory whose name holds one is ONE segment to the kernel
+  // and two to the split above, which moves the profile row's offset. When the
+  // path holds a backslash, the `/`-only reading is judged as well.
+  const splittings = [pathSegments(candidate)];
+  if (candidate.includes("\\")) {
+    splittings.push(candidate.split(/\/+/u).filter((segment) => segment.length > 0 && segment !== "."));
+  }
+  return splittings.some((segments) => credentialSegmentsAsWrittenOrResolved(segments));
+}
+
+/** The credential rows over one splitting, as written and with `..` resolved. */
+function credentialSegmentsAsWrittenOrResolved(segments: readonly string[]): boolean {
+  const written = segments.map((segment) => segment.toLowerCase());
   if (credentialSegments(written)) return true;
   if (!written.includes("..")) return false;
   const resolved: string[] = [];
@@ -924,6 +939,22 @@ function credentialWritesOnly(basename: string, args: readonly string[]): boolea
  * not listed, `-fp`, an unknown flag) makes the argv a reader, and the
  * credential rule judges what it names.
  */
+/**
+ * Where git's verb sits in its argv, read the way {@link gitWritesNamedPathsOnly}
+ * reads it (APRV-522 fix round 2): only zero-value globals may come before it,
+ * and any other flag leaves the verb unknown (`null`). The hook's credential
+ * pass uses it so that, under a directory a `CDPATH` lookup may have chosen,
+ * the verb word is not judged as a path: git never opens its verb.
+ */
+export function gitVerbIndex(args: readonly string[]): number | null {
+  let at = 0;
+  while (at < args.length && isFlag(args[at] as string)) {
+    if (!GIT_ZERO_VALUE_GLOBALS.includes(args[at] as string)) return null;
+    at += 1;
+  }
+  return at < args.length ? at : null;
+}
+
 function gitWritesNamedPathsOnly(args: readonly string[]): boolean {
   let at = 0;
   while (at < args.length && isFlag(args[at] as string)) {
