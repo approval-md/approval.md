@@ -5723,7 +5723,12 @@ its own flags are not parsed as this verb's.
   ONE inline script is classified by that script since APRV-380, so
   `zsh -lc 'git push origin main'` is `vcs.push.main`; a script file, an extra
   word, a redirection on the wrapper, an assignment prefix and a nested shell
-  all stay opaque.
+  all stay opaque. So does a shell that is not the system's, named as written
+  (APRV-523): one spelled by a path outside `/bin`, `/usr/bin`,
+  `/usr/local/bin`, `/sbin` and `/usr/sbin` (a relative path, a Homebrew
+  shell under `/opt`), or by a word with an expansion or a backslash in it.
+  An assignment-shaped shell word with a quoted or escaped name is
+  `hook-unclassified`.
 - `hook-unparseable` — the command line could not be tokenized.
 - `hook-rejected` — a human said no.
 - `hook-revoked` — a granted approval was withdrawn.

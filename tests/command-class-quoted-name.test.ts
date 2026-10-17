@@ -239,6 +239,36 @@ test("review-b S1: a login-shell wrapper unwraps only the system's shell, named 
   assert.equal(commandSegmentShapes("bash -c 'ls'")?.[0]?.script, "ls");
 });
 
+test("review-b S1-R, N4, N6: only a shell or shape-row word whose text is the bytes bash runs is the system's", () => {
+  // S1-R: a parameter expansion supplies the slash, and a literal backslash
+  // makes the basename read as a shell. Without the expansion the backslash
+  // still names a program other than the shell. Both stay wrapped.
+  for (const command of ["$d'\\'bash -c 'ls'", "$d\\\\bash -lc 'ls'", "x'\\'bash -c 'ls'", "x\\\\sh -c 'ls'"]) {
+    assert.equal(failure(command).code, "opaque", command);
+    const shape = commandSegmentShapes(command)?.[0];
+    assert.ok(shape !== undefined, command);
+    assert.equal(shape.script, null, command);
+    assert.equal(shape.opaqueShell, true, command);
+  }
+  // N4: a quoted or escaped name whose value is a system-bin shell path.
+  for (const command of ["\"n\"=/bin/bash -c 'ls'", "\\n=/usr/bin/sh -lc 'ls'"]) {
+    const refused = failure(command);
+    assert.equal(refused.code, "unclassified", command);
+    assert.match(refused.detail, /quoted or escaped is a command word/u, command);
+  }
+  // N6: the APRV-508 shape-row gate reads the same rule.
+  for (const command of ["$d'\\'date", "x'\\'date", "$d/date"]) {
+    assert.equal(failure(command).code, "unclassified", command);
+  }
+  // The controls: a bare name and a system-bin path keep the wrapper route
+  // and the shape rows.
+  assert.equal(answer("bash -c 'ls'"), "read.shell/read-shell");
+  assert.equal(answer("/bin/zsh -lc 'ls'"), "read.shell/read-shell");
+  for (const command of ["date", "/bin/date", "date -u", "TZ=UTC date"]) {
+    assert.equal(answer(command), "read.shell/date-read", command);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // The hook refuses under this repository's APPROVAL.md
 // ---------------------------------------------------------------------------

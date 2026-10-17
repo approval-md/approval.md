@@ -1031,7 +1031,16 @@ const WRAPPER_SHELLS: readonly string[] = [
   "n=x/bash",
   ...quotedNameSpellings("n=x/bash"),
   ...quotedNameSpellings("n=/bin/bash"),
+  // Fix round 2 (review-b S1-R): a literal backslash before the shell name,
+  // after an expansion or a plain prefix.
+  "$d'\\'bash",
+  "$d\\\\zsh",
+  "x'\\'bash",
+  "x\\\\sh",
 ];
+
+/** Shape-row binaries (APRV-508), bare, at a system path and spelled as above (review-b N6). */
+const SHAPE_ROW_BINS: readonly string[] = ["date", "/bin/date", "hostname", "$d'\\'date", "x'\\'date", "$d/date", "x\\\\hostname"];
 
 function* wrapperCorpus(): Generator<string> {
   for (const shell of WRAPPER_SHELLS) {
@@ -1045,6 +1054,19 @@ function* wrapperCorpus(): Generator<string> {
       }
     }
   }
+  for (const bin of SHAPE_ROW_BINS) {
+    for (const args of ["", "-u", "+%s", "--version"]) {
+      const command = [bin, args].filter((word) => word !== "").join(" ");
+      yield command;
+      yield `TZ=UTC ${command}`;
+      yield `ls && ${command}`;
+    }
+  }
+}
+
+/** A command word with an expansion or a literal backslash, and no quoted assignment name (fix round 2). */
+function isInexactBinWord(word: string): boolean {
+  return /[$\\]/u.test(word) && !hasQuotedName(word);
 }
 
 /** A shell spelled by a path outside the system-bin directories, which the wrapper rule no longer unwraps. */
@@ -1087,7 +1109,8 @@ test("differential: a quoted or escaped name is stricter-only against #652 and m
       const fromAprv521 =
         carriesRefusedEnvironment(command) || words.some((word) => /^[A-Za-z_][A-Za-z0-9_]*(?:\[|\+=)/u.test(word));
       // The fix round (review-b S1): a path-spelled shell is no longer unwrapped.
-      const pathShell = words.some(isPathSpelledShell);
+      // Fix round 2 (review-b S1-R, N6): so is a word whose text is not the bytes bash runs.
+      const pathShell = words.some(isPathSpelledShell) || words.some(isInexactBinWord);
       const carried = words.some(hasQuotedName) || pathShell || (label === "main" && fromAprv521);
       if (!carried) problems.push(`${label}: moved without a quoted name: ${command}`);
       if (now.ok && !before.ok) {

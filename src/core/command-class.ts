@@ -4951,7 +4951,7 @@ export function loginShellScript(segment: LexSegment): string | null {
   // APRV-523 fix round (review-b S1): only the system's shell, named as
   // written. A bare name and a system-bin path keep the route.
   if (shell.assignment || ASSIGNMENT.test(shell.text)) return null;
-  if (!isSystemBinWord(shell.text)) return null;
+  if (!isSystemBinWord(shell.text, shell.exact)) return null;
   const base = pathSegments(shell.text).slice(-1)[0] ?? shell.text;
   if (!UNWRAPPABLE_SHELLS.has(base)) return null;
   if (!INLINE_SCRIPT_FLAG.test(flag.text)) return null;
@@ -5516,8 +5516,18 @@ const SYSTEM_BIN_DIRS: readonly string[] = ["/bin/", "/usr/bin/", "/usr/local/bi
  * place? A bare name is looked up on PATH; a path in a system directory names
  * that file. `./date` or `/tmp/x/date` is whatever program sits there, and a
  * shape row (APRV-508) does not vouch for it.
+ *
+ * Only a word whose `text` is the bytes bash runs can be judged by its text
+ * (APRV-523 fix round 2, review-b S1-R and N6). A word that is not
+ * {@link LexWord.exact} still changes under expansion, and bash may then see a
+ * slash this text does not show; a backslash in `text` is a path separator to
+ * {@link pathSegments} but a plain character to bash, so the basename read
+ * from it is not the program's name. Either is refused here, before the bare
+ * name is admitted. Callers holding only a string pass no flag: theirs is
+ * already exact ({@link isExecCodeInterpreter} runs on the exact-only shape).
  */
-function isSystemBinWord(word: string): boolean {
+function isSystemBinWord(word: string, exact = true): boolean {
+  if (!exact || word.includes("\\")) return false;
   if (!word.includes("/")) return true;
   if (word.includes("..") || word.includes("//")) return false;
   return SYSTEM_BIN_DIRS.some((dir) => word.startsWith(dir) && !word.slice(dir.length).includes("/"));
@@ -5553,11 +5563,18 @@ function matchRule(
    * (APRV-510.) Computed by `classifySegment`, which holds the words.
    */
   execShaped = false,
+  /** Is `binWord` the bytes bash runs ({@link LexWord.exact})? (APRV-523 fix round 2, review-b N6.) */
+  binExact = true,
 ): CommandRule | null {
   for (const rule of COMMAND_RULES) {
     if (!rule.bins.includes(bin)) continue;
     if (rule.probe === true && !isVersionProbe(args)) continue;
-    if (rule.shape !== undefined && (substituted || !isSystemBinWord(binWord) || !rule.shape(args, assignments))) continue;
+    if (
+      rule.shape !== undefined &&
+      (substituted || !isSystemBinWord(binWord, binExact) || !rule.shape(args, assignments))
+    ) {
+      continue;
+    }
     if (rule.execCode === true && !execShaped) continue;
     // APRV-502: see the doc comment above; any of the three declines the row.
     if (
@@ -5981,7 +5998,8 @@ function classifySegment(
   const substituted = segment.words
     .slice(cursor + 1)
     .some((word) => word.substitutions.length > 0);
-  const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin, execShape !== null);
+  const binExact = (segment.words[cursor] as LexWord).exact;
+  const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin, execShape !== null, binExact);
   if (rule === null) {
     return {
       ok: false,

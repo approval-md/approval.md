@@ -235,10 +235,16 @@ on the hook for enforcement.
   script's class whenever the first word's last path segment named a shell.
   That held for an assignment-shaped first word with a quoted or escaped name
   and for a relative path, so the script's class was given to a program the
-  agent can place. The wrapper is now unwrapped only when its shell word is
-  the system's: a bare name, or a path in `/bin`, `/usr/bin`, `/usr/local/bin`,
-  `/sbin` or `/usr/sbin`, with no assignment shape. Any other shell word keeps
-  the wrapper opaque or `unclassified`. The segment shapes the hook,
+  agent can place. A word whose slash came from a parameter expansion, with a
+  literal backslash before the shell name, took the same route (review-b
+  S1-R): the classifier read the backslash as a path separator and saw no
+  slash, while bash ran a path. The wrapper is now unwrapped only when its
+  shell word is the system's, named as written: a bare name, or a path in
+  `/bin`, `/usr/bin`, `/usr/local/bin`, `/sbin` or `/usr/sbin`, with no
+  assignment shape, no backslash, and nothing the shell would still expand.
+  Every other shell word keeps the wrapper opaque or `unclassified`. The
+  same written-as-run test now gates the date, hostname and other shape rows
+  (APRV-508), whose binary had the same backslash reading. The segment shapes the hook,
   the approval breakdown and the channels read now name the word bash runs as
   the binary. A quoted value, or a quoted subscript, keeps the word an
   assignment, unchanged. Stricter only: a depth-2 differential over
@@ -246,13 +252,17 @@ on the hook for enforcement.
   spellings added to its alphabet, and a corpus of other programs) moved
   51,226 from an answer to `unclassified` against #652's head (3a9c33c3) and
   586,454 against main (2179e128, #652's moves included), and loosened or
-  reclassified none. With login-shell wrappers added to that corpus
-  (2,423,543 lines), it moved 52,468 against main after #653 (7ab156eb) and
-  1,242 against this change before the wrapper rule (e0cb9923), and loosened
-  or reclassified none. Cost: none expected for the quoted name; an agent has
-  no reason to quote the name of an assignment. A shell spelled by any other
-  path (a relative one, or a Homebrew shell under `/opt`) is no longer
-  unwrapped, and its inline script needs a person.
+  reclassified none. With login-shell wrappers, the backslash and expansion
+  spellings, and shape-row binaries added to that corpus (2,423,915 lines),
+  it moved 52,712 against main after #653 (7ab156eb), 1,242 against this
+  change before the wrapper rule (e0cb9923, measured before the backslash
+  rows were added) and 244 against the first wrapper rule (d6752ded), and
+  loosened or reclassified none. Cost: none expected for the quoted name; an
+  agent has no reason to quote the name of an assignment. A shell spelled by
+  any other path (a relative one, or a Homebrew shell under `/opt`), or by a
+  word with an expansion or a backslash in it, is no longer unwrapped, and
+  its inline script needs a person; a shape-row binary spelled that way is
+  `unclassified`.
 
 ### Harnesses
 
