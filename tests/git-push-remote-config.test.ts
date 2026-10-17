@@ -26,7 +26,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -459,11 +459,13 @@ test("a directory the push runs in that cannot be named: the push its configurat
     class: "vcs.history.rewrite",
     rule: "git-push-config-unreadable",
   });
-  // An explicit src:dst is decided by the line, not the configuration.
+  // An explicit src:dst names its refs, but followTags may still publish tags.
   assert.deepEqual(classified('cd "$WT" && git push origin lane:lane', fixture.clone), {
-    class: "vcs.push.branch",
-    rule: "git-push-branch",
+    class: "release.publish",
+    rule: "git-push-config-unreadable",
   });
+  // A bare relative name goes through CDPATH, so it is not followed.
+  assert.equal(classified("cd clone && git push origin lane", join(fixture.clone, "..")).rule, "git-push-config-unreadable");
 });
 
 test("a cd to a literal path reads the checkout there, and the one it left", { skip: GIT_VERSION === null }, () => {
@@ -514,7 +516,7 @@ test("steer: the branch origin/HEAD names is a trunk, by name and through DWIM",
   assert.notEqual(after.get("refs/heads/develop"), before.get("refs/heads/develop"), "develop moved");
 });
 
-test("steer: code run earlier in the same command may rewrite the configuration, so a push it decides is unreadable", () => {
+test("steer + review: any earlier non-read segment, or foreign code, makes the push's configuration unreadable", () => {
   const fixture = makeFixture();
   assert.deepEqual(classified("npm test && git push -u origin lane", fixture.clone), {
     class: "vcs.history.rewrite",
@@ -524,10 +526,185 @@ test("steer: code run earlier in the same command may rewrite the configuration,
     class: "vcs.history.rewrite",
     rule: "git-push-config-unreadable",
   });
-  // An explicit src:dst is decided by the line; git add / commit run no foreign code.
-  assert.deepEqual(classified("npm test && git push origin lane:lane", fixture.clone), { class: "vcs.push.branch", rule: "git-push-branch" });
   assert.deepEqual(classified("git add -A && git commit -q -m x && git push -u origin lane", fixture.clone), {
+    class: "vcs.history.rewrite",
+    rule: "git-push-config-unreadable",
+  });
+  // The refs are on the line, but followTags may still be on by then.
+  assert.deepEqual(classified("npm test && git push origin lane:lane", fixture.clone), {
+    class: "release.publish",
+    rule: "git-push-config-unreadable",
+  });
+  // A read before it, a read piped after it, and a write after it (not concurrent) leave the reading alone.
+  assert.deepEqual(classified("git status && git push -u origin lane", fixture.clone), { class: "vcs.push.branch", rule: "git-push-branch" });
+  assert.deepEqual(classified("git push -u origin lane 2>&1 | tail -3", fixture.clone), { class: "vcs.push.branch", rule: "git-push-branch" });
+  assert.deepEqual(classified("git push -u origin lane && gh pr create --fill", fixture.clone), {
     class: "vcs.push.branch",
     rule: "git-push-branch",
   });
+  // Run alongside a write, it is unreadable.
+  assert.deepEqual(classified("git push -u origin lane & npm test", fixture.clone), {
+    class: "vcs.history.rewrite",
+    rule: "git-push-config-unreadable",
+  });
+});
+// ---------------------------------------------------------------------------
+// Security review: config the hook reads, config changed on the same line
+// ---------------------------------------------------------------------------
+
+/** Run a whole command line in the clone, as the harness would. */
+function sh(cwd: string, command: string): Ran {
+  const ran = spawnSync("/bin/sh", ["-c", command], { cwd, env: ENV, encoding: "utf8", timeout: 20_000 });
+  return { status: ran.status, stdout: ran.stdout ?? "", stderr: ran.stderr ?? "" };
+}
+
+function assertCovers(fixture: Fixture, command: string, cwd: string, sees: RegExp): { class: string; rule: string } {
+  const result = classifyForHook(command, [], cwd).result;
+  assert.equal(result.ok, true, command);
+  if (!result.ok) throw new Error("unreachable");
+  let strictest = "vcs.push.branch";
+  for (const segment of result.segments) {
+    if (ORDER.includes(segment.class) && ORDER.indexOf(segment.class) < ORDER.indexOf(strictest)) strictest = segment.class;
+  }
+  const before = refsOf(fixture.remote);
+  sh(cwd, command);
+  const { floor, effect } = floorOf(fixture, before, refsOf(fixture.remote));
+  assert.match(effect.join("; "), sees, `${command}: effect ${effect.join("; ")}`);
+  assert.ok(ORDER.indexOf(strictest) <= ORDER.indexOf(floor), `${command}: ${strictest} but did ${effect.join("; ")}`);
+  const push = result.segments.find((segment) => segment.rule.startsWith("git-push") || segment.rule === "git-ref-delete");
+  return { class: push?.class ?? "", rule: push?.rule ?? "" };
+}
+
+test("review: a mirror set in a per-worktree config.worktree is read in the worktree", { skip: GIT_VERSION === null }, () => {
+  const fixture = makeFixture();
+  ok(fixture.clone, ["config", "extensions.worktreeConfig", "true"]);
+  const wt = join(fixture.clone, "..", "wt");
+  ok(fixture.clone, ["worktree", "add", "-q", "-b", "wtb", wt, "main"]);
+  ok(wt, ["config", "--worktree", "remote.origin.mirror", "true"]);
+  assert.deepEqual(assertCovers(fixture, "git push origin", wt, /removed refs\/heads\/stale/u), {
+    class: "vcs.history.rewrite",
+    rule: "git-push-config-mirror",
+  });
+});
+
+test("review: a mirror set through include.path is read (git config reads includes)", { skip: GIT_VERSION === null }, () => {
+  const fixture = makeFixture();
+  writeFileSync(join(fixture.clone, "inc.cfg"), '[remote "origin"]\n\tmirror = true\n');
+  ok(fixture.clone, ["config", "include.path", "../inc.cfg"]);
+  assert.deepEqual(assertCovers(fixture, "git push origin", fixture.clone, /removed refs\/heads\/stale/u), {
+    class: "vcs.history.rewrite",
+    rule: "git-push-config-mirror",
+  });
+});
+
+test("review: includeIf onbranch flips after a checkout on the same line; the hook does not trust its earlier read", { skip: GIT_VERSION === null }, () => {
+  const fixture = makeFixture();
+  writeFileSync(join(fixture.clone, "main.cfg"), '[remote "origin"]\n\tmirror = true\n');
+  ok(fixture.clone, ["config", "includeIf.onbranch:main.path", "../main.cfg"]);
+  // On lane the include is off, and the hook's read says so.
+  assert.deepEqual(classified("git push origin", fixture.clone), { class: "vcs.push.main", rule: "git-push-implicit" });
+  // After `git checkout main` on the same line it is on; the push really mirrors.
+  assert.deepEqual(assertCovers(fixture, "git checkout -q main && git push origin", fixture.clone, /removed refs\/heads\/stale/u), {
+    class: "vcs.history.rewrite",
+    rule: "git-push-config-unreadable",
+  });
+});
+
+test("review: HEAD read before a checkout on the same line is not trusted", { skip: GIT_VERSION === null }, () => {
+  const fixture = makeFixture();
+  assert.deepEqual(classified("git push origin HEAD", fixture.clone), { class: "vcs.push.branch", rule: "git-push-branch" });
+  const answer = assertCovers(fixture, "git checkout -q main && git push origin HEAD", fixture.clone, /trunk moved/u);
+  assert.deepEqual(answer, { class: "release.publish", rule: "git-push-config-unreadable" });
+});
+
+test("review: a mirror appended to ~/.gitconfig on the same line is refused, and it really mirrors", { skip: GIT_VERSION === null }, () => {
+  const fixture = makeFixture();
+  const user = join(HOME, ".gitconfig");
+  const saved = readFileSync(user, "utf8");
+  try {
+    const command = "printf '[remote \"origin\"]\\n\\tmirror = true\\n' >> ~/.gitconfig && git push origin";
+    const result = classifyForHook(command, [], fixture.clone).result;
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, ["vcs.history.rewrite"]);
+    assert.equal(result.segments[0]?.rule, "git-config-file-write");
+    const before = refsOf(fixture.remote);
+    assert.equal(sh(fixture.clone, command).status, 0);
+    assert.match(floorOf(fixture, before, refsOf(fixture.remote)).effect.join("; "), /removed refs\/heads\/stale/u);
+  } finally {
+    writeFileSync(user, saved);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Agreement with git 2.50's parsers, for the readings APRV-518 touched
+// ---------------------------------------------------------------------------
+
+const REMOTE_READ_FORMS: readonly string[] = [
+  "git remote",
+  "git remote -v",
+  "git remote --verbose",
+  "git remote -v -v",
+  "git remote show origin",
+  "git remote show -n origin",
+  "git remote -v show origin",
+  "git remote get-url origin",
+  "git remote get-url --push origin",
+  "git remote get-url --all --push origin",
+  "git remote get-url --no-push origin",
+  "git remote update",
+  "git remote update origin",
+  "git remote -v update origin",
+  "git remote update --no-prune origin",
+];
+
+test("agreement: every git remote form the classifier reads is one git accepts and that writes no configuration", { skip: GIT_VERSION === null }, () => {
+  const fixture = makeFixture();
+  const config = join(fixture.clone, ".git", "config");
+  for (const command of REMOTE_READ_FORMS) {
+    assert.deepEqual(classified0(command), { class: "read.vcs.remote", rule: "git-remote-read" }, command);
+    const before = readFileSync(config, "utf8");
+    const heads = [...refsOf(fixture.clone).keys()].filter((ref) => !ref.startsWith("refs/remotes/"));
+    const ran = sh(fixture.clone, command);
+    assert.equal(ran.status, 0, `${command}: git refused it: ${ran.stderr}`);
+    assert.equal(readFileSync(config, "utf8"), before, `${command} changed .git/config`);
+    assert.deepEqual([...refsOf(fixture.clone).keys()].filter((ref) => !ref.startsWith("refs/remotes/")), heads, command);
+  }
+});
+
+function classified0(command: string): { class: string; rule: string } {
+  const result = classifyCommand(command);
+  assert.equal(result.ok, true, command);
+  if (!result.ok) throw new Error("unreachable");
+  const segment = result.segments[0] as { class: string; rule: string };
+  return { class: segment.class, rule: segment.rule };
+}
+
+/** Destinations, pushed from a lane one commit ahead of the remote trunk. */
+const DESTINATIONS = ["main", "heads/main", "refs/heads/main", "MAIN", "Main", "master", "HEAD", "remotes/origin/main", "tags/t9", "heads/heads/main", "heads/lane", "lane", "refs/heads/lane"];
+/** Colon-less words, pushed from main one commit ahead of the remote trunk. */
+const COLONLESS = ["main", "heads/main", "refs/heads/main", "HEAD", "@", "head", "HeAd", "HEAD~1", "@{u}", "HEAD^", "refs/heads/HEAD"];
+
+test("agreement: every DWIM destination and HEAD spelling is classified at least as strictly as git 2.50 acts on it", { skip: GIT_VERSION === null }, () => {
+  const cases = [
+    ...DESTINATIONS.map((dst) => ({ setup: ["checkout", "-q", "-B", "lane", "main"], argv: ["push", "origin", `lane:${dst}`] })),
+    ...COLONLESS.map((word) => ({ setup: ["checkout", "-q", "main"], argv: ["push", "origin", word] })),
+  ];
+  for (const one of cases) {
+    const fixture = makeFixture();
+    ok(fixture.clone, one.setup);
+    ok(fixture.clone, ["branch", "-q", "-u", "origin/main"]);
+    const command = `git ${one.argv.join(" ")}`;
+    const pure = classified0(command);
+    const hook = classified(command, fixture.clone);
+    const before = refsOf(fixture.remote);
+    git(fixture.clone, one.argv);
+    const { floor, effect } = floorOf(fixture, before, refsOf(fixture.remote));
+    for (const [layer, answer] of [["pure", pure], ["hook", hook]] as const) {
+      assert.ok(
+        ORDER.indexOf(answer.class) <= ORDER.indexOf(floor),
+        `${layer}: ${command} classified ${answer.class} but git did ${effect.join("; ")} (needs ${floor})`,
+      );
+    }
+  }
 });

@@ -2993,7 +2993,7 @@ export function classifyForHook(
   // APRV-518. A `git push` whose refs its remote configuration or its current
   // branch decides is answered from the checkout it runs in. First, because it
   // reads only push segments, which no pass below changes.
-  const pushed = refinePushRepo(classified, cwd);
+  const pushed = refinePushRepo(classified, cwd, command);
   const rewritten = refineRewrite(pushed.result, cwd);
   const scratched = refineScratchDelete(rewritten.result, roots);
   const scoped = refineReadScope(scratched.result, readRoots, cwd);

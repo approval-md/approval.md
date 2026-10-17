@@ -244,8 +244,8 @@ test("several directories: the strictest answer wins (a cd that may fail leaves 
   assert.equal(under("git push origin HEAD", [facts(), facts({ head: "main", headIsDefault: true })]).class, "vcs.push.main");
 });
 
-test("HEAD/@ cannot be read: the trunk, since HEAD takes no configured mapping", () => {
-  assert.deepEqual(under("git push origin HEAD", null), { class: "vcs.push.main", rule: "git-push-head" });
+test("HEAD/@ cannot be read: at least the trunk (HEAD takes no configured mapping), and followTags may add tags", () => {
+  assert.deepEqual(under("git push origin HEAD", null), { class: "release.publish", rule: "git-push-config-unreadable" });
 });
 
 test("a mirror remote makes the push a mirror push, whatever its other words", () => {
@@ -319,11 +319,11 @@ test("a legacy remotes/branches file the push may use is unreadable", () => {
   });
 });
 
-test("configuration that cannot be read: a push it decides is vcs.history.rewrite, an explicit one keeps its class", () => {
+test("configuration that cannot be read: a push it decides is vcs.history.rewrite, an explicit one is at least release.publish", () => {
   for (const command of ["git push", "git push origin", "git push origin lane", "git push --tags origin", "git push -u origin lane"]) {
     assert.deepEqual(under(command, null), { class: REWRITE, rule: "git-push-config-unreadable" }, command);
   }
-  assert.deepEqual(under("git push origin lane:lane", null), { class: "vcs.push.branch", rule: "git-push-branch" });
+  assert.deepEqual(under("git push origin lane:lane", null), { class: "release.publish", rule: "git-push-config-unreadable" });
   assert.deepEqual(under("git push origin :stale", null), { class: "vcs.ref.delete", rule: "git-ref-delete", path: "stale" });
   assert.deepEqual(under("git push origin --delete lane", null), { class: "vcs.ref.delete", rule: "git-ref-delete", path: "lane" });
 });
@@ -481,4 +481,46 @@ test("the branch origin/HEAD names is a trunk when the checkout shows it", () =>
   assert.equal(under("git push origin lane:heads/develop", [develop]).class, "vcs.push.main");
   assert.equal(under("git push origin develop", [develop]).class, "vcs.push.main");
   assert.equal(under("git push origin lane:develop", [facts()]).class, "vcs.push.branch");
+});
+
+// ---------------------------------------------------------------------------
+// Security review: config changed on the same line, git's own config files
+// ---------------------------------------------------------------------------
+
+test("a write to git's own configuration files outside a repository is vcs.history.rewrite", () => {
+  for (const [command, path] of [
+    ["printf x >> ~/.gitconfig", "~/.gitconfig"],
+    ["echo x > /Users/a/.gitconfig", "/Users/a/.gitconfig"],
+    ["tee -a ~/.config/git/config", "~/.config/git/config"],
+    ["cp /tmp/x /etc/gitconfig", "/etc/gitconfig"],
+  ] as const) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, command);
+    if (!result.ok) continue;
+    assert.deepEqual(
+      result.segments.map((segment) => [segment.class, segment.rule, segment.path]),
+      [[REWRITE, "git-config-file-write", path]],
+      command,
+    );
+  }
+  assert.equal(only("cat ~/.gitconfig").class.startsWith("read."), true);
+});
+
+test("a bare GIT_* or XDG_CONFIG_HOME assignment is refused: it re-points every later git", () => {
+  for (const command of [
+    "GIT_CONFIG_GLOBAL=/tmp/g; git push origin",
+    "GIT_DIR=/tmp/x; git push",
+    "XDG_CONFIG_HOME=/tmp/x; git push origin lane",
+  ]) {
+    assert.equal(refusal(command), "unclassified", command);
+  }
+  // A prefix assignment on the push itself was already the rewrite class (APRV-517).
+  assert.equal(only("GIT_CONFIG_COUNT=1 git push origin lane").class, REWRITE);
+});
+
+test("unreadable configuration: an explicit or HEAD push may still publish tags (push.followTags)", () => {
+  assert.deepEqual(under("git push origin lane:lane", null), { class: "release.publish", rule: "git-push-config-unreadable" });
+  assert.deepEqual(under("git push origin HEAD", null), { class: "release.publish", rule: "git-push-config-unreadable" });
+  // A deletion pushes no tags.
+  assert.equal(under("git push origin :stale", null).class, "vcs.ref.delete");
 });

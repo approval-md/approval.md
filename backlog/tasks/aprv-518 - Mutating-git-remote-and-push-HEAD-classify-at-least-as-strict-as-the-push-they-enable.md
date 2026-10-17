@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-17 06:49'
-updated_date: '2026-10-17 07:19'
+updated_date: '2026-10-17 07:39'
 labels:
   - classifier
   - security
@@ -31,6 +31,7 @@ Found by the APRV-517 build lane (lanes-approval/APRV-PUSH-DELETE-build.md, foll
 - [x] #5 command-class conformance vectors regenerated via scripts/regen-conformance-vectors.mjs (1.9.0); CHANGELOG Unreleased Security entry
 - [x] #6 Steer (#649 refutation): any shell write whose target has a .git segment (redirect, tee, cp, mv, sed -i, rm, ln, curl -o, wget -O) is vcs.history.rewrite (git-dir-write); in the same command, earlier foreign code or a write to a shell-expanded path makes a push's configuration unreadable
 - [x] #7 Steer: push destinations resolve through git's ref DWIM (heads/main, refs/heads/main, case-insensitive, tags/x a tag, the origin/HEAD branch a trunk), so any destination that resolves to the default branch is vcs.push.main or stricter
+- [x] #8 Security review: the hook's checkout reading is trusted only when no other segment on the line can change it (earlier non-read, or concurrent non-read); unreadable explicit/HEAD pushes are at least release.publish; writes to ~/.gitconfig, ~/.config/git/, /etc/gitconfig are vcs.history.rewrite; bare GIT_*/XDG_CONFIG_HOME assignments refused; real-git agreement tests for every touched reading
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -53,4 +54,6 @@ Done in lane claude-approval@main/APRV-REMOTE-MIRROR (Opus 5.5 subagent), stacke
 - Verified on git 2.50.1: a colon-less refspec takes force AND destination from a mapping remote.*.push; HEAD takes no mapping; mirror config applies with --tags/--all/--repo; `lane:heads/main` moves main.
 - Evidence: tsc 0, lint 0, build 0, conformance 693/693 (0), regen no drift; targeted 28 files exit 0 (1789 tests, 1787 pass, 2 machine skips). Differential vs #649 head: pure 24,689 lines 0 looser (6,887 stricter); hook 3,627 lines in 9 checkout states 0 looser (1,003 stricter). command-class 1.9.0 (#649 has 1.8.0; #639 also claims 1.8.0).
 - Touches global invariant "fail closed" only in the strict direction.
+
+Security review round (TOCTOU, validator-differential): the hook now distrusts its own pre-run reading whenever any earlier segment that is not a read, or any concurrent non-read segment (pipe or &), could change config/HEAD/includes; such a push is vcs.history.rewrite when config decides its refs, at least release.publish when its refs are on the line (followTags), vcs.ref.delete when it only deletes. Added git-config-file-write (~/.gitconfig, ~/.config/git/*, /etc/gitconfig), refused bare GIT_*/XDG_CONFIG_HOME assignments, CDPATH-subject cd targets not followed, missing cd target = no push there. Real-git proofs: per-worktree config.worktree mirror, include.path mirror, includeIf onbranch flipped by an earlier checkout, HEAD after checkout, ~/.gitconfig append. Agreement tests: every git remote read form is accepted by git 2.50.1 and leaves .git/config and local heads unchanged; 24 DWIM destination and HEAD spellings classified at least as strictly as git acts on them (pure and hook). Residual (cannot be seen per call): a parallel Bash call running foreign code, an include target outside the known config files written in another call, exported GIT_* in a persistent harness shell. Differential vs #649: pure 24,696 lines 0 looser, hook 3,735 lines 0 looser. Targeted 28 files exit 0 (1,799 tests, 1,797 pass, 2 machine skips).
 <!-- SECTION:NOTES:END -->

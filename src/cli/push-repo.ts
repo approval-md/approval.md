@@ -46,13 +46,12 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { childEnvironment } from "../core/child-env.js";
 import {
-  CODE_EXECUTING_RULES,
   commandSegmentShapes,
   GIT_PUSH_RULES,
   gitPushSegmentClass,
@@ -115,6 +114,10 @@ function entriesOf(dir: string): string[] | null {
 
 /** Read what a push in `dir` would see. */
 export function readPushRepoFacts(dir: string, budget: Budget = { deadline: Date.now() + PUSH_REPO_BUDGET_MS }): DirectoryFacts {
+  // A directory that does not exist is one a `cd` into fails on, and no push
+  // runs there. Checked before spawning, so a missing git binary (also ENOENT)
+  // stays unreadable.
+  if (!existsSync(dir)) return { kind: "no-repository" };
   const where = runGit(dir, ["rev-parse", "--git-common-dir"], budget);
   if (where.failed) return { kind: "unreadable" };
   if (where.status === 128) return { kind: "no-repository" };
@@ -217,35 +220,66 @@ function cdTarget(args: readonly string[], from: string): string | null {
   if (word === "~") return homedir();
   if (word.startsWith("~/")) return join(homedir(), word.slice(2));
   if (word.startsWith("~")) return null;
-  return isAbsolute(word) ? word : resolve(from, word);
+  if (isAbsolute(word)) return word;
+  // `CDPATH` applies to a name that does not begin with `/`, `.` or `..`.
+  if (!word.startsWith(".")) return null;
+  return resolve(from, word);
 }
 
 /** Does this segment text name a directory change this step must follow? */
 const DIRECTORY_WORD = /(?:^|[\s;&|(])(?:cd|pushd|popd)(?:\s|$)/u;
 
 /**
+ * Does the command line run segments at the same time: a pipe (`|`, `|&`) or
+ * a background `&`? Read from the raw text with `&&`, `||` and the redirection
+ * forms (`2>&1`, `&>`, `>&2`, `<&0`) set aside. A quoted `|` or `&` reads as
+ * concurrent too, which only ever makes the answer stricter.
+ */
+export function runsConcurrently(command: string): boolean {
+  const rest = command
+    .replace(/&&|\|\|/gu, " ")
+    .replace(/\d*[<>]&\d*-?|&>>?/gu, " ");
+  return /[|&]/u.test(rest);
+}
+
+/**
  * Every directory the segment at `index` may run in, from the segments before
  * it in order, or the reason the configuration it will run under cannot be
  * known from here.
  *
- * Besides a `cd` it cannot follow, two kinds of earlier segment make the
- * configuration unknowable, because this step reads the checkout BEFORE the
- * command runs: one that runs code the runtime did not author
- * ({@link CODE_EXECUTING_RULES}: `node x.js`, `npm test`, …), which may write
- * `.git/config`; and one that writes, or names in a writing command, a path
- * the shell expands (`> "$(git rev-parse --git-dir)/config"`, `cp x "$D"`).
- * A write the text names inside a `.git` directory is already
- * `vcs.history.rewrite` in the pure classifier.
+ * This step reads the checkout BEFORE the command runs, so any other segment
+ * that can change what git will read makes that reading untrustworthy, and
+ * the push is answered as unreadable (the strictest reading its configuration
+ * could take). That is every segment before the push that is not a read, and,
+ * when the line runs segments at the same time (`|`, `&`), every other
+ * segment that is not a read. A `git checkout` moves HEAD, `npm test` runs
+ * code that may write `.git/config`, `printf … >> ~/.gitconfig` writes the
+ * user file, a bare `GIT_*=` assignment re-points git (refused outright in the
+ * pure classifier). A read (`cd`, `git status`, `ls`) changes nothing git
+ * reads, except that `cd` moves the directory, which is followed: a literal
+ * absolute target, `.`/`..`-relative, or `~/`. A bare relative name is looked up
+ * through `CDPATH` by the shell, so it is not followed.
  */
 function directoriesFor(
   segments: readonly ClassifiedSegment[],
   index: number,
   cwd: string,
+  concurrent: boolean,
 ): { dirs: string[] } | { why: string } {
+  const pushText = (segments[index] as ClassifiedSegment).text;
+  if (concurrent) {
+    for (const [at, segment] of segments.entries()) {
+      if (at === index || segment.text === pushText) continue;
+      if (!segment.class.startsWith("read.")) {
+        return { why: `\`${segment.text}\` runs alongside it and may change what git reads` };
+      }
+    }
+  }
   let dirs = [cwd];
   for (const segment of segments.slice(0, index)) {
-    if (CODE_EXECUTING_RULES.includes(segment.rule)) {
-      return { why: `\`${segment.text}\` before it runs code that may rewrite the git configuration` };
+    if (segment.text === pushText) continue;
+    if (!segment.class.startsWith("read.") || segment.rule === "assignment") {
+      return { why: `\`${segment.text}\` runs first and may change what git reads` };
     }
     const shapes = commandSegmentShapes(segment.text);
     if (shapes === null) {
@@ -255,9 +289,6 @@ function directoriesFor(
     for (const shape of shapes) {
       if (shape.expands.writes) {
         return { why: `\`${segment.text}\` before it writes a path the shell expands` };
-      }
-      if (!segment.class.startsWith("read.") && shape.expands.args && shape.bin !== "cd") {
-        return { why: `\`${segment.text}\` before it writes where the shell decides` };
       }
       const bin = shape.bin === null ? null : (shape.bin.split("/").pop() ?? shape.bin);
       if (bin === "pushd" || bin === "popd") return { why: "a directory change before it cannot be followed" };
@@ -286,7 +317,7 @@ export interface PushRepoRefinement {
  * `cwd` is the directory the command runs in, the same one every other impure
  * pass of {@link classifyForHook} reads.
  */
-export function refinePushRepo(result: CommandClassification, cwd: string): PushRepoRefinement {
+export function refinePushRepo(result: CommandClassification, cwd: string, command = ""): PushRepoRefinement {
   if (!result.ok) return { result, notes: [] };
   const candidates = result.segments
     .map((segment, index) => ({ segment, index }))
@@ -305,8 +336,10 @@ export function refinePushRepo(result: CommandClassification, cwd: string): Push
 
   const notes: string[] = [];
   const segments = [...result.segments];
+  // No command text: assume the segments may run at the same time.
+  const concurrent = command.length === 0 || runsConcurrently(command);
   for (const { segment, index } of candidates) {
-    const walked = directoriesFor(result.segments, index, cwd);
+    const walked = directoriesFor(result.segments, index, cwd, concurrent);
     let facts: PushRepoFacts[] | null = [];
     let why = "";
     if ("why" in walked) {

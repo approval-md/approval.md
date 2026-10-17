@@ -97,9 +97,16 @@ was `vcs.push.branch` even on main.
   it read as a workspace write and an implicit trunk push. A redirection,
   `tee`, `cp`, `mv`, `sed -i`, `rm`, `ln`, `curl -o` or `wget -O` whose target
   has a `.git` segment now takes the class of the push it can arm. Reads are
-  unmoved. In the same command, code that runs first (`npm test && git push
-  -u origin lane`) or a write to a path the shell expands makes the push's
-  configuration unreadable, so a push it decides is `vcs.history.rewrite`.
+  unmoved. Writes to `~/.gitconfig`, `~/.config/git/` and `/etc/gitconfig`
+  take the class too (rule `git-config-file-write`), and a bare `GIT_*=` or
+  `XDG_CONFIG_HOME=` assignment is refused.
+- **The hook trusts its reading of the checkout only when nothing else on the
+  line can change it.** Any non-read segment before the push (`git checkout
+  main && git push origin HEAD`, `npm test && git push -u origin lane`), or
+  any non-read segment running alongside it (`|`, `&`), makes the push
+  unreadable: `vcs.history.rewrite` when its configuration decides its refs,
+  at least `release.publish` when its refs are on the line (`push.followTags`
+  may be on by then). Push in its own call to keep the real answer.
 - **Push destinations are read through git's ref DWIM.** `git push origin
   lane:heads/main` moved the remote trunk and read as `vcs.push.branch`.
   `heads/x` is `refs/heads/x`, case is ignored (`MAIN`), `tags/x` is a tag,
@@ -110,10 +117,10 @@ was `vcs.push.branch` even on main.
   main, master, the `origin/HEAD` branch or a detached HEAD stay
   `vcs.push.main`; any other branch is `vcs.push.branch`, the answer it had.
 - **Every verdict that moved, moved stricter.** Against #649's head, 0 looser
-  under the class order and under this repository's APPROVAL.md: over 24,689
-  pure command lines (4,528 `git push`, 2,344 `git remote` and 15 `.git`-write
-  lines stricter), and over 3,627 hook-level command lines in nine checkout
-  states (1,003 stricter). Real-git tests on a bare local remote prove each
+  under the class order and under this repository's APPROVAL.md: over 24,696
+  pure command lines (4,528 `git push`, 2,344 `git remote` and 20
+  configuration-write lines stricter), and over 3,735 hook-level command lines
+  in nine checkout states (1,147 stricter). Real-git tests on a bare local remote prove each
   case's effect. Conformance: `command-class` 1.9.0, twelve new vectors; no
   existing expectation moved.
 

@@ -812,12 +812,27 @@ followTags and submodule keys, `git for-each-ref refs/tags
 refs/remotes/origin/HEAD`, and the legacy `remotes/` and `branches/`
 directories. It reads every directory the push may run in: the hook's own, and
 each literal `cd` before it (a `cd` that fails leaves the shell where it was,
-so both count). The strictest answer wins. Because it reads the checkout
-before the command runs, an earlier segment of the same command that may
-change the configuration makes it unreadable: one that runs code the runtime
-did not author (`npm test`, `node x.js`, the `CODE_EXECUTING_RULES`), or one
-that writes to or names a path the shell expands (`>> "$(git rev-parse
---git-dir)/config"`, `cp x "$D"`).
+so both count; a bare relative name goes through `CDPATH` and is not
+followed). The strictest answer wins. `git config` reads includes,
+`includeIf` and a per-worktree `config.worktree` the way the push will.
+
+It reads the checkout BEFORE the command runs, so it trusts that reading only
+when nothing else on the line can change what git will read. Any segment
+before the push that is not a read (a `git checkout` moves HEAD and flips an
+`includeIf "onbranch:"`, `npm test` runs code, `printf … >> ~/.gitconfig`
+writes the user file, a write to a path the shell expands), and, when the line
+runs segments at the same time (`|`, `&`), any other segment that is not a
+read, makes the push unreadable. An unreadable push its configuration decides
+is `vcs.history.rewrite`; one whose refs are on the line is at least
+`release.publish`, because `push.followTags` may be on by then; a push that
+only deletes stays `vcs.ref.delete`. Push in its own Bash call to get the
+checkout's real answer: `git add -A && git commit -m x` first, then `git push
+-u origin lane`.
+
+Writes to git's own configuration files outside a repository (`~/.gitconfig`,
+anything under `~/.config/git/`, `/etc/gitconfig`) are `vcs.history.rewrite`
+too (rule `git-config-file-write`), and a bare `GIT_*=` or
+`XDG_CONFIG_HOME=` assignment is refused, as `HOME=` already was.
 
 Destinations are read the way git's ref DWIM reads them, in the pure
 classifier too: `heads/main` is `refs/heads/main` (git tries `refs/<name>`
@@ -836,7 +851,8 @@ the hook can read it.
 | submodule recursion on | `vcs.push.main` | `git-push-config-submodules` |
 | `HEAD` / `@` on main, master, the branch `origin/HEAD` names, or detached | `vcs.push.main` | `git-push-head` |
 | `HEAD` / `@` on any other branch | `vcs.push.branch` | `git-push-branch` |
-| a legacy remotes file the push may use, a `cd` it cannot follow (`cd "$D"`, `cd -`, `pushd`), earlier code or an expanded write path in the same command, or a checkout git cannot read, for a push its configuration decides | `vcs.history.rewrite` | `git-push-config-unreadable` |
+| a legacy remotes file the push may use, a `cd` it cannot follow (`cd "$D"`, `cd -`, `cd sub`, `pushd`), an earlier non-read segment or a concurrent one, or a checkout git cannot read, for a push its configuration decides | `vcs.history.rewrite` | `git-push-config-unreadable` |
+| the same, for a push whose refs are on the line (`lane:lane`, `HEAD`) | `release.publish` or stricter | `git-push-config-unreadable` |
 
 Without a checkout to read, the pure classifier reads `HEAD` / `@` as the trunk
 (`git-push-head`), because the text cannot show it is not main. A directory

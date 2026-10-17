@@ -2029,7 +2029,14 @@ function gitPushClass(
   if (view.kind === "text") return strictestPush([pushFactsClass({ ...base, headAs: "main" }), floor]);
   if (view.kind === "unreadable") {
     if (configDecides) return { class: "vcs.history.rewrite", rule: GIT_PUSH_CONFIG_UNREADABLE_RULE };
-    return strictestPush([pushFactsClass({ ...base, headAs: "main" }), floor]);
+    // The refs are on the line, but `push.followTags` (or submodule
+    // recursion) may add a tag publication the configuration alone decides.
+    // A push that only deletes pushes no tags.
+    const pushesRefs = !reading.remove && refspecs.some((refspec) => deletedRef(refspec) === null);
+    const configured: (Refinement & { class: string })[] = pushesRefs
+      ? [{ class: "release.publish", rule: GIT_PUSH_CONFIG_UNREADABLE_RULE }]
+      : [];
+    return strictestPush([pushFactsClass({ ...base, headAs: "main" }), floor, ...configured]);
   }
 
   const { facts } = view;
@@ -2569,6 +2576,26 @@ const GIT_DIR_WRITE_RULE = "git-dir-write";
 /** Does this path have a `.git` segment (the directory, or a worktree's `.git` file)? */
 function namesGitDirectory(word: string): boolean {
   return pathSegments(word).some((segment) => segment.toLowerCase() === ".git");
+}
+
+/** The rule a write to a git configuration file outside a repository takes (APRV-518). */
+const GIT_CONFIG_FILE_WRITE_RULE = "git-config-file-write";
+
+/**
+ * Is this path one of git's own configuration files outside a repository:
+ * a `.gitconfig` (the user file and its usual include targets), anything
+ * under `.config/git/` (the XDG user directory), or `/etc/gitconfig`? Each
+ * is read by every push, so a write to one arms a push exactly as a write to
+ * `.git/config` does.
+ */
+function namesGitConfigFile(word: string): boolean {
+  const segments = pathSegments(word).map((segment) => segment.toLowerCase());
+  const last = segments[segments.length - 1];
+  if (last === ".gitconfig" || last === "gitconfig") return true;
+  for (let at = 0; at + 2 < segments.length; at += 1) {
+    if (segments[at] === ".config" && segments[at + 1] === "git") return true;
+  }
+  return false;
 }
 
 /** `git branch` reads until it is asked to delete, rename or force-set one. */
@@ -4798,6 +4825,10 @@ function isSteeringAssignment(word: string): boolean {
   if (["TZ", "TZDIR", "PATH", "LOCPATH", "GCONV_PATH", "LANG", "LANGUAGE", "HOME", "CDPATH"].includes(name)) {
     return true;
   }
+  // APRV-518: `GIT_CONFIG_GLOBAL=/tmp/g; git push origin` hands every later
+  // git on the line (when the variable is already exported) a configuration
+  // the hook never read, and `XDG_CONFIG_HOME` moves git's user config.
+  if (name === "XDG_CONFIG_HOME" || name.startsWith("GIT_")) return true;
   return name.startsWith("LC_") || name.startsWith("LD_");
 }
 
@@ -5270,6 +5301,18 @@ function classifySegment(
         class: "vcs.history.rewrite",
         rule: GIT_DIR_WRITE_RULE,
         path: gitDir,
+        ...(sandbox === null ? {} : { sandbox }),
+      };
+    }
+    const gitConfig =
+      writeTargets.find(namesGitConfigFile) ??
+      named.find((word) => !/\s/u.test(word) && namesGitConfigFile(word));
+    if (gitConfig !== undefined) {
+      return {
+        ok: true,
+        class: "vcs.history.rewrite",
+        rule: GIT_CONFIG_FILE_WRITE_RULE,
+        path: gitConfig,
         ...(sandbox === null ? {} : { sandbox }),
       };
     }
