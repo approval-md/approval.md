@@ -32,10 +32,23 @@ before a tag.
   (amended SPEC.md §7 and §8, APRV-433, pending sign-off). It replaces
   APRV-108's quiet downgrade of an unpublished rewrite to `vcs.commit.branch`.
   A policy with no `vcs.history.rewrite.local`, `.shared` or `.*` line gets
-  exactly the verdicts it got before; every refined start and request now
-  carries `payload.history_rewrite`. The text classifier's rebase row is split
-  into rule ids by spelling, and `git pull --rebase` is now
-  `vcs.history.rewrite` from the text (it was `vcs.commit.branch`).
+  the verdicts it got before, except for the spellings under Security above:
+  a force push spelled as a short bundle (`git push -fu`, `-uf`, `-vf`) or
+  as an abbreviation of `--force-with-lease`, `--force-if-includes` or
+  `--mirror` (`--force-w`, `--force-if`, `--m`), an abbreviated amend
+  (`git commit --am`) and an abbreviated hard reset (`git reset --h`) now
+  resolve as the rewrite class APRV-108 answered, not as a plain push,
+  remote ref deletion, commit or reset. That is stricter wherever
+  `vcs.history.rewrite` is at least as strict as the class it replaces, as
+  in the default classes and in this repository's policy, where
+  `git push -fu origin lane` goes from autonomous to human-only.
+  Every refined start and request now carries `payload.history_rewrite`.
+  The rebase state is read as git reads it (`rebase-apply` before
+  `rebase-merge`), and a state git does not leave behind (both directories,
+  an attached HEAD, a `detached HEAD` head-name while HEAD is on a branch)
+  makes `--abort`, `--continue` and `--skip` shared. The text classifier's
+  rebase row is split into rule ids by spelling, and `git pull --rebase` is
+  now `vcs.history.rewrite` from the text (it was `vcs.commit.branch`).
 
 ## 0.4.4 — 2026-10-12
 
