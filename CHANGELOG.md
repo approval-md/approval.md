@@ -40,6 +40,32 @@ subshell stay refused, the open
   conformance suite `hook-exec-code` 1.0.0; `refusal-unions` 29.0.0;
   `schema-validation` 3.4.0. SPEC.md §5.2, §7 and §11.2 amended, pending sign-off.
 
+### Harnesses
+
+- **A Hermes record carries its harness version (APRV-419).** `hermes
+  --version` prints `Hermes Agent v0.21.3 (2026.9.14) · upstream 913d4098`, and
+  the U+00B7 separator made the write boundary refuse the whole line, so no
+  Hermes `task.registered` or `gate.bypassed` ever carried `harness_version` and
+  `approval doctor` could never compare one. A version line is now recorded as
+  its printable-ASCII prefix, trimmed: everything from the first control or
+  non-ASCII character is cut, and Hermes records `Hermes Agent v0.21.3
+  (2026.9.14)`. A prefix over 64 characters is still refused. The schema is
+  unchanged: every value the new rule records is one the old rule accepted
+  whole. The fail-closed floor still reads the full installed line, because
+  the prefix drops the upstream commit.
+
+### Site
+
+- **The judgy reviewer pages left the repository (APRV-393).** `judgy/` is
+  deleted and approval.md/judgy now answers 404, with no pointer page. The
+  archive is this repository's own history: commit `49574e4d` (APRV-387) is the
+  last one that touches `judgy/`, and its tree there is byte-identical to the
+  one deleted. The judgy research card on `approved/` and the
+  `docs/README-extended.md` link went with it. The packed file list is
+  unchanged (942 paths), because `judgy/` was never in the `files` list;
+  `docs/README-extended.md`, which ships in the package, drops judgy from its
+  directory table.
+
 ## 0.4.5 — 2026-10-17
 
 0.4.5 carries exactly 0.4.4's content. It is the first published release of

@@ -1889,7 +1889,14 @@ anything: one log holds the records of every harness that ever wrote to it.
 The write boundary constrains the SHAPE: one line, printable ASCII, at most 64
 characters. The value is the output of a third-party process going into an
 append-only log, and SPEC.md §11.1 invariant 3 has no exception for provenance,
-so a banner (and whatever a banner quotes) is cut at the first newline.
+so a banner (and whatever a banner quotes) is cut at the first newline. Since
+APRV-419 the recorded value is the line's printable-ASCII prefix: everything from
+the first character outside U+0020..U+007E (a control character, a non-ASCII
+separator) onward is cut and the rest is trimmed, where the line used to be
+refused whole. Hermes prints `Hermes Agent v0.21.3 (2026.9.14) · upstream
+913d4098` and records `Hermes Agent v0.21.3 (2026.9.14)`. A prefix still longer
+than 64 characters is refused rather than truncated, and every value recorded is
+one the old rule would have accepted, so the schema is unchanged.
 
 Both fields are OPTIONAL and additive. Every record written before they existed
 still validates and still verifies, and the `execution.started` an autonomous

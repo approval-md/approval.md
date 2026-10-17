@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Static server for the site pages in this repo (index.html, /features, /rsi,
-// /judgy). Dev only: no caching, no directory listing. Usage:
+// Static server for the site pages in this repo (index.html, /features, /rsi).
+// Dev only: no caching, no directory listing. Usage:
 //   node scripts/site-serve.mjs [port] [--sink]
 // --sink additionally accepts POST /sink/<name> and writes the body to
 // brand/out/<name> (plain basenames only). brand/render-assets.html uses it to
