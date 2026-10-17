@@ -610,7 +610,8 @@ any `$(…)` that is not purely a read: all deny. The fix is to write the comman
 out, or to run the effect through `approval run` with a granted token.
 
 **A login shell around one inline script is the exception** (APRV-380). Words
-that are exactly a known shell, one inline-script flag (`-c`, `-lc`, `-ic` and
+that are exactly a known shell (bare, or at a system-bin path, spelled with no
+expansion and no backslash), one inline-script flag (`-c`, `-lc`, `-ic` and
 the like) and one script are classified by the SCRIPT, through this same
 classifier: `/bin/zsh -lc 'git push origin main'` is `vcs.push.main`, and the
 record still binds the outer command you wrote. A script FILE, a fourth word, a
