@@ -50,6 +50,60 @@ before a tag.
   rebase row is split into rule ids by spelling, and `git pull --rebase` is
   now `vcs.history.rewrite` from the text (it was `vcs.commit.branch`).
 
+## 0.4.5 — 2026-10-17
+
+0.4.5 carries exactly 0.4.4's content. It is the first published release of
+that content, so an install moving up from 0.4.3 gets every change in the
+`## 0.4.4` section of `CHANGELOG.md`, the security fixes first.
+
+0.4.4 was tagged (`v0.4.4`, at `5e8db0ea`) but never published to npm. When
+the release workflow verified the tag, main had already moved on, so the
+publish binding, which requires the tag and current main to be the same commit,
+refused it before anything reached the registry. That is the binding working as
+designed. The trusted-publishing runbook says a tag that fails the identity
+checks is neither moved nor deleted, and the release takes a new version. So
+`v0.4.4` stays where it is, with no npm package and no GitHub Release, and
+`approval-md@0.4.4` does not exist on the registry.
+
+### What is in it
+
+- **Every change in the `## 0.4.4` section of `CHANGELOG.md`.** In short:
+  - the 0.4.3 classifier holes are closed: credential reads through `<`
+    (APRV-503); `$(…)` in a redirection target; `>&WORD` onto a file; `$(…)`
+    in an unquoted heredoc body and `$` in a heredoc delimiter (APRV-504); and
+    a word-initial `#` (APRV-508);
+  - `date` in its display forms, and the system-information readers
+    (`uptime`, `whoami`, `hostname`, `df`, `free`, `seq`, `paste`, `[`), are
+    `read.shell` (APRV-508);
+  - conformance: `command-class` 1.7.0.
+- **Nothing else.** Between the `v0.4.4` tag and this release, main changed
+  only in `backlog/` and `metrics/`, and neither ships in the package. Apart
+  from the version strings (`package.json`, `package-lock.json`, `VERSION` in
+  `src/cli/wordmark.ts`, `APPROVALD_VERSION` in `src/daemon/git-evidence.ts`),
+  the package's source is byte for byte what `5e8db0ea` carries.
+
+### Behavior changes for an existing policy
+
+- Against 0.4.3: the ones listed in the 0.4.4 section.
+- Against the `v0.4.4` tag: none. The only visible difference is the version
+  string, which shows in the CLI banner and in the `approvald 0.4.5` author
+  name on the daemon's evidence commits.
+
+### What did not change
+
+- No SPEC class change, no policy key, no schema file, no refusal code, as for
+  0.4.4.
+
+### Upgrade order
+
+- **Agent Village:** publish 0.4.5 and read its integrity back, then the
+  control plane pins `APPROVAL_MD_VERSION=0.4.5` and its
+  `APPROVAL_MD_INTEGRITY`, then one update per box (the overlay roll that
+  carries the date-timestamp change does this). Set the pins before that roll,
+  or it installs 0.4.3 again. A pin that names 0.4.4 cannot install, because
+  that version was never published. The checkpoint rebake follows later and
+  is not on the critical path.
+
 ## 0.4.4 — 2026-10-12
 
 ### Security
