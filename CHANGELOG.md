@@ -36,8 +36,10 @@ before a tag.
   archive is this repository's own history: commit `49574e4d` (APRV-387) is the
   last one that touches `judgy/`, and its tree there is byte-identical to the
   one deleted. The judgy research card on `approved/` and the
-  `docs/README-extended.md` link went with it. No package contents change:
-  `judgy/` was never in the `files` list.
+  `docs/README-extended.md` link went with it. The packed file list is
+  unchanged (942 paths), because `judgy/` was never in the `files` list;
+  `docs/README-extended.md`, which ships in the package, drops judgy from its
+  directory table.
 
 ## 0.4.4 — 2026-10-12
 

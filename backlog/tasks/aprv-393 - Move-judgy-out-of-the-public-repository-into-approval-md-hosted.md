@@ -1,11 +1,13 @@
 ---
 id: APRV-393
-title: Remove judgy/ from the public repository; its destination is undecided
+title: >-
+  Remove judgy/ from the public repository; the archive is git history at
+  49574e4d and /judgy returns 404
 status: In Progress
 assignee:
   - '@claude-nonav'
 created_date: '2026-09-20 01:32'
-updated_date: '2026-10-17 01:06'
+updated_date: '2026-10-17 02:26'
 labels:
   - site
   - hosting
@@ -76,4 +78,6 @@ What makes approval.md/judgy 404: GitHub Pages for approval-md/approval.md is bu
 AC5 evidence (local): scripts/site-serve.mjs on the branch answers 200 for /, index.html, features/, rsi/, approved/, approved/slides.html, hosted/policy-builder/, llms.txt, llms-full.txt, site.webmanifest, og-image.png and schema/event.schema.json, and 404 for judgy/, judgy/research/, judgy/live/. A scan of every href/src in the remaining site HTML found 0 same-site links that no longer resolve. The site has no build step (static files served from the root).
 
 AC6, OPEN for a ruling: `npm pack --dry-run --json --ignore-scripts` before and after lists the same 942 paths and judgy contributes none (it was never in package.json files). The one content difference is docs/README-extended.md (75718 to 75661 bytes), the dangling-link removal above, which the build brief asked for. AC6's literal wording ("identical in contents") is therefore not met. Either accept that the deletion itself changes no artifact and check AC6, or drop the README-extended.md hunk from this PR (its link to ../judgy/README.md was already dead inside the tarball, which never carried judgy/).
+
+Fix round 1 (refute M1, N4): the CHANGELOG Site entry no longer says the package contents are unchanged. It now says the packed file list is unchanged (942 paths, re-checked with npm pack --dry-run --json --ignore-scripts) and that docs/README-extended.md, which ships in the package, drops judgy from its directory table. The README-extended.md hunk stays. AC6 is deliberately left UNCHECKED for Carter: its literal wording (a packed tarball identical in contents) is not met by that one file, and whether that hunk satisfies AC6 as intended is his ruling, not the build's. Title updated to the decided outcome (D-8).
 <!-- SECTION:NOTES:END -->
