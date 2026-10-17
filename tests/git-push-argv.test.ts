@@ -163,11 +163,13 @@ pin([
   ["HOME=/tmp/h git push origin lane", [REWRITE, "git-push-unreadable"]],
   ["XDG_CONFIG_HOME=/tmp/h git push origin lane", [REWRITE, "git-push-unreadable"]],
   // Global options that pick another repository's config, or inject config.
-  ["git --git-dir=/tmp/x/.git push origin lane", [REWRITE, "git-push-unreadable"]],
-  ["git --work-tree=/tmp/x push origin lane", [REWRITE, "git-push-unreadable"]],
-  ["git --config-env=remote.origin.push=V push origin", [REWRITE, "git-push-unreadable"]],
-  ["git --exec-path=/tmp/x push origin lane", ["refused", "opaque"]],
-  ["git --namespace=x push origin lane", ["vcs.push.branch", "git-push-branch"]],
+  // APRV-520: every value-taking git global, separate or `=`-joined, leaves
+  // the segment unclassified before the push grammar is reached.
+  ["git --git-dir=/tmp/x/.git push origin lane", ["refused", "unclassified"]],
+  ["git --work-tree=/tmp/x push origin lane", ["refused", "unclassified"]],
+  ["git --config-env=remote.origin.push=V push origin", ["refused", "unclassified"]],
+  ["git --exec-path=/tmp/x push origin lane", ["refused", "unclassified"]],
+  ["git --namespace=x push origin lane", ["refused", "unclassified"]],
 ]);
 
 // ---------------------------------------------------------------------------
