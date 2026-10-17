@@ -705,6 +705,34 @@ left to re-read the command. Every spelling lands there:
 | `git push origin :x` | `vcs.ref.delete` | `x` |
 | `git push origin --delete a b c` | `vcs.ref.delete` | `a b c` |
 | `git push origin feature :stale` | `vcs.ref.delete` | `stale` |
+| `git push -ud origin feature/x` | `vcs.ref.delete` | `feature/x` |
+| `git push --del origin main` | `vcs.ref.delete` | `main` |
+| `git push --prune origin --all` | `vcs.ref.delete` (rule `git-push-prune`) | nothing |
+
+"Every spelling" means every spelling git's own option parser accepts
+(APRV-517). The classifier walks the argv the way git 2.50's `parse-options`
+walks it over `git push`'s option table (`src/core/git-push-argv.ts`): a
+short bundle carrying `d` (`-ud`, `-du`, `-dn`, `-do x`) is `-d`, a unique
+prefix of a long option is that option (`--de` through `--delet` are
+`--delete`, `--pru` is `--prune`, `--m` is `--mirror`), a value-taking option
+consumes its value (`-o x`, `--repo x`), and a global option in front of
+`push` (`git --no-pager push …`) does not shift the positionals. `--prune`
+binds nothing, because the refs it removes are the ones a pattern no longer
+matches on the remote, which the text does not show.
+
+What that walk cannot read is never read as a plain push. An option git does
+not know, an ambiguous abbreviation (`--d` could be `--delete` or
+`--dry-run`), a value where none is taken, a missing value, a global option
+the classifier does not read past, `--exec` / `--receive-pack` (the program
+git starts for the far side, which runs on this machine for a local remote)
+and `git --exec-path=…` are `opaque`. A word the shell may expand (`$B`, `"$B"`, a `$(…)`, a
+glob, a brace expansion), and an assignment or global option in front of
+`push` that steers git's configuration (`GIT_*=`, `HOME=`,
+`XDG_CONFIG_HOME=`, `--git-dir=`, `--work-tree=`, `--config-env=`), are
+`vcs.history.rewrite`, rule `git-push-unreadable`: any of them can hold
+`-d`, `:main` or `+main`. Write the ref name out. The word scan the row made
+before stays as a floor under the walk, so no command classifies looser than
+it did.
 
 It used to be `vcs.push.main`, which reads as "this reaches the trunk". In a
 project that samples trunk pushes retrospectively that meant an irreversible
@@ -721,7 +749,8 @@ history is the stricter fact about the command. A **tag** deletion is still
 however it is removed — and so is a bulk deletion that mixes a tag in. A
 `--delete` naming **no ref at all** stays in the class with nothing bound: an
 invocation whose targets cannot be read is the one that least deserves the
-looser answer.
+looser answer. A `--delete` whose ref is an unexpanded word (`--delete
+$BRANCH`) takes the stricter `git-push-unreadable` reading above.
 
 A policy that has no `vcs.ref.delete` line resolves the class by
 `defaults.autonomy`, like any other class no rule matches, so adopting it is an
