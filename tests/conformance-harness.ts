@@ -45,6 +45,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1063,6 +1064,169 @@ function runHookToolMap(input: Record<string, unknown>): Expectation {
   };
 }
 
+// --- hook-exec-code (APRV-510) --------------------------------------------
+
+/** Replace every `<gate>` in a vector's strings with the scratch gate root. */
+function withGate(value: unknown, dir: string): unknown {
+  if (typeof value === "string") return value.split("<gate>").join(dir);
+  if (Array.isArray(value)) return value.map((entry) => withGate(entry, dir));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, entry]) => [key, withGate(entry, dir)]),
+    );
+  }
+  return value;
+}
+
+/**
+ * The `exec.code` class (APRV-510), per harness, as a language-neutral suite.
+ *
+ * Each vector carries its policy TEXT, the call, and optionally `files`: paths
+ * relative to the gate root and their contents, written before the call, so a
+ * file program has bytes to hash. `<gate>` in any string is the gate root
+ * (Hermes's `terminal` must name an absolute `workdir`). `symlinks` (fix
+ * round 2, refuter M1) maps a path relative to the gate root to a link target,
+ * written verbatim after `files` (a relative target resolves from the link's
+ * directory, as `ln -s` makes it). `cwd` sets the envelope's `cwd`: a string
+ * (`<gate>` expanded), or `null` to send an envelope with no `cwd` key; absent,
+ * it is the gate root (refuter N8). `secret` is a marker the vector's program
+ * carries: the expectation pins that it never reaches the log or the payload
+ * store, because a record binds a program's hash and length and never its
+ * text. The runner attests the policy unless the vector says `attest: false`,
+ * sends one PreToolUse envelope, and reports the verdict and what the log
+ * gained.
+ */
+function runHookExecCode(input: Record<string, unknown>): Expectation {
+  const harness = str(input, "harness");
+  if (harness !== "claude-code" && harness !== "hermes") {
+    throw new ConformanceError(`hook-exec-code has no envelope for harness ${JSON.stringify(harness)}`);
+  }
+  const dir = gateHome();
+  const policyPath = join(dir, "APPROVAL.md");
+  const logPath = join(dir, ".approval", "log", "events.jsonl");
+  writeFileSync(policyPath, str(input, "policy"), "utf8");
+  if (input["attest"] === false) {
+    mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  } else {
+    const attested = appendAttestation(logPath, policyPath, "human:conformance");
+    if (!attested.ok) {
+      throw new ConformanceError(`the vector's policy could not be attested: ${attested.error.code}`);
+    }
+  }
+  const files = input["files"];
+  if (files !== undefined) {
+    if (files === null || typeof files !== "object" || Array.isArray(files)) {
+      throw new ConformanceError("vector input.files must be an object of path to contents");
+    }
+    for (const [path, contents] of Object.entries(files as Record<string, unknown>)) {
+      if (typeof contents !== "string") throw new ConformanceError(`file ${path} must be a string`);
+      const target = join(dir, path);
+      mkdirSync(join(target, ".."), { recursive: true });
+      writeFileSync(target, contents, "utf8");
+    }
+  }
+  const symlinks = input["symlinks"];
+  if (symlinks !== undefined) {
+    if (symlinks === null || typeof symlinks !== "object" || Array.isArray(symlinks)) {
+      throw new ConformanceError("vector input.symlinks must be an object of path to link target");
+    }
+    for (const [path, linkTarget] of Object.entries(symlinks as Record<string, unknown>)) {
+      if (typeof linkTarget !== "string") throw new ConformanceError(`symlink ${path} must name a string target`);
+      const link = join(dir, path);
+      mkdirSync(join(link, ".."), { recursive: true });
+      symlinkSync(linkTarget, link);
+    }
+  }
+  const envelopeCwd = input["cwd"] === undefined ? dir : withGate(input["cwd"], dir);
+  if (envelopeCwd !== null && typeof envelopeCwd !== "string") {
+    throw new ConformanceError("vector input.cwd must be a string or null");
+  }
+  const cwdField = envelopeCwd === null ? {} : { cwd: envelopeCwd };
+  const logLines = (): string[] =>
+    existsSync(logPath)
+      ? readFileSync(logPath, "utf8").split("\n").filter((line) => line.trim().length > 0)
+      : [];
+  const before = logLines().length;
+  const toolInput = withGate(input["tool_input"], dir);
+  if (toolInput === null || typeof toolInput !== "object" || Array.isArray(toolInput)) {
+    throw new ConformanceError("vector input.tool_input must be an object");
+  }
+  const body =
+    harness === "hermes"
+      ? {
+          hook_event_name: "pre_tool_call",
+          session_id: "conformance-exec-code",
+          tool_use_id: "conformance-tu-1",
+          ...cwdField,
+          profile: "default",
+          extra: { turn_id: "conformance-turn" },
+          tool_name: str(input, "tool"),
+          tool_input: toolInput,
+        }
+      : {
+          hook_event_name: "PreToolUse",
+          session_id: "conformance-exec-code",
+          tool_use_id: "conformance-tu-1",
+          ...cwdField,
+          tool_name: str(input, "tool"),
+          tool_input: toolInput,
+        };
+  const argv = [harness, "--dir", dir];
+  const timeout = input["timeout"];
+  if (typeof timeout === "string") argv.push("--timeout", timeout, "--interval", "100ms");
+
+  const out: string[] = [];
+  const err: string[] = [];
+  const code = commandHook(
+    argv,
+    { out: (line) => out.push(line), err: (line) => err.push(line) },
+    dir,
+    () => JSON.stringify(body),
+  );
+  const parsed = JSON.parse(out.join("")) as Record<string, unknown>;
+  let permission: string;
+  let reason: string;
+  if (harness === "hermes") {
+    const blocked = parsed["action"] === "block";
+    permission = blocked ? "deny" : "allow";
+    reason = blocked ? String(parsed["message"]) : err.join("");
+    if (code !== (blocked ? 2 : 0)) {
+      throw new ConformanceError(`the hermes verdict ${permission} was answered at exit ${String(code)}`);
+    }
+  } else {
+    if (code !== 0) throw new ConformanceError(`hook exited ${String(code)}: ${err.join("")}`);
+    const nested = parsed["hookSpecificOutput"] as Record<string, unknown> | undefined;
+    permission = String(nested?.["permissionDecision"]);
+    reason = String(nested?.["permissionDecisionReason"]);
+  }
+
+  const appended = logLines()
+    .slice(before)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const start = appended.find((record) => record["event"] === "execution.started");
+  const requested = appended.find((record) => record["event"] === "approval.requested");
+  const startPayload = (start?.["payload"] ?? {}) as Record<string, unknown>;
+  const requestPayload = (requested?.["payload"] ?? {}) as Record<string, unknown>;
+  const secret = input["secret"];
+  let textWritten: boolean | null = null;
+  if (typeof secret === "string") {
+    const store = join(dir, ".approval", "payloads");
+    const stored = existsSync(store)
+      ? readdirSync(store).map((name) => readFileSync(join(store, name), "utf8"))
+      : [];
+    textWritten = [logLines().join("\n"), ...stored].some((text) => text.includes(secret));
+  }
+  const colon = reason.indexOf(":");
+  return {
+    valid: permission === "allow",
+    permission,
+    ...(permission === "deny" && colon > 0 ? { failure_class: reason.slice(0, colon) } : {}),
+    recorded_class: start === undefined ? null : (startPayload["class"] ?? null),
+    requested_class: requested === undefined ? null : (requestPayload["class"] ?? null),
+    program_text_written: textWritten,
+  };
+}
+
 // --- command-class (APRV-353, APRV-352) -------------------------------------
 
 /**
@@ -1147,6 +1311,7 @@ const EXECUTORS: Readonly<Record<string, Executor>> = {
   "gate-verdicts": runGateVerdict,
   "hook-read-scope": runHookReadScope,
   "hook-tool-map": runHookToolMap,
+  "hook-exec-code": runHookExecCode,
   "command-class": runCommandClass,
 };
 

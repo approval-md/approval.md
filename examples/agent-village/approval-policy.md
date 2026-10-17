@@ -62,6 +62,26 @@ What it says, in one line each:
   every class resolves `manual` (every hooked tool call then waits for a tap),
   so a tenant receives this block only after its pinned core understands it.
 
+- **Opaque agent code is recorded once custody is live, and refused until then
+  (APRV-510).** The `exec.code` row is autonomous, so `python3 -c`, `node -e`
+  and kin are recorded by the program's hash and length (never its text) once
+  the policy opens the class. The `exec:` block that opens it ships COMMENTED
+  OUT, and the row alone changes one thing: with the row and no custody line,
+  those calls are refused `hook-exec-code-custody-unattested` (naming the line)
+  instead of `hook-opaque`. **Rollout order:** (1) a core release carrying
+  APRV-510 is pinned on the tenant (an older core refuses the `exec` key at the
+  schema and the whole policy then fails closed, every class `manual`; the row
+  alone is harmless on any core, an unknown class row resolves like any other);
+  (2) the control plane renders this file with the block uncommented and the
+  operator attests it, and only after (3) credential custody (the overlay's
+  custody change) is live on that tenant; (4) `execute_code: hooked` last, on
+  the operator's acceptance of the APRV-509 probe. Under co-location a
+  `python3 <file>` whose file sits in the resident's 0700 home stays refused
+  even then (`hook-exec-code-unreadable`: the daemon cannot read it), so the
+  inline forms and `execute_code` are the usual paths this opens. That is
+  EACCES, not a co-location rule: a file the daemon can read, outside the
+  home, is accepted and hashed.
+
 `agent_may_request` is the policy key PR #569 (APRV-445) adds. On a build
 without it, this file fails the schema and every class resolves `manual`, which
 is the fail-closed reading; the fixture is meant for a build that carries #569.
@@ -124,6 +144,15 @@ classes:
   message.send:                  { autonomy: autonomous }
   network.call:                  { autonomy: autonomous }
   read.web:                      { autonomy: autonomous }
+  # opaque agent code (APRV-510): recorded by hash once the exec block below is live
+  exec.code:                     { autonomy: autonomous }
+
+# Set only after credential custody (the overlay PR) is live on this tenant, on
+# a core carrying APRV-510; an older core fails this whole policy closed.
+# exec:
+#   code:
+#     custody: attested          # opens python3 -c, node -e and kin as exec.code
+#     execute_code: hooked       # Hermes execute_code; only on the APRV-509 probe's yes
 ```
 
 One limit of the stated-intent row: it stays autonomous only for a request that
