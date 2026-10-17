@@ -5656,7 +5656,11 @@ semantic-version-shaped tag, `tag <name>`, `--tags`, or `--follow-tags` is
 that DELETES a remote ref — `--delete`, `-d`, or a colon refspec such as
 `:refs/heads/x` — is `vcs.ref.delete` with the ref names bound (APRV-352), and a
 tag deletion keeps `release.publish`; ordinary branch pushes retain their branch
-or trunk class.
+or trunk class. Flags are read the way git's option parser reads them, short
+bundles (`-ud`) and unique-prefix abbreviations (`--del`, `--m`) included, and
+`--prune` is a deletion too (APRV-517); a push git would refuse, or one naming
+a far-side program (`--exec`, `--receive-pack`), is `opaque`, and a word the
+shell may expand is `vcs.history.rewrite`.
 
 `git tag` splits on its flags since APRV-397: a LISTING (`-l`, `--list`, `-n`,
 `-n<num>`, `--contains`, `--points-at`, `--merged`, `--sort`, `--format`,

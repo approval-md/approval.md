@@ -54,7 +54,9 @@ Decisions:
 - `--super-prefix` is gone from git 2.50 and is kept as value-taking because an older git consumes its value.
 - The check sits before the credential read, so `git -C x rm .approval/env` is now `unclassified` rather than `account.credential`. Both are refused by the hook; `unclassified` is refused in every mode, an open window included.
 
-Differential (tests/command-class-git-globals.test.ts, APPROVAL_DIFF_BASE pointing at a build of 5fd8a6f1): depth 2 prefixes, 41,355 lines: 19,305 unchanged, 20,160 moved from an answer to `unclassified`, 1,890 refused before and after, 0 loosened, 0 reclassified. Depth 3, 2,150,475 lines: 907,170 unchanged, 1,113,378 answer to `unclassified`, 129,927 refused both, 0 loosened, 0 reclassified.
+Differential (tests/command-class-git-globals.test.ts, APPROVAL_DIFF_BASE pointing at a build of the base): against 98d12562 (main after #649), depth 2, 41,355 lines: 19,305 unchanged, 18,118 moved from an answer to `unclassified`, 3,932 refused before and after, 0 loosened, 0 reclassified; depth 3, 2,150,475 lines: 907,170 unchanged, 997,840 answer to `unclassified`, 245,465 refused both, 0 loosened, 0 reclassified. Against 5fd8a6f1 (before #649) at depth 3: 1,113,378 answer to `unclassified`, 129,927 refused both, 0 loosened, 0 reclassified.
+
+Merge with #649 (APRV-517): its push grammar reads the globals in front of `push` itself. The APRV-520 check runs first, so five of its pins move to `unclassified`: `--git-dir=`, `--work-tree=`, `--config-env=` (were `vcs.history.rewrite`), `--exec-path=` (was `opaque`) and `--namespace=` (was `vcs.push.branch`). tests/git-push-argv.test.ts is updated to match. Its global table leaves out `--no-literal-pathspecs`, so `git --no-literal-pathspecs push` stays `opaque` there, which is stricter and was left alone.
 
 Usability cost: the `=`-joined spellings (`git --git-dir=.git status`) used to classify as their subcommand and now refuse. The separate spellings with a path value (`git -C ~/repo status`) were already `unclassified` on main, because the path was read as the subcommand.
 

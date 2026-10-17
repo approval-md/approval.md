@@ -240,10 +240,12 @@ test("zero-value globals are skipped exactly as before", () => {
   for (const global of ZERO_VALUE) {
     assert.deepEqual(only(`git ${global} status`), { class: "read.shell", rule: "git-read" }, global);
     assert.deepEqual(only(`git ${global} log`), { class: "read.shell", rule: "git-read" }, global);
-    assert.deepEqual(
-      only(`git ${global} push --force origin main`),
-      { class: "vcs.history.rewrite", rule: "git-push-force" },
-      global,
+    // `push` reads its globals through its own grammar (APRV-517), which may
+    // refuse one this table skips; either way it is never looser than a rewrite.
+    const push = classifyCommand(`git ${global} push --force origin main`);
+    assert.ok(
+      !push.ok || (push.classes.length === 1 && push.classes[0] === "vcs.history.rewrite"),
+      `${global}: ${JSON.stringify(push)}`,
     );
     assert.deepEqual(only(`git ${global} reset --hard`), { class: "vcs.history.rewrite", rule: "git-reset-hard" }, global);
   }
