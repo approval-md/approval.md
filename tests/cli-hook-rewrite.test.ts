@@ -661,7 +661,14 @@ test("cases 45-48: a global option, an env assignment or an earlier state change
   assertUnrefined(dir, "git push origin lane && git commit --amend", "vcs.push.branch", 0);
   assertMember(dir, "git push origin lane && git commit --amend", "shared", "compound-state", BRANCH, 1);
   // A promoted spelling with an ordinary assignment reads the same configuration.
-  assertUnrefined(dir, "GIT_TERMINAL_PROMPT=0 git push", "vcs.push.main");
+  assertUnrefined(dir, "PAGER=cat git push", "vcs.push.main");
+  // APRV-517: any `GIT_*` assignment in front of `git push` steers which
+  // configuration the push reads, so the text classifier answers the rewrite
+  // class (`git-push-unreadable`) before this step runs, and every push-side
+  // rewrite is shared. Stricter than the `vcs.push.main` APRV-433 had here.
+  const prompt = assertMember(dir, "GIT_TERMINAL_PROMPT=0 git push", "shared", "push-side", "vcs.history.rewrite");
+  assert.equal(probe(dir, "GIT_TERMINAL_PROMPT=0 git push", 0).rule, "git-push-unreadable");
+  assert.equal(prompt.ref, null);
 });
 
 test("cases 49-50: the phase-two spellings stay outside the family, pinned so the change is visible", () => {

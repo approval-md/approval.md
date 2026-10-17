@@ -809,9 +809,10 @@ function judgeSegment(
       // A spelling the TEXT says is not a rewrite is promoted only on what the
       // configuration says, so what blocks the reading is narrower here: an
       // assignment that can point git at other configuration or another
-      // repository, or a global option. `GIT_TERMINAL_PROMPT=0 git push`
-      // reads the same configuration this check reads, and stays where the
-      // text put it unless that configuration forces.
+      // repository, or a global option. `PAGER=cat git push` reads the
+      // same configuration this check reads, and stays where the text put it
+      // unless that configuration forces. (A `GIT_*` assignment never reaches
+      // here for a push: the classifier reads it as `git-push-unreadable`.)
       const blocked =
         shape === null ||
         shape.globalOptions.some((option) => !INERT_GLOBAL_OPTIONS.includes(option)) ||
@@ -857,6 +858,10 @@ function judgeSegment(
 
     switch (segment.rule) {
       case "git-push-force":
+      // APRV-517: a push whose words the shell may expand, or whose
+      // configuration an assignment or a global option steers, can hold a
+      // `+` refspec or `--force`. Every push-side rewrite is shared.
+      case "git-push-unreadable":
         return sharedOf("push-side", legacyOf());
       case "git-filter":
         return sharedOf("whole-history", legacyOf());

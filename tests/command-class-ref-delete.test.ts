@@ -92,10 +92,13 @@ test("a --delete naming no ref at all stays in the class, with nothing bound", (
   assert.equal(segment.path, undefined);
 });
 
-test("a ref name the classifier cannot expand is still a deletion", () => {
+test("a ref name the classifier cannot expand is at least a deletion", () => {
+  // APRV-517: an unexpanded word in a push can hold any flag (`--no-delete
+  // +main` turns this back into a force push), so it takes the strictest class
+  // the row emits. Never looser than the deletion it was before.
   const segment = only("git push origin --delete $BRANCH");
-  assert.equal(segment.class, REF_DELETE);
-  assert.equal(segment.path, "$BRANCH");
+  assert.equal(segment.class, "vcs.history.rewrite");
+  assert.equal(segment.rule, "git-push-unreadable");
 });
 
 // ---------------------------------------------------------------------------

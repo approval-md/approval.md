@@ -340,7 +340,8 @@ the classifier is the same file for both harnesses.
 A `git push` that removes a remote ref is `vcs.ref.delete`, rule
 `git-ref-delete`, with the ref names bound to the segment's `path`. Every
 spelling lands there: `--delete`, `-d`, a colon refspec (`:refs/heads/x`, `:x`),
-and bulk forms mixing several. A force push stays `vcs.history.rewrite` and a
+bulk forms mixing several, `--prune`, and every bundle (`-ud`) or unique-prefix
+abbreviation (`--del`) git's option parser accepts (APRV-517). A force push stays `vcs.history.rewrite` and a
 tag deletion stays `release.publish`. The full account, including why the class
 exists and what a policy that has no line for it resolves to, is in
 [docs/claude-code-hook.md](claude-code-hook.md#deleting-a-remote-ref-aprv-352);
@@ -381,6 +382,7 @@ spelling:
 | `git rebase --exec`, `-x`, `-s <not built in>` | `git-rebase-exec` | always shared, `runs-commands` |
 | `git filter-branch`, `git filter-repo` | `git-filter` | always shared, `whole-history` |
 | `git push --force` and every push-side spelling | `git-push-force` | always shared, `push-side` |
+| a `git push` whose words the shell may expand, or whose configuration an assignment or a global option steers | `git-push-unreadable` | always shared, `push-side` |
 | `git pull --rebase` | `git-pull-rebase` | `HEAD --not <upstream as last fetched>`; `--rebase=merges` or `=interactive` is shared, `interactive`; `-s <not built in>` is shared, `runs-commands` |
 | bare `git pull` with `pull.rebase` / `branch.<b>.rebase` set | `git-write` | promoted into the family, as `pull --rebase` |
 | bare `git push` with a `+` refspec or `mirror` in remote configuration | `git-push-implicit` | promoted, always shared, `push-side` |
