@@ -28,9 +28,12 @@ import { fileURLToPath } from "node:url";
 
 import { decide, expire, findHarnessCarry, register, request } from "../src/core/gate.js";
 import {
+  abandonedAfterMs,
+  defaultRetryGraceMs,
   HARNESS_CAP_MARGIN_MS,
   harnessCapFitsMargin,
   harnessCappedTtlMs,
+  HOOK_RETRY_GRACE_MS,
 } from "../src/core/harness-wait.js";
 import type { EventRecord } from "../src/core/log.js";
 import { payloadHash } from "../src/core/payload.js";
@@ -637,9 +640,10 @@ function announceOf(run: Run): string {
 
 test("F7: when the capped window closes before the retry grace, the deny says the window is what holds the question open", () => {
   const dir = hookCase();
-  // 1s wait + the 5m default grace = 301s from the request; the 300s cap leaves
-  // a 240s window, so the window closes first and "open for the 5m grace"
-  // would be a claim the runtime does not keep.
+  // 1s wait + the default grace = 3600s from the request, since APRV-464 ends
+  // the default grace at the policy's 1h TTL (a 3599s grace, printed "60m");
+  // the 300s cap leaves a 240s window, so the window closes first and "open
+  // for the 60m grace" would be a claim the runtime does not keep.
   const run = runCli(
     ["hook", "claude-code", "--timeout", "1s", "--interval", "200ms", "--harness-cap", "300s"],
     dir,
@@ -649,17 +653,17 @@ test("F7: when the capped window closes before the retry grace, the deny says th
   assert.match(verdict.reason, /^hook-timeout: /u);
   assert.match(
     verdict.reason,
-    /the request\(s\) expire at \S+, which comes before the 5m retry grace would run out, so that is how long they stay open/u,
+    /the request\(s\) expire at \S+, which comes before the 60m retry grace would run out, so that is how long they stay open/u,
     verdict.reason,
   );
-  assert.ok(!/stay open for the 5m retry grace/u.test(verdict.reason), verdict.reason);
-  assert.ok(!/Past the grace the question is taken back \(approval\.withdrawn, reason timeout\) BY THE NEXT GATED TOOL CALL/u.test(verdict.reason), verdict.reason);
+  assert.ok(!/stay open for the 60m retry grace/u.test(verdict.reason), verdict.reason);
+  assert.ok(!/Past the grace the question is taken back \(approval\.withdrawn, reason timeout\) BY THE NEXT NON-READ TOOL CALL/u.test(verdict.reason), verdict.reason);
   assert.match(
     announceOf(run),
-    /The request expires at \S+, which comes before the 5m retry grace would run out/u,
+    /The request expires at \S+, which comes before the 60m retry grace would run out/u,
     run.stderr,
   );
-  assert.ok(!/leaving the request open for a 5m retry grace/u.test(run.stderr), run.stderr);
+  assert.ok(!/leaving the request open for a 60m retry grace/u.test(run.stderr), run.stderr);
   assert.equal(runCli(["log", "verify"], dir).code, 0);
 });
 
@@ -687,7 +691,7 @@ test("F7: when the retry grace is the shorter of the two, the grace sentence sta
   const verdict = verdictOf(run);
   assert.match(verdict.reason, /^hook-timeout: /u);
   assert.match(verdict.reason, /stay open for the 10s retry grace/u, verdict.reason);
-  assert.match(verdict.reason, /Past the grace the question is taken back \(approval\.withdrawn, reason timeout\) BY THE NEXT GATED TOOL CALL/u, verdict.reason);
+  assert.match(verdict.reason, /Past the grace the question is taken back \(approval\.withdrawn, reason timeout\) BY THE NEXT NON-READ TOOL CALL/u, verdict.reason);
   assert.match(
     verdict.reason,
     /The harness ceiling this hook runs under bounds the question too: the request\(s\) expire at \S+/u,
@@ -753,4 +757,42 @@ test("F3: a capped request under a policy with no TTL is no longer shown as 'no 
   assert.ok(!/no TTL/u.test(human.stdout), human.stdout);
   assert.match(human.stdout, /\d+m left|\d+s left/u, human.stdout);
   assert.equal(runCli(["log", "verify"], dir).code, 0);
+});
+
+// ===========================================================================
+// APRV-464: the default retry grace ends at the policy's TTL
+// ===========================================================================
+
+test("APRV-464: with a policy TTL the default grace puts the abandonment line at the TTL", () => {
+  // The hook's grace is how long a question OUTLIVES the wait, and the line
+  // the sweep and the carry bound use is the wait plus the grace from the
+  // request's own ts. The default makes that line the TTL exactly, so "past
+  // the grace" and "expired" are one moment (amended SPEC.md "A harness wait
+  // that expires").
+  for (const [ttlMs, waitMs] of [
+    [3_600_000, 540_000], // the 2026-10-04 shape: a 1h TTL, the 9m wait
+    [3_600_000, 55_000], // the hook's own 55s default wait
+    [4_000, 100],
+  ] as const) {
+    const grace = defaultRetryGraceMs(ttlMs, waitMs);
+    assert.equal(grace, ttlMs - waitMs);
+    assert.equal(abandonedAfterMs(waitMs, grace), ttlMs, `${String(ttlMs)}/${String(waitMs)}`);
+  }
+  // The 2026-10-04 incident's numbers: the old default took the question back
+  // 14 minutes after it was asked, the new one leaves it to the hour.
+  assert.equal(abandonedAfterMs(540_000, HOOK_RETRY_GRACE_MS), 840_000);
+  assert.equal(abandonedAfterMs(540_000, defaultRetryGraceMs(3_600_000, 540_000)), 3_600_000);
+});
+
+test("APRV-464: a wait longer than the TTL leaves no grace, and no TTL keeps the five minutes", () => {
+  // Floored at zero: the request has expired before the wait even ends, so
+  // there is nothing left to hold open, and a negative grace is no duration.
+  assert.equal(defaultRetryGraceMs(30_000, 540_000), 0);
+  assert.equal(defaultRetryGraceMs(30_000, 30_000), 0);
+  // A negative wait cannot widen the grace past the TTL.
+  assert.equal(defaultRetryGraceMs(30_000, -5_000), 30_000);
+  // With no TTL nothing ends the question but the grace, so the old default
+  // stands rather than an unbounded one.
+  assert.equal(defaultRetryGraceMs(null, 540_000), HOOK_RETRY_GRACE_MS);
+  assert.equal(defaultRetryGraceMs(null, 0), HOOK_RETRY_GRACE_MS);
 });

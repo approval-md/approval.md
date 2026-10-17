@@ -1273,7 +1273,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-rejected` | a human said no |
 | `hook-revoked` | a granted approval was withdrawn before use |
 | `hook-expired` | the TTL lapsed before a decision |
-| `hook-timeout` | no decision inside `--timeout` (clamped to what a stated or assumed harness ceiling leaves); the request stays OPEN, and a decision inside the RETRY GRACE authorizes an identical retry, once. Past the grace it authorizes nothing: the next gated call of this actor withdraws the question, and a retry does not carry a grant written after the grace ran out (APRV-410). Under a harness ceiling the deny names the instant the request expires |
+| `hook-timeout` | no decision inside `--timeout` (clamped to what a stated or assumed harness ceiling leaves); the request stays OPEN, and a decision inside the RETRY GRACE authorizes an identical retry, once. Past the grace it authorizes nothing: the next non-read call of this actor that the gate admits or asks about withdraws the question (a read never does, APRV-464), and a retry does not carry a grant written after the grace ran out (APRV-410). With no `--retry-grace` the grace ends at the policy's TTL, so a late tap is refused `expired`. Under a harness ceiling the deny names the instant the request expires |
 | `hook-harness-cap-too-short` | the `--harness-cap` this hook was told about does not clear the 60s margin, so no window is left for a human. Nothing registered, nothing requested, no prompt sent |
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
@@ -1468,8 +1468,22 @@ the hook answering before that kill.
 ### How long the question outlives the wait (APRV-287)
 
 The open request above is open for a **retry grace**, not forever. `--retry-grace`
-sets it and the default is **5 minutes**, measured from the `approval.requested`
-record's own timestamp; `core/harness-wait.ts` holds the number and the reasoning.
+sets how long the question outlives the wait, and the line the hook judges by is
+the wait plus the grace, measured from the `approval.requested` record's own
+timestamp; `core/harness-wait.ts` holds the numbers and the reasoning.
+
+**The default grace ends at the policy's TTL (APRV-464).** With no
+`--retry-grace`, the grace is the policy's `approval_ttl` less the wait, so the
+wait plus the grace is exactly the TTL: a grace that has run out and a request
+that has expired are the same moment, and a tap after it is refused `expired`
+(*Expired, the approval window has closed*) with `approval.expired` on the
+record. Under a policy that declares no `approval_ttl` the default stays **5
+minutes**. A request under a harness ceiling is still bounded by the shorter
+ceiling-derived window (APRV-423). The change came from 2026-10-04, when a
+`network.call` request waited out the nine-minute wait, sat in the five-minute
+grace and was taken back while the approver was restarting the listener that
+would have shown it; it had to be asked again, twice. An operator who wants the
+old behaviour passes `--retry-grace 5m`.
 
 - **Inside the grace** nothing changes: the request stays pending, the prompt
   keeps its buttons, and a retry of the identical command in the identical
@@ -1481,6 +1495,17 @@ record's own timestamp; `core/harness-wait.ts` holds the number and the reasonin
   about, whose grace has run out, and which the verified log still shows as
   pending. Withdrawal stays requester-only, so a hook only ever withdraws
   questions this actor asked.
+- **Only a call that is not a read sweeps (APRV-464).** The later invocation
+  withdraws only when at least one class of its command is not `read` or
+  `read.*` (the same predicate the loop floor uses, so an unknown class counts
+  as a write). A `grep`, an `ls` or a manual `read.*` call leaves every pending
+  question alone, because an agent that is still reading has not given up on
+  the question it asked. A mixed command (`ls -la && mkdir build`) carries a
+  write, so it sweeps. A non-read call the hook refuses before it reaches
+  either sweep (a `human-only` class, a required sandbox, the unattended
+  guard) sweeps nothing; the next one the gate admits or asks about does. The withdrawal an expiring wait makes of its OWN
+  requests is unchanged: that is the asking call ending its own question under
+  the grace its operator configured.
 
 #### Who withdraws, and what happens when nobody does (APRV-410)
 
@@ -1509,8 +1534,9 @@ Two things changed, and between them they bound the state rather than remove it:
 
 1. **The sweep now also runs on the autonomous path**, from the verified read
    that invocation already performs for the open-window lookup. So any gated
-   tool call (autonomous, supervised or manual) takes back this actor's
-   abandoned questions. A **pass-through** allow still sweeps nothing,
+   tool call (autonomous, supervised or manual) whose classes include one that
+   is not a read takes back this actor's abandoned questions (narrowed to
+   non-read calls by APRV-464). A **pass-through** allow still sweeps nothing,
    deliberately: a call the hook answers before it has classes at all (the
    `approval` CLI itself, a tool whose input names nothing gateable) holds no
    payload hash, and sweeping with nothing to protect could take back a
@@ -1524,13 +1550,24 @@ Two things changed, and between them they bound the state rather than remove it:
    answer to "may a retry of that exact command in that directory adopt a late
    grant" is **no**, definitively, whether or not anyone withdrew.
 
-What is NOT fixed, and is worth knowing before you read a log: a decision that
-lands past the grace on a request nobody withdrew is still recorded as an
-ordinary `approval.granted`, and the approver is still told their tap landed. A
-distinct refusal at the decision surface (the channel telling the sender the
-question expired, and the log carrying that rather than a grant) needs a new
-member of `channel_decision_refusal_codes`, which SPEC.md §11.2 requires a
-registry row for. That is a spec amendment and its own task.
+What a late decision meets now (APRV-410 AC2, closed with the codes that
+already exist, by Carter's ruling of 2026-10-17): under the default grace a
+question past its grace has expired, so the tap is refused `expired`, the
+runtime records `approval.expired`, and the channel tells the sender the window
+closed. A tap after a withdrawal is refused `request-withdrawn`. No new member
+of `channel_decision_refusal_codes` was added. Two residuals are left, both
+accepted by Carter on 2026-10-17, and neither authorizes anything:
+
+- When an operator shortens the grace below the TTL with `--retry-grace`, a tap
+  that lands after that grace and before both the TTL and any withdrawal is
+  still recorded as an ordinary `approval.granted`, and a retry does not carry
+  it (#538).
+- Under a policy with no `approval_ttl`, the default grace stays 5 minutes and
+  nothing expires the request, so a tap after those 5 minutes and before any
+  withdrawal is recorded as an ordinary `approval.granted` that authorizes
+  nothing: the retry asks again under a fresh key. Before APRV-464 a read
+  between the request and the tap usually withdrew the question first, so the
+  tap was refused `request-withdrawn`; reads no longer withdraw.
 
 The reason is what a stale request costs. On 2026-09-06 three waits expired
 behind a dead daemon, nothing retried them, and a dozen requests sat live until
@@ -1542,7 +1579,12 @@ requester took this back and is no longer waiting; nothing was recorded.*
 
 The deny text says which of the two happened, in as many words: either
 `NOTHING WAS WITHDRAWN … the request(s) stay open for the 5m retry grace`, or
-`the 5m retry grace has run out: <key> WAS WITHDRAWN (reason timeout)`.
+`the 5m retry grace has run out: <key> WAS WITHDRAWN (reason timeout)`. Under
+the default grace the first form adds `The grace ends when the policy's
+approval_ttl does (APRV-464)` and names the `expired` refusal; with an
+operator-stated grace it names which later calls withdraw (`BY THE NEXT
+NON-READ TOOL CALL THIS ACTOR (<actor>) MAKES THAT THE GATE ADMITS OR ASKS
+ABOUT`).
 
 ### When the verified view lags its own requests (APRV-294)
 
@@ -1604,10 +1646,14 @@ five separate messages and took three rounds of taps.
 
 A listener that starts or reconnects re-derives the pending set from the verified
 log and re-delivers it (SPEC §10.3). On its **first cycle**, under `burst`
-delivery, requests older than the hook's wait plus its retry grace — the point at
-which no tool call can still be holding the answer — are delivered as ONE summary
-message: how many, how old the oldest is, which classes, and a single
-`Reject all`. Fresh requests keep one message each.
+delivery, requests past their approval window — the point at which no tool call
+can still be holding the answer — are delivered as ONE summary message. The
+window is the request's own expiry (its TTL, narrowed by any recorded harness
+cap), since a hook question stays live and carryable until then (APRV-464);
+only a request nothing expires falls back to the hook's wait plus its 5-minute
+retry grace. The message gives how many, how old the oldest is and which
+classes, and carries a single `Reject all`. Fresh requests keep one message
+each.
 
 The summary carries **no payload and no approve button**, deliberately. SPEC
 §10.3 requires the canonical rendering of a manual action's payload in front of
@@ -1630,8 +1676,9 @@ buried behind dead ones, and an approver rejecting the one they wanted
 (APRV-118). So the pending set has a stated order, applied once per cycle and
 used by the delivery, the `paced` walkthrough's seeding and `/queue` alike:
 
-1. **Live requests first, newest first.** Live means younger than the hook's
-   wait plus its retry grace — the same boundary the collapse uses, so there is
+1. **Live requests first, newest first.** Live means not past its approval
+   window (unexpired, or for a request with no TTL younger than the hook's wait
+   plus its retry grace) — the same boundary the collapse uses, so there is
    one meaning of "somebody may still be holding this". Newest first because the
    newest is the one most likely to have a tool call blocked on it right now.
 2. **Stale requests after them, oldest first.** These are what the collapse

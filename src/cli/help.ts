@@ -1603,7 +1603,7 @@ Commands:
   hermes       Hermes Agent snake_case pre_tool_call/post_tool_call; {action,message} out, DENY IS EXIT 2, allow is {}. fail_closed: true BLOCKS a broken hook (observed on main 118984d7; default false, and v0.21.3 ignores it silently). \`approval hook hermes --help\` prints the YAML
   classify     print what the classifier makes of a command line and exit
   --as <id>        proposing identity (default agent:<harness>)
-  --timeout/--interval/--retry-grace/--harness-cap <d>  wait / poll / hold for a retry / the harness's OWN kill timeout (9m/1s/5m/none), which lapses the request 60s inside it so approval.expired lands first
+  --timeout/--interval/--retry-grace/--harness-cap <d>  wait / poll / hold for a retry / the harness's OWN kill timeout (9m/1s/until the policy TTL, 5m with none/none), which lapses the request 60s inside it so approval.expired lands first
   --dir/--policy/--log <p>   policy+log root; --dir sets BOTH, default primary
   -h, --help       this text
 Codex opt-in: register exact Bash|apply_patch synchronously with timeout 600s (default wait 9m). Bash is denied because native events hide per-call workdir; direct apply_patch is experimental. PostToolUse is diagnostic.

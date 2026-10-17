@@ -235,7 +235,7 @@ ceiling the harness sets, and the ceiling has nothing to do with approval.
 so the adapter has to answer before the harness kills it. The Codex hook entry
 buys more room and is still bounded: a nine-minute gate wait inside a
 ten-minute outer timeout (`docs/codex-hook.md`). Everything downstream of a
-ceiling exists because of it, including the five-minute retry grace and the
+ceiling exists because of it, including the retry grace (five minutes when it was written; since APRV-464 it ends at the policy's TTL by default) and the
 adopt-on-retry dance (`harness-wait.ts:50`, `src/cli/hook.ts:2845`), which exist
 so a denial-by-deadline is recoverable.
 
