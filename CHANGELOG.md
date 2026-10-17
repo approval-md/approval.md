@@ -49,6 +49,29 @@ policy that made `git push -ud origin lane` autonomous and `git push --del
 origin main` supervised-retro (it proceeds). Upgrade every install that relies
 on the hook for enforcement.
 
+- **Credential reads are judged on every path (APRV-522).** Six classes of
+  spelling let a command read a credential file below `account.credential`,
+  on 0.4.5 and older (the APRV-639 credential-asymmetry refutation). (M2) git
+  was exempt from the credential rule as a write-only binary, so its reading
+  verbs (diff and grep without an index, log and show with a patch or a
+  `<rev>:<path>`) printed the file as `read.shell`; now only the path-writing
+  verbs keep the exemption, and only when the verb is read past the globals
+  and every option is on that verb's closed allow-list (an abbreviated long
+  option, a bundled short flag or an unknown flag makes git a reader). (M3) The
+  credential rows now resolve `..`, `.` and `//` and fold case, in the shell and
+  in the read tools; a `..` spelling through the log directory keeps
+  `log.mutate`. (M4) The Claude Code hook and `hook classify` gain the disk pass
+  the Hermes hook had: every path a segment reads is landed through earlier
+  `cd`s, symlinks (lexical and physical `..`), globs, brace lists, `$PWD` and
+  `${VAR:-default}`, and judged by the credential rule
+  (`credential-path-resolved`). After a `cd` the hook cannot resolve, a later
+  relative read is a credential read. (M5) The same pass judges a reader whose
+  segment also writes, and a reader inside `$(…)`, which the Hermes pass
+  skipped. (M6) A file named inside a reader's own option (`--name=FILE`, an
+  attached short value, curl's `@FILE` forms) is judged as a read. (S2) A `<`
+  target, and a read inside `$(…)`, take the read scope a positional target
+  takes. No credential location was added.
+
 - **`git push` is read through git 2.50's own option grammar (APRV-517).** The
   `git-push` row matched flags by exact spelling (`--delete`, `-d`, `--force`,
   `-f`), and git accepts more than that. Short bundles carrying `d` (`-ud`,

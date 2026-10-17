@@ -533,6 +533,22 @@ Five overrides sit on top of the table:
   traversal back out of it (`.approval-journal/../.approval/vault.enc`) is
   protected again, and a copy FROM credential material INTO the journal is
   still `account.credential`, because that rule reads every argument.
+
+  **Every spelling, and every landing (APRV-522).** The credential rows match
+  after `..`, `.` and `//` are resolved and with case folded, in the shell and
+  in the read tools alike. git is judged as `cp` is: a reading verb that names
+  credential material is `account.credential`, and only the path-writing verbs,
+  read past the globals and with every option on that verb's closed list, keep
+  their `policy.core` answer. A file named inside a reader's own option
+  (`--name=FILE`, an attached short value, curl's `@FILE` forms) is a read. The
+  hook then lands every path a segment reads, whatever class the segment took
+  and inside every `$(…)`: through earlier `cd`s, symlinks (lexical and
+  physical `..`), globs, brace lists, `$PWD` and `${VAR:-default}`, and adds
+  `credential-path-resolved` → `account.credential` beside the segment's own
+  class when one lands on credential material. After a `cd` the hook cannot
+  resolve (a variable, `-`, `popd`), a later relative read is a credential
+  read. A path held in a variable, or produced by a substitution's output,
+  stays out of reach.
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
   `>>` writes a file, and the class says so. Since APRV-283 a redirection onto a
   DISCARD device is exempt, because it creates nothing: `/dev/null`,
