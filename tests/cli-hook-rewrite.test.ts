@@ -429,26 +429,19 @@ test("cases 12-14: a plain rebase is local exactly when its range is unpublished
   assert.equal(fourteen.lost, 2);
 });
 
-test("cases 15-16: --onto counts the commits replayed and the commits dropped", () => {
+test("cases 15-16 (APRV-648 fix round 3): --onto takes a value, so it is shared, option-unvetted", () => {
+  // Before fix round 3 case 15 was local (the union base of C4). The closed
+  // rule shares every option that takes a value, --onto included, rather than
+  // model it.
   const dir = newRepo(THIS_REPO, 7);
-  // 15: lane over a local base branch, no upstream anywhere.
   branch(dir, "base");
   commit(dir, "b1");
   branch(dir, "lane");
   commit(dir, "l1");
-  const fifteen = assertMember(dir, "git rebase --onto origin/main base lane", "local", "range-unpublished", BRANCH);
-  assert.equal(fifteen.lost, 2);
-  // 16: lane holds origin/main~4..origin/main~3, which --onto drops.
+  assertMember(dir, "git rebase --onto origin/main base lane", "shared", "option-unvetted", BRANCH);
+  assertMember(dir, "git rebase --onto=origin/main base lane", "shared", "option-unvetted", BRANCH);
   git(dir, "checkout", "--quiet", "-B", "lane", "origin/main~3");
-  const sixteen = assertMember(
-    dir,
-    "git rebase --onto origin/main origin/main~5 lane",
-    "shared",
-    "shared-commit",
-    BRANCH,
-  );
-  assert.equal(sixteen.lost, 2);
-  assert.equal(sixteen.lost_shared, 2);
+  assertMember(dir, "git rebase --onto origin/main origin/main~5 lane", "shared", "option-unvetted", BRANCH);
 });
 
 test("cases 17-21: interactive and command-running rebases are always shared", () => {
@@ -459,7 +452,9 @@ test("cases 17-21: interactive and command-running rebases are always shared", (
   assertMember(dir, "GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash origin/main", "shared", "env-assignment", BRANCH);
   assertMember(dir, 'git rebase --exec "npm test" origin/main', "shared", "runs-commands", BRANCH);
   assertMember(dir, "git rebase -s custom origin/main", "shared", "runs-commands", BRANCH);
-  assertMember(dir, "git rebase -s ort origin/main", "local", "range-unpublished", BRANCH);
+  // A built-in strategy is still a value-taking option (fix round 3).
+  assertMember(dir, "git rebase -s ort origin/main", "shared", "option-unvetted", BRANCH);
+  assertMember(dir, "git rebase origin/main", "local", "range-unpublished", BRANCH);
 });
 
 test("cases 30, 31, 33: detached, gone upstream, and no repository are shared", () => {
@@ -829,9 +824,13 @@ test("adversarial: rebase options outside the closed list are shared, abbreviati
   assertMember(dir, "git rebase origin/main", "shared", "interactive", BRANCH);
   assertMember(dir, "git rebase --no-rebase-merges origin/main", "local", "range-unpublished", BRANCH);
   git(dir, "config", "--unset", "rebase.rebaseMerges");
-  // The vetted spellings stay local.
-  assertMember(dir, "git rebase -q --autostash --onto origin/main origin/main lane", "local", "range-unpublished", BRANCH);
-  assertMember(dir, "git rebase -Xtheirs -s ort origin/main", "local", "range-unpublished", BRANCH);
+  // The vetted zero-value spellings stay local; a value-taking option does
+  // not, attached or separate (APRV-648 fix round 3).
+  assertMember(dir, "git rebase -q --autostash origin/main lane", "local", "range-unpublished", BRANCH);
+  assertMember(dir, "git rebase -q --autostash --onto origin/main origin/main lane", "shared", "option-unvetted", BRANCH);
+  assertMember(dir, "git rebase -Xtheirs -s ort origin/main", "shared", "option-unvetted", BRANCH);
+  assertMember(dir, "git rebase -C4 origin/main", "shared", "option-unvetted", BRANCH);
+  assertMember(dir, "git rebase -Skey origin/main", "shared", "option-unvetted", BRANCH);
   // A rebasing pull with a strategy git does not ship runs it; =merges is shared.
   assertMember(dir, "git pull --rebase -s custom origin main", "shared", "runs-commands", BRANCH);
   assertMember(dir, "git pull --rebase=merges origin main", "shared", "interactive", BRANCH);
@@ -842,13 +841,17 @@ test("adversarial: reset --hard and commit --amend in the abbreviations git acce
   branch(dir, "lane");
   commit(dir, "l1");
   commit(dir, "l2");
-  assertMember(dir, "git reset --h origin/main", "local", "range-unpublished", BRANCH);
-  assertMember(dir, "git commit --am --no-edit", "local", "range-unpublished", BRANCH);
+  // The classifier reads them as rewrites; the judge's closed list takes
+  // exact spellings only, so an abbreviation is shared (fix round 3).
+  assertMember(dir, "git reset --h origin/main", "shared", "option-unvetted", BRANCH);
+  assertMember(dir, "git commit --am --no-edit", "shared", "option-unvetted", BRANCH);
+  assertMember(dir, "git reset --hard origin/main", "local", "range-unpublished", BRANCH);
+  assertMember(dir, "git commit --amend --no-edit", "local", "range-unpublished", BRANCH);
   // commit --amend on a pushed branch, either spelling.
   pushUpstream(dir, "lane");
   assertMember(dir, "git commit --amend --no-edit", "shared", "shared-commit", BARE);
-  assertMember(dir, "git commit --am --no-edit", "shared", "shared-commit", BARE);
-  assertMember(dir, "git reset --ha HEAD~1", "shared", "shared-commit", BARE);
+  assertMember(dir, "git commit --am --no-edit", "shared", "option-unvetted", BARE);
+  assertMember(dir, "git reset --ha HEAD~1", "shared", "option-unvetted", BARE);
   assertMember(dir, "git reset --hard HEAD~1", "shared", "shared-commit", BARE);
 });
 
@@ -1470,6 +1473,188 @@ test("APRV-648, in the hook: under the proposed lines every resume step is denie
     assert.equal(verdict.permission, "deny", `${id}: ${verdict.reason}`);
     assert.match(verdict.reason, /^hook-class-human-only: class vcs\.history\.rewrite\.shared /u, id);
     assert.match(verdict.reason, /unreadable-target/u, id);
+    assert.equal(rawLog(dir), log, `${id}: a human-only refusal appends nothing`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// APRV-648 fix round 3: ONE closed rule for every judge (Carter's FAIL-CLOSED
+// ruling, L10075). Every dash word must be, exactly, on the verb's list of
+// options that take no value; anything else is shared. Each case below was
+// `.local` (or outside the family) at 43031065. Classification only: no
+// rewrite runs, and no rebase state is written.
+// ---------------------------------------------------------------------------
+
+/** A branch whose whole history is unshared: an orphan with one commit, no upstream. */
+function orphanRepo(policy = PROPOSED): string {
+  const dir = newRepo(policy);
+  branch(dir, "lane");
+  commit(dir, "l1");
+  git(dir, "checkout", "--quiet", "--orphan", "scratch");
+  commit(dir, "s1");
+  return dir;
+}
+
+test("APRV-648 fix round 3, M1: `git rebase --root <branch>` is shared; git rewrites <branch>, not HEAD's branch", () => {
+  const dir = orphanRepo();
+  // At 43031065 the first three were `.local` range-unpublished: the hook
+  // judged HEAD (`scratch`), git rewrites `main` (or `lane`) from its root.
+  for (const command of [
+    "git rebase --root main",
+    "git rebase --root -f main",
+    "git rebase --root --ignore-date lane",
+    "git rebase --root --signoff main",
+    "git rebase --root",
+    "git rebase --root=x main",
+    "git rebase --roo main",
+    "git rebase -f --root main",
+  ]) {
+    assertMember(dir, command, "shared", "option-unvetted", BRANCH);
+  }
+  for (const command of [
+    "git rebase --root --onto lane main",
+    "git rebase --onto lane --root main",
+    "git rebase --root --onto=lane main",
+  ]) {
+    assertMember(dir, command, "shared", "option-unvetted", BRANCH);
+  }
+});
+
+test("APRV-648 fix round 3, M2: reset --hard reads no option's value as its target", () => {
+  const dir = newRepo(PROPOSED);
+  branch(dir, "lane");
+  commit(dir, "l1");
+  commit(dir, "l2");
+  pushUpstream(dir, "lane");
+  // An empty file named `@`: git reads no pathspec from it and resets to HEAD~1.
+  writeFileSync(join(dir, "@"), "", "utf8");
+  // At 43031065 this was `.local` no-commits-lost: the hook read `@` (HEAD).
+  assertMember(dir, "git reset --hard --pathspec-from-file @ HEAD~1", "shared", "option-unvetted", BARE);
+  for (const command of [
+    "git reset --hard --pathspec-from-file=@ HEAD~1",
+    "git reset --hard --pathspec-from-file=@",
+    "git reset --hard --pathspec-file-nul --pathspec-from-file @ HEAD~1",
+    "git reset --hard --pathspec-fr @ HEAD~1",
+    "git reset --hard --recurse-submodules HEAD",
+    "git reset --soft --hard HEAD",
+    "git reset --hard -- HEAD",
+    "git reset --hard --end-of-options HEAD",
+  ]) {
+    assertMember(dir, command, "shared", "option-unvetted", BARE);
+  }
+  // Two positionals: git dies on paths with --hard; the judge does not pick one.
+  assertMember(dir, "git reset --hard HEAD HEAD~1", "shared", "unreadable-target", BARE);
+  // The zero-value spellings are still judged.
+  assertMember(dir, "git reset --hard", "local", "no-commits-lost", BARE);
+  assertMember(dir, "git reset -q --hard --no-refresh HEAD", "local", "no-commits-lost", BARE);
+  assertMember(dir, "git reset --hard HEAD~1", "shared", "shared-commit", BARE);
+});
+
+test("APRV-648 fix round 3, M3: a rebasing pull hidden behind a swallowed --no-rebase joins the family, shared", () => {
+  const dir = newRepo(PROPOSED);
+  commit(dir, "m2");
+  // On main with its upstream. At 43031065 each of these was `vcs.commit.branch`,
+  // outside the family: the classifier let the swallowed `--no-rebase` win.
+  for (const command of [
+    "git pull -r -o --no-rebase origin",
+    "git pull -r --server-option --no-rebase origin",
+    "git pull -r --server-option=--no-rebase",
+    "git pull -r -o=--no-rebase",
+  ]) {
+    assert.equal(probe(dir, command).rule, "git-pull-rebase", command);
+    assertMember(dir, command, "shared", "default-branch", BRANCH);
+  }
+  // With pull.rebase=true, a `--no-rebase` that is `-o`'s value no longer
+  // blocks the promotion (at 43031065 the substring test did).
+  git(dir, "config", "pull.rebase", "true");
+  for (const command of [
+    "git pull -o --no-rebase",
+    "git pull --server-option=--no-rebase",
+    "git pull --server-option --no-rebase origin",
+    "git pull --serv --no-rebase",
+  ]) {
+    assert.equal(probe(dir, command).rule, "git-write", command);
+    assertMember(dir, command, "shared", "default-branch", BRANCH);
+  }
+  // An explicit merge in option position still keeps the configuration out.
+  assertUnrefined(dir, "git pull --no-rebase", BRANCH);
+  assertUnrefined(dir, "git pull -o x --no-rebase", BRANCH);
+});
+
+test("APRV-648 fix round 3: the pull judge takes zero-value options and no positional", () => {
+  const dir = newRepo(PROPOSED);
+  branch(dir, "lane");
+  commit(dir, "l1");
+  pushUpstream(dir, "lane");
+  commit(dir, "l2");
+  assertMember(dir, "git pull --rebase", "local", "range-unpublished", BRANCH);
+  assertMember(dir, "git pull -r -q --autostash", "local", "range-unpublished", BRANCH);
+  // At 43031065 `-o x` was skipped and `x` read as the remote, so this was local.
+  assertMember(dir, "git pull -r -o x", "shared", "option-unvetted", BRANCH);
+  assertMember(dir, "git pull -r --depth 1", "shared", "option-unvetted", BRANCH);
+  assertMember(dir, "git pull --rebase=true", "shared", "option-unvetted", BRANCH);
+  // git maps <remote> <branch> through the remote's fetch refspec; the judge
+  // does not model that, so any positional is shared.
+  assertMember(dir, "git pull --rebase origin lane", "shared", "unreadable-target", BRANCH);
+  assertMember(dir, "git pull --rebase origin", "shared", "unreadable-target", BRANCH);
+});
+
+test("APRV-648 fix round 3: the amend judge takes zero-value options and no pathspec", () => {
+  const dir = newRepo(PROPOSED);
+  branch(dir, "lane");
+  commit(dir, "l1");
+  assertMember(dir, "git commit --amend", "local", "range-unpublished", BRANCH);
+  assertMember(dir, "git commit -a --amend --no-edit -q", "local", "range-unpublished", BRANCH);
+  for (const command of [
+    'git commit --amend -m "x"',
+    "git commit --amend --message=x",
+    "git commit --amend -C HEAD",
+    "git commit --amend --author=x",
+    "git commit --amend --fixup=HEAD",
+    "git commit --amend --am",
+    "git commit --amend --pathspec-from-file=f",
+    "git commit -am x --amend",
+  ]) {
+    assertMember(dir, command, "shared", "option-unvetted", BRANCH);
+  }
+  assertMember(dir, "git commit --amend l1.txt", "shared", "unreadable-target", BRANCH);
+});
+
+test("APRV-648 fix round 3, N1: only the bare `git` is git, before a rewrite and as the rewrite", () => {
+  const dir = newRepo(PROPOSED);
+  branch(dir, "lane");
+  commit(dir, "l1");
+  // At 43031065 both were `.local`: `./git status` passed as a harmless earlier segment.
+  assertMember(dir, "./git status && git commit --amend --no-edit", "shared", "compound-state", BRANCH, 1);
+  assertMember(dir, "/tmp/x/git add . && git commit --amend --no-edit", "shared", "compound-state", BRANCH, 1);
+  assertMember(dir, "git status && git commit --amend --no-edit", "local", "range-unpublished", BRANCH, 1);
+  assertMember(dir, "./git commit --amend --no-edit", "shared", "global-option", BRANCH);
+});
+
+test("APRV-648 fix round 3, in the hook: under the proposed lines each M is denied as .shared", () => {
+  const cases: [string, string, string][] = [];
+  const m1 = orphanRepo();
+  attest(m1);
+  cases.push([m1, "git rebase --root main", "m1-root"]);
+  cases.push([m1, "git rebase --root -f lane", "m1-root-f"]);
+  const m2 = newRepo(PROPOSED);
+  branch(m2, "lane");
+  commit(m2, "l1");
+  commit(m2, "l2");
+  pushUpstream(m2, "lane");
+  writeFileSync(join(m2, "@"), "", "utf8");
+  attest(m2);
+  cases.push([m2, "git reset --hard --pathspec-from-file @ HEAD~1", "m2-pathspec"]);
+  const m3 = newRepo(PROPOSED);
+  commit(m3, "m2");
+  attest(m3);
+  cases.push([m3, "git pull -r -o --no-rebase origin", "m3-server-option"]);
+  cases.push([m3, "git pull -r --server-option=--no-rebase", "m3-server-option-attached"]);
+  for (const [dir, command, id] of cases) {
+    const log = rawLog(dir);
+    const verdict = hook(dir, command, id);
+    assert.equal(verdict.permission, "deny", `${id}: ${verdict.reason}`);
+    assert.match(verdict.reason, /^hook-class-human-only: class vcs\.history\.rewrite\.shared /u, id);
     assert.equal(rawLog(dir), log, `${id}: a human-only refusal appends nothing`);
   }
 });

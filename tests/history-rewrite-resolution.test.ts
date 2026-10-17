@@ -19,6 +19,7 @@ import {
   emittableClass,
   gitInvocationShape,
   pullRebaseMode,
+  readPullRebase,
   rebaseRunsStrategy,
   RUNTIME_CLASSES,
 } from "../src/core/command-class.js";
@@ -261,6 +262,7 @@ test("both members are reachable classes, so a policy line naming one is not ref
 test("gitInvocationShape: assignments, global options, the subcommand, unreadable words", () => {
   assert.deepEqual(gitInvocationShape("GIT_SEQUENCE_EDITOR=: git rebase -i main"), {
     assignments: ["GIT_SEQUENCE_EDITOR=:"],
+    binary: "git",
     globalOptions: [],
     sub: "rebase",
     args: ["-i", "main"],
@@ -280,6 +282,11 @@ test("gitInvocationShape: assignments, global options, the subcommand, unreadabl
   assert.deepEqual(gitInvocationShape("git reset --hard ma*")?.unreadable, [false, true]);
   assert.equal(gitInvocationShape("approval sandbox -- git rebase main"), null);
   assert.equal(gitInvocationShape("git a && git b"), null, "one segment only");
+  // APRV-648 N1: the program word is reported as written, so a caller can
+  // insist on the bare `git` on PATH.
+  assert.equal(gitInvocationShape("./git status")?.binary, "./git");
+  assert.equal(gitInvocationShape("/tmp/x/git status")?.binary, "/tmp/x/git");
+  assert.equal(gitInvocationShape("git status")?.binary, "git");
 });
 
 test("pullRebaseMode and rebaseRunsStrategy read the flags the classifier reads", () => {
@@ -291,13 +298,48 @@ test("pullRebaseMode and rebaseRunsStrategy read the flags the classifier reads"
   // git accepts an unambiguous prefix of a long option (APRV-433 build).
   assert.equal(pullRebaseMode(["--reb"]), "rebase");
   assert.equal(pullRebaseMode(["--rebas=i"]), "interactive");
-  assert.equal(pullRebaseMode(["--rebase", "--no-reb"]), null);
+  // An abbreviation is a word the reader does not understand (fix round 3),
+  // so the strictest reading any word allows wins.
+  assert.equal(pullRebaseMode(["--rebase", "--no-reb"]), "rebase");
   assert.equal(pullRebaseMode(["--recurse-submodules=no"]), null);
   assert.equal(pullRebaseMode(["--rebase=interactive"]), "interactive");
   assert.equal(pullRebaseMode(["--rebase=i"]), "interactive");
   assert.equal(pullRebaseMode(["--rebase", "--no-rebase"]), null);
   assert.equal(pullRebaseMode(["--rebase=false"]), null);
   assert.equal(pullRebaseMode(["-Xtheirs"]), null);
+  // APRV-648 fix round 3, M3: values of pull's value-taking options are
+  // skipped the way git's parse-options skips them (builtin/pull.c).
+  assert.deepEqual(readPullRebase(["-r", "-o", "--no-rebase", "origin"]), {
+    mode: "rebase",
+    explicit: true,
+    understood: true,
+  });
+  assert.deepEqual(readPullRebase(["-o", "--no-rebase"]), { mode: null, explicit: false, understood: true });
+  assert.deepEqual(readPullRebase(["--server-option=--no-rebase"]), { mode: null, explicit: false, understood: true });
+  assert.deepEqual(readPullRebase(["--server-option", "--no-rebase"]), { mode: null, explicit: false, understood: true });
+  // git reads `=--no-rebase` as `-o`'s value; the pre-round-3 floor reads the
+  // bundle's `r` as a rebase, and the floor wins (spurious, never milder).
+  assert.deepEqual(readPullRebase(["-o=--no-rebase"]), { mode: "rebase", explicit: false, understood: true });
+  assert.deepEqual(readPullRebase(["--no-rebase"]), { mode: null, explicit: true, understood: true });
+  assert.deepEqual(readPullRebase(["--rebase=false"]), { mode: null, explicit: true, understood: true });
+  // git reads `-rfalse` as a merge; the floor reads a bundle carrying `r` as a rebase.
+  assert.deepEqual(readPullRebase(["-rfalse"]), { mode: "rebase", explicit: true, understood: true });
+  // A value option with nothing after it, an abbreviation, an unknown word:
+  // not understood, never an explicit merge.
+  assert.deepEqual(readPullRebase(["-o"]), { mode: null, explicit: false, understood: false });
+  assert.deepEqual(readPullRebase(["--serv", "--no-rebase"]), { mode: null, explicit: false, understood: false });
+  assert.deepEqual(readPullRebase(["-r", "--serv", "--no-rebase"]), { mode: "rebase", explicit: false, understood: false });
+  assert.deepEqual(readPullRebase(["--no-reb"]), { mode: null, explicit: false, understood: false });
+  assert.deepEqual(readPullRebase(["--frob", "--rebase=i"]), { mode: "interactive", explicit: false, understood: false });
+  // A swallowed value that looks like a rebase request counts as one, and so
+  // does one after `--` or inside a bundle (stricter than git, never milder
+  // than the reading before fix round 3).
+  assert.equal(readPullRebase(["-o", "-r"]).mode, "rebase");
+  assert.equal(readPullRebase(["--server-option", "--rebase=i"]).mode, "interactive");
+  assert.equal(readPullRebase(["--", "-r"]).mode, "rebase");
+  assert.equal(readPullRebase(["-or"]).mode, "rebase");
+  // After `--` every word is a positional.
+  assert.deepEqual(readPullRebase(["-r", "--", "--no-rebase"]), { mode: "rebase", explicit: true, understood: true });
   for (const builtin of BUILTIN_MERGE_STRATEGIES) {
     assert.equal(rebaseRunsStrategy(["-s", builtin]), false, builtin);
   }

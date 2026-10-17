@@ -2365,15 +2365,122 @@ function refineGitRebase(ctx: RuleContext): Refinement {
 }
 
 /**
- * The rebase mode a `git pull` argv asks for, or `null` for a merging pull
- * (APRV-433). `"interactive"` for `--rebase=interactive` / `=i`; `"merges"`
- * for `--rebase=merges` / `=m` (a `--rebase-merges` rebase); `"rebase"`
- * for `--rebase`, `-r`, `--rebase=true` and any other value git might read
- * as a rebase. `--no-rebase` and `--rebase=false` are a merge, and so is a
- * pull that says nothing (the impure step reads the configuration).
- * Exported for the impure step, which must read the flags the same way.
+ * `git pull`'s options, read the way git's parse-options reads them (git
+ * v2.50.1 `builtin/pull.c`, `pull_options`). Exact spellings only: a word
+ * outside these lists, an abbreviation included, is a word the reader does not
+ * understand, and it cannot say whether that word swallows the next one.
  */
-export function pullRebaseMode(args: readonly string[]): "rebase" | "interactive" | "merges" | null {
+const PULL_LONG_NO_VALUE: readonly string[] = [
+  "--verbose",
+  "--quiet",
+  "--progress",
+  "--no-progress",
+  "--no-rebase",
+  "--stat",
+  "--no-stat",
+  "--summary",
+  "--no-summary",
+  "--no-log",
+  "--no-signoff",
+  "--squash",
+  "--no-squash",
+  "--commit",
+  "--no-commit",
+  "--edit",
+  "--no-edit",
+  "--ff",
+  "--no-ff",
+  "--ff-only",
+  "--verify",
+  "--no-verify",
+  "--verify-signatures",
+  "--no-verify-signatures",
+  "--autostash",
+  "--no-autostash",
+  "--no-gpg-sign",
+  "--allow-unrelated-histories",
+  "--all",
+  "--append",
+  "--force",
+  "--tags",
+  "--no-tags",
+  "--prune",
+  "--dry-run",
+  "--keep",
+  "--unshallow",
+  "--update-shallow",
+  "--ipv4",
+  "--ipv6",
+  "--show-forced-updates",
+  "--no-show-forced-updates",
+  "--set-upstream",
+  "--no-recurse-submodules",
+];
+
+/** Long options whose value is OPTIONAL and, when given, attached with `=` (`PARSE_OPT_OPTARG`). */
+const PULL_LONG_OPTIONAL_VALUE: readonly string[] = [
+  "--rebase",
+  "--recurse-submodules",
+  "--log",
+  "--signoff",
+  "--gpg-sign",
+  "--jobs",
+];
+
+/** Long options that REQUIRE a value: attached with `=`, or else the next word. */
+const PULL_LONG_REQUIRED_VALUE: readonly string[] = [
+  "--strategy",
+  "--strategy-option",
+  "--cleanup",
+  "--upload-pack",
+  "--depth",
+  "--shallow-since",
+  "--shallow-exclude",
+  "--deepen",
+  "--refmap",
+  "--server-option",
+  "--negotiation-tip",
+];
+
+/** Short options that take no value. */
+const PULL_SHORT_NO_VALUE = "vqnaftpk46";
+/** Short options whose optional value is the rest of the bundle (`-rfalse`, `-Skey`, `-j4`). */
+const PULL_SHORT_OPTIONAL_VALUE = "rSj";
+/** Short options that require a value: the rest of the bundle, or else the next word (`-o x`). */
+const PULL_SHORT_REQUIRED_VALUE = "sXo";
+
+/** The rebase mode one `--rebase=<value>` (or `-r<value>`) names. Exact lowercase false words only. */
+function pullRebaseValue(value: string): "rebase" | "interactive" | "merges" | null {
+  if (value === "false" || value === "no" || value === "off" || value === "0") return null;
+  if (value === "interactive" || value === "i") return "interactive";
+  if (value === "merges" || value === "m") return "merges";
+  return "rebase";
+}
+
+/**
+ * The strictest rebase mode git could read from this word, in ANY position,
+ * or `null` when it cannot ask for one. The fallback when the argv is not
+ * understood: `-r`, `--rebase[=…]`, a prefix of `--rebase` git might expand
+ * (`--reb`, `--rebas=i`), or a short bundle carrying `r`.
+ */
+function mayAskRebase(word: string): "rebase" | "interactive" | "merges" | null {
+  if (word.startsWith("--")) {
+    const equals = word.indexOf("=");
+    const name = equals === -1 ? word : word.slice(0, equals);
+    if (name.length < 3 || !"--rebase".startsWith(name)) return null;
+    return equals === -1 ? "rebase" : pullRebaseValue(word.slice(equals + 1));
+  }
+  return word.startsWith("-") && word.slice(1).includes("r") ? "rebase" : null;
+}
+
+/**
+ * The pre-round-3 reading of a `git pull` argv, word by word with the last
+ * rebase word winning and no option's value skipped. Kept only as a FLOOR for
+ * {@link readPullRebase}: on its own it lets a swallowed `--no-rebase` win
+ * (APRV-648 M3), but it counts every word that looks like a rebase request,
+ * so taking the stricter of the two never answers milder than it did.
+ */
+function textualPullRebaseMode(args: readonly string[]): "rebase" | "interactive" | "merges" | null {
   let mode: "rebase" | "interactive" | "merges" | null = null;
   for (const arg of args) {
     const equals = arg.indexOf("=");
@@ -2403,6 +2510,117 @@ export function pullRebaseMode(args: readonly string[]): "rebase" | "interactive
     }
   }
   return mode;
+}
+
+
+/** How a `git pull` argv asks about rebasing (APRV-433, APRV-648 fix round 3). */
+export interface PullRebaseReading {
+  /** `null` for a merging pull, or one that leaves it to the configuration. */
+  mode: "rebase" | "interactive" | "merges" | null;
+  /**
+   * Did a word in OPTION position settle the mode (`--rebase`, `-r`,
+   * `--no-rebase`, `--rebase=false`)? `false` when the mode is left to the
+   * configuration, and whenever the argv was not understood.
+   */
+  explicit: boolean;
+  /** Was every word read exactly as git's parse-options reads it? */
+  understood: boolean;
+}
+
+/**
+ * Read a `git pull` argv the way git's parse-options does, fail closed
+ * (APRV-648 fix round 3, M3). A value-taking option swallows its value, so
+ * `git pull -r -o --no-rebase origin` asks for a rebase and
+ * `--server-option=--no-rebase` settles nothing. Last word wins, as in git.
+ *
+ * When any word is outside the exact lists above (an abbreviation, an unknown
+ * option, a value option with nothing after it), the reader cannot tell which
+ * words are options, so it answers the strictest mode any word anywhere could
+ * ask for, and otherwise leaves the mode to the configuration; it never
+ * reports an explicit `--no-rebase` it does not understand.
+ */
+export function readPullRebase(args: readonly string[]): PullRebaseReading {
+  let mode: "rebase" | "interactive" | "merges" | null = null;
+  let explicit = false;
+  let understood = true;
+  const set = (next: "rebase" | "interactive" | "merges" | null): void => {
+    mode = next;
+    explicit = true;
+  };
+  for (let at = 0; at < args.length && understood; at += 1) {
+    const word = args[at] as string;
+    if (word === "--") break;
+    if (!word.startsWith("-") || word === "-") continue;
+    if (word.startsWith("--")) {
+      const equals = word.indexOf("=");
+      const name = equals === -1 ? word : word.slice(0, equals);
+      if (equals === -1 && PULL_LONG_NO_VALUE.includes(word)) {
+        if (word === "--no-rebase") set(null);
+        continue;
+      }
+      if (PULL_LONG_OPTIONAL_VALUE.includes(name)) {
+        if (name === "--rebase") set(equals === -1 ? "rebase" : pullRebaseValue(word.slice(equals + 1)));
+        continue;
+      }
+      if (PULL_LONG_REQUIRED_VALUE.includes(name)) {
+        if (equals !== -1) continue;
+        if (at + 1 >= args.length) understood = false;
+        at += 1;
+        continue;
+      }
+      understood = false;
+      continue;
+    }
+    // A short bundle: letters until one that takes a value.
+    for (let index = 1; index < word.length; index += 1) {
+      const letter = word[index] as string;
+      const rest = word.slice(index + 1);
+      if (PULL_SHORT_NO_VALUE.includes(letter)) continue;
+      if (PULL_SHORT_OPTIONAL_VALUE.includes(letter)) {
+        if (letter === "r") set(rest.length === 0 ? "rebase" : pullRebaseValue(rest));
+        break;
+      }
+      if (PULL_SHORT_REQUIRED_VALUE.includes(letter)) {
+        if (rest.length === 0) {
+          if (at + 1 >= args.length) understood = false;
+          at += 1;
+        }
+        break;
+      }
+      understood = false;
+      break;
+    }
+  }
+  const strictest = (
+    ...asked: ("rebase" | "interactive" | "merges" | null)[]
+  ): "rebase" | "interactive" | "merges" | null => {
+    if (asked.includes("interactive")) return "interactive";
+    if (asked.includes("merges")) return "merges";
+    if (asked.includes("rebase")) return "rebase";
+    return null;
+  };
+  // The floor: the word-by-word reading this function gave before fix round
+  // 3, which counts every word that looks like a rebase request wherever it
+  // sits (an option's value, after `--`, inside a bundle). git may read
+  // fewer of them; the answer is never milder than that reading.
+  const floor = textualPullRebaseMode(args);
+  if (!understood) return { mode: strictest(floor, ...args.map(mayAskRebase)), explicit: false, understood };
+  return { mode: strictest(floor, mode), explicit, understood };
+}
+
+/**
+ * The rebase mode a `git pull` argv asks for, or `null` for a merging pull
+ * (APRV-433). `"interactive"` for `--rebase=interactive` / `=i`; `"merges"`
+ * for `--rebase=merges` / `=m` (a `--rebase-merges` rebase); `"rebase"`
+ * for `--rebase`, `-r`, `--rebase=true` and any other value git might read
+ * as a rebase. `--no-rebase` and `--rebase=false` are a merge, and so is a
+ * pull that says nothing (the impure step reads the configuration). See
+ * {@link readPullRebase} for how value-taking options and words the reader
+ * does not understand are read. Exported for the impure step, which must read
+ * the flags the same way.
+ */
+export function pullRebaseMode(args: readonly string[]): "rebase" | "interactive" | "merges" | null {
+  return readPullRebase(args).mode;
 }
 
 /** `git pull`: a rebasing pull is a rewrite; a merging pull keeps `git-write` (APRV-433). */
@@ -5324,6 +5542,12 @@ export function commandSegmentWords(command: string): CommandSegmentWords[] | nu
 export interface GitInvocationShape {
   /** `NAME=value` words before `git`, verbatim. */
   assignments: string[];
+  /**
+   * The program word as written (quotes removed): `git`, `/usr/bin/git`,
+   * `./git`. The shape matches any word whose last path segment is `git`, so
+   * a caller that must know the program is the one on `PATH` reads this.
+   */
+  binary: string;
   /** Every word between `git` and the subcommand (`--no-pager`, `--git-dir=x`). */
   globalOptions: string[];
   /** The subcommand, or `null` when there is none. */
@@ -5402,6 +5626,7 @@ export function gitInvocationShape(segmentText: string): GitInvocationShape | nu
   const rest = words.slice(cursor + 1);
   return {
     assignments,
+    binary: bin.text,
     globalOptions,
     sub: subWord === undefined ? null : subWord.text,
     args: rest.map((word) => word.text),

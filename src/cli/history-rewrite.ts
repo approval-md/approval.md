@@ -46,6 +46,7 @@ import {
   commandLineShape,
   gitInvocationShape,
   pullRebaseMode,
+  readPullRebase,
   rebaseRunsStrategy,
   type ClassifiedSegment,
   type CommandClassification,
@@ -137,13 +138,32 @@ const HARMLESS_ASSIGNMENTS: readonly string[] = [
 const HARMLESS_EARLIER_GIT_SUBS: readonly string[] = ["add", "rm", "status"];
 
 /**
- * The options a plain `git rebase` may carry and still be judged local: a
- * CLOSED list, exact spellings only (APRV-433 build). git accepts any
- * unambiguous prefix of a long option, so `--inter` is `--interactive` and
- * `--exe` is `--exec`; a list of the flags to refuse would miss those, a list
- * of the flags to accept cannot. A flag outside it is shared, basis
- * `option-unvetted`. `--update-refs` is absent on purpose: it moves every
- * other branch that points into the range.
+ * The ONE rule every judge applies to its argv (APRV-648 fix round 3, Carter's
+ * FAIL-CLOSED ruling for #648): `.local` only on positive proof. Each word that
+ * starts with `-` must be, exactly, on the verb's closed list of options that
+ * take NO value. An option that takes a value (attached or the next word), an
+ * unknown dash word, an abbreviation (git accepts any unambiguous prefix of a
+ * long option, so a list of flags to refuse would miss `--inter`, `--exe`,
+ * `--h`), `--`, `--end-of-options` and a lone `-` are all outside it, and
+ * make the segment shared, basis `option-unvetted`. No dash word is ever
+ * skipped: a value-taking option the check skipped would leave its value to be
+ * read as the target (APRV-648 M2, `--pathspec-from-file @ HEAD~5`). Any
+ * positional beyond what the judge models is shared, `unreadable-target`.
+ * Supporting an option is deleted rather than modelled wherever the two
+ * compete.
+ */
+
+/**
+ * `git rebase`: options that take no value, exact spellings (git v2.50.1
+ * `builtin/rebase.c`). `--update-refs` is absent on purpose: it moves every
+ * other branch that points into the range (it is reported as
+ * `updates-other-refs`). `--root` is absent on purpose (APRV-648 M1): it
+ * changes git's positional grammar, so `git rebase --root <branch>` rewrites
+ * `<branch>` from its root while a reader of `<upstream> [<branch>]` judges
+ * HEAD's branch. `-S` and `--gpg-sign` take an optional value that can only
+ * be attached, so bare they take none; `-S<key>` and `--gpg-sign=<key>` are
+ * outside the list. `--onto`, `-s`, `-X`, `-C`, `--whitespace` and
+ * `--empty` take a value and are outside it.
  */
 const REBASE_PLAIN_FLAGS: readonly string[] = [
   "--keep-base",
@@ -182,7 +202,6 @@ const REBASE_PLAIN_FLAGS: readonly string[] = [
   "-m",
   "--merge",
   "--apply",
-  "--root",
   "--no-gpg-sign",
   "--gpg-sign",
   "-S",
@@ -190,30 +209,91 @@ const REBASE_PLAIN_FLAGS: readonly string[] = [
   "--no-reschedule-failed-exec",
 ];
 
-/** Plain-rebase options whose value is the NEXT word. */
-const REBASE_SEPARATE_VALUE_FLAGS: readonly string[] = [
-  "--onto",
+/**
+ * `git reset --hard`: options that take no value (git v2.50.1
+ * `builtin/reset.c`). The other modes (`--soft`, `--mixed`, `--merge`,
+ * `--keep`; git takes the last), `--recurse-submodules` (it moves the
+ * submodules' HEADs too), `-p`, `-N`, `--pathspec-from-file` and
+ * `--pathspec-file-nul` are outside it.
+ */
+const RESET_HARD_FLAGS: readonly string[] = ["--hard", "-q", "--quiet", "--no-refresh", "--refresh"];
+
+/**
+ * `git commit --amend`: options that take no value (git v2.50.1
+ * `builtin/commit.c`). Every message, author, date, trailer, template,
+ * fixup, squash, cleanup and pathspec option takes a value and is outside it,
+ * so `GIT_EDITOR=true git commit --amend` or `--no-edit` is the judged
+ * spelling. A pathspec positional is outside what the judge models.
+ */
+const AMEND_FLAGS: readonly string[] = [
+  "--amend",
+  "--no-edit",
+  "-e",
+  "--edit",
+  "-q",
+  "--quiet",
+  "-v",
+  "--verbose",
+  "-a",
+  "--all",
   "-s",
-  "--strategy",
-  "-X",
-  "--strategy-option",
-  "-C",
-  "--whitespace",
-  "--empty",
+  "--signoff",
+  "--no-signoff",
+  "-n",
+  "--no-verify",
+  "--verify",
+  "--reset-author",
+  "--allow-empty",
+  "--allow-empty-message",
+  "--no-post-rewrite",
+  "--no-gpg-sign",
 ];
 
-/** Plain-rebase long options whose value is attached with `=`. */
-const REBASE_ATTACHED_LONG: readonly string[] = [
-  "--onto=",
-  "--strategy=",
-  "--strategy-option=",
-  "--whitespace=",
-  "--empty=",
-  "--gpg-sign=",
+/**
+ * A rebasing `git pull`: options that take no value (git v2.50.1
+ * `builtin/pull.c`). `-r` and `--rebase` bare only: `--rebase=<value>` and
+ * `-r<value>` are outside it (`=merges` and `=interactive` are reported as
+ * `interactive` before the list is read). `-o`/`--server-option`, `-s`, `-X`,
+ * `--depth`, `--upload-pack` and every other value-taking option is outside
+ * it, and so is every positional: git maps `<remote> <branch>` through the
+ * remote's fetch refspec, not to `refs/remotes/<remote>/<branch>`, and a lone
+ * `<remote>` other than the branch's own makes git rebase onto what it fetched.
+ */
+const PULL_REBASE_FLAGS: readonly string[] = [
+  "-r",
+  "--rebase",
+  "-q",
+  "--quiet",
+  "-v",
+  "--verbose",
+  "-n",
+  "--no-stat",
+  "--stat",
+  "--autostash",
+  "--no-autostash",
 ];
 
-/** Plain-rebase short options whose value is attached (`-Xtheirs`, `-C4`, `-sort`, `-Skey`). */
-const REBASE_ATTACHED_SHORT: readonly string[] = ["-X", "-C", "-s", "-S"];
+/** One argv read under the closed rule: its positionals, or the first word outside the list. */
+interface VettedArgv {
+  positionals: { word: string; unreadable: boolean }[];
+  unvetted: string | null;
+}
+
+/** Read `args` under the closed rule: every dash word exactly on `allowed`, never skipped. */
+function vetArgv(shape: GitInvocationShape, allowed: readonly string[]): VettedArgv {
+  const positionals: { word: string; unreadable: boolean }[] = [];
+  let unvetted: string | null = null;
+  for (let at = 0; at < shape.args.length; at += 1) {
+    const word = shape.args[at] as string;
+    if (word.startsWith("-")) {
+      // A word the shell may change is never vetted, whatever it reads as now.
+      if (shape.unreadable[at] === true || !allowed.includes(word)) unvetted ??= word;
+      continue;
+    }
+    positionals.push({ word, unreadable: shape.unreadable[at] === true });
+  }
+  return { positionals, unvetted };
+}
 
 const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 
@@ -544,70 +624,27 @@ const APRV108_RULES: readonly string[] = [
   "git-filter",
 ];
 
-/** Positional words of a rebase argv, and the flags whose value is a revision. */
-interface RebaseArgs {
-  positionals: { word: string; unreadable: boolean }[];
-  onto: { word: string; unreadable: boolean } | null;
-  root: boolean;
+/** A plain rebase argv under the closed rule. */
+interface RebaseArgs extends VettedArgv {
   /** `true` for `--update-refs`, `false` for `--no-update-refs`, `null` when neither. */
   updateRefs: boolean | null;
   /** `--no-rebase-merges` was given, so `rebase.rebaseMerges` does not apply. */
   noRebaseMerges: boolean;
-  /** The first option outside the closed list, or `null`. */
-  unvetted: string | null;
 }
 
 function parseRebaseArgs(shape: GitInvocationShape): RebaseArgs {
-  const positionals: { word: string; unreadable: boolean }[] = [];
-  let onto: { word: string; unreadable: boolean } | null = null;
-  let root = false;
+  const vetted = vetArgv(shape, [...REBASE_PLAIN_FLAGS, "--update-refs"]);
   let updateRefs: boolean | null = null;
-  let noRebaseMerges = false;
-  let unvetted: string | null = null;
-  let endOfOptions = false;
-  for (let at = 0; at < shape.args.length; at += 1) {
-    const word = shape.args[at] as string;
-    const unreadable = shape.unreadable[at] === true;
-    if (endOfOptions || !word.startsWith("-") || word === "-") {
-      positionals.push({ word, unreadable });
-      continue;
-    }
-    if (word === "--") {
-      endOfOptions = true;
-      continue;
-    }
-    if (word === "--root") root = true;
-    if (word === "--update-refs") {
-      updateRefs = true;
-      continue;
-    }
-    if (word === "--no-update-refs") updateRefs = false;
-    if (word === "--no-rebase-merges") noRebaseMerges = true;
-    if (REBASE_PLAIN_FLAGS.includes(word)) continue;
-    if (word.startsWith("--onto=")) {
-      onto = { word: word.slice("--onto=".length), unreadable };
-      continue;
-    }
-    if (REBASE_ATTACHED_LONG.some((prefix) => word.startsWith(prefix))) continue;
-    if (REBASE_SEPARATE_VALUE_FLAGS.includes(word)) {
-      const value = shape.args[at + 1];
-      if (value === undefined) {
-        unvetted ??= word;
-        continue;
-      }
-      if (word === "--onto") onto = { word: value, unreadable: shape.unreadable[at + 1] === true };
-      at += 1;
-      continue;
-    }
-    if (REBASE_ATTACHED_SHORT.some((flag) => word.startsWith(flag) && word.length > flag.length)) continue;
-    unvetted ??= word;
+  for (const word of shape.args) {
+    if (word === "--update-refs") updateRefs = true;
+    else if (word === "--no-update-refs" && updateRefs === null) updateRefs = false;
   }
-  return { positionals, onto, root, updateRefs, noRebaseMerges, unvetted };
+  return { ...vetted, updateRefs, noRebaseMerges: shape.args.includes("--no-rebase-merges") };
 }
 
 /**
  * Is an EARLIER segment of the command line one the check may look past?
- * Only a git invocation from {@link HARMLESS_EARLIER_GIT_SUBS}, with no
+ * Only a bare `git` invocation from {@link HARMLESS_EARLIER_GIT_SUBS}, with no
  * assignment, no global option beyond the inert ones, no word the shell could
  * change, no construct the lexer cannot read, and no write redirect other than
  * to `/dev/null`. Everything else is assumed to move the state the check reads.
@@ -615,6 +652,9 @@ function parseRebaseArgs(shape: GitInvocationShape): RebaseArgs {
 function harmlessBefore(text: string): boolean {
   const shape = gitInvocationShape(text);
   if (shape === null || shape.opaque) return false;
+  // The bare word `git`, the program on PATH: `./git status` is whatever an
+  // agent wrote into `./git` (APRV-648 N1).
+  if (shape.binary !== "git") return false;
   if (shape.assignments.length > 0) return false;
   if (shape.globalOptions.some((option) => !INERT_GLOBAL_OPTIONS.includes(option))) return false;
   if (shape.sub === null || !HARMLESS_EARLIER_GIT_SUBS.includes(shape.sub)) return false;
@@ -793,6 +833,10 @@ function judgeSegment(
   // another one, or whose state an earlier segment can change, is shared.
   const precheck = (): HistoryRewriteBasis | null => {
     if (shape === null) return "global-option";
+    // Only the bare word `git` is the program the check reads the repository
+    // with; `./git`, `/tmp/x/git` (and `/usr/bin/git`, which is not proved to
+    // be the same program) are shared (APRV-648 fix round 3, N1).
+    if (shape.binary !== "git") return "global-option";
     if (shape.globalOptions.some((option) => !INERT_GLOBAL_OPTIONS.includes(option))) {
       return "global-option";
     }
@@ -831,9 +875,15 @@ function judgeSegment(
         );
         return forced ? sharedOf("push-side", legacyOf()) : null;
       }
-      // A merging `git pull`: does configuration make it a rebase?
-      if (shape !== null && /--no-rebase|--rebase=(?:false|no|off|0)\b/u.test(shape.args.join(" "))) {
-        return null;
+      // A merging `git pull`: does configuration make it a rebase? Only an
+      // explicit `--no-rebase` / `--rebase=false` that git reads as an
+      // OPTION keeps the configuration out, read word by word with git's
+      // value-taking options skipped (APRV-648 M3): the value of `-o`
+      // (`git pull -o --no-rebase`, `--server-option=--no-rebase`) settles
+      // nothing, and an argv the reader does not understand never blocks.
+      if (shape !== null) {
+        const reading = readPullRebase(shape.args);
+        if (reading.understood && reading.explicit && reading.mode === null) return null;
       }
       if (blocked) return sharedOf(precheck() ?? "global-option", legacyOf());
       const config = readConfig(git, "^(branch\\..*\\.rebase|pull\\.rebase)$");
@@ -877,7 +927,7 @@ function judgeSegment(
         return judgePullRebase(git, repo(), live, legacyOf());
       }
       case "git-commit-amend":
-        return judgeAmend(git, repo(), legacyOf());
+        return judgeAmend(git, repo(), live, legacyOf());
       case "git-reset-hard":
         return judgeResetHard(git, repo(), live, legacyOf());
       case "git-rebase":
@@ -908,7 +958,12 @@ function refGate(facts: RepoFacts, ref: string, legacy: string): Judged | null {
 }
 
 /** `git commit --amend`: R is HEAD alone. */
-function judgeAmend(git: Git, facts: RepoFacts, legacy: string): Judged {
+function judgeAmend(git: Git, facts: RepoFacts, shape: GitInvocationShape, legacy: string): Judged {
+  const vetted = vetArgv(shape, AMEND_FLAGS);
+  if (vetted.unvetted !== null || !shape.args.includes("--amend")) {
+    return sharedOf("option-unvetted", legacy, facts.head);
+  }
+  if (vetted.positionals.length > 0) return sharedOf("unreadable-target", legacy, facts.head);
   if (facts.head === null) return sharedOf("detached-head", legacy);
   const gated = refGate(facts, facts.head, legacy);
   if (gated !== null) return gated;
@@ -925,15 +980,15 @@ function judgeAmend(git: Git, facts: RepoFacts, legacy: string): Judged {
 
 /** `git reset --hard [<rev>]`: R = HEAD --not <rev>. */
 function judgeResetHard(git: Git, facts: RepoFacts, shape: GitInvocationShape, legacy: string): Judged {
-  let rev = "HEAD";
-  for (let at = 0; at < shape.args.length; at += 1) {
-    const word = shape.args[at] as string;
-    if (word === "--") break;
-    if (word.startsWith("-")) continue;
-    if (shape.unreadable[at] === true) return sharedOf("unreadable-target", legacy, facts.head);
-    rev = word;
-    break;
+  const vetted = vetArgv(shape, RESET_HARD_FLAGS);
+  if (vetted.unvetted !== null || !shape.args.includes("--hard")) {
+    return sharedOf("option-unvetted", legacy, facts.head);
   }
+  const [target, extra] = vetted.positionals;
+  if (extra !== undefined || target?.unreadable === true) {
+    return sharedOf("unreadable-target", legacy, facts.head);
+  }
+  const rev = target?.word ?? "HEAD";
   if (facts.head === null) return sharedOf("detached-head", legacy);
   const gated = refGate(facts, facts.head, legacy);
   if (gated !== null) return gated;
@@ -943,18 +998,14 @@ function judgeResetHard(git: Git, facts: RepoFacts, shape: GitInvocationShape, l
   return judgeRange(git, facts, { ref: facts.head, oldTip, bases: [base], localBasis: "range-unpublished" }, legacy);
 }
 
-/** `git rebase [--onto <x>] [<upstream> [<branch>]]`. */
+/** `git rebase [<upstream> [<branch>]]`. */
 function judgeRebase(git: Git, facts: RepoFacts, shape: GitInvocationShape, legacy: string): Judged {
   const parsed = parseRebaseArgs(shape);
-  if (parsed.unvetted !== null) return sharedOf("option-unvetted", legacy, facts.head);
   if (parsed.updateRefs === true) return sharedOf("updates-other-refs", legacy, facts.head);
+  if (parsed.unvetted !== null) return sharedOf("option-unvetted", legacy, facts.head);
   const [upstreamWord, branchWord, extra] = parsed.positionals;
   if (extra !== undefined) return sharedOf("unreadable-target", legacy, facts.head);
-  if (
-    upstreamWord?.unreadable === true ||
-    branchWord?.unreadable === true ||
-    parsed.onto?.unreadable === true
-  ) {
+  if (upstreamWord?.unreadable === true || branchWord?.unreadable === true) {
     return sharedOf("unreadable-target", legacy, facts.head);
   }
   let ref: string;
@@ -972,29 +1023,15 @@ function judgeRebase(git: Git, facts: RepoFacts, shape: GitInvocationShape, lega
   if (configured !== null) return sharedOf(configured, legacy, ref);
   const oldTip = resolveCommit(git, ref);
   if (oldTip === null) return sharedOf("unreadable-target", legacy, ref);
-
-  let bases: string[] = [];
-  if (!parsed.root) {
-    let upstream: string | null;
-    if (upstreamWord !== undefined) {
-      upstream = resolveCommit(git, upstreamWord.word);
-    } else {
-      const configured = facts.branches.get(ref)?.upstream ?? null;
-      upstream = configured === null ? null : resolveCommit(git, configured);
-    }
-    if (upstream === null) return sharedOf("unreadable-target", legacy, ref);
-    if (parsed.onto !== null) {
-      const onto = resolveCommit(git, parsed.onto.word);
-      if (onto === null) return sharedOf("unreadable-target", legacy, ref);
-      // C4: the union base. Commits replayed AND commits dropped are in R.
-      const merged = git.output(["merge-base", "--all", onto, upstream]);
-      bases = merged?.split("\n").map((line) => line.trim()).filter((id) => OBJECT_ID.test(id)) ?? [];
-      if (bases.length === 0) return sharedOf("unreadable-target", legacy, ref);
-    } else {
-      bases = [upstream];
-    }
+  let upstream: string | null;
+  if (upstreamWord !== undefined) {
+    upstream = resolveCommit(git, upstreamWord.word);
+  } else {
+    const configuredUpstream = facts.branches.get(ref)?.upstream ?? null;
+    upstream = configuredUpstream === null ? null : resolveCommit(git, configuredUpstream);
   }
-  return judgeRange(git, facts, { ref, oldTip, bases, localBasis: "range-unpublished" }, legacy);
+  if (upstream === null) return sharedOf("unreadable-target", legacy, ref);
+  return judgeRange(git, facts, { ref, oldTip, bases: [upstream], localBasis: "range-unpublished" }, legacy);
 }
 
 /**
@@ -1032,23 +1069,15 @@ function judgePullRebase(git: Git, facts: RepoFacts, shape: GitInvocationShape, 
   if (rebaseRunsStrategy(shape.args)) return sharedOf("runs-commands", legacy, facts.head);
   const configured = rebaseConfigBlock(git, null, false);
   if (configured !== null) return sharedOf(configured, legacy, facts.head);
-  const positionals: { word: string; unreadable: boolean }[] = [];
-  for (let at = 0; at < shape.args.length; at += 1) {
-    const word = shape.args[at] as string;
-    if (word.startsWith("-")) continue;
-    positionals.push({ word, unreadable: shape.unreadable[at] === true });
-  }
-  if (positionals.some((p) => p.unreadable) || positionals.length > 2) {
-    return sharedOf("unreadable-target", legacy, facts.head);
-  }
-  const [remote, branch] = positionals;
-  let upstream: string | null;
-  if (remote !== undefined && branch !== undefined) {
-    upstream = resolveCommit(git, `refs/remotes/${remote.word}/${branch.word}`);
-  } else {
-    const configured = facts.branches.get(facts.head)?.upstream ?? null;
-    upstream = configured === null ? null : resolveCommit(git, configured);
-  }
+  // The closed rule (APRV-648 fix round 3): no dash word skipped, so a
+  // value-taking option (`-o`, `--server-option`, `--depth`, …) is shared, and
+  // no positional, so the upstream is the branch's configured one, which is
+  // the ref git's own fork-point reads for a pull that names no repository.
+  const vetted = vetArgv(shape, PULL_REBASE_FLAGS);
+  if (vetted.unvetted !== null) return sharedOf("option-unvetted", legacy, facts.head);
+  if (vetted.positionals.length > 0) return sharedOf("unreadable-target", legacy, facts.head);
+  const configuredUpstream = facts.branches.get(facts.head)?.upstream ?? null;
+  const upstream = configuredUpstream === null ? null : resolveCommit(git, configuredUpstream);
   const oldTip = resolveCommit(git, "HEAD");
   if (upstream === null || oldTip === null) return sharedOf("unreadable-target", legacy, facts.head);
   return judgeRange(git, facts, { ref: facts.head, oldTip, bases: [upstream], localBasis: "range-unpublished" }, legacy);

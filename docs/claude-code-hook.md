@@ -788,16 +788,16 @@ spelling:
 
 | spelling | rule | lost range, or verdict |
 |---|---|---|
-| `git commit --amend` | `git-commit-amend` | HEAD alone |
-| `git reset --hard [<rev>]` | `git-reset-hard` | `HEAD --not <rev>`; nothing lost is `no-commits-lost` |
-| `git rebase [--onto <x>] [<upstream> [<branch>]]` | `git-rebase` | `<branch> --not <upstream>`, or `--not $(merge-base --all <x> <upstream>)` with `--onto`; an option outside a closed list is shared, `option-unvetted`; `--update-refs` or `rebase.updateRefs` is shared, `updates-other-refs`; `rebase.rebaseMerges` is shared, `interactive` |
+| `git commit --amend` | `git-commit-amend` | HEAD alone; any option that takes a value (`-m`, `-C`, `--author`, `--fixup`, …) is shared, `option-unvetted`, so `--no-edit` or `GIT_EDITOR=true` is the judged spelling; a pathspec is shared, `unreadable-target` |
+| `git reset --hard [<rev>]` | `git-reset-hard` | `HEAD --not <rev>`; nothing lost is `no-commits-lost`; only `-q`, `--quiet`, `--no-refresh` and `--refresh` may join `--hard`, and at most one `<rev>` |
+| `git rebase [<upstream> [<branch>]]` | `git-rebase` | `<branch> --not <upstream>`; `--root`, `--onto` and every other option that takes a value (`-s`, `-X`, `-C`, `--whitespace`, `--empty`, `-S<key>`) is shared, `option-unvetted`, as is any option outside a closed list; `--update-refs` or `rebase.updateRefs` is shared, `updates-other-refs`; `rebase.rebaseMerges` is shared, `interactive` |
 | `git rebase --continue`, `--skip`, `--abort`, `--quit` | `git-rebase-continue`, `git-rebase-abort` | always shared, `unreadable-target`, on a real stop as much as on a forged one (APRV-648 fix round 2, a deliberate departure from the D-6 spec text): git reads what each one does from files under the git directory (the branch to move, the commit to move it to, a pending amend of HEAD, the steps left, the refs to delete), and anything that can write the checkout can write those, so the check reads none of them |
 | `git rebase -i`, `--edit-todo`, `--rebase-merges` | `git-rebase-interactive` | always shared, `interactive` |
 | `git rebase --exec`, `-x`, `-s <not built in>` | `git-rebase-exec` | always shared, `runs-commands` |
 | `git filter-branch`, `git filter-repo` | `git-filter` | always shared, `whole-history` |
 | `git push --force` and every push-side spelling | `git-push-force` | always shared, `push-side` |
 | a `git push` whose words the shell may expand, or whose configuration an assignment or a global option steers | `git-push-unreadable` | always shared, `push-side` |
-| `git pull --rebase` | `git-pull-rebase` | `HEAD --not <upstream as last fetched>`; `--rebase=merges` or `=interactive` is shared, `interactive`; `-s <not built in>` is shared, `runs-commands` |
+| `git pull --rebase` | `git-pull-rebase` | `HEAD --not <upstream as last fetched>`, for a pull that names no repository; `--rebase=merges` or `=interactive` is shared, `interactive`; `-s <not built in>` is shared, `runs-commands`; any option that takes a value (`-o`, `--server-option`, `--depth`, …) is shared, `option-unvetted`; a `<repository>` or refspec is shared, `unreadable-target` |
 | bare `git pull` with `pull.rebase` / `branch.<b>.rebase` set | `git-write` | promoted into the family, as `pull --rebase` |
 | bare `git push` with a `+` refspec or `mirror` in remote configuration | `git-push-implicit` | promoted, always shared, `push-side` |
 
@@ -819,9 +819,17 @@ range over 1000 commits is shared, `range-too-large`.
 git accepts any unambiguous prefix of a long option and bundles short ones,
 so the text classifier reads those spellings as their full ones: `git push
 -fu`, `--force-w` and `--m` are force pushes, `git commit --am` is an amend,
-`git reset --h` is a hard reset and `git pull --reb` is a rebasing pull. A
-plain `git rebase` takes only the options on a closed list, exact spellings,
-so an abbreviation such as `--inter` or `--exe` is shared, `option-unvetted`. The restack by merge (`git merge origin/main`, a merging
+`git reset --h` is a hard reset and `git pull --reb` is a rebasing pull. Each
+judge takes only the options on its verb's closed list of options that take
+no value, exact spellings, and never skips an option word (APRV-648 fix round
+3): an abbreviation such as `--inter`, `--exe`, `--am` or `--h`, an option that
+takes a value, `--`, and an unknown option are shared, `option-unvetted`, and
+a positional the judge does not model is shared, `unreadable-target`. The
+text classifier reads a `git pull` argv the way git's parse-options does, so a
+`--no-rebase` that is the value of `-o` or `--server-option` keeps neither the
+rebasing pull out of the family nor the configuration from promoting a bare
+one. Only the bare word `git` is git: `./git status` before a rewrite is
+`compound-state`, and `./git` as the rewrite itself is `global-option`. The restack by merge (`git merge origin/main`, a merging
 `git pull`) is outside the family and runs no git query at all.
 
 **Resolution.** Under a policy with no `vcs.history.rewrite.local`, `.shared`

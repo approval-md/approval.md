@@ -156,6 +156,21 @@ const FIXTURES: readonly Fixture[] = [
   { command: "git pull --no-rebase origin main", class: "vcs.commit.branch", rule: "git-write", row: "git-pull" },
   { command: "git pull --ff-only", class: "vcs.commit.branch", rule: "git-write", row: "git-pull" },
   { command: "git pull -Xtheirs", class: "vcs.commit.branch", rule: "git-write", row: "git-pull" },
+  // APRV-648 fix round 3, M3: a value-taking option swallows its value, as in
+  // git's parse-options, so a `--no-rebase` that is `-o`'s value settles nothing.
+  { command: "git pull -r -o --no-rebase origin", class: "vcs.history.rewrite", rule: "git-pull-rebase", row: "git-pull" },
+  { command: "git pull -r --server-option --no-rebase origin", class: "vcs.history.rewrite", rule: "git-pull-rebase", row: "git-pull" },
+  { command: "git pull -r --server-option=--no-rebase", class: "vcs.history.rewrite", rule: "git-pull-rebase", row: "git-pull" },
+  { command: "git pull -r -o=--no-rebase", class: "vcs.history.rewrite", rule: "git-pull-rebase", row: "git-pull" },
+  { command: "git pull -r -qo --no-rebase", class: "vcs.history.rewrite", rule: "git-pull-rebase", row: "git-pull" },
+  { command: "git pull -r --depth --no-rebase", class: "vcs.history.rewrite", rule: "git-pull-rebase", row: "git-pull" },
+  // An abbreviation the reader does not understand: the strictest reading wins.
+  { command: "git pull -r --serv --no-rebase", class: "vcs.history.rewrite", rule: "git-pull-rebase", row: "git-pull" },
+  { command: "git pull -r --no-reb", class: "vcs.history.rewrite", rule: "git-pull-rebase", row: "git-pull" },
+  // `-r` as `-o`'s value asks git for nothing, but a swallowed value that
+  // looks like a rebase request still counts as one (stricter than git).
+  { command: "git pull -o -r origin", class: "vcs.history.rewrite", rule: "git-pull-rebase", row: "git-pull" },
+  { command: "git pull -r -o x --no-rebase", class: "vcs.commit.branch", rule: "git-write", row: "git-pull" },
   { command: "git merge origin/main", class: "vcs.commit.branch", rule: "git-write" },
   { command: "git reset --hard HEAD~1", class: "vcs.history.rewrite", rule: "git-reset-hard", row: "git-reset" },
   { command: "git reset HEAD~1", class: "vcs.commit.branch", rule: "git-reset" },

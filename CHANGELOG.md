@@ -96,6 +96,20 @@ on the hook for enforcement.
   classifier's rebase row is split into rule ids by spelling, and
   `git pull --rebase` is now `vcs.history.rewrite` from the text (it was
   `vcs.commit.branch`).
+  Every judge that can answer `.local` reads its argv under one closed
+  rule (APRV-648 fix round 3): each option word must be, exactly, on that
+  verb's list of options that take no value. An option that takes a value
+  (`git rebase --onto`, `-s`, `-X`; `git commit --amend -m`; `git reset
+  --hard --pathspec-from-file`; `git pull -o`), `--root`, an abbreviation,
+  `--` and any positional the judge does not model (a pathspec, a pull's
+  `<repository>`) are shared. `git rebase --root <branch>` was judged on
+  HEAD's branch while git rewrites `<branch>`; `git reset --hard
+  --pathspec-from-file <f> <rev>` took `<f>` as the target; and
+  `git pull -r -o --no-rebase` read the server option's value as a merge.
+  The text classifier now skips `git pull`'s option values the way git
+  does, never answering milder than before, and only the bare word `git`
+  counts as git for the earlier-segment list and the judges (`./git
+  status && …` is shared).
 - Conformance: `command-class` 1.9.0, thirty-seven new `rewrite-*` vectors;
   no existing expectation moved.
 
