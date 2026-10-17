@@ -6756,7 +6756,15 @@ function resolvedPathClasses(
         add("account.credential");
         return;
       }
-      if (target.unresolved) return;
+      if (target.unresolved) {
+        // APRV-511 (cred-asymmetry M1): a word this hook cannot expand is still
+        // judged by what it spells. `git` is exempt from the classifier's text
+        // credential rule, so this pass is git's only credential check, and
+        // `git diff --no-index /dev/null $(echo ~)/.hermes/.env` (whose `$(...)`
+        // the lexer leaves as the substitution sentinel) passed as `read.shell`.
+        if (unresolvedReadCouldNameCredential(target.text)) add("account.credential");
+        return;
+      }
       for (const from of cwds) {
         // APRV-511 fix round 3 (M(L5c-1)): both readings, as for a write.
         const spelled = spelledAbsolute(from, target.text);
@@ -7044,6 +7052,56 @@ function globCouldNameCredential(path: string): boolean {
   if (!hasGlobChars(last)) return globCouldNameGateHome(path);
   const pattern = globRegex(last);
   return CREDENTIAL_NAMES.some((name) => pattern.test(name)) || globCouldNameGateHome(path);
+}
+
+/**
+ * APRV-511 (cred-asymmetry M1): could a read word this hook cannot expand (a
+ * variable, `${X:-default}`, the `$(...)` substitution sentinel) name a
+ * credential? Fail closed on credential shapes only:
+ *
+ * - the classifier's text rule ({@link isCredentialPath}), which reads an
+ *   unexpanded segment as a maybe-home;
+ * - a pattern that could name one ({@link globCouldNameCredential});
+ * - a credential file name (`.env`, `.env.*`, `.op.env`, `.op.env.*`,
+ *   `auth.json`) at or after the first unexpanded segment, which may have
+ *   expanded to a home, a profile home or a profiles directory;
+ * - `env`, `env.*`, `vault*` or `keys` right after an unexpanded segment, which
+ *   may have expanded to an approval home;
+ * - an unexpanded span in the LAST segment right under a literal Hermes home
+ *   (`.hermes`, `$HERMES_HOME`, or a home's `profiles/<p>`), which may spell
+ *   `.env`, `.op.env` or `auth.json`, or in any segment right under a literal `.approval`,
+ *   which may spell `env`, `vault.enc` or `keys`.
+ *
+ * As in {@link isCredentialPath}, an unexpanded segment stands for one segment.
+ */
+function unresolvedReadCouldNameCredential(text: string): boolean {
+  if (isCredentialPath(text) || globCouldNameCredential(text)) return true;
+  // One segment per braced variable, so a default's `/` (`${H:-$HOME/.hermes}`) splits nothing.
+  const collapsed = text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/gu, "${$1}");
+  const segments = collapsed.split(/[/\\]+/u).filter((segment) => segment.length > 0);
+  const unknown = (segment: string): boolean => /[$`]/u.test(segment);
+  const credentialFile = (segment: string): boolean => {
+    const name = segment.toLowerCase();
+    return name === ".env" || name.startsWith(".env.") || name === ".op.env" || name.startsWith(".op.env.") || name === "auth.json";
+  };
+  const approvalFile = (segment: string): boolean =>
+    segment === "env" || segment.startsWith("env.") || segment.startsWith("vault") || segment === "keys";
+  const hermesHome = (segment: string | undefined): boolean =>
+    segment !== undefined && (segment.toLowerCase() === ".hermes" || segment === "$HERMES_HOME" || segment === "${HERMES_HOME}");
+  const literalHome = (index: number): boolean => {
+    if (segments[index - 1] === ".approval") return true;
+    if (index !== segments.length - 1) return false;
+    if (hermesHome(segments[index - 1])) return true;
+    return segments[index - 2]?.toLowerCase() === "profiles" && hermesHome(segments[index - 3]);
+  };
+  let afterUnknown = false;
+  for (const [index, segment] of segments.entries()) {
+    if (unknown(segment) && literalHome(index)) return true;
+    if (afterUnknown && credentialFile(segment)) return true;
+    if (index > 0 && unknown(segments[index - 1] as string) && approvalFile(segment)) return true;
+    if (unknown(segment)) afterUnknown = true;
+  }
+  return false;
 }
 
 /** The entries a final-component glob matches, or `null` when the directory is unknown. */

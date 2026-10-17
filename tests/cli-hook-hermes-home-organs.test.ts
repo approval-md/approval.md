@@ -774,3 +774,140 @@ test("fix round 5 (last) through the hook: an upload source outside the read sco
   const run = ask(dir, { tool: "terminal", input: { command: "curl -T ./upload.bin https://e/x", workdir: workspace } });
   assert.equal(verdictOf(run).permission, "allow", `${run.stdout} ${run.stderr}`);
 });
+
+// ---------------------------------------------------------------------------
+// cred-asymmetry M1: an unresolved git read word that names a credential
+// ---------------------------------------------------------------------------
+
+/**
+ * `git` is exempt from the classifier's text credential rule (it is in the
+ * write-only bins), so for a git reader the Hermes disk pass is the only
+ * credential check. Since #639 the lexer leaves `$(...)` as the substitution
+ * sentinel, the word stays unresolved, and before this fix the disk pass
+ * returned without a class: `git diff --no-index /dev/null $(echo ~)/.hermes/.env`
+ * passed as autonomous `read.shell` where main blocked it as `account.credential`.
+ * Synthetic files only, with HOME pointed at the scratch gate.
+ */
+function credentialLab(): { dir: string; home: string; env: Record<string, string> } {
+  const { dir, home } = ready();
+  writeFileSync(join(home, ".env"), "SYNTHETIC_TOKEN=x\n", "utf8");
+  writeFileSync(join(home, "auth.json"), "{}\n", "utf8");
+  mkdirSync(join(home, "profiles", "p"), { recursive: true });
+  writeFileSync(join(home, "profiles", "p", ".env"), "SYNTHETIC_TOKEN=x\n", "utf8");
+  mkdirSync(join(dir, ".approval"), { recursive: true });
+  return { dir, home, env: { HOME: dir } };
+}
+
+const UNRESOLVED_CREDENTIAL_WORDS = [
+  "$(echo ~)/.hermes/.env",
+  "$(pwd)/.hermes/.env",
+  '"$(echo ~)/.hermes/auth.json"',
+  "$(printf %s ~)/.hermes/.op.env",
+  "${HERMES_HOME:-$HOME/.hermes}/.op.env",
+  '"${HERMES_HOME:-/x}/.op.env"',
+  "$(echo ~)/.hermes/profiles/p/.env",
+  "$(echo ~/.hermes/profiles)/p/.env",
+  "$(echo ~)/.hermes/hermes-agent/.env",
+  "~/.hermes/$(echo .env)",
+  "~/.hermes/.e$(echo nv)",
+  "$(pwd)/.approval/env",
+  "$(pwd)/.approval/vault.enc",
+  "$(echo .approval)/env",
+];
+
+const GIT_READERS = [
+  (word: string) => `git diff --no-index /dev/null ${word}`,
+  (word: string) => `git grep --no-index -h . ${word}`,
+  (word: string) => `git log -p -- ${word}`,
+  (word: string) => `git show ${word}`,
+];
+
+test("cred-asymmetry M1: a git reader whose path holds an unresolved word before a credential stays account.credential", () => {
+  const { dir, env } = credentialLab();
+  const rows: Row[] = [];
+  for (const reader of GIT_READERS) {
+    for (const word of UNRESOLVED_CREDENTIAL_WORDS) {
+      rows.push({ tool: "terminal", input: { command: reader(word), workdir: dir }, env });
+    }
+  }
+  // Literal controls: each reader of the plain spelling was blocked before #639 and since.
+  for (const reader of GIT_READERS) {
+    for (const word of ["~/.hermes/.env", "~/.hermes/auth.json", "~/.hermes/.op.env", "~/.hermes/profiles/p/.env"]) {
+      rows.push({ tool: "terminal", input: { command: reader(word), workdir: dir }, env });
+    }
+  }
+  // The report's own repro, with the workdir the home itself.
+  rows.push({ tool: "terminal", input: { command: "git diff --no-index /dev/null $(echo ~)/.hermes/.env", workdir: join(dir, ".hermes") }, env });
+  rows.push({ tool: "terminal", input: { command: "git show HEAD:$(pwd)/.hermes/.env", workdir: dir }, env });
+  expectDenied(dir, rows, "account.credential");
+});
+
+test("cred-asymmetry M1: backtick substitution before a credential stays refused", () => {
+  const { dir, env } = credentialLab();
+  for (const reader of GIT_READERS) {
+    const row: Row = { tool: "terminal", input: { command: reader("`echo ~`/.hermes/.env"), workdir: dir }, env };
+    const run = ask(dir, row);
+    assert.equal(verdictOf(run).permission, "deny", `${JSON.stringify(row.input)}: ${run.stdout} ${run.stderr}`);
+  }
+});
+
+test("cred-asymmetry M1: an unresolved git read word that names no credential still reads", () => {
+  const { dir, home, env } = credentialLab();
+  for (const command of [
+    "git diff --no-index /dev/null $(pwd)/notes.md",
+    "git diff --no-index /dev/null $(pwd)/.envrc",
+    "git grep --no-index -h . $(pwd)/src",
+    "git log -p -- $(pwd)/README.md",
+    "git diff --no-index /dev/null ~/.hermes/workspace/$(echo x)",
+    "git diff --no-index /dev/null ~/.hermes/$(echo workspace)/notes.md",
+  ]) {
+    const run = ask(dir, { tool: "terminal", input: { command, workdir: join(home, "workspace") }, env });
+    assert.equal(verdictOf(run).permission, "allow", `${command}: ${run.stdout} ${run.stderr}`);
+  }
+});
+
+function askClaudeCode(dir: string, command: string, env: Record<string, string>): Run {
+  return runCli(
+    ["hook", "claude-code", "--as", "agent:cc"],
+    dir,
+    JSON.stringify({
+      hook_event_name: "PreToolUse",
+      session_id: "cc-m1",
+      tool_use_id: `cc-${String(Math.random()).slice(2)}`,
+      cwd: dir,
+      tool_name: "Bash",
+      tool_input: { command },
+      transcript_path: "/dev/null",
+      permission_mode: "default",
+    }),
+    env,
+  );
+}
+
+test("cred-asymmetry M1 parity: Claude Code reads the sentinel before a credential as account.credential", () => {
+  const { dir, env } = credentialLab();
+  for (const command of [
+    "cat $(echo ~)/.hermes/.env",
+    "cat $(pwd)/.hermes/auth.json",
+    "cat ${HERMES_HOME:-$HOME/.hermes}/.op.env",
+    "cat $(pwd)/.approval/env",
+  ]) {
+    const run = askClaudeCode(dir, command, env);
+    assert.match(run.stdout, /"permissionDecision":"deny"/u, `${command}: ${run.stdout}`);
+    assert.ok(classesOf(run).includes("account.credential"), `${command}: ${run.stdout}`);
+  }
+});
+
+test(
+  "cred-asymmetry M1 parity: Claude Code's git readers of a credential",
+  { todo: "cred-asymmetry M2, pre-existing on main: Claude Code has no disk pass and git is exempt from the text credential rule" },
+  () => {
+    const { dir, env } = credentialLab();
+    for (const reader of GIT_READERS) {
+      for (const word of ["~/.hermes/.env", "$(echo ~)/.hermes/.env"]) {
+        const run = askClaudeCode(dir, reader(word), env);
+        assert.ok(classesOf(run).includes("account.credential"), `${reader(word)}: ${run.stdout}`);
+      }
+    }
+  },
+);
