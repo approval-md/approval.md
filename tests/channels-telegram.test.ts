@@ -146,6 +146,7 @@ import {
   newDispatchState,
   collapsibleStale,
   orderPending,
+  pacedReminderLines,
   queueLines,
   reviewHandlerFor,
   staleReminderLines,
@@ -4790,8 +4791,18 @@ test("paced delivery opens with one summary and the oldest request alone (APRV-2
   );
 
   const sent = sentSince(from);
-  assert.equal(sent[0]?.includes("3 pending"), true, `summary missing the count: ${String(sent[0])}`);
-  assert.equal(sent[0]?.includes("communicate.email.external"), true, "summary named no class");
+  // P-9: the paced opening is the restart's reminder, in a resident's words:
+  // the count, that one is below, and that older buttons still work. No class
+  // name, no action key.
+  assert.equal(
+    sent[0],
+    "<b>Reminder: 3 requests are waiting for you.</b>\nOne is below; the next comes after you answer it. Buttons on older messages above still work.",
+    `not the paced reminder: ${String(sent[0])}`,
+  );
+  assert.equal(sent[0]?.includes("communicate.email.external"), false, "the reminder named a class");
+  for (const key of [a, b, c]) {
+    assert.equal(sent[0]?.includes(key), false, `the reminder named ${key}`);
+  }
   for (const key of [b, c]) {
     assert.equal(
       sent.filter((text) => text.includes(key)).length,
@@ -4956,7 +4967,7 @@ test("/queue lists every pending request while one is being shown (APRV-216)", a
   assert.equal(recordCount(world), before, "/queue appended to the log");
 
   const reply = sentSince(from).join("\n");
-  assert.equal(reply.includes("3 pending"), true, `no summary in the reply: ${reply}`);
+  assert.equal(reply.includes("3 requests are waiting for you (oldest "), true, `no summary in the reply: ${reply}`);
   for (const key of [a, b, c]) {
     assert.equal(reply.includes(key), true, `${key} is pending and absent from /queue`);
   }
@@ -4979,7 +4990,7 @@ test("/queue lists every pending request while one is being shown (APRV-216)", a
   mock.queueUpdate(messageUpdate({ chatId: CHAT, text: "/queue" }));
   await channel.pollOnce();
   const secondReply = sentSince(secondFrom).join("\n");
-  assert.equal(secondReply.includes("2 pending"), true, `stale count: ${secondReply}`);
+  assert.equal(secondReply.includes("2 requests are waiting for you"), true, `stale count: ${secondReply}`);
   assert.equal(secondReply.includes(a), false, "a decided request is still listed as pending");
 
   assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
@@ -5014,7 +5025,7 @@ test("the commands answer a queue with nothing selected without naming a card (A
   const from = mock.sentTexts().length;
   await commands("queue");
   const listing = sentSince(from).join("\n");
-  assert.equal(listing.includes("1 pending"), true, `no summary: ${listing}`);
+  assert.equal(listing.includes("1 request is waiting for you (asked "), true, `no summary: ${listing}`);
   assert.equal(listing.includes(only), true, "the pending request is not listed");
   assert.equal(listing.includes("no decision buttons"), true, "the reply is not self-identified");
   assert.equal(
@@ -5057,7 +5068,7 @@ test("the commands answer a queue with nothing selected without naming a card (A
   // The announce path bolds the first line, so this is `includes` against a
   // reply whose only content is that line.
   assert.equal(
-    empty.includes("Nothing pending — the queue is empty."),
+    empty.includes("Nothing is waiting for you right now."),
     true,
     `not the empty reply: ${empty}`,
   );
@@ -5172,6 +5183,34 @@ test("digest grouping still applies to the request being shown (APRV-216)", asyn
   assertClean(world.unit);
 });
 
+test("P-9: a paced restart behind a relay says the older buttons no longer work", async () => {
+  // Paced is the product default, and before P-9 its opening line was a count
+  // and a class tally that never said whether the earlier copies still decide.
+  const world = staged(3, distinctPayloadFor);
+  const setup = setupFor(world, channelFor({ staleCopy: false }), undefined, "paced");
+  const { streams, err } = capture();
+  requestAt(world, 0, at(1));
+  requestAt(world, 1, at(2));
+
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(setup, streams, newDispatchState(), at(63));
+  assert.equal(cycle.summary?.pending, 2);
+  assert.equal(
+    sentSince(from)[0],
+    "<b>Reminder: 2 requests are waiting for you.</b>\nOne is below; the next comes after you answer it. Buttons on older messages above no longer work; use the one below.",
+  );
+  assert.deepEqual(pacedReminderLines(3, 3, false), [
+    "Reminder: 3 requests are waiting for you.",
+    "They are below. Buttons on older messages above no longer work; use the ones below.",
+  ]);
+  assert.deepEqual(pacedReminderLines(5, 2, true), [
+    "Reminder: 5 requests are waiting for you.",
+    "2 are below; the next come after you answer them. Buttons on older messages above still work.",
+  ]);
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
 test("a pending set that grows while nothing is shown announces itself again (APRV-216)", async () => {
   const world = staged(3, distinctPayloadFor);
   const channel = channelFor();
@@ -5180,8 +5219,13 @@ test("a pending set that grows while nothing is shown announces itself again (AP
   const { streams, err } = capture();
 
   const a = requestAt(world, 0, at(1));
+  const openFrom = mock.sentTexts().length;
   const opening = await dispatchPending(setup, streams, state, at(63));
   assert.equal(opening.summary?.pending, 1);
+  assert.equal(
+    sentSince(openFrom)[0],
+    "<b>Reminder: 1 request is waiting for you.</b>\nIt is below. Buttons on older messages above still work.",
+  );
 
   channel.onDecision(handlerFor(world, at(64)));
   assert.equal((await press(channel, a, "grant"))?.ok, true);
@@ -5189,8 +5233,11 @@ test("a pending set that grows while nothing is shown announces itself again (AP
   // Two arrive while the approver has nothing in front of them.
   requestAt(world, 1, at(65));
   requestAt(world, 2, at(66));
+  const grownFrom = mock.sentTexts().length;
   const grown = await dispatchPending(setup, streams, state, at(67));
   assert.equal(grown.summary?.pending, 2, "a queue that grew said nothing about it");
+  // P-9: a growth re-send is the count line, not a second reminder.
+  assert.equal(sentSince(grownFrom)[0], "<b>2 requests are waiting for you (oldest 2 min ago).</b>");
 
   assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
   assertClean(world.unit);
@@ -5300,8 +5347,13 @@ test("the summary and the queue listing are arithmetic on the log alone (APRV-21
 
   const summary = summaryLines(requests, at(180));
   assert.equal(summary.length, 1, "the summary is one line");
-  assert.equal(summary[0]?.includes("2 pending"), true);
-  assert.equal(summary[0]?.includes("2h 59m ago"), true, `oldest age wrong: ${String(summary[0])}`);
+  assert.equal(summary[0], "2 requests are waiting for you (oldest 2h 59m ago).");
+  // The oldest is the oldest whatever the order: /queue passes the set newest
+  // first (orderPending), and the header must not call the newest the oldest.
+  assert.deepEqual(summaryLines([...requests].reverse(), at(180)), summary);
+  assert.deepEqual(summaryLines(requests.slice(1), at(180)), [
+    "1 request is waiting for you (asked 1h 00m ago).",
+  ]);
 
   // [0] summary, [1] the "this is a list" line (APRV-256), then the items.
   const listed = queueLines(requests, at(180), [world.keys[1] as string]);
@@ -5309,8 +5361,8 @@ test("the summary and the queue listing are arithmetic on the log alone (APRV-21
   assert.equal(listed[2]?.includes(TASK), true, "the list names no task");
   assert.equal(listed[3]?.includes("selected"), true, "the selected request is not marked");
 
-  assert.deepEqual(summaryLines([], at(180)), ["Nothing pending — the queue is empty."]);
-  assert.deepEqual(queueLines([], at(180), []), ["Nothing pending — the queue is empty."]);
+  assert.deepEqual(summaryLines([], at(180)), ["Nothing is waiting for you right now."]);
+  assert.deepEqual(queueLines([], at(180), []), ["Nothing is waiting for you right now."]);
 });
 
 /**
@@ -5435,7 +5487,7 @@ test("/queue calls itself a list and never claims a card is visible (APRV-256)",
 
   // --- Empty queue ---------------------------------------------------------
   const empty = queueLines([], at(180), []).join("\n");
-  assert.equal(empty, "Nothing pending — the queue is empty.");
+  assert.equal(empty, "Nothing is waiting for you right now.");
   for (const banned of ["card", "button", "shown now", "message above", "/skip", "/next"]) {
     assert.equal(empty.includes(banned), false, `an empty queue mentioned ${banned}: ${empty}`);
   }

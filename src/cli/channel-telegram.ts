@@ -1303,39 +1303,74 @@ export function staleCopyFor(apiBase: string | null, noStaleCopy: boolean): bool
 // ---------------------------------------------------------------------------
 
 /**
- * The summary line that precedes a paced send, and the body of `/queue`.
+ * The count line a paced cycle sends when the pending set has grown, and the
+ * header of `/queue` (APRV-216), in a resident's words (P-9).
  *
- * One message, and everything in it is arithmetic on the verified log at the
- * instant it is written: how many requests are pending, how long the oldest has
- * waited, and which classes they are. Nothing is remembered between calls, so
- * two summaries a minute apart can disagree only because the log moved.
+ * One line, and everything in it is arithmetic on the verified log at the
+ * instant it is written: how many requests are waiting and how long the oldest
+ * has waited. Nothing is remembered between calls, so two summaries a minute
+ * apart can disagree only because the log moved.
  *
- * The class tally is the part worth the space. The count alone says how much
- * work is waiting; the classes say what KIND of work, which is what tells an
- * approver whether the queue is six identical `network.call`s they can walk
- * through or one `policy.edit` they should read carefully.
+ * Before P-9 it also carried a class tally ("communicate.email.external ×3").
+ * The tally told an operator what kind of work was queued, and told a resident
+ * nothing they could read; the kind of each request is on its own card, and
+ * `/queue` now lists each by the agent's own summary ({@link queueLines}).
+ *
+ * The oldest is the one asked longest ago, whatever order `requests` is in:
+ * `/queue` passes the set in presentation order ({@link orderPending}, live
+ * newest first), where the first entry is the NEWEST, and a header that read
+ * the first entry's age called the newest one the oldest.
  */
 export function summaryLines(requests: ChannelRequest[], now: string): string[] {
-  if (requests.length === 0) return ["Nothing pending — the queue is empty."];
-
-  const nowMs = Date.parse(now);
-  const oldest = requests[0] as ChannelRequest;
-  const oldestMs = Date.parse(oldest.requested_ts.value);
-  const age =
-    Number.isNaN(nowMs) || Number.isNaN(oldestMs) ? "unknown age" : ageText(nowMs - oldestMs);
-
-  const tally = new Map<string, number>();
-  for (const request of requests) {
-    const cls = request.class.value;
-    tally.set(cls, (tally.get(cls) ?? 0) + 1);
-  }
-  const classes = [...tally.entries()]
-    .map(([cls, count]) => (count === 1 ? cls : `${cls} ×${String(count)}`))
-    .join(", ");
-
+  if (requests.length === 0) return ["Nothing is waiting for you right now."];
+  const one = requests.length === 1;
   return [
-    `${String(requests.length)} pending — oldest ${age} — ${classes}`,
+    `${String(requests.length)} ${one ? "request is" : "requests are"} waiting for you (${one ? "asked" : "oldest"} ${oldestAge(requests, now)}).`,
   ];
+}
+
+/** How long ago the longest-waiting request was asked, in words. */
+function oldestAge(requests: readonly ChannelRequest[], now: string): string {
+  const nowMs = Date.parse(now);
+  const instants = requests
+    .map((request) => Date.parse(request.requested_ts.value))
+    .filter((at) => !Number.isNaN(at));
+  if (Number.isNaN(nowMs) || instants.length === 0) return "at an unknown time";
+  return ageText(nowMs - Math.min(...instants));
+}
+
+/**
+ * The reminder a paced listener's first cycle opens with (P-9).
+ *
+ * Paced is the product default (APRV-216), and a restart there used to open
+ * with the bare count line and then one card. Nothing in it said this was a
+ * reminder, or whether the buttons on older messages above still worked, which
+ * matters most behind a relay, where they do not (APRV-456). So the first
+ * cycle's line is a reminder in the burst banner's words ({@link bannerLines}):
+ * how many are waiting, how many are below, and what the older buttons do.
+ *
+ * `shown` is how many requests this cycle puts below it: one, or a digest
+ * group. Later cycles that find the set has grown send {@link summaryLines}
+ * instead, which is a count and not a reminder.
+ */
+export function pacedReminderLines(
+  pending: number,
+  shown: number,
+  staleCopy = true,
+): string[] {
+  const head = `Reminder: ${String(pending)} ${pending === 1 ? "request is" : "requests are"} waiting for you.`;
+  const below =
+    shown >= pending
+      ? pending === 1
+        ? "It is below."
+        : "They are below."
+      : shown === 1
+        ? "One is below; the next comes after you answer it."
+        : `${String(shown)} are below; the next come after you answer them.`;
+  const older = staleCopy
+    ? "Buttons on older messages above still work."
+    : `Buttons on older messages above no longer work; use ${shown === 1 ? "the one" : "the ones"} below.`;
+  return [head, `${below} ${older}`];
 }
 
 /**
@@ -2191,10 +2226,16 @@ export async function dispatchPending(
   if (setup.delivery === "paced" && undelivered.length > 0) {
     const pending = queue.requests.length;
     if (!state.paced.summarySent || pending > state.paced.announced) {
+      const opening = !state.paced.summarySent;
       state.paced.summarySent = true;
       state.paced.announced = pending;
+      // P-9: the first one is a reminder that says what the older buttons do;
+      // a later one, for a set that grew, is the count line.
+      const lines = opening
+        ? pacedReminderLines(pending, undelivered.length, setup.channel.staleCopyEnabled())
+        : summaryLines(queue.requests, now);
       try {
-        const deliveryId = await setup.channel.announce(summaryLines(queue.requests, now));
+        const deliveryId = await setup.channel.announce(lines);
         result.summary = { delivery_id: deliveryId, pending };
       } catch (cause) {
         // Cosmetic, exactly like the banner: the request below it is the point,
