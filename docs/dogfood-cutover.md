@@ -386,12 +386,18 @@ natural response (tap it again, harder) was the one response that could not
 help. Four things changed.
 
 **A restart announces itself.** Under `burst`, the first batch a listener sends is
-preceded by one line: `LISTENER STARTED — re-sending N pending requests`,
-followed by the requests. A flood that says what it is is a re-delivery; the
-same flood in silence is an incident. Later cycles send no banner, because a
-request that arrives at 14:00 is a notification and not a re-delivery. The line
-says *started* rather than *restarted* because the listener genuinely cannot
-tell the two apart: it keeps nothing across a restart, on purpose.
+preceded by one short message in plain words: `Reminder: N requests are still
+waiting for you.`, then either `They are repeated below; buttons on older
+messages above still work, and nothing is answered twice.` (the default) or, on a
+relayed listener (a non-Telegram `--api-base`, or `--no-stale-copy`; APRV-456),
+whose older buttons are refused,
+`Use the buttons below; buttons on older messages above no longer work.`. The
+requests follow. A flood that says what it is is a re-delivery; the same flood
+in silence is an incident. Later cycles send no banner, because a request that
+arrives at 14:00 is a notification and not a re-delivery. The message says
+neither *started* nor *restarted*, because the listener genuinely cannot tell
+the two apart (it keeps nothing across a restart, on purpose); "still waiting"
+is true either way.
 
 **The live one is on top, and the dead ones are one message** (APRV-425). A
 restart no longer sends a message per pending request. The requests nobody can

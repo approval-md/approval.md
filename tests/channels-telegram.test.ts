@@ -4516,11 +4516,41 @@ test("direct: the same forged bytes are carried by APRV-196's fallback, the resi
 });
 
 test("the restart banner stops promising earlier copies when the fallback is off (APRV-456)", () => {
-  assert.match(bannerLines(2)[1] as string, /its buttons still decide the same request/u);
+  assert.equal(
+    bannerLines(2)[1],
+    "They are repeated below; buttons on older messages above still work, and nothing is answered twice.",
+  );
   const relayed = bannerLines(2, false);
-  assert.equal(relayed[0], "LISTENER STARTED — re-sending 2 pending requests.");
-  assert.doesNotMatch(relayed[1] as string, /still decide/u);
-  assert.match(relayed[1] as string, /no longer decide anything on this listener/u);
+  assert.equal(relayed[0], "Reminder: 2 requests are still waiting for you.");
+  assert.doesNotMatch(relayed[1] as string, /still work/u);
+  assert.equal(relayed[1], "Use the buttons below; buttons on older messages above no longer work.");
+});
+
+test("the restart banner is one short message in a resident's words, singular and plural", () => {
+  assert.deepEqual(bannerLines(1), [
+    "Reminder: 1 request is still waiting for you.",
+    "It is repeated below; buttons on older messages above still work, and nothing is answered twice.",
+  ]);
+  assert.deepEqual(bannerLines(1, false), [
+    "Reminder: 1 request is still waiting for you.",
+    "Use the buttons below; buttons on older messages above no longer work.",
+  ]);
+  assert.deepEqual(bannerLines(2, false), [
+    "Reminder: 2 requests are still waiting for you.",
+    "Use the buttons below; buttons on older messages above no longer work.",
+  ]);
+  for (const pending of [1, 2, 5]) {
+    for (const staleCopy of [true, false]) {
+      const text = bannerLines(pending, staleCopy).join("\n");
+      assert.ok(bannerLines(pending, staleCopy).length <= 2, "the banner grew past two lines");
+      // None of the system's own vocabulary reaches the person holding the phone.
+      assert.doesNotMatch(
+        text,
+        /listener|\blog\b|cycle|live cop|decide|pending|re-sending|started/iu,
+        `jargon in the banner: ${text}`,
+      );
+    }
+  }
 });
 
 test("a startup batch is preceded by one banner naming how many are coming (APRV-196)", async () => {
@@ -4535,14 +4565,15 @@ test("a startup batch is preceded by one banner naming how many are coming (APRV
   assert.equal(first.banner?.pending, 3, JSON.stringify(first.banner));
 
   const sent = mock.sentTexts().slice(from);
-  const banner = sent.findIndex((text) => text.includes("LISTENER STARTED"));
+  const banner = sent.findIndex((text) => text.includes("still waiting for you"));
   assert.equal(banner, 0, "the banner did not come first");
   assert.equal(
-    sent.filter((text) => text.includes("LISTENER STARTED")).length,
+    sent.filter((text) => text.includes("still waiting for you")).length,
     1,
     "more than one banner for one batch",
   );
-  assert.match(sent[0] as string, /re-sending 3 pending requests/u);
+  assert.match(sent[0] as string, /Reminder: 3 requests are still waiting for you\./u);
+  assert.doesNotMatch(sent[0] as string, /LISTENER STARTED|read from the log/u);
   for (const key of keys) {
     assert.ok(!(sent[0] as string).includes(key), "the banner named an action key");
   }
@@ -4566,9 +4597,10 @@ test("a startup batch is preceded by one banner naming how many are coming (APRV
     "the later request was not delivered",
   );
 
-  // The wording is honest about what a listener can know: it says STARTED,
-  // because nothing here can tell a restart from a first start.
-  assert.deepEqual(bannerLines(1)[0], "LISTENER STARTED — re-sending 1 pending request.");
+  // The wording is honest about what a listener can know: it claims neither a
+  // start nor a restart, because nothing here can tell the two apart; it says
+  // only that the request is still waiting, which is true either way.
+  assert.deepEqual(bannerLines(1)[0], "Reminder: 1 request is still waiting for you.");
   assertClean(world.unit);
 });
 
