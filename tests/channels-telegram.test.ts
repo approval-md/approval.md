@@ -5619,21 +5619,33 @@ test("APRV-287: a restarted listener collapses the stale queue into one message"
   );
 
   const sent = mock.sentTexts().slice(from);
-  const summary = sent.find((text) => text.includes("STALE REQUEST")) as string;
+  const summary = sent.find((text) => text.includes("older ones are listed here")) as string;
   assert.ok(summary !== undefined, `no collapsed message: ${sent.join(" | ")}`);
-  assert.match(summary, /2 STALE REQUESTS/u);
+  assert.match(summary, /2 older ones are listed here; nobody is waiting on them any more\./u);
   // One action, and it is a rejection: nothing here shows the payloads, so
   // nothing here may collect an approval.
-  const buttons = buttonsOnMessageContaining("STALE REQUEST");
+  const buttons = buttonsOnMessageContaining("older ones are listed here");
   assert.deepEqual(
     buttons.map((label) => label.replace(/^\S+\s/u, "")),
     ["Reject all (2)"],
     `the collapsed message offered ${buttons.join(", ")}`,
   );
-  for (const key of old) assert.equal(summary.includes(key), true, `${key} is not named`);
-  assert.equal(summary.includes(fresh), false, "the fresh request was collapsed too");
+  // P-9: members are named by the agent's own summary and their age, under a
+  // label saying the summary is the agent's and unchecked. No action key: the
+  // person holding the phone cannot read one.
+  assert.match(summary, /<b>What your agent says \(not checked\) — agent:drafter<\/b>/u);
+  assert.match(summary, /\n1\. chase invoice 41 · 1h 00m ago\n2\. chase invoice 42 · 59 min ago\n/u);
+  for (const key of [...old, fresh]) {
+    assert.equal(summary.includes(key), false, `${key} is named in the stale summary`);
+  }
+  assert.doesNotMatch(summary, /chase invoice 43/u, "the fresh request was collapsed too");
   // It carries no payload, and says so where it says why there is no approve.
-  assert.match(summary, /carries NO payload/u);
+  assert.match(summary, /This message does not show what they would send, so it has no approve button\./u);
+  assert.match(
+    summary,
+    /To approve one, use its earlier message if you still have it, or ask your agent to try again\. Reject all turns down only these 2\./u,
+  );
+  assert.doesNotMatch(summary, /COMPUTED|CLAIMED|hook|log event|approval grant|<code>|retry grace/u);
   // P-9: the summary is the restart's ONE reminder. It counts everything this
   // cycle re-sends (two collapsed plus one card), and no banner follows it.
   assert.match(summary, /^<b>Reminder: 3 requests are still waiting for you\.<\/b>\n/u);
@@ -5650,7 +5662,7 @@ test("APRV-287: a restarted listener collapses the stale queue into one message"
   assert.equal(sent.length, 4, `the summary and one 3-message card: ${sent.join(" | ")}`);
   // One message for the two of them, not two.
   assert.equal(
-    sent.filter((text) => text.includes("STALE REQUEST")).length,
+    sent.filter((text) => text.includes("older ones are listed here")).length,
     1,
     "more than one collapsed message",
   );
@@ -5699,6 +5711,10 @@ test("P-9: the stale summary's reminder counts every re-send and tells a relay a
     /The other one is repeated below; use its buttons, as buttons on older messages above no longer work\./u,
   );
   assert.doesNotMatch(reminders[0] as string, /still work/u);
+  // The earlier copies do not decide here, so the footer does not send the
+  // approver to them.
+  assert.match(reminders[0] as string, /To approve one, ask your agent to try again\. Reject all turns down only these 2\./u);
+  assert.doesNotMatch(reminders[0] as string, /earlier message/u);
 
   assert.deepEqual(staleReminderLines(4, 0, false), ["Reminder: 4 requests are still waiting for you."]);
   assert.deepEqual(staleReminderLines(5, 2, true), [
@@ -5873,7 +5889,7 @@ test("APRV-425: a restart with every pending request stale sends ONE message and
   const sent = mock.sentTexts().slice(from);
 
   assert.equal(sent.length, 1, `${String(sent.length)} messages: ${sent.join(" | ")}`);
-  assert.match(sent[0] as string, /4 STALE REQUESTS/u);
+  assert.match(sent[0] as string, /4 older ones are listed here; nobody is waiting on them any more\./u);
   // P-9: the one message is the reminder too, and with nothing after it, it
   // says nothing about messages below.
   assert.match(sent[0] as string, /^<b>Reminder: 4 requests are still waiting for you\.<\/b>\n/u);
@@ -5938,10 +5954,13 @@ test("APRV-425: a superseded duplicate is collapsed while its newer twin is prom
   // nothing here: the summary says exactly that rather than claiming they are
   // old, because a message that overstates what it collapsed is read by the
   // person deciding.
-  const summary = sent.find((text) => text.includes("STALE REQUEST")) as string;
+  const summary = sent.find((text) => text.includes("older ones are listed here")) as string;
   assert.ok(summary !== undefined, `no collapsed message: ${sent.join(" | ")}`);
-  assert.match(summary, /all superseded by a newer pending request for the same bytes and class/u);
-  assert.doesNotMatch(summary, /older than the hook's/u);
+  assert.match(
+    summary,
+    /2 older ones are listed here; your agent has asked the same thing again since, so answer the newer one instead\./u,
+  );
+  assert.doesNotMatch(summary, /nobody is waiting/u);
 
   // The live asking keeps its own card, with its payload and its buttons.
   assert.equal(

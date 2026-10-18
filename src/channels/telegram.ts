@@ -381,6 +381,22 @@ export const TELEGRAM_CLAIMED_HEADING_SUFFIX = "NOT verified by the runtime";
 export const TELEGRAM_CLAIMED_CONTINUED_HEADING = `WHAT THIS DOES (continued) — CLAIMED, ${TELEGRAM_CLAIMED_HEADING_SUFFIX}`;
 
 /**
+ * The plain-words label over lines the requesting agent wrote (P-9).
+ *
+ * The same words the minimal card uses for the agent's own summary: the reader
+ * learns that the agent said it and that nobody checked it, which is what the
+ * old "CLAIMED ... NOT verified by the runtime" said in the system's vocabulary.
+ * The author id stays after it, because which agent said a thing is part of
+ * what an approver weighs (APRV-144).
+ */
+export const TELEGRAM_CLAIMED_LABEL = "What your agent says (not checked)";
+
+/** {@link TELEGRAM_CLAIMED_LABEL} naming who wrote the lines under it. */
+export function claimedLabelFor(author: string): string {
+  return `${TELEGRAM_CLAIMED_LABEL} — ${author}`;
+}
+
+/**
  * The most members one digest may carry (APRV-115).
  *
  * Not a rendering limit — {@link renderDigest} checks the real one against
@@ -1607,8 +1623,20 @@ export interface StaleSummary {
    * is still open: once one is decided, the count it states is no longer true.
    */
   reminder?: string[];
-  /** Computed lines: how many, how old the oldest is, which classes. */
+  /** Computed lines: how many are listed, and why nobody is waiting on them. */
   lines: string[];
+  /**
+   * How long ago each member was asked, computed, in member order (P-9). Shown
+   * beside each claimed summary so the members can be told apart without an
+   * action key.
+   */
+  ages?: string[];
+  /**
+   * Whether the buttons on earlier copies still decide (APRV-456), which the
+   * footer's advice depends on. Filled from the channel's own setting by
+   * {@link TelegramChannel.notifyStale} when the caller leaves it out.
+   */
+  staleCopy?: boolean;
 }
 
 /** One digest message, as the delivering process remembers it. */
@@ -1713,14 +1741,22 @@ function sharedPayload(members: ChannelRequest[]): ChannelRequest | null {
 
 /**
  * The collapsed re-delivery's own message: what is waiting, and one way to
- * clear it (APRV-287).
+ * clear it (APRV-287), in a resident's words (P-9).
  *
- * Everything above the buttons is computed by the runtime from the verified log
- * — the count, the ages, the classes — and the per-member lines carry the
- * agent's own summaries under a heading that says so, exactly as an ordinary
- * digest does. What it does NOT carry is any payload, and the message says so
- * in the same breath as it explains why the only button rejects: a decision is
- * bound to the bytes the approver was shown, and nothing here shows them.
+ * Everything above the claimed label is computed by the runtime from the
+ * verified log (the reminder's count, why nobody is waiting, each member's
+ * age), and the per-member lines carry the agent's own summaries under a label
+ * that says they are the agent's and were not checked, exactly as an ordinary
+ * digest does (SPEC.md §9: computed and claimed stay visibly separate). What it
+ * does NOT carry is any payload, and the footer says so in the same breath as
+ * it explains why the only button rejects: a decision is bound to the bytes the
+ * approver was shown, and nothing here shows them.
+ *
+ * Before P-9 each member line led with its action key, and the text explained
+ * the hook's wait, log events and `approval grant <action key>`. None of that
+ * helps the person holding the phone, so a member is now its summary and its
+ * age, and the footer says what they can do: use the earlier message if its
+ * buttons still work (`staleCopy`), or let the agent ask again.
  */
 function renderStaleSummary(
   digest: DigestState,
@@ -1728,30 +1764,29 @@ function renderStaleSummary(
   open: number,
   total: number,
 ): { text: string; keyboard: { inline_keyboard: InlineButton[][] } | null } {
-  // P-9: the restart's one reminder, while every member is still open.
+  // P-9: the restart's one reminder, while every member is still open. Its
+  // first line is the headline; any further line (what follows this message)
+  // goes after the computed lines, which say what this message lists.
   const reminder = open === total ? (stale.reminder ?? []) : [];
+  const headline =
+    reminder[0] ??
+    (open === 0
+      ? `All ${String(total)} older requests decided`
+      : open === total
+        ? `${String(open)} older request${open === 1 ? " is" : "s are"} still open`
+        : `${String(open)} of ${String(total)} older requests still open`);
   const lines: string[] = [
-    ...reminder.map((line, index) => (index === 0 ? `<b>${escapeHtml(line)}</b>` : escapeHtml(line))),
-    ...(reminder.length === 0 ? [] : [""]),
-    `<b>${escapeHtml(
-      open === 0
-        ? `ALL ${total} STALE REQUESTS DECIDED`
-        : `${open} STALE REQUEST${open === 1 ? "" : "S"} — NOBODY IS WAITING ON ${open === 1 ? "IT" : "THEM"}`,
-    )}</b>`,
+    `<b>${escapeHtml(headline)}</b>`,
+    ...stale.lines.map((line) => escapeHtml(line)),
+    ...reminder.slice(1).map((line) => escapeHtml(line)),
     "",
-    "<b>COMPUTED — derived by the runtime from the log and the policy</b>",
-    ...stale.lines.map((line) => `• ${escapeHtml(line)}`),
-    ...digest.facts.map(
-      (fact) =>
-        `• <b>${escapeHtml(fact.label)}:</b> ${escapeHtml(fact.text)} <i>(${escapeHtml(fact.origin)})</i>`,
-    ),
-    "",
-    `<b>CLAIMED — authored by ${escapeHtml(digest.author)}, NOT verified by the runtime</b>`,
+    `<b>${escapeHtml(claimedLabelFor(digest.author))}</b>`,
   ];
 
   for (const [index, member] of digest.members.entries()) {
+    const age = stale.ages?.[index];
     lines.push(
-      `${index + 1}. <code>${escapeHtml(member.actionKey)}</code> — ${escapeHtml(member.summary)}`,
+      `${index + 1}. ${escapeHtml(member.summary)}${age === undefined ? "" : ` · ${escapeHtml(age)}`}`,
     );
     if (member.settled !== null) {
       lines.push(`   <b>${escapeHtml(member.settled.headline)}</b>`);
@@ -1759,12 +1794,18 @@ function renderStaleSummary(
     }
   }
 
-  lines.push(
-    "",
-    escapeHtml(
-      "These asked while a hook waited, and the wait is long over: no tool call is holding the answer. This message carries NO payload, so it offers no approve button — a decision is bound to the bytes you were shown, and nothing here shows them. Rejecting is one log event per request and authorizes nothing. To approve one instead, decide it on its own card or run `approval grant <action key>`; the requests stay listed by /queue either way.",
-    ),
-  );
+  if (open > 0) {
+    const approve =
+      stale.staleCopy === false
+        ? "To approve one, ask your agent to try again."
+        : "To approve one, use its earlier message if you still have it, or ask your agent to try again.";
+    lines.push(
+      "",
+      escapeHtml(
+        `This message does not show what they would send, so it has no approve button. ${approve} Reject all turns down only ${open === 1 ? "this one" : `these ${String(open)}`}.`,
+      ),
+    );
+  }
 
   const rows: InlineButton[][] =
     open === 0
@@ -3596,7 +3637,10 @@ export class TelegramChannel implements TestableChannel {
     stale: StaleSummary,
   ): Promise<TelegramBatchDelivery | null> {
     if (members.length === 0) return null;
-    return this.deliverDigest(members, `tg-batch-${this.makeNonce()}`, stale);
+    return this.deliverDigest(members, `tg-batch-${this.makeNonce()}`, {
+      ...stale,
+      staleCopy: stale.staleCopy ?? this.staleCopy,
+    });
   }
 
   /**

@@ -2669,60 +2669,56 @@ export function orderPending(requests: ChannelRequest[], now: string): ChannelRe
 }
 
 /**
- * A DURATION in words, which is not what {@link ageText} renders.
- *
- * `ageText` says how long ago something happened ("5 min ago"), and these two
- * numbers are lengths of time rather than instants: writing "older than the
- * hook's 5 min ago retry grace" would be a sentence about the wrong kind of
- * thing.
- */
-function durationText(ms: number): string {
-  if (ms < 60_000) return `${String(Math.round(ms / 1000))}s`;
-  const minutes = Math.round(ms / 60_000);
-  return `${String(minutes)}m`;
-}
-
-/**
- * The computed lines a collapsed re-delivery leads with (APRV-287).
+ * The computed lines a collapsed re-delivery leads with (APRV-287), in a
+ * resident's words (P-9).
  *
  * `superseded` is the subset a newer pending request replaced (APRV-425), and
- * the first line states the split rather than claiming every member is old.
- * Before this the line said "all older than the hook's wait plus its retry
- * grace", which stopped being true the moment the collapse widened: a message
- * that overstates what it collapsed is the stale-documentation failure in
- * message form, and this one is read by the person deciding.
+ * the line states the split rather than claiming every member is old. Before
+ * APRV-425 it said every member was past the hook's wait, which stopped being
+ * true the moment the collapse widened: a message that overstates what it
+ * collapsed is the stale-documentation failure in message form, and this one is
+ * read by the person deciding.
+ *
+ * Before P-9 these lines also spelled out the hook's wait and retry grace in
+ * seconds and minutes, a tally of class names, and a sentence about log events
+ * and identical retries. The reader is whoever holds the phone, so what is left
+ * is the one thing they need: how many are listed, and why nobody needs an
+ * answer to them now. The age of each one moves onto its own line
+ * ({@link staleAges}).
  */
 export function staleLines(
   requests: ChannelRequest[],
-  now: string,
+  _now: string,
   superseded: ReadonlySet<string> = new Set(),
 ): string[] {
-  const nowMs = Date.parse(now);
-  const ages = requests
-    .map((request) => nowMs - Date.parse(request.requested_ts.value))
-    .filter((age) => !Number.isNaN(age));
-  const oldest = ages.length === 0 ? null : Math.max(...ages);
-  const tally = new Map<string, number>();
-  for (const request of requests) {
-    const cls = request.class.value;
-    tally.set(cls, (tally.get(cls) ?? 0) + 1);
-  }
+  const count = requests.length;
+  const listed = `${String(count)} older ${count === 1 ? "one is" : "ones are"} listed here`;
   const replaced = requests.filter((request) => superseded.has(request.action_key.value)).length;
-  const abandoned = requests.length - replaced;
-  const why =
-    replaced === 0
-      ? `all older than the hook's ${durationText(HOOK_DEFAULT_WAIT_MS)} wait plus its ${durationText(HOOK_RETRY_GRACE_MS)} retry grace`
-      : abandoned === 0
-        ? "all superseded by a newer pending request for the same bytes and class"
-        : `${String(abandoned)} older than the hook's ${durationText(HOOK_DEFAULT_WAIT_MS)} wait plus its ${durationText(HOOK_RETRY_GRACE_MS)} retry grace, ${String(replaced)} superseded by a newer pending request for the same bytes and class`;
+  const abandoned = count - replaced;
+  if (replaced === 0) {
+    return [`${listed}; nobody is waiting on ${count === 1 ? "it" : "them"} any more.`];
+  }
+  if (abandoned === 0) {
+    return [`${listed}; your agent has asked the same thing again since, so answer the newer one instead.`];
+  }
   return [
-    `${String(requests.length)} pending requests, ${why}`,
-    `oldest: ${oldest === null ? "unknown age" : ageText(oldest)}`,
-    `classes: ${[...tally.entries()]
-      .map(([cls, count]) => (count === 1 ? cls : `${cls} ×${String(count)}`))
-      .join(", ")}`,
-    "collapsed into this one message because nothing is waiting on them; each one stays pending in the log, and a decision on any of them can still authorize an identical retry",
+    `${listed}. Nobody is waiting on ${String(abandoned)} of them, and your agent has asked the same thing again since for the other ${String(replaced)}.`,
   ];
+}
+
+/**
+ * How long ago each collapsed request was asked, in the order given (P-9).
+ *
+ * Computed from the verified log's own `requested_ts`, like the rest of the
+ * summary, and rendered beside each member's claimed summary line so the
+ * resident can tell the requests apart without an action key.
+ */
+export function staleAges(requests: readonly ChannelRequest[], now: string): string[] {
+  const nowMs = Date.parse(now);
+  return requests.map((request) => {
+    const at = Date.parse(request.requested_ts.value);
+    return Number.isNaN(nowMs) || Number.isNaN(at) ? "unknown age" : ageText(nowMs - at);
+  });
 }
 
 /**
@@ -2814,6 +2810,7 @@ async function collapseStale(
         setup.channel.staleCopyEnabled(),
       ),
       lines: staleLines(stale, now, superseded),
+      ages: staleAges(stale, now),
     });
   } catch (cause) {
     delivered = null;
