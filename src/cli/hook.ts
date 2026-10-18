@@ -3022,9 +3022,14 @@ const DIRECTORY_COPIERS: ReadonlySet<string> = new Set(["cp", "rsync", "scp"]);
  * A word opening with a tilde prefix this hook does not expand (`~+`, `~-`,
  * `~name`) is a credential read (fix round 1, M-C). A relative word read after an
  * unresolvable `cd` is a credential read even when it holds a `$` this hook
- * cannot expand (fix round 1, S-2). Otherwise a word left with such a `$` is
- * judged by its text alone, as the pure rule judges it: a path held in a
- * variable, or produced by a substitution's output, is the accepted limit.
+ * cannot expand (fix round 1, S-2). Otherwise a word left with such a `$` (a
+ * variable, or the substitution sentinel a `$(…)` leaves) is judged as the
+ * Hermes disk pass judges it, for every adapter (APRV-524): by its text, by
+ * its literal prefix landed from each working directory, and, when its last
+ * component is the unresolved one, as a read of whatever that prefix holds,
+ * so a home or a directory that holds credentials makes it a credential read.
+ * Beyond that, a path held in a variable or produced by a substitution's
+ * output is the accepted limit.
  *
  * `cwd` may name several directories (fix round 1, S-1): every one is a place
  * the command may start in, and each is judged.
@@ -3045,6 +3050,11 @@ export function credentialReadLandings(
   // command around it, so a printed word is as good as a piped one.
   // Fix round 2: the basenames of a configured Hermes home, for the steered rule.
   const hermesNames = configuredHermesNames(env);
+  // APRV-524: the configured home, for an unresolved word whose prefix lands in
+  // a home not named `.hermes` (as {@link resolvedPathClasses} computes it).
+  const configuredHermesHome = env["APPROVAL_HERMES_HOME"] ?? env["HERMES_HOME"] ?? null;
+  const configuredHome =
+    configuredHermesHome !== null && configuredHermesHome.length > 0 ? canonicalPath(configuredHermesHome) : null;
   const walk = (
     text: string,
     startCwds: readonly string[],
@@ -3204,7 +3214,37 @@ export function credentialReadLandings(
           return;
         }
         if (target.unresolved) {
-          if (isCredentialPath(target.text)) hit(word);
+          // APRV-524. Since APRV-511 a `$(…)` stays in the word as the
+          // substitution sentinel, so a word whose last component is a
+          // substitution is unresolved here, where before it was read as the
+          // directory the substitution sits in (and a directory reader of a
+          // home took this class from that). The Hermes disk pass judges such
+          // a word again, but only for an adapter that states a per-call
+          // directory; this pass runs for every adapter, so the judgement is
+          // made here too. It fails closed: the word is a credential read when
+          // its text could name one ({@link unresolvedReadCouldNameCredential}),
+          // when its literal prefix, landed from each working directory in all
+          // three readings, makes it one, or when its LAST component is the
+          // unresolved one and that prefix lands on a credential path or a
+          // directory that holds credentials ({@link holdsCredentials}).
+          if (unresolvedReadCouldNameCredential(target.text)) {
+            hit(word);
+            return;
+          }
+          const { prefix, rest } = unresolvedPrefix(target.text);
+          const lastComponent = !/[/\\]/u.test(rest.replace(/[/\\]+$/u, ""));
+          for (const from of cwds) {
+            const lexical = resolvePathSegments(from, prefix);
+            for (const landed of new Set([lexical, canonicalPath(lexical), physicalLanding(from, prefix)])) {
+              if (
+                (lastComponent && lands(landed, true)) ||
+                landedSpellings(landed, rest, configuredHome).some(unresolvedReadCouldNameCredential)
+              ) {
+                hit(word);
+                return;
+              }
+            }
+          }
           return;
         }
         for (const from of cwds) {
