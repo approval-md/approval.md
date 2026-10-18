@@ -62,9 +62,11 @@ on the hook for enforcement.
   when its text could name one, when its literal prefix lands somewhere that
   makes it one, or when its last component is the unresolved one under a home,
   a profile home, the install's directory, an approval home or any directory
-  that holds credentials. It only adds the class. A single-file read of such a
-  word now answers the same on every adapter, as it already did on Hermes;
-  ordinary directories are unaffected.
+  that holds credentials. The same judgement covers a home spelled as a
+  variable the hook process does not have set, which before APRV-511 a git
+  reader also could not pass. It only adds the class. A single-file read of
+  such a word now answers the same on every adapter, as it already did on
+  Hermes; ordinary directories are unaffected.
 - **Credential reads are judged on every path (APRV-522).** Six classes of
   spelling let a command read a credential file below `account.credential`,
   on 0.4.5 and older (the APRV-639 credential-asymmetry refutation). (M2) git

@@ -3195,7 +3195,22 @@ export function credentialReadLandings(
           // reader.
           const spelled = target.text.replace(/^\$(?:\{HERMES_HOME\}|HERMES_HOME)/u, "/.hermes");
           const kind = gateRootKind(spelled);
-          if (isCredentialPath(spelled) || (recursive && kind !== null && kind !== "scripts")) hit(word);
+          if (isCredentialPath(spelled) || (recursive && kind !== null && kind !== "scripts")) {
+            hit(word);
+            return;
+          }
+          // APRV-524, the same judgement as an unresolved word below: the
+          // unknown home is one more unknown segment to the text rule, and an
+          // unresolved LAST component directly in the home, the approval home
+          // or a home's `approval/` reads whatever that directory holds.
+          const { prefix, rest } = unresolvedPrefix(spelled);
+          const holder = gateRootKind(prefix);
+          if (
+            unresolvedReadCouldNameCredential(target.text) ||
+            (lastComponentUnresolved(rest) && holder !== null && holder !== "scripts")
+          ) {
+            hit(word);
+          }
           return;
         }
         // M-C: a tilde prefix this hook does not expand lands somewhere unknown.
@@ -3232,7 +3247,7 @@ export function credentialReadLandings(
             return;
           }
           const { prefix, rest } = unresolvedPrefix(target.text);
-          const lastComponent = !/[/\\]/u.test(rest.replace(/[/\\]+$/u, ""));
+          const lastComponent = lastComponentUnresolved(rest);
           for (const from of cwds) {
             const lexical = resolvePathSegments(from, prefix);
             for (const landed of new Set([lexical, canonicalPath(lexical), physicalLanding(from, prefix)])) {
@@ -8268,6 +8283,18 @@ function segmentsCouldNameCredential(segments: readonly string[]): boolean {
     if (unknownSegment(segment)) afterUnknown = true;
   }
   return false;
+}
+
+/**
+ * APRV-524: is the unexpanded span in the LAST component of the word? `rest`
+ * is {@link unresolvedPrefix}'s, which starts at the span's component. Split
+ * on `/` alone, the kernel's separator (a backslash is a character of a name),
+ * with empty and `.` components dropped, so a trailing `/` or `/.` still
+ * leaves the span last. The stricter reading on every count.
+ */
+function lastComponentUnresolved(rest: string): boolean {
+  const components = rest.split("/").filter((component) => component.length > 0 && component !== ".");
+  return components.length === 1 && /[$`]/u.test(components[0] as string);
 }
 
 /**

@@ -112,6 +112,8 @@ const SENTINEL_WORDS: readonly string[] = [
   tilde("hermes-agent", printed(ENV_FILE)),
   tilde(".", printed(ENV_FILE)),
   tilde("skills", "..", printed(AUTH_FILE)),
+  // The home spelled as a variable the hook process does not have set.
+  [["$", "HERMES_HOME"].join(""), printed(ENV_FILE)].join("/"),
 ];
 
 /** The four git readers, each built as an argv and joined. */
@@ -418,5 +420,48 @@ test("APRV-524 codex (bridge): controls under an ordinary directory still read",
   ].map((command) => ({ command, cwd: dir }));
   for (const [at, answer] of codexBridge(dir, rows).entries()) {
     assert.equal(answer.outcome, "accept", `${rows[at]!.command}: ${JSON.stringify(answer)}`);
+  }
+});
+
+/**
+ * Siblings of the same rule (the commit review's parity and parser points):
+ * the home spelled as a variable this process does not have set, which the
+ * credential pass handles in its own branch; a quoted backslash, which the
+ * shell keeps and the kernel reads as a character of the name; and a trailing
+ * `/.`. The plain and braced home-variable rows were account.credential on
+ * ee26a22f for a git reader and not on 49c56543. Every other row here is
+ * stricter than both earlier trees: a single-file reader, `hermes-agent/.env`
+ * (a credential row only since APRV-511), and the backslash and `/.` shapes.
+ */
+test("APRV-524 classifyForHook siblings: an unset home variable, a quoted backslash, a trailing dot", () => {
+  const { dir, home } = lab();
+  const saved = { h: process.env["HERMES_HOME"], a: process.env["APPROVAL_HERMES_HOME"] };
+  delete process.env["HERMES_HOME"];
+  delete process.env["APPROVAL_HERMES_HOME"];
+  try {
+    const plain = ["$", "HERMES_HOME"].join("");
+    const braced = ["$", "{HERMES_HOME}"].join("");
+    const denied: readonly string[] = [
+      [plain, printed(ENV_FILE)].join("/"),
+      [braced, printed(ENV_FILE)].join("/"),
+      [plain, "hermes-agent", printed(ENV_FILE)].join("/"),
+      [plain, "profiles", "p", printed(ENV_FILE)].join("/"),
+      [plain, "approval", printed("env")].join("/"),
+      ['"', [home, [printed("x"), "y"].join("\\")].join("/"), '"'].join(""),
+      [home, printed("x"), "."].join("/"),
+    ];
+    for (const reader of [...GIT_READERS, (word: string) => ["cat", word].join(" ")]) {
+      for (const word of denied) {
+        const result = classifyForHook(reader(word), [], dir, [], false).result;
+        assert.ok(result.ok && result.classes.includes("account.credential"), `${reader(word)}: ${JSON.stringify(result)}`);
+      }
+      for (const word of [[plain, "workspace", printed("a.md")].join("/"), [plain, "workspace", "a.md"].join("/")]) {
+        const result = classifyForHook(reader(word), [], dir, [], false).result;
+        assert.ok(result.ok && !result.classes.includes("account.credential"), `${reader(word)}: ${JSON.stringify(result)}`);
+      }
+    }
+  } finally {
+    if (saved.h !== undefined) process.env["HERMES_HOME"] = saved.h;
+    if (saved.a !== undefined) process.env["APPROVAL_HERMES_HOME"] = saved.a;
   }
 });
