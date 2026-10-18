@@ -1351,7 +1351,9 @@ function oldestAge(requests: readonly ChannelRequest[], now: string): string {
  * how many are waiting, how many are below, and what the older buttons do.
  *
  * `shown` is how many requests this cycle puts below it: one, or a digest
- * group. Later cycles that find the set has grown send {@link summaryLines}
+ * group. With the stale-copy fallback on, older buttons decide only while their
+ * request is the one being shown, so when fewer are shown than are pending the
+ * line says only the ones below work right now (fold round 1, S1). Later cycles that find the set has grown send {@link summaryLines}
  * instead, which is a count and not a reminder.
  */
 export function pacedReminderLines(
@@ -1368,6 +1370,18 @@ export function pacedReminderLines(
       : shown === 1
         ? "One is below; the next comes after you answer it."
         : `${String(shown)} are below; the next come after you answer them.`;
+  if (staleCopy && shown < pending) {
+    // Fold round 1, S1: under paced only the unit below has a live delivery.
+    // An older copy of any OTHER pending request is answered "Still pending —
+    // this copy's buttons are not live here", so "older buttons still work"
+    // would be this channel's own text sending the approver to a refusal.
+    return [
+      head,
+      shown === 1
+        ? "One is below. Only its buttons work right now; the others come next, with new buttons, after you answer it."
+        : `${String(shown)} are below. Only their buttons work right now; the others come next, with new buttons, after you answer them.`,
+    ];
+  }
   const older = staleCopy
     ? "Buttons on older messages above still work."
     : `Buttons on older messages above no longer work; use ${shown === 1 ? "the one" : "the ones"} below.`;
@@ -1465,8 +1479,8 @@ export function queueLines(
       ? "Can't find its message? /skip sends the next one instead; this one comes back later."
       : "Can't find their message? /skip sends the next ones instead; these come back later.",
     selected === 1
-      ? "/next stops showing you this one. Neither command answers anything."
-      : "/next stops showing you these. Neither command answers anything.",
+      ? "/next stops showing you this one and does not send it again. Neither command answers anything."
+      : "/next stops showing you these and does not send them again. Neither command answers anything.",
   );
   return lines;
 }

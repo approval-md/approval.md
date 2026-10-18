@@ -277,7 +277,9 @@ on the hook for enforcement.
   opening is a reminder that says whether older buttons still work, which
   matters behind a relay where they do not. The request card's headings read
   "Checked by approval.md", "Exactly what you are approving" and "What your
-  agent says (not checked)". The card's action-key row and its canonical payload
+  agent says (not checked)", and the author id in that label (and in each
+  claimed row's tag) is one line of at most 80 characters, so an id with a line
+  break cannot draw a second heading. The card's action-key row and its canonical payload
   block are unchanged, the first because it is a required row and the second
   because `display_hash` binds it (SPEC.md §10.3), and so are decisions,
   buttons, grouping, pacing and retries. `/queue`'s header now names the oldest

@@ -402,9 +402,44 @@ export const TELEGRAM_CLAIMED_CONTINUED_HEADING = "What your agent says (continu
  */
 export const TELEGRAM_COMPUTED_HEADING = "Checked by approval.md";
 
-/** {@link TELEGRAM_CLAIMED_LABEL} naming who wrote the lines under it. */
+/** The most characters of an author id the claimed label shows (fold round 1, S3). */
+export const TELEGRAM_CLAIMED_AUTHOR_MAX = 80;
+
+/**
+ * {@link TELEGRAM_CLAIMED_LABEL} naming who wrote the lines under it.
+ *
+ * The author is the requester's actor id, which the actor rule
+ * (`^(human|agent):.+`) checks only at its start: a line break later in it
+ * passes. Escaping stops markup, but not a second line inside the bold heading
+ * that reads like the runtime's own "Checked by approval.md" (fold round 1,
+ * S3). So every run of whitespace, line breaks included, becomes one space,
+ * control and format characters are dropped, and the id is cut at
+ * {@link TELEGRAM_CLAIMED_AUTHOR_MAX} characters with an ellipsis. The label is
+ * always one line.
+ */
 export function claimedLabelFor(author: string): string {
-  return `${TELEGRAM_CLAIMED_LABEL} — ${author}`;
+  return `${TELEGRAM_CLAIMED_LABEL} — ${oneLineAuthor(author)}`;
+}
+
+/**
+ * An author id as one short line (fold round 1, S3): whitespace runs, line
+ * breaks included, become one space; control and format characters go; the id
+ * is cut at {@link TELEGRAM_CLAIMED_AUTHOR_MAX} characters with an ellipsis.
+ * Used by {@link claimedLabelFor} and by the `(author)` tag on each claimed
+ * row, which carries the same id. A computed row's origin is a fixed word, so
+ * this changes nothing there.
+ */
+export function oneLineAuthor(author: string): string {
+  const flat = author
+    .replace(/\s+/gu, " ")
+    .replace(/[\p{Cc}\p{Cf}]/gu, "")
+    .trim();
+  const chars = Array.from(flat);
+  const shown =
+    chars.length > TELEGRAM_CLAIMED_AUTHOR_MAX
+      ? `${chars.slice(0, TELEGRAM_CLAIMED_AUTHOR_MAX - 1).join("")}…`
+      : flat;
+  return shown.length === 0 ? "unknown" : shown;
 }
 
 /**
@@ -1256,7 +1291,7 @@ export function renderTelegram(
     request.summary.kind === "claimed" ? request.summary.author : "the requesting party";
 
   const render = (entry: Line): string =>
-    `• <b>${escapeHtml(entry.label)}:</b> ${escapeHtml(entry.text)} <i>(${escapeHtml(entry.origin)})</i>`;
+    `• <b>${escapeHtml(entry.label)}:</b> ${escapeHtml(entry.text)} <i>(${escapeHtml(oneLineAuthor(entry.origin))})</i>`;
 
   const header = [
     `<b>${escapeHtml(heading)}</b>`,

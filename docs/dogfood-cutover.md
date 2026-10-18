@@ -360,9 +360,10 @@ is the other half. Both are deliberate acts by the human.
 **There is no wall any more.** The default since APRV-216 is
 `channels.telegram.delivery: paced`, and a restart with five pending requests
 sends two things: one reminder (`Reminder: 5 requests are waiting for you.`,
-then `One is below; the next comes after you answer it.` and whether the
-buttons on older messages above still work) and the OLDEST request, with its
-buttons. If more requests arrive while nothing is in front of you, the count is
+then `One is below. Only its buttons work right now; the others come next, with
+new buttons, after you answer it.`, or on a relayed listener a line saying the
+buttons on older messages above no longer work) and the OLDEST request, with
+its buttons. If more requests arrive while nothing is in front of you, the count is
 sent again as one line (`7 requests are waiting for you (oldest 2h 10m ago).`),
 and that same line heads `/queue`. The next one arrives on the first cycle after you decide that one, `/skip` it (it
 comes round again, last) or `/next` past it (this process does not show it

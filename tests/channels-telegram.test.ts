@@ -829,6 +829,18 @@ test("the claimed block is the last message of a prompt, and carries the buttons
   // AC1: the keyboard is on that message and on no other, and the delivery id
   // the channel reports (which the callback arming keys on) is its id.
   assert.ok(last.replyMarkup !== undefined, "the claimed message carries no buttons");
+  // Fold round 1, S2: each button's LABEL is paired with its data. The mock's
+  // `callbackDataFor` finds buttons by data alone, so this is where a label
+  // that says Approve on `r:` data, or names another request, fails.
+  const cardRows = (last.replyMarkup as { inline_keyboard: { text: string; callback_data: string }[][] })
+    .inline_keyboard;
+  const ref = actionRefOf(request_.action_key.value);
+  assert.equal(cardRows.length, 1, JSON.stringify(cardRows));
+  const [approve, reject] = cardRows[0] ?? [];
+  assert.equal(approve?.text, "✅ Approve");
+  assert.match(approve?.callback_data ?? "", new RegExp(`^g:[^:]+:${ref}$`, "u"), "Approve does not carry g: data for this request");
+  assert.equal(reject?.text, "🛑 Reject");
+  assert.match(reject?.callback_data ?? "", new RegExp(`^r:[^:]+:${ref}$`, "u"), "Reject does not carry r: data for this request");
   for (const message of messages.slice(0, -1)) {
     assert.equal(message.replyMarkup, undefined, "a message above the claimed block was buttoned");
   }
@@ -1025,6 +1037,28 @@ test("a digest member keeps the same order and no buttons at all", async () => {
   const digest = messages[messages.length - 1] as { text: string; replyMarkup: unknown };
   assert.match(digest.text, /3 requests are waiting for you/u);
   assert.ok(digest.replyMarkup !== undefined, "the digest lost its keyboard");
+  // Fold round 1, S2: the button labelled "Approve N" / "Reject N" carries g: /
+  // r: data for member N's action ref, member N being the Nth line of the digest
+  // (the same order as the prompts above, asserted below), and "all" carries no ref.
+  const digestRows = (digest.replyMarkup as { inline_keyboard: { text: string; callback_data: string }[][] })
+    .inline_keyboard;
+  for (const [index, key] of world.keys.entries()) {
+    const ref = actionRefOf(key);
+    const row = digestRows[index] ?? [];
+    assert.equal(row[0]?.text, `✅ Approve ${index + 1}`);
+    assert.match(row[0]?.callback_data ?? "", new RegExp(`^g:[^:]+:${ref}$`, "u"), `Approve ${index + 1} is not member ${index + 1}'s grant`);
+    assert.equal(row[1]?.text, `🛑 Reject ${index + 1}`);
+    assert.match(row[1]?.callback_data ?? "", new RegExp(`^r:[^:]+:${ref}$`, "u"), `Reject ${index + 1} is not member ${index + 1}'s reject`);
+  }
+  const allRow = digestRows[world.keys.length] ?? [];
+  assert.deepEqual(
+    allRow.map((button) => [button.text, /^[GR]:[^:]+$/u.test(button.callback_data)]),
+    [
+      [`✅ Approve all (${world.keys.length})`, true],
+      [`🛑 Reject all (${world.keys.length})`, true],
+    ],
+  );
+  assert.ok(allRow[0]?.callback_data.startsWith("G:") && allRow[1]?.callback_data.startsWith("R:"));
 
   const members = messages.slice(0, -1);
   for (const message of members) {
@@ -4796,7 +4830,7 @@ test("paced delivery opens with one summary and the oldest request alone (APRV-2
   // name, no action key.
   assert.equal(
     sent[0],
-    "<b>Reminder: 3 requests are waiting for you.</b>\nOne is below; the next comes after you answer it. Buttons on older messages above still work.",
+    "<b>Reminder: 3 requests are waiting for you.</b>\nOne is below. Only its buttons work right now; the others come next, with new buttons, after you answer it.",
     `not the paced reminder: ${String(sent[0])}`,
   );
   assert.equal(sent[0]?.includes("communicate.email.external"), false, "the reminder named a class");
@@ -5211,8 +5245,41 @@ test("P-9: a paced restart behind a relay says the older buttons no longer work"
   ]);
   assert.deepEqual(pacedReminderLines(5, 2, true), [
     "Reminder: 5 requests are waiting for you.",
-    "2 are below; the next come after you answer them. Buttons on older messages above still work.",
+    "2 are below. Only their buttons work right now; the others come next, with new buttons, after you answer them.",
   ]);
+  assert.deepEqual(pacedReminderLines(5, 2, false), [
+    "Reminder: 5 requests are waiting for you.",
+    "2 are below; the next come after you answer them. Buttons on older messages above no longer work; use the ones below.",
+  ]);
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("fold round 1, S1: a paced restart with 3 pending and 1 shown never claims older buttons work", async () => {
+  // Paced shows one unit. A tap on an older copy of either of the other two
+  // pending requests finds no live delivery here and is answered "Still
+  // pending — this copy's buttons are not live here", so the opening must not
+  // promise that older buttons work.
+  const world = staged(3, distinctPayloadFor);
+  const { streams, err } = capture();
+  const keys = [0, 1, 2].map((index) => requestAt(world, index, at(index + 1)));
+
+  // A first process puts the oldest in front of the approver, then "restarts".
+  await dispatchPending(setupFor(world, channelFor(), undefined, "paced"), streams, newDispatchState(), at(63));
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(
+    setupFor(world, channelFor(), undefined, "paced"),
+    streams,
+    newDispatchState(),
+    at(64),
+  );
+  assert.equal(cycle.summary?.pending, 3);
+  assert.equal(cycle.delivered.length, 1, JSON.stringify(cycle.delivered));
+  const reminder = sentSince(from)[0] as string;
+  assert.match(reminder, /^<b>Reminder: 3 requests are waiting for you\.<\/b>\n/u);
+  assert.doesNotMatch(reminder, /still work/u, `the reminder over-claims: ${reminder}`);
+  assert.match(reminder, /Only its buttons work right now/u);
+  for (const key of keys) assert.equal(reminder.includes(key), false, `the reminder named ${key}`);
   assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
   assertClean(world.unit);
 });
@@ -5437,7 +5504,16 @@ test("/queue calls itself a list and never claims a card is visible (APRV-256)",
     true,
     "no /skip recovery is offered",
   );
-  assert.equal(selected.includes("/next stops showing you this one."), true, "/next is not explained");
+  assert.equal(selected.includes("/next stops showing you this one"), true, "/next is not explained");
+  // Fold round 1, N8: the two guards the shortened copy had dropped. /skip's
+  // request comes round again later (a later cycle sends it fresh), and /next
+  // is not a way to ask for the card again.
+  assert.equal(selected.includes("this one comes back later"), true, "the later re-send is not promised");
+  assert.equal(
+    selected.includes("/next stops showing you this one and does not send it again."),
+    true,
+    "/next is left readable as a resend",
+  );
   assert.equal(selected.includes("Neither command answers anything."), true, "no decision disclaimer");
 
   // Only the selected key is marked, and it is marked once.
