@@ -47,11 +47,15 @@ interface Run {
   stderr: string;
 }
 
+/** A configured Hermes home the CLI child is given (review-b S3); none by default. */
+let childHermesHome: string | null = null;
+
 function runCli(args: string[], cwd: string, input: string, home: string): Run {
   const childEnv: NodeJS.ProcessEnv = { ...process.env, HOME: home };
   delete childEnv["APPROVAL_HUMAN"];
   delete childEnv["HERMES_HOME"];
   delete childEnv["APPROVAL_HERMES_HOME"];
+  if (childHermesHome !== null) childEnv["HERMES_HOME"] = childHermesHome;
   const result = spawnSync(process.execPath, [CLI_ENTRY, ...args], { cwd, encoding: "utf8", env: childEnv, input });
   assert.equal(result.error, undefined, `spawn failed: ${String(result.error)}`);
   return { code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
@@ -465,3 +469,203 @@ test("APRV-524 classifyForHook siblings: an unset home variable, a quoted backsl
     if (saved.a !== undefined) process.env["APPROVAL_HERMES_HOME"] = saved.a;
   }
 });
+
+// ---------------------------------------------------------------------------
+// review-b M1: a substitution that is NOT the whole last component
+// ---------------------------------------------------------------------------
+
+const APPROVAL_DIR = [".", "approval"].join("");
+/** A substitution that prints nothing, so the word reads as its literal text. */
+const EMPTY = substitution("true");
+
+/**
+ * The lab with every directory review-b names as holding credentials, built in
+ * the scratch directory (never under the real HOME): a profile home, a home's
+ * `approval/`, an approval home with its `keys/`, a configured home not named
+ * `.hermes`, two directories under the home that hold a credential file without
+ * being a home (the disk rule's own case), and an ordinary one beside them.
+ */
+function credentialLab(): {
+  dir: string;
+  home: string;
+  configured: string;
+  holders: readonly string[];
+  plain: string;
+} {
+  const { dir, home } = lab();
+  const vault = join(dir, "vault-parent", APPROVAL_DIR);
+  const configured = join(dir, "hh");
+  const holders = [join(home, "workspace", "proj"), join(home, "workspace", "proj2")];
+  const plain = join(home, "workspace", "plain");
+  for (const sub of [join(home, "profiles", "p"), join(home, "approval"), join(vault, "keys"), configured, ...holders, plain]) {
+    mkdirSync(sub, { recursive: true });
+  }
+  writeFileSync(join(home, "profiles", "p", ENV_FILE), "SYNTHETIC_TOKEN=x\n", "utf8");
+  writeFileSync(join(home, "approval", "env"), "SYNTHETIC=x\n", "utf8");
+  writeFileSync(join(vault, "env"), "SYNTHETIC=x\n", "utf8");
+  writeFileSync(join(vault, "keys", "k"), "x\n", "utf8");
+  writeFileSync(join(configured, ENV_FILE), "SYNTHETIC_TOKEN=x\n", "utf8");
+  writeFileSync(join(holders[0]!, ["config", "yaml"].join(".")), "x: 1\n", "utf8");
+  writeFileSync(join(holders[1]!, AUTH_FILE), "{}\n", "utf8");
+  writeFileSync(join(plain, "a.md"), "x\n", "utf8");
+  return { dir, home, configured, holders, plain };
+}
+
+/**
+ * Review-b's three M1 shapes, under `root` (the directory that holds the Hermes
+ * home): each word, read with the substitution empty, names a directory that
+ * holds credentials. The last row is the relative form, read from `root`.
+ */
+const m1Words = (root: string): readonly string[] => {
+  const at = (...parts: string[]): string => [root, ...parts].join("/");
+  return [
+    // (i) the substitution in a middle component, the literal tail a credential directory
+    at(EMPTY, HOME_DIR),
+    at(HOME_DIR, EMPTY, "approval"),
+    at(HOME_DIR, "profiles", EMPTY, "p"),
+    at(HOME_DIR, EMPTY, "hermes-agent"),
+    at("vault-parent", EMPTY, APPROVAL_DIR),
+    // (ii) the substitution glued to the directory's own name
+    at([HOME_DIR, EMPTY].join("")),
+    at([EMPTY, HOME_DIR].join("")),
+    at(HOME_DIR, "profiles", ["p", EMPTY].join("")),
+    at("vault-parent", [APPROVAL_DIR, EMPTY].join("")),
+    // (iii) a glob before a last-component substitution, matching such a directory on disk
+    at(HOME_DIR, ["appr", "*"].join(""), EMPTY),
+    at("vault-parent", APPROVAL_DIR, ["k", "*", "s"].join(""), EMPTY),
+    // (f) relative, from the directory that holds the home
+    [".", EMPTY, HOME_DIR].join("/"),
+  ];
+};
+
+/** The same shapes over an ordinary directory: controls. */
+const m1Controls = (root: string): readonly string[] => {
+  const at = (...parts: string[]): string => [root, ...parts].join("/");
+  return [at(EMPTY, "notes"), at(["notes", EMPTY].join("")), at(["no", "*", "s"].join(""), EMPTY), [".", EMPTY, "notes"].join("/")];
+};
+
+/** Review-b's recursive readers: the four git readers, grep -r, rg, tar and a directory copy. */
+const RECURSIVE_READERS: ReadonlyArray<(word: string) => string> = [
+  ...GIT_READERS,
+  (word) => ["grep", "-r", "x", word].join(" "),
+  (word) => ["rg", "x", word].join(" "),
+  (word) => ["tar", "-cf", "notes/out.tar", word].join(" "),
+  (word) => ["cp", "-r", word, "notes/copy"].join(" "),
+];
+
+/**
+ * The L11340 class proper (the substitution as the whole last component) under
+ * the directories no adapter row used before: an approval home, a profile home
+ * and a configured home not named `.hermes` (review-b S3).
+ */
+const properWords = (root: string): readonly string[] => {
+  const at = (...parts: string[]): string => [root, ...parts].join("/");
+  return [
+    at("vault-parent", APPROVAL_DIR, printed("env")),
+    at("vault-parent", APPROVAL_DIR, EMPTY),
+    at(HOME_DIR, "profiles", "p", printed(ENV_FILE)),
+    at(HOME_DIR, "profiles", "p", EMPTY),
+    at("hh", printed(ENV_FILE)),
+    at("hh", EMPTY),
+  ];
+};
+
+const credentialClassOf = (command: string, cwd: string): boolean => {
+  const result = classifyForHook(command, [], cwd, [], false).result;
+  assert.ok(result.ok, `${command}: ${JSON.stringify(result)}`);
+  return result.classes.includes("account.credential");
+};
+
+/** Run `body` with the configured home set, in this process and in every CLI child. */
+function withConfiguredHome(configured: string, body: () => void): void {
+  const saved = { h: process.env["HERMES_HOME"], a: process.env["APPROVAL_HERMES_HOME"] };
+  process.env["HERMES_HOME"] = configured;
+  delete process.env["APPROVAL_HERMES_HOME"];
+  childHermesHome = configured;
+  try {
+    body();
+  } finally {
+    childHermesHome = null;
+    if (saved.h === undefined) delete process.env["HERMES_HOME"];
+    else process.env["HERMES_HOME"] = saved.h;
+    if (saved.a !== undefined) process.env["APPROVAL_HERMES_HOME"] = saved.a;
+  }
+}
+
+test("APRV-524 M1 classifyForHook with no per-call directory: a middle, glued or glob substitution before a credential directory", () => {
+  const { dir } = credentialLab();
+  // Every row is judged before the assertion, so a failure lists all it missed.
+  const missed: string[] = [];
+  const opened: string[] = [];
+  for (const reader of RECURSIVE_READERS) {
+    for (const word of m1Words(dir)) if (!credentialClassOf(reader(word), dir)) missed.push(reader(word));
+    for (const word of m1Controls(dir)) if (credentialClassOf(reader(word), dir)) opened.push(reader(word));
+  }
+  assert.deepEqual(missed, []);
+  assert.deepEqual(opened, [], "controls");
+});
+
+test("APRV-524 S3 classifyForHook: the whole last component under an approval home, a profile home and a configured home", () => {
+  const { dir, configured } = credentialLab();
+  withConfiguredHome(configured, () => {
+    for (const reader of GIT_READERS) {
+      for (const word of properWords(dir)) assert.ok(credentialClassOf(reader(word), dir), reader(word));
+    }
+  });
+});
+
+/**
+ * The disk rule (a last component left unresolved, its prefix a directory that
+ * holds credentials) on its own: a variable rather than a substitution, so the
+ * empty reading does not apply, under directories no text rule names.
+ */
+test("APRV-524 S3 classifyForHook: the disk rule, an unresolved last component in a directory that holds credentials", () => {
+  const { holders, plain } = credentialLab();
+  const variable = ["$", "UNSET_NAME"].join("");
+  const braced = ["$", "{UNSET_NAME}"].join("");
+  const missed: string[] = [];
+  for (const reader of GIT_READERS) {
+    for (const holder of holders) {
+      const rows: ReadonlyArray<[string, string]> = [
+        [reader([holder, variable].join("/")), plain],
+        [reader([holder, braced, "."].join("/")), plain],
+        // Relative, from the holder itself.
+        [reader([".", variable].join("/")), holder],
+      ];
+      for (const [command, cwd] of rows) if (!credentialClassOf(command, cwd)) missed.push(`${command} (cwd ${cwd})`);
+    }
+    assert.ok(!credentialClassOf(reader([plain, variable].join("/")), plain), `control: ${reader(plain)}`);
+  }
+  assert.deepEqual(missed, []);
+});
+
+const M1_ADAPTERS = ADAPTERS.filter((adapter) => adapter.name === "claude-code" || adapter.name === "hermes (workdir)");
+// The readers whose only human-only class here is the credential one. An
+// archive or a copy of a home is `policy.core` as well, and a hook's reason
+// names one class, so tar and cp are pinned through classifyForHook above.
+const M1_CLI_READERS = RECURSIVE_READERS.slice(0, 6);
+
+for (const adapter of M1_ADAPTERS) {
+  test(`APRV-524 M1 ${adapter.name}: a recursive reader of a middle, glued or glob substitution before a credential directory is account.credential`, () => {
+    const { dir } = credentialLab();
+    for (const reader of M1_CLI_READERS) {
+      for (const word of m1Words("~")) expectVerdict(adapter, dir, dir, reader(word), "deny");
+    }
+    // Controls: only without a per-call directory (with one, APRV-511's
+    // recursive-reader rule makes every unresolved word a credential read).
+    if (!adapter.perCall) {
+      for (const reader of M1_CLI_READERS) {
+        for (const word of m1Controls("~")) expectVerdict(adapter, dir, dir, reader(word), "allow");
+      }
+    }
+  });
+
+  test(`APRV-524 S3 ${adapter.name}: the whole last component under an approval home, a profile home and a configured home`, () => {
+    const { dir, configured } = credentialLab();
+    withConfiguredHome(configured, () => {
+      for (const reader of GIT_READERS) {
+        for (const word of properWords("~")) expectVerdict(adapter, dir, dir, reader(word), "deny");
+      }
+    });
+  });
+}

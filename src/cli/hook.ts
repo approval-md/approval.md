@@ -113,6 +113,7 @@ import {
   NODE_SKILL_SCRIPT_RULE,
   protectedPathClass,
   SKILL_SCRIPT_RULE,
+  SUBSTITUTION_SENTINEL,
   type ClassifiedSegment,
   type CommandClassification,
   type ProtectedPathEntry,
@@ -3023,13 +3024,16 @@ const DIRECTORY_COPIERS: ReadonlySet<string> = new Set(["cp", "rsync", "scp"]);
  * `~name`) is a credential read (fix round 1, M-C). A relative word read after an
  * unresolvable `cd` is a credential read even when it holds a `$` this hook
  * cannot expand (fix round 1, S-2). Otherwise a word left with such a `$` (a
- * variable, or the substitution sentinel a `$(…)` leaves) is judged as the
- * Hermes disk pass judges it, for every adapter (APRV-524): by its text, by
- * its literal prefix landed from each working directory, and, when its last
- * component is the unresolved one, as a read of whatever that prefix holds,
- * so a home or a directory that holds credentials makes it a credential read.
- * Beyond that, a path held in a variable or produced by a substitution's
- * output is the accepted limit.
+ * variable, or the substitution sentinel a `$(…)` leaves) is judged here for
+ * every adapter (APRV-524): by its text, by its literal prefix landed from
+ * each working directory, and, when its last component is the unresolved
+ * one, as a read of whatever that prefix holds, so a home or a directory that
+ * holds credentials makes it a credential read. A word holding the sentinel is
+ * judged once more with every sentinel removed, as a resolved path (the
+ * reading before APRV-511), so an empty substitution is judged too. The Hermes
+ * disk pass also fails closed on every recursive reader of such a word; this
+ * pass does not. Beyond that, a path held in a variable (which may be empty)
+ * or produced by a substitution's output is the accepted limit.
  *
  * `cwd` may name several directories (fix round 1, S-1): every one is a place
  * the command may start in, and each is judged.
@@ -3296,6 +3300,19 @@ export function credentialReadLandings(
         }
       };
       const judge = (word: string, recursive: boolean, steeredToo = true): void => {
+        // APRV-524 (review-b M1): a word holding the substitution sentinel is
+        // judged a second time with every sentinel removed. That is how the
+        // release before APRV-511 read it, its lexer adding nothing for a
+        // `$(…)`: the literal text left, landed, its globs expanded on disk,
+        // and a directory reader of a directory that holds credentials a
+        // credential read. The unresolved branch below models a substitution
+        // as one segment of any name; this reading covers the empty one, so a
+        // substitution in a middle component, one glued to a directory's own
+        // name, and one after a glob that matches such a directory on disk are
+        // judged too. Both judgements only record, so the stricter stands.
+        if (word.includes(SUBSTITUTION_SENTINEL)) {
+          judge(word.split(SUBSTITUTION_SENTINEL).join(""), recursive, steeredToo);
+        }
         const spellings = new Set<string>();
         for (const parameter of parameterSpellings(word)) {
           spellings.add(parameter);
