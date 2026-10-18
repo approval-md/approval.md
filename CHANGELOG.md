@@ -49,6 +49,30 @@ policy that made `git push -ud origin lane` autonomous and `git push --del
 origin main` supervised-retro (it proceeds). Upgrade every install that relies
 on the hook for enforcement.
 
+- **A credential read whose last path component is a command substitution is
+  `account.credential` on every adapter (APRV-524).** Since APRV-511 a
+  substitution stays in its word as an unexpanded sentinel, and the credential
+  pass that every adapter runs judged such a word by its text alone, so a git
+  reader (show, a no-index diff or grep, a patch log) of a Hermes credential
+  file named through a substitution was an autonomous read on Claude Code,
+  Cursor, Grok, the Codex bridge and Muse without a per-call directory, where
+  the release before APRV-511 refused it. Only Hermes, and Muse with a
+  `workdir`, judged the word again. The credential pass, which every adapter
+  runs, now judges it too: an unresolved read word is a credential read when
+  its text could name one, when its literal prefix lands somewhere that makes
+  it one, or when its last component is the unresolved one under a home, a
+  profile home, the install's directory, an approval home or any directory
+  that holds credentials. A word holding a substitution is also judged with
+  the substitution empty, as the release before APRV-511 read it, so a
+  recursive reader (git, `grep -r`, rg, tar, a directory copy) of a
+  substitution in a middle component, glued to a credential directory's name,
+  or after a glob that matches one on disk is refused again as well. The same
+  judgement covers a home spelled as a variable the hook process does not
+  have set, which before APRV-511 a git reader also could not pass. It only
+  adds the class. A single-file read of such a word now answers the same on
+  every adapter, as it already did on Hermes; Hermes and Muse with a `workdir`
+  still also refuse every recursive read of an unresolved word, which the
+  other adapters do not. Ordinary directories are unaffected.
 - **Credential reads are judged on every path (APRV-522).** Six classes of
   spelling let a command read a credential file below `account.credential`,
   on 0.4.5 and older (the APRV-639 credential-asymmetry refutation). (M2) git
