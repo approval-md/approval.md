@@ -1599,6 +1599,14 @@ export interface DigestMemberState {
  * terminal.
  */
 export interface StaleSummary {
+  /**
+   * The reminder this message opens with on a restart (P-9), the first line in
+   * bold: how many requests this cycle re-sends in all, and, when cards follow
+   * it, whether the buttons on older messages still work. It replaces the
+   * separate re-delivery banner for that cycle. Shown only while every member
+   * is still open: once one is decided, the count it states is no longer true.
+   */
+  reminder?: string[];
   /** Computed lines: how many, how old the oldest is, which classes. */
   lines: string[];
 }
@@ -1720,7 +1728,11 @@ function renderStaleSummary(
   open: number,
   total: number,
 ): { text: string; keyboard: { inline_keyboard: InlineButton[][] } | null } {
+  // P-9: the restart's one reminder, while every member is still open.
+  const reminder = open === total ? (stale.reminder ?? []) : [];
   const lines: string[] = [
+    ...reminder.map((line, index) => (index === 0 ? `<b>${escapeHtml(line)}</b>` : escapeHtml(line))),
+    ...(reminder.length === 0 ? [] : [""]),
     `<b>${escapeHtml(
       open === 0
         ? `ALL ${total} STALE REQUESTS DECIDED`

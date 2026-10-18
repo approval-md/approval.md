@@ -148,6 +148,7 @@ import {
   orderPending,
   queueLines,
   reviewHandlerFor,
+  staleReminderLines,
   summaryLines,
   REVIEW_OFFER_ATTEMPTS,
   REVIEW_OFFER_MAX_WAIT_MS,
@@ -5633,6 +5634,20 @@ test("APRV-287: a restarted listener collapses the stale queue into one message"
   assert.equal(summary.includes(fresh), false, "the fresh request was collapsed too");
   // It carries no payload, and says so where it says why there is no approve.
   assert.match(summary, /carries NO payload/u);
+  // P-9: the summary is the restart's ONE reminder. It counts everything this
+  // cycle re-sends (two collapsed plus one card), and no banner follows it.
+  assert.match(summary, /^<b>Reminder: 3 requests are still waiting for you\.<\/b>\n/u);
+  assert.match(
+    summary,
+    /The other one is repeated below; buttons on older messages above still work\./u,
+  );
+  assert.equal(cycle.banner, undefined, "a banner went out behind the stale summary");
+  assert.equal(
+    sent.filter((text) => text.includes("still waiting for you")).length,
+    1,
+    "more than one reminder for one restart",
+  );
+  assert.equal(sent.length, 4, `the summary and one 3-message card: ${sent.join(" | ")}`);
   // One message for the two of them, not two.
   assert.equal(
     sent.filter((text) => text.includes("STALE REQUEST")).length,
@@ -5656,6 +5671,40 @@ test("APRV-287: a restarted listener collapses the stale queue into one message"
     [...old].sort(),
   );
 
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("P-9: the stale summary's reminder counts every re-send and tells a relay approver to use the new buttons", async () => {
+  // The village shape: burst delivery behind a relay, so the earlier copies'
+  // buttons no longer decide (APRV-456). Two stale requests and one live one
+  // used to be the summary, then a banner counting "1 request" under it.
+  const world = staged(3, distinctPayloadFor);
+  const setup = setupFor(world, channelFor({ staleCopy: false }));
+  const { streams, err } = capture();
+  requestAt(world, 0, at(1));
+  requestAt(world, 1, at(2));
+  requestAt(world, 2, at(60));
+
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(setup, streams, newDispatchState(), at(61));
+  const sent = mock.sentTexts().slice(from);
+
+  assert.equal(cycle.banner, undefined, "a banner went out behind the stale summary");
+  const reminders = sent.filter((text) => text.includes("still waiting for you"));
+  assert.equal(reminders.length, 1, `reminders: ${reminders.join(" | ")}`);
+  assert.match(reminders[0] as string, /^<b>Reminder: 3 requests are still waiting for you\.<\/b>\n/u);
+  assert.match(
+    reminders[0] as string,
+    /The other one is repeated below; use its buttons, as buttons on older messages above no longer work\./u,
+  );
+  assert.doesNotMatch(reminders[0] as string, /still work/u);
+
+  assert.deepEqual(staleReminderLines(4, 0, false), ["Reminder: 4 requests are still waiting for you."]);
+  assert.deepEqual(staleReminderLines(5, 2, true), [
+    "Reminder: 5 requests are still waiting for you.",
+    "The other 2 are repeated below; buttons on older messages above still work.",
+  ]);
   assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
   assertClean(world.unit);
 });
@@ -5825,6 +5874,10 @@ test("APRV-425: a restart with every pending request stale sends ONE message and
 
   assert.equal(sent.length, 1, `${String(sent.length)} messages: ${sent.join(" | ")}`);
   assert.match(sent[0] as string, /4 STALE REQUESTS/u);
+  // P-9: the one message is the reminder too, and with nothing after it, it
+  // says nothing about messages below.
+  assert.match(sent[0] as string, /^<b>Reminder: 4 requests are still waiting for you\.<\/b>\n/u);
+  assert.doesNotMatch(sent[0] as string, /repeated below/u);
   assert.equal(cycle.banner, undefined, "a banner went out in front of nothing");
   assert.deepEqual(cycle.digests, [], "a prompt digest was sent");
   assert.deepEqual(

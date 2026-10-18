@@ -1244,6 +1244,40 @@ export function bannerLines(pending: number, staleCopy = true): string[] {
 }
 
 /**
+ * The reminder a collapsed re-delivery opens with, in place of the banner
+ * (P-9).
+ *
+ * Before this, a restart with two stale requests and one live one sent the
+ * stale summary first and the {@link bannerLines} banner second, and the banner
+ * counted only the cards after it: "1 request is still waiting" with three
+ * pending and the summary of the other two directly above. Two reminders, the
+ * more verbose one first, and a count that read as wrong. Now the summary IS the
+ * reminder: its first line counts everything this cycle re-sends (`pending`,
+ * collapsed and carded together), and the banner is skipped.
+ *
+ * `following` is how many requests get their own card after the summary. When
+ * there are any, the second line says so and says whether the buttons on older
+ * messages still work, which is what the banner it replaces said (APRV-456).
+ * When there are none, the summary is the whole restart and nothing follows.
+ */
+export function staleReminderLines(
+  pending: number,
+  following: number,
+  staleCopy = true,
+): string[] {
+  const head = `Reminder: ${String(pending)} ${pending === 1 ? "request is" : "requests are"} still waiting for you.`;
+  if (following <= 0) return [head];
+  const below =
+    following === 1 ? "The other one is repeated below" : `The other ${String(following)} are repeated below`;
+  return [
+    head,
+    staleCopy
+      ? `${below}; buttons on older messages above still work.`
+      : `${below}; use ${following === 1 ? "its buttons" : "their buttons"}, as buttons on older messages above no longer work.`,
+  ];
+}
+
+/**
  * Whether APRV-196's stale-copy fallback is on for a listener launched with
  * this `--api-base` and this `--no-stale-copy` (APRV-456).
  *
@@ -2183,8 +2217,16 @@ export async function dispatchPending(
   // started against an empty queue has no re-delivery to announce, ever. See
   // {@link bannerLines} for why this is a banner rather than an edit of the
   // copies that came before.
+  //
+  // P-9: a cycle whose stale summary went out has had its reminder already. The
+  // summary opens with the count of everything this cycle re-sends and says
+  // whether older buttons still work ({@link staleReminderLines}), so a banner
+  // here would be the second reminder of one restart.
   const announcing =
-    setup.delivery === "burst" && !state.banner.sent && undelivered.length > 0;
+    setup.delivery === "burst" &&
+    !state.banner.sent &&
+    undelivered.length > 0 &&
+    result.collapsed === undefined;
   state.banner.sent = true;
   if (announcing) {
     try {
@@ -2762,7 +2804,15 @@ async function collapseStale(
 
   let delivered: Awaited<ReturnType<TelegramChannel["notifyStale"]>> = null;
   try {
+    // P-9: the summary carries this cycle's reminder, counting everything it
+    // re-sends (the collapsed members plus the cards that follow), and the
+    // banner is then skipped. `undecided` is exactly that set on a first cycle.
     delivered = await setup.channel.notifyStale(stale, {
+      reminder: staleReminderLines(
+        undecided.length,
+        undecided.length - stale.length,
+        setup.channel.staleCopyEnabled(),
+      ),
       lines: staleLines(stale, now, superseded),
     });
   } catch (cause) {
