@@ -4968,17 +4968,22 @@ test("/queue lists every pending request while one is being shown (APRV-216)", a
 
   const reply = sentSince(from).join("\n");
   assert.equal(reply.includes("3 requests are waiting for you (oldest "), true, `no summary in the reply: ${reply}`);
-  for (const key of [a, b, c]) {
-    assert.equal(reply.includes(key), true, `${key} is pending and absent from /queue`);
+  // P-9: each pending request is listed by the agent's own summary, and no
+  // line names an action key or a task id.
+  for (const summary of ["chase invoice 41", "chase invoice 42", "chase invoice 43"]) {
+    assert.equal(reply.includes(`. ${summary} · `), true, `${summary} is pending and absent from /queue`);
   }
-  assert.equal(reply.includes(`${a} `), true, "the list is not keyed by action key");
-  assert.equal(reply.includes("selected"), true, "/queue did not mark the selected request");
+  for (const key of [a, b, c]) {
+    assert.equal(reply.includes(key), false, `/queue named the action key ${key}`);
+  }
+  assert.equal(reply.includes(TASK), false, "/queue named the task id");
+  assert.equal(reply.includes("· sent to you earlier"), true, "/queue did not mark the selected request");
 
   // APRV-256, over the real wire: the reply an approver actually receives says
   // it has no buttons and how to recover a card they cannot find, and it still
   // appends nothing while saying so (asserted against `before` above).
-  assert.equal(reply.includes("no decision buttons"), true, `not self-identified: ${reply}`);
-  assert.equal(reply.includes("/skip is the recovery"), true, `no recovery offered: ${reply}`);
+  assert.equal(reply.includes("This list has no buttons."), true, `not self-identified: ${reply}`);
+  assert.equal(reply.includes("/skip sends the next one instead"), true, `no recovery offered: ${reply}`);
   assert.equal(reply.includes("shown now"), false, `the old marker reached the chat: ${reply}`);
   assert.equal(reply.includes("message above"), false, `the old pointer reached the chat: ${reply}`);
 
@@ -4991,7 +4996,7 @@ test("/queue lists every pending request while one is being shown (APRV-216)", a
   await channel.pollOnce();
   const secondReply = sentSince(secondFrom).join("\n");
   assert.equal(secondReply.includes("2 requests are waiting for you"), true, `stale count: ${secondReply}`);
-  assert.equal(secondReply.includes(a), false, "a decided request is still listed as pending");
+  assert.equal(secondReply.includes("chase invoice 41"), false, "a decided request is still listed as pending");
 
   assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
   assertClean(world.unit);
@@ -5002,7 +5007,7 @@ test("/queue lists every pending request while one is being shown (APRV-216)", a
  * here rather than imported so that a change to the shipped wording has to be
  * made twice, deliberately (APRV-256).
  */
-const SELECTED_LINE_MARKER = " — selected — card sent earlier";
+const SELECTED_LINE_MARKER = " · sent to you earlier";
 
 /**
  * APRV-256, at the command level rather than the renderer's. Two states an
@@ -5026,10 +5031,11 @@ test("the commands answer a queue with nothing selected without naming a card (A
   await commands("queue");
   const listing = sentSince(from).join("\n");
   assert.equal(listing.includes("1 request is waiting for you (asked "), true, `no summary: ${listing}`);
-  assert.equal(listing.includes(only), true, "the pending request is not listed");
-  assert.equal(listing.includes("no decision buttons"), true, "the reply is not self-identified");
+  assert.equal(listing.includes("1. chase invoice 41 · "), true, "the pending request is not listed");
+  assert.equal(listing.includes(only), false, "the listing named the action key");
+  assert.equal(listing.includes("This list has no buttons."), true, "the reply is not self-identified");
   assert.equal(
-    listing.includes("no approval card has been sent for any of these"),
+    listing.includes("None of these has been sent to you yet."),
     true,
     `a card was implied with nothing selected: ${listing}`,
   );
@@ -5355,11 +5361,16 @@ test("the summary and the queue listing are arithmetic on the log alone (APRV-21
     "1 request is waiting for you (asked 1h 00m ago).",
   ]);
 
-  // [0] summary, [1] the "this is a list" line (APRV-256), then the items.
+  // [0] summary, [1] the "this is a list" line (APRV-256), [2] the claimed
+  // label (P-9), then the items: the agent's summary and the age, no ids.
   const listed = queueLines(requests, at(180), [world.keys[1] as string]);
-  assert.equal(listed[2]?.startsWith("1. "), true, "the list is not numbered from one");
-  assert.equal(listed[2]?.includes(TASK), true, "the list names no task");
-  assert.equal(listed[3]?.includes("selected"), true, "the selected request is not marked");
+  assert.equal(listed[2], "What your agent says (not checked):");
+  assert.equal(listed[3], "1. chase invoice 41 · 2h 59m ago", "the list is not numbered from one");
+  assert.equal(listed[4], "2. chase invoice 42 · 1h 00m ago · sent to you earlier");
+  for (const line of listed) {
+    assert.equal(line.includes(TASK), false, `the list names the task: ${line}`);
+    for (const key of world.keys) assert.equal(line.includes(key), false, `the list names ${key}`);
+  }
 
   assert.deepEqual(summaryLines([], at(180)), ["Nothing is waiting for you right now."]);
   assert.deepEqual(queueLines([], at(180), []), ["Nothing is waiting for you right now."]);
@@ -5388,14 +5399,13 @@ test("/queue calls itself a list and never claims a card is visible (APRV-256)",
   // --- Selected item -------------------------------------------------------
   const selected = queueLines(requests, at(180), [world.keys[0] as string]).join("\n");
 
-  // AC #1: the reply identifies itself as a list without decision buttons, and
-  // points at the card without placing it.
-  assert.equal(selected.includes("no decision buttons"), true, `not self-identified: ${selected}`);
-  assert.equal(selected.includes("its own approval card"), true, "decisions are not directed");
+  // AC #1: the reply identifies itself as a list without buttons, and points at
+  // the request's own message without placing it.
+  assert.equal(selected.includes("This list has no buttons."), true, `not self-identified: ${selected}`);
   assert.equal(
-    selected.includes("wherever that card sits"),
+    selected.includes("Each request is answered on its own message, wherever it is in this chat."),
     true,
-    "the card's position is asserted or omitted",
+    "decisions are not directed, or the message's position is asserted",
   );
 
   // AC #2: the two reported phrases are gone, and no synonym takes their place.
@@ -5406,36 +5416,29 @@ test("/queue calls itself a list and never claims a card is visible (APRV-256)",
     "above to decide",
     "being shown",
     "in front of you",
+    "on screen",
   ]) {
     assert.equal(selected.includes(banned), false, `${banned} survived in: ${selected}`);
   }
   assert.equal(
-    selected.includes("card sent earlier"),
+    selected.includes("sent to you earlier"),
     true,
     "the marker does not describe prior delivery",
   );
   assert.equal(
-    selected.includes("cannot tell whether that card is still here"),
+    selected.includes("Can't find its message?"),
     true,
-    "the reply vouches for a card it cannot see",
+    "the reply vouches for a message it cannot see",
   );
 
-  // AC #3: recovery, and what recovery does not do.
-  assert.equal(selected.includes("/skip is the recovery"), true, "no /skip recovery is offered");
-  assert.equal(selected.includes("Nothing is decided by typing it"), true, "no decision disclaimer");
-  assert.equal(selected.includes("stays pending in the log"), true, "pendingness is not stated");
+  // AC #3: recovery, and what recovery does not do, in two short lines (P-9).
   assert.equal(
-    selected.includes("a fresh card is sent on a later listener cycle"),
+    selected.includes("/skip sends the next one instead; this one comes back later."),
     true,
-    "the fresh card is not promised to a later cycle",
+    "no /skip recovery is offered",
   );
-  assert.equal(selected.includes("gloss is being written"), true, "the gloss delay is unmentioned");
-  assert.equal(
-    selected.includes("It is not a way to ask for the card again."),
-    true,
-    "/next is left readable as a resend",
-  );
-  assert.equal(selected.includes("no new card is sent for it"), true, "/next is not disambiguated");
+  assert.equal(selected.includes("/next stops showing you this one."), true, "/next is not explained");
+  assert.equal(selected.includes("Neither command answers anything."), true, "no decision disclaimer");
 
   // Only the selected key is marked, and it is marked once.
   assert.equal(
@@ -5446,7 +5449,7 @@ test("/queue calls itself a list and never claims a card is visible (APRV-256)",
   const markedLine = selected
     .split("\n")
     .find((line) => line.includes(SELECTED_LINE_MARKER)) as string;
-  assert.equal(markedLine.includes(world.keys[0] as string), true, "the wrong request is marked");
+  assert.equal(markedLine.includes("chase invoice 41"), true, "the wrong request is marked");
 
   // --- A digest selection is still ONE card --------------------------------
   // `state.paced.current` carries every key of a digest group, and the group
@@ -5458,29 +5461,24 @@ test("/queue calls itself a list and never claims a card is visible (APRV-256)",
   ]).join("\n");
   assert.equal(grouped.split(SELECTED_LINE_MARKER).length - 1, 2, "both keys were not marked");
   assert.equal(
-    grouped.includes("a single approval card for them was sent to this chat earlier"),
+    grouped.includes("Can't find their message?"),
     true,
-    `a digest selection implied several cards: ${grouped}`,
+    `a digest selection implied several messages: ${grouped}`,
   );
-  assert.equal(grouped.includes("/skip is the recovery"), true, "recovery is singular-only");
+  assert.equal(grouped.includes("/skip sends the next ones instead"), true, "recovery is singular-only");
 
   // --- No selected item ----------------------------------------------------
   const none = queueLines(requests, at(180), []).join("\n");
-  assert.equal(none.includes("no decision buttons"), true, "the list line is selection-dependent");
+  assert.equal(none.includes("This list has no buttons."), true, "the list line is selection-dependent");
   assert.equal(none.includes(SELECTED_LINE_MARKER), false, "an unselected request was marked");
   assert.equal(
-    none.includes("Nothing is selected right now"),
+    none.includes("None of these has been sent to you yet."),
     true,
-    `the empty selection is not stated: ${none}`,
+    `the empty selection is not stated, or a message is implied: ${none}`,
   );
-  assert.equal(
-    none.includes("no approval card has been sent for any of these"),
-    true,
-    "a card is implied with nothing selected",
-  );
-  // With nothing selected there is no lost card to recover, so the recovery
-  // paragraph stays off rather than inviting a /skip that has nothing to skip.
-  assert.equal(none.includes("/skip is the recovery"), false, "recovery offered with no selection");
+  // With nothing selected there is no lost message to recover, so the recovery
+  // lines stay off rather than inviting a /skip that has nothing to skip.
+  assert.equal(none.includes("/skip"), false, "recovery offered with no selection");
   for (const banned of ["shown now", "message above", "in front of you"]) {
     assert.equal(none.includes(banned), false, `${banned} survived in: ${none}`);
   }
@@ -6053,6 +6051,103 @@ test("APRV-425: a superseded duplicate is collapsed while its newer twin is prom
   }
   assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
   assertClean(world.unit);
+});
+
+/**
+ * P-9. The resident-facing texts of a restart carry no ids: not in the stale
+ * summary, not in the digest's member lines, not in the paced reminder, not in
+ * `/queue`. The technical card's own action-key row and its canonical payload
+ * block are the only places ids remain (a required row, and a block bound by
+ * display_hash), and this test does not look at them.
+ */
+const P9_JARGON = [
+  /sha256/u,
+  /\.approval\//u,
+  /wysiwys/u,
+  /display_hash/u,
+  /COMPUTED/u,
+  /CLAIMED/u,
+  /NOT verified/u,
+  /<code>/u,
+  /retry grace/u,
+  /hook/u,
+  /log event/u,
+  /approval grant/u,
+  /keys:/u,
+];
+
+function assertPlainWords(text: string, ids: readonly string[], where: string): void {
+  for (const id of ids) assert.equal(text.includes(id), false, `${where} names ${id}: ${text}`);
+  for (const pattern of P9_JARGON) assert.doesNotMatch(text, pattern, `${where}: ${text}`);
+}
+
+test("P-9: no action key or task id in the stale summary, the digest, the paced reminder or /queue", async () => {
+  // Burst: two stale requests and two similar live ones, so one restart sends
+  // the stale summary and a digest.
+  const burst = staged(4);
+  const { streams, err } = capture();
+  const keys = [
+    requestAt(burst, 0, at(1)),
+    requestAt(burst, 1, at(2)),
+    requestAt(burst, 2, at(60)),
+    requestAt(burst, 3, at(60)),
+  ];
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(
+    setupFor(burst, channelFor({ staleCopy: false })),
+    streams,
+    newDispatchState(),
+    at(61),
+  );
+  assert.notEqual(cycle.collapsed, undefined, "nothing was collapsed");
+  assert.equal(cycle.digests.length, 1, JSON.stringify(cycle.digests));
+  const sent = mock.sentTexts().slice(from);
+  const ids = [...keys, TASK];
+
+  const summary = sent[0] as string;
+  assert.match(summary, /^<b>Reminder: 4 requests are still waiting for you\.<\/b>\n/u);
+  assertPlainWords(summary, ids, "the stale summary");
+
+  const digest = sent[sent.length - 1] as string;
+  assert.match(digest, /^<b>2 requests are waiting for you<\/b>\n/u);
+  assertPlainWords(digest, ids, "the digest");
+  // A member prompt is a technical card and keeps its action-key row; its
+  // heading line is the resident's, and it names nothing.
+  const headings = sent
+    .filter((text) => text.startsWith("<b>Request "))
+    .map((text) => text.split("\n")[0] as string);
+  assert.deepEqual(headings, [
+    "<b>Request 1 of 2 — answer it on the summary below</b>",
+    "<b>Request 2 of 2 — answer it on the summary below</b>",
+  ]);
+
+  // Paced: the reminder.
+  const paced = staged(3, distinctPayloadFor);
+  const pacedKeys = [0, 1, 2].map((index) => requestAt(paced, index, at(index + 1)));
+  const pacedState = newDispatchState();
+  const pacedSetup = setupFor(paced, channelFor({ staleCopy: false }), undefined, "paced");
+  const pacedFrom = mock.sentTexts().length;
+  await dispatchPending(pacedSetup, streams, pacedState, at(63));
+  const reminder = mock.sentTexts()[pacedFrom] as string;
+  assert.match(reminder, /^<b>Reminder: 3 requests are waiting for you\.<\/b>/u);
+  assertPlainWords(reminder, [...pacedKeys, TASK], "the paced reminder");
+  assert.doesNotMatch(reminder, /communicate\.email/u, "the paced reminder named a class");
+
+  // /queue, with one request selected.
+  const queue = buildPendingQueue(paced.unit.logPath, paced.tagOptions, at(70));
+  assert.equal(queue.ok, true);
+  const listing = queueLines(
+    orderPending(queue.ok ? queue.requests : [], at(70)),
+    at(70),
+    pacedState.paced.current ?? [],
+  ).join("\n");
+  assert.match(listing, /· sent to you earlier/u);
+  assertPlainWords(listing, [...pacedKeys, TASK], "/queue");
+  assert.doesNotMatch(listing, /communicate\.email/u, "/queue named a class");
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(burst.unit);
+  assertClean(paced.unit);
 });
 
 // ===========================================================================

@@ -151,6 +151,7 @@ import {
   TELEGRAM_NOT_RECORDED,
   TELEGRAM_REVIEW_DENIED,
   TELEGRAM_REVIEW_RECORDED,
+  TELEGRAM_CLAIMED_LABEL,
   TELEGRAM_DEFAULT_API_BASE,
   TELEGRAM_TERMINAL_HEADLINES,
   utcClock,
@@ -1374,30 +1375,31 @@ export function pacedReminderLines(
 }
 
 /**
- * The marker `/queue` puts on the request this listener has selected (APRV-256).
+ * The marker `/queue` puts on the request this listener has selected (APRV-256),
+ * in a resident's words (P-9).
  *
- * It says two things and claims no third. "Selected" is this process's memory of
- * which request it is holding; "card sent earlier" is the delivery bookkeeping
- * recording that a send once succeeded. Neither is evidence that the card is
- * still in the chat: Telegram reports a successful send, never a message's
- * continued existence, and a card can be deleted, buried under a thousand later
- * messages, or lost with the chat history on a reinstall. The old marker,
- * "shown now", asserted present visibility from a past delivery, which is the
- * bug this constant exists to keep fixed.
+ * It says one thing and claims no second: a message for this request was sent
+ * earlier, which is the delivery bookkeeping recording that a send once
+ * succeeded. That is not evidence the message is still in the chat: Telegram
+ * reports a successful send, never a message's continued existence, and a card
+ * can be deleted, buried under a thousand later messages, or lost with the chat
+ * history on a reinstall. The marker before APRV-256, "shown now", asserted
+ * present visibility from a past delivery, which is the bug this constant
+ * exists to keep fixed, and why it does not say "on screen" either.
  */
-const SELECTED_MARKER = " — selected — card sent earlier";
+const SELECTED_MARKER = " · sent to you earlier";
 
 /**
  * What `/queue` says about itself, immediately under the summary (APRV-256).
  *
  * `/queue` is a summary reply and carries no buttons, so an approver reading it
  * on a phone must not be left hunting this message for controls that were never
- * on it. Where the controls DO live is stated without a direction: a card is
+ * on it. Where the controls DO live is stated without a direction: a message is
  * somewhere in the chat's history, and "above" was only ever true for the
  * approver who asked while looking straight at it.
  */
 const QUEUE_IS_A_LIST =
-  "This is a list of what the log is holding. It has no decision buttons: a request is decided on its own approval card, wherever that card sits in this chat.";
+  "This list has no buttons. Each request is answered on its own message, wherever it is in this chat.";
 
 /**
  * `/queue`'s reply: the summary, then one numbered line per pending request.
@@ -1405,15 +1407,17 @@ const QUEUE_IS_A_LIST =
  * Derived, like the summary, from the verified log at reply time and not from
  * anything this process is holding: the numbering is positional and names no
  * button, so a stale copy of this list cannot be used to decide anything. The
- * marker says which one this listener has selected and once delivered, because
- * the question `/queue` is usually asked to answer is "what else is there
- * besides the one I am looking at" — and, since APRV-256, its unhappy twin,
- * "where is the one I am supposed to be looking at".
+ * marker says which one was sent earlier, because the question `/queue` is
+ * usually asked to answer is "what else is there besides the one I am looking
+ * at" and, since APRV-256, its unhappy twin, "where is the one I am supposed to
+ * be looking at".
  *
- * The footer answers that second question the only honest way available to a
- * process whose knowledge of the chat ends at "a send returned success": it
- * says what was sent, says it cannot tell whether the card survived, and then
- * spends its remaining words on recovery rather than reassurance.
+ * P-9: each line is the agent's own summary and its age, under the label that
+ * says the summary is the agent's and unchecked. Before P-9 each line was the
+ * action key, the task id, the class and the age, and in real use the first
+ * two are `hook:<session uuid>:<tool_use_id>…`, two long raw ids per line. The
+ * three recovery paragraphs are two short lines: what /skip and /next do, and
+ * that neither answers anything.
  */
 export function queueLines(
   requests: ChannelRequest[],
@@ -1426,19 +1430,17 @@ export function queueLines(
   const nowMs = Date.parse(now);
   const current = new Set(shown);
   let selected = 0;
-  lines.push(QUEUE_IS_A_LIST);
+  lines.push(QUEUE_IS_A_LIST, `${TELEGRAM_CLAIMED_LABEL}:`);
   requests.forEach((request, index) => {
-    const key = request.action_key.value;
     const requestedMs = Date.parse(request.requested_ts.value);
     const age =
       Number.isNaN(nowMs) || Number.isNaN(requestedMs)
         ? "unknown age"
         : ageText(nowMs - requestedMs);
-    const task = request.task.value ?? "no task";
-    const isSelected = current.has(key);
+    const isSelected = current.has(request.action_key.value);
     if (isSelected) selected += 1;
     lines.push(
-      `${String(index + 1)}. ${key} — ${task} — ${request.class.value} — ${age}${
+      `${String(index + 1)}. ${request.summary.value ?? "(none given)"} · ${age}${
         isSelected ? SELECTED_MARKER : ""
       }`,
     );
@@ -1448,27 +1450,23 @@ export function queueLines(
     // Nothing selected is an ordinary state, not a fault: a decided or passed
     // over request leaves the listener holding nothing until the next cycle
     // picks the next one up. Saying so is what stops the reader searching the
-    // chat for a card this process never claimed to have sent.
-    lines.push(
-      "Nothing is selected right now, so no approval card has been sent for any of these. The next one goes out with its buttons on an upcoming listener cycle.",
-    );
+    // chat for a message this process never claimed to have sent.
+    lines.push("None of these has been sent to you yet. The next one arrives with its buttons shortly.");
     return lines;
   }
 
   // More than one key is marked when the selection is a digest group, which
-  // Telegram receives as ONE card covering the set. Hence "a single approval
-  // card" in the plural branch and no positional word in either: the reply may
+  // Telegram receives as ONE summary message covering the set, so the plural
+  // branch speaks of one message. No positional word in either: the reply may
   // be chunked across several messages, so "above" is not this function's to
   // promise even about its own lines.
-  const holding =
-    selected === 1
-      ? "The request marked selected is the one this listener is holding, and an approval card for it was sent to this chat earlier. The buttons on that card decide it."
-      : `The ${String(selected)} requests marked selected are what this listener is holding as one digest, and a single approval card for them was sent to this chat earlier. The buttons on that card decide them.`;
-
   lines.push(
-    `${holding} This listener cannot tell whether that card is still here.`,
-    "If you cannot find the card, /skip is the recovery: it puts the request at the back of the order and lets the next one through. Nothing is decided by typing it, the request stays pending in the log, and a fresh card is sent on a later listener cycle once the requests ahead of it have had their turn (a cycle can run a little long while a gloss is being written).",
-    "/next gives up your place instead: this listener moves past the request and stops offering it, and no new card is sent for it. It is not a way to ask for the card again.",
+    selected === 1
+      ? "Can't find its message? /skip sends the next one instead; this one comes back later."
+      : "Can't find their message? /skip sends the next ones instead; these come back later.",
+    selected === 1
+      ? "/next stops showing you this one. Neither command answers anything."
+      : "/next stops showing you these. Neither command answers anything.",
   );
   return lines;
 }
