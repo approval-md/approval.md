@@ -1199,7 +1199,8 @@ export const DISPATCH_LOUD_ATTEMPTS = 3;
 export const DISPATCH_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 /**
- * The line that introduces the first batch a listener process sends (APRV-196).
+ * The one message that introduces the first batch a listener process sends
+ * (APRV-196). Two lines, sent together by `announce`, the first in bold.
  *
  * **Why a banner and not an edit of the earlier copies.** The incident was a
  * restart re-sending five pending requests with no warning, on top of five
@@ -1215,27 +1216,30 @@ export const DISPATCH_RETENTION_MS = 24 * 60 * 60 * 1000;
  * (`actionRefOf` in `channels/telegram.ts`), so a human who taps the copy they
  * can see decides the request they meant.
  *
- * It says "started" rather than "restarted" because a listener cannot tell the
- * two apart, having deliberately kept nothing that would let it, and a first
- * start that claimed to be a restart would be this channel's own text lying
- * about the system's history.
+ * **The words are a resident's, not the system's.** The reader is whoever
+ * holds the phone, so the banner is one short message in plain words: how many
+ * requests are still waiting, and whether the buttons on the older messages
+ * above still work. It names no process, no log and no cycle, and it says
+ * neither "started" nor "restarted": a listener cannot tell the two apart,
+ * having deliberately kept nothing that would let it, so the text claims only
+ * what is true either way (these requests are still waiting). The old third
+ * line, about where the pending set is read from, is gone; it described the
+ * runtime to someone who only needs to know which button to press.
  *
  * **With the stale-copy fallback off (APRV-456)** the second line says the
- * opposite, because the earlier copies' buttons no longer decide anything: a
- * relayed listener refuses a nonce it is not holding (`nonce-not-issued`), so
- * the banner tells the approver to use the copies below it. A banner that kept
+ * opposite, because the earlier copies' buttons no longer work: a relayed
+ * listener refuses a nonce it is not holding (`nonce-not-issued`), so the
+ * banner tells the approver to use the buttons below it. A banner that kept
  * promising working older copies would be this channel's own text sending the
  * approver to a button that refuses them.
  */
 export function bannerLines(pending: number, staleCopy = true): string[] {
-  const plural = pending === 1 ? "request" : "requests";
-  const live = `The ${pending === 1 ? "message" : "messages"} below ${pending === 1 ? "is" : "are"} the live ${pending === 1 ? "copy" : "copies"}.`;
+  const one = pending === 1;
   return [
-    `LISTENER STARTED — re-sending ${pending} pending ${plural}.`,
+    `Reminder: ${pending} ${one ? "request is" : "requests are"} still waiting for you.`,
     staleCopy
-      ? `${live} If an earlier copy of the same request is further up this chat, its buttons still decide the same request; nothing is decided twice.`
-      : `${live} Buttons on earlier copies further up this chat no longer decide anything on this listener; tap the ${pending === 1 ? "copy" : "copies"} below.`,
-    "Which requests are pending is read from the log on every cycle, never from this chat.",
+      ? `${one ? "It is" : "They are"} repeated below; buttons on older messages above still work, and nothing is answered twice.`
+      : "Use the buttons below; buttons on older messages above no longer work.",
   ];
 }
 

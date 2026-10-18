@@ -264,6 +264,20 @@ on the hook for enforcement.
   its inline script needs a person; a shape-row binary spelled that way is
   `unclassified`.
 
+### Channels and identity
+
+- **The Telegram re-delivery banner speaks plainly.** Under `delivery: burst`,
+  the message in front of a listener's first batch was three lines of system
+  vocabulary (`LISTENER STARTED — re-sending N pending requests.`, a sentence
+  about "live copies" and what still "decides", and one about the log being read
+  on every cycle). It is now one short message: `Reminder: N requests are still
+  waiting for you.` (`1 request is` for one), then `They are repeated below;
+  buttons on older messages above still work, and nothing is answered twice.`
+  by default, or `Use the buttons below; buttons on older messages above no
+  longer work.` on a relayed listener (APRV-456). The line about the log is
+  gone. Still one banner per start, still only before the first batch; what is
+  pending and what a tap decides are unchanged.
+
 ### Harnesses
 
 - **A Hermes record carries its harness version (APRV-419).** `hermes
