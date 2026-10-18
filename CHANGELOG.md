@@ -15,10 +15,27 @@ before a tag.
 
 ## Unreleased
 
+## 0.4.6 — 2026-10-18
+
+0.4.6 carries everything merged since 0.4.5. It closes the classifier holes
+listed under "Holes in 0.4.5" below (git push delete spellings, git globals
+that take a value, environment assignments in front of git, credential reads
+in six spellings, quoted assignment names, and writes into the Hermes home's
+other organs), and every verdict those changes move, moves stricter. It adds
+`exec.code`, a custody-gated class for opaque agent code. `exec.code` is opt-in
+and off by default: a policy that never names `exec.code` keeps every refusal
+byte for byte, and nothing new blocks an agent's code runs. And it puts the
+Telegram reminder, stale summary, digest, `/queue` and card headings in plain
+words. Upgrade every install that relies on the hook for enforcement, in the
+order under "Upgrade order" at the end of this section. **Rollout note:** a
+core older than 0.4.6 refuses the `exec` key and fails the whole policy closed,
+so a policy gains an `exec` block only after every core that reads it runs
+0.4.6.
+
 ### Added
 
-- **`exec.code`, a custody-gated class for opaque agent code (APRV-510; 0.4.5
-  candidate).** `python3 -c`, `python -c`, `node -e`/`--eval`, `bun -e`/`--eval`,
+- **`exec.code`, a custody-gated class for opaque agent code (APRV-510).**
+  `python3 -c`, `python -c`, `node -e`/`--eval`, `bun -e`/`--eval`,
   `deno eval`, `perl -e`/`-E`, `ruby -e`, and `python`/`python3`/`bun` running a
   file that is not a skill script were refused before policy on every harness, and
   Hermes `execute_code` with them. A new policy block opens them key by key:
@@ -42,12 +59,31 @@ subshell stay refused, the open
 
 ### Security
 
-**A hole in 0.4.5 that this closes.** A `git push` that deleted a remote
-branch classified as a plain push when the delete flag was bundled or
-abbreviated, so `vcs.ref.delete` was never asked. Under this repository's
-policy that made `git push -ud origin lane` autonomous and `git push --del
-origin main` supervised-retro (it proceeds). Upgrade every install that relies
-on the hook for enforcement.
+**Holes in 0.4.5 that this release closes.** Each one let a command run below
+the class it should have had. Upgrade every install that relies on the hook
+for enforcement.
+
+- A `git push` that deleted a remote branch classified as a plain push when
+  the delete flag was bundled or abbreviated, so `vcs.ref.delete` was never
+  asked. Under this repository's policy that made `git push -ud origin lane`
+  autonomous and `git push --del origin main` supervised-retro (it proceeds)
+  (APRV-517).
+- A git global option that takes a value made its value the subcommand, so
+  `git -C status push --force origin main` was `read.shell` (APRV-520).
+- An environment assignment in front of git hid the program git runs, so
+  `GIT_PAGER=<cmd> git log` ran `<cmd>` as `read.shell` (APRV-521).
+- Six classes of spelling read a credential file below `account.credential`,
+  git's reading verbs among them (APRV-522).
+- An assignment-shaped word with a quoted or escaped name was read past as an
+  assignment, so the classifier judged a different program from the one bash
+  runs (APRV-523).
+- On an Agent Village box a write into `$HERMES_HOME/hermes-agent/`,
+  `$HERMES_HOME/plugins/` or onto `$HERMES_HOME/.op.env` was
+  `files.write.workspace`, autonomous under the village template (APRV-511,
+  under "The Hermes home's other organs" below).
+
+APRV-524 closes a gap that APRV-511's substitution sentinel opened on main
+after 0.4.5; no release carried it. The entries below give the detail.
 
 - **A credential read whose last path component is a command substitution is
   `account.credential` on every adapter (APRV-524).** Since APRV-511 a
@@ -349,7 +385,7 @@ on the hook for enforcement.
   `docs/README-extended.md`, which ships in the package, drops judgy from its
   directory table.
 
-### The Hermes home's other organs (APRV-511; 0.4.6 candidate)
+### The Hermes home's other organs (APRV-511)
 
 - **Security: `hermes-agent/`, `plugins/` and `.op.env` are organs.** On an
   Agent Village box the agent's uid owns the whole Hermes home, and a write
@@ -533,6 +569,15 @@ on the hook for enforcement.
   included; one 0.4.4 test row, `TZ="$(cat .tz)" date`, tightened, see the
   rebase bullet). Totals 896/896.
   SPEC.md §5.2's organ list amended, pending sign-off.
+
+### Upgrade order
+
+- **Agent Village:** publish 0.4.6 and read its integrity back, then the
+  control plane pins `APPROVAL_MD_VERSION=0.4.6` and its
+  `APPROVAL_MD_INTEGRITY`, then one update per box. A box still on 0.4.5 keeps
+  the 0.4.5 holes and the old Telegram copy. Only after every box is on 0.4.6
+  may a policy there carry an `exec` block; without one, `exec.code` stays
+  closed. The checkpoint rebake follows later and is not on the critical path.
 
 ## 0.4.5 — 2026-10-17
 
