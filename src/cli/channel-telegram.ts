@@ -151,6 +151,7 @@ import {
   TELEGRAM_NOT_RECORDED,
   TELEGRAM_REVIEW_DENIED,
   TELEGRAM_REVIEW_RECORDED,
+  TELEGRAM_CLAIMED_LABEL,
   TELEGRAM_DEFAULT_API_BASE,
   TELEGRAM_TERMINAL_HEADLINES,
   utcClock,
@@ -1244,6 +1245,40 @@ export function bannerLines(pending: number, staleCopy = true): string[] {
 }
 
 /**
+ * The reminder a collapsed re-delivery opens with, in place of the banner
+ * (P-9).
+ *
+ * Before this, a restart with two stale requests and one live one sent the
+ * stale summary first and the {@link bannerLines} banner second, and the banner
+ * counted only the cards after it: "1 request is still waiting" with three
+ * pending and the summary of the other two directly above. Two reminders, the
+ * more verbose one first, and a count that read as wrong. Now the summary IS the
+ * reminder: its first line counts everything this cycle re-sends (`pending`,
+ * collapsed and carded together), and the banner is skipped.
+ *
+ * `following` is how many requests get their own card after the summary. When
+ * there are any, the second line says so and says whether the buttons on older
+ * messages still work, which is what the banner it replaces said (APRV-456).
+ * When there are none, the summary is the whole restart and nothing follows.
+ */
+export function staleReminderLines(
+  pending: number,
+  following: number,
+  staleCopy = true,
+): string[] {
+  const head = `Reminder: ${String(pending)} ${pending === 1 ? "request is" : "requests are"} still waiting for you.`;
+  if (following <= 0) return [head];
+  const below =
+    following === 1 ? "The other one is repeated below" : `The other ${String(following)} are repeated below`;
+  return [
+    head,
+    staleCopy
+      ? `${below}; buttons on older messages above still work.`
+      : `${below}; use ${following === 1 ? "its buttons" : "their buttons"}, as buttons on older messages above no longer work.`,
+  ];
+}
+
+/**
  * Whether APRV-196's stale-copy fallback is on for a listener launched with
  * this `--api-base` and this `--no-stale-copy` (APRV-456).
  *
@@ -1269,66 +1304,116 @@ export function staleCopyFor(apiBase: string | null, noStaleCopy: boolean): bool
 // ---------------------------------------------------------------------------
 
 /**
- * The summary line that precedes a paced send, and the body of `/queue`.
+ * The count line a paced cycle sends when the pending set has grown, and the
+ * header of `/queue` (APRV-216), in a resident's words (P-9).
  *
- * One message, and everything in it is arithmetic on the verified log at the
- * instant it is written: how many requests are pending, how long the oldest has
- * waited, and which classes they are. Nothing is remembered between calls, so
- * two summaries a minute apart can disagree only because the log moved.
+ * One line, and everything in it is arithmetic on the verified log at the
+ * instant it is written: how many requests are waiting and how long the oldest
+ * has waited. Nothing is remembered between calls, so two summaries a minute
+ * apart can disagree only because the log moved.
  *
- * The class tally is the part worth the space. The count alone says how much
- * work is waiting; the classes say what KIND of work, which is what tells an
- * approver whether the queue is six identical `network.call`s they can walk
- * through or one `policy.edit` they should read carefully.
+ * Before P-9 it also carried a class tally ("communicate.email.external ×3").
+ * The tally told an operator what kind of work was queued, and told a resident
+ * nothing they could read; the kind of each request is on its own card, and
+ * `/queue` now lists each by the agent's own summary ({@link queueLines}).
+ *
+ * The oldest is the one asked longest ago, whatever order `requests` is in:
+ * `/queue` passes the set in presentation order ({@link orderPending}, live
+ * newest first), where the first entry is the NEWEST, and a header that read
+ * the first entry's age called the newest one the oldest.
  */
 export function summaryLines(requests: ChannelRequest[], now: string): string[] {
-  if (requests.length === 0) return ["Nothing pending — the queue is empty."];
-
-  const nowMs = Date.parse(now);
-  const oldest = requests[0] as ChannelRequest;
-  const oldestMs = Date.parse(oldest.requested_ts.value);
-  const age =
-    Number.isNaN(nowMs) || Number.isNaN(oldestMs) ? "unknown age" : ageText(nowMs - oldestMs);
-
-  const tally = new Map<string, number>();
-  for (const request of requests) {
-    const cls = request.class.value;
-    tally.set(cls, (tally.get(cls) ?? 0) + 1);
-  }
-  const classes = [...tally.entries()]
-    .map(([cls, count]) => (count === 1 ? cls : `${cls} ×${String(count)}`))
-    .join(", ");
-
+  if (requests.length === 0) return ["Nothing is waiting for you right now."];
+  const one = requests.length === 1;
   return [
-    `${String(requests.length)} pending — oldest ${age} — ${classes}`,
+    `${String(requests.length)} ${one ? "request is" : "requests are"} waiting for you (${one ? "asked" : "oldest"} ${oldestAge(requests, now)}).`,
   ];
 }
 
+/** How long ago the longest-waiting request was asked, in words. */
+function oldestAge(requests: readonly ChannelRequest[], now: string): string {
+  const nowMs = Date.parse(now);
+  const instants = requests
+    .map((request) => Date.parse(request.requested_ts.value))
+    .filter((at) => !Number.isNaN(at));
+  if (Number.isNaN(nowMs) || instants.length === 0) return "at an unknown time";
+  return ageText(nowMs - Math.min(...instants));
+}
+
 /**
- * The marker `/queue` puts on the request this listener has selected (APRV-256).
+ * The reminder a paced listener's first cycle opens with (P-9).
  *
- * It says two things and claims no third. "Selected" is this process's memory of
- * which request it is holding; "card sent earlier" is the delivery bookkeeping
- * recording that a send once succeeded. Neither is evidence that the card is
- * still in the chat: Telegram reports a successful send, never a message's
- * continued existence, and a card can be deleted, buried under a thousand later
- * messages, or lost with the chat history on a reinstall. The old marker,
- * "shown now", asserted present visibility from a past delivery, which is the
- * bug this constant exists to keep fixed.
+ * Paced is the product default (APRV-216), and a restart there used to open
+ * with the bare count line and then one card. Nothing in it said this was a
+ * reminder, or whether the buttons on older messages above still worked, which
+ * matters most behind a relay, where they do not (APRV-456). So the first
+ * cycle's line is a reminder in the burst banner's words ({@link bannerLines}):
+ * how many are waiting, how many are below, and what the older buttons do.
+ *
+ * `shown` is how many requests this cycle puts below it: one, or a digest
+ * group. With the stale-copy fallback on, older buttons decide only while their
+ * request is the one being shown, so when fewer are shown than are pending the
+ * line says only the ones below work right now (fold round 1, S1). Later cycles that find the set has grown send {@link summaryLines}
+ * instead, which is a count and not a reminder.
  */
-const SELECTED_MARKER = " — selected — card sent earlier";
+export function pacedReminderLines(
+  pending: number,
+  shown: number,
+  staleCopy = true,
+): string[] {
+  const head = `Reminder: ${String(pending)} ${pending === 1 ? "request is" : "requests are"} waiting for you.`;
+  const below =
+    shown >= pending
+      ? pending === 1
+        ? "It is below."
+        : "They are below."
+      : shown === 1
+        ? "One is below; the next comes after you answer it."
+        : `${String(shown)} are below; the next come after you answer them.`;
+  if (staleCopy && shown < pending) {
+    // Fold round 1, S1: under paced only the unit below has a live delivery.
+    // An older copy of any OTHER pending request is answered "Still pending —
+    // this copy's buttons are not live here", so "older buttons still work"
+    // would be this channel's own text sending the approver to a refusal.
+    return [
+      head,
+      shown === 1
+        ? "One is below. Only its buttons work right now; the others come next, with new buttons, after you answer it."
+        : `${String(shown)} are below. Only their buttons work right now; the others come next, with new buttons, after you answer them.`,
+    ];
+  }
+  const older = staleCopy
+    ? "Buttons on older messages above still work."
+    : `Buttons on older messages above no longer work; use ${shown === 1 ? "the one" : "the ones"} below.`;
+  return [head, `${below} ${older}`];
+}
+
+/**
+ * The marker `/queue` puts on the request this listener has selected (APRV-256),
+ * in a resident's words (P-9).
+ *
+ * It says one thing and claims no second: a message for this request was sent
+ * earlier, which is the delivery bookkeeping recording that a send once
+ * succeeded. That is not evidence the message is still in the chat: Telegram
+ * reports a successful send, never a message's continued existence, and a card
+ * can be deleted, buried under a thousand later messages, or lost with the chat
+ * history on a reinstall. The marker before APRV-256, "shown now", asserted
+ * present visibility from a past delivery, which is the bug this constant
+ * exists to keep fixed, and why it does not say "on screen" either.
+ */
+const SELECTED_MARKER = " · sent to you earlier";
 
 /**
  * What `/queue` says about itself, immediately under the summary (APRV-256).
  *
  * `/queue` is a summary reply and carries no buttons, so an approver reading it
  * on a phone must not be left hunting this message for controls that were never
- * on it. Where the controls DO live is stated without a direction: a card is
+ * on it. Where the controls DO live is stated without a direction: a message is
  * somewhere in the chat's history, and "above" was only ever true for the
  * approver who asked while looking straight at it.
  */
 const QUEUE_IS_A_LIST =
-  "This is a list of what the log is holding. It has no decision buttons: a request is decided on its own approval card, wherever that card sits in this chat.";
+  "This list has no buttons. Each request is answered on its own message, wherever it is in this chat.";
 
 /**
  * `/queue`'s reply: the summary, then one numbered line per pending request.
@@ -1336,15 +1421,17 @@ const QUEUE_IS_A_LIST =
  * Derived, like the summary, from the verified log at reply time and not from
  * anything this process is holding: the numbering is positional and names no
  * button, so a stale copy of this list cannot be used to decide anything. The
- * marker says which one this listener has selected and once delivered, because
- * the question `/queue` is usually asked to answer is "what else is there
- * besides the one I am looking at" — and, since APRV-256, its unhappy twin,
- * "where is the one I am supposed to be looking at".
+ * marker says which one was sent earlier, because the question `/queue` is
+ * usually asked to answer is "what else is there besides the one I am looking
+ * at" and, since APRV-256, its unhappy twin, "where is the one I am supposed to
+ * be looking at".
  *
- * The footer answers that second question the only honest way available to a
- * process whose knowledge of the chat ends at "a send returned success": it
- * says what was sent, says it cannot tell whether the card survived, and then
- * spends its remaining words on recovery rather than reassurance.
+ * P-9: each line is the agent's own summary and its age, under the label that
+ * says the summary is the agent's and unchecked. Before P-9 each line was the
+ * action key, the task id, the class and the age, and in real use the first
+ * two are `hook:<session uuid>:<tool_use_id>…`, two long raw ids per line. The
+ * three recovery paragraphs are two short lines: what /skip and /next do, and
+ * that neither answers anything.
  */
 export function queueLines(
   requests: ChannelRequest[],
@@ -1357,19 +1444,17 @@ export function queueLines(
   const nowMs = Date.parse(now);
   const current = new Set(shown);
   let selected = 0;
-  lines.push(QUEUE_IS_A_LIST);
+  lines.push(QUEUE_IS_A_LIST, `${TELEGRAM_CLAIMED_LABEL}:`);
   requests.forEach((request, index) => {
-    const key = request.action_key.value;
     const requestedMs = Date.parse(request.requested_ts.value);
     const age =
       Number.isNaN(nowMs) || Number.isNaN(requestedMs)
         ? "unknown age"
         : ageText(nowMs - requestedMs);
-    const task = request.task.value ?? "no task";
-    const isSelected = current.has(key);
+    const isSelected = current.has(request.action_key.value);
     if (isSelected) selected += 1;
     lines.push(
-      `${String(index + 1)}. ${key} — ${task} — ${request.class.value} — ${age}${
+      `${String(index + 1)}. ${request.summary.value ?? "(none given)"} · ${age}${
         isSelected ? SELECTED_MARKER : ""
       }`,
     );
@@ -1379,27 +1464,23 @@ export function queueLines(
     // Nothing selected is an ordinary state, not a fault: a decided or passed
     // over request leaves the listener holding nothing until the next cycle
     // picks the next one up. Saying so is what stops the reader searching the
-    // chat for a card this process never claimed to have sent.
-    lines.push(
-      "Nothing is selected right now, so no approval card has been sent for any of these. The next one goes out with its buttons on an upcoming listener cycle.",
-    );
+    // chat for a message this process never claimed to have sent.
+    lines.push("None of these has been sent to you yet. The next one arrives with its buttons shortly.");
     return lines;
   }
 
   // More than one key is marked when the selection is a digest group, which
-  // Telegram receives as ONE card covering the set. Hence "a single approval
-  // card" in the plural branch and no positional word in either: the reply may
+  // Telegram receives as ONE summary message covering the set, so the plural
+  // branch speaks of one message. No positional word in either: the reply may
   // be chunked across several messages, so "above" is not this function's to
   // promise even about its own lines.
-  const holding =
-    selected === 1
-      ? "The request marked selected is the one this listener is holding, and an approval card for it was sent to this chat earlier. The buttons on that card decide it."
-      : `The ${String(selected)} requests marked selected are what this listener is holding as one digest, and a single approval card for them was sent to this chat earlier. The buttons on that card decide them.`;
-
   lines.push(
-    `${holding} This listener cannot tell whether that card is still here.`,
-    "If you cannot find the card, /skip is the recovery: it puts the request at the back of the order and lets the next one through. Nothing is decided by typing it, the request stays pending in the log, and a fresh card is sent on a later listener cycle once the requests ahead of it have had their turn (a cycle can run a little long while a gloss is being written).",
-    "/next gives up your place instead: this listener moves past the request and stops offering it, and no new card is sent for it. It is not a way to ask for the card again.",
+    selected === 1
+      ? "Can't find its message? /skip sends the next one instead; this one comes back later."
+      : "Can't find their message? /skip sends the next ones instead; these come back later.",
+    selected === 1
+      ? "/next stops showing you this one and does not send it again. Neither command answers anything."
+      : "/next stops showing you these and does not send them again. Neither command answers anything.",
   );
   return lines;
 }
@@ -2157,10 +2238,16 @@ export async function dispatchPending(
   if (setup.delivery === "paced" && undelivered.length > 0) {
     const pending = queue.requests.length;
     if (!state.paced.summarySent || pending > state.paced.announced) {
+      const opening = !state.paced.summarySent;
       state.paced.summarySent = true;
       state.paced.announced = pending;
+      // P-9: the first one is a reminder that says what the older buttons do;
+      // a later one, for a set that grew, is the count line.
+      const lines = opening
+        ? pacedReminderLines(pending, undelivered.length, setup.channel.staleCopyEnabled())
+        : summaryLines(queue.requests, now);
       try {
-        const deliveryId = await setup.channel.announce(summaryLines(queue.requests, now));
+        const deliveryId = await setup.channel.announce(lines);
         result.summary = { delivery_id: deliveryId, pending };
       } catch (cause) {
         // Cosmetic, exactly like the banner: the request below it is the point,
@@ -2183,8 +2270,16 @@ export async function dispatchPending(
   // started against an empty queue has no re-delivery to announce, ever. See
   // {@link bannerLines} for why this is a banner rather than an edit of the
   // copies that came before.
+  //
+  // P-9: a cycle whose stale summary went out has had its reminder already. The
+  // summary opens with the count of everything this cycle re-sends and says
+  // whether older buttons still work ({@link staleReminderLines}), so a banner
+  // here would be the second reminder of one restart.
   const announcing =
-    setup.delivery === "burst" && !state.banner.sent && undelivered.length > 0;
+    setup.delivery === "burst" &&
+    !state.banner.sent &&
+    undelivered.length > 0 &&
+    result.collapsed === undefined;
   state.banner.sent = true;
   if (announcing) {
     try {
@@ -2627,60 +2722,56 @@ export function orderPending(requests: ChannelRequest[], now: string): ChannelRe
 }
 
 /**
- * A DURATION in words, which is not what {@link ageText} renders.
- *
- * `ageText` says how long ago something happened ("5 min ago"), and these two
- * numbers are lengths of time rather than instants: writing "older than the
- * hook's 5 min ago retry grace" would be a sentence about the wrong kind of
- * thing.
- */
-function durationText(ms: number): string {
-  if (ms < 60_000) return `${String(Math.round(ms / 1000))}s`;
-  const minutes = Math.round(ms / 60_000);
-  return `${String(minutes)}m`;
-}
-
-/**
- * The computed lines a collapsed re-delivery leads with (APRV-287).
+ * The computed lines a collapsed re-delivery leads with (APRV-287), in a
+ * resident's words (P-9).
  *
  * `superseded` is the subset a newer pending request replaced (APRV-425), and
- * the first line states the split rather than claiming every member is old.
- * Before this the line said "all older than the hook's wait plus its retry
- * grace", which stopped being true the moment the collapse widened: a message
- * that overstates what it collapsed is the stale-documentation failure in
- * message form, and this one is read by the person deciding.
+ * the line states the split rather than claiming every member is old. Before
+ * APRV-425 it said every member was past the hook's wait, which stopped being
+ * true the moment the collapse widened: a message that overstates what it
+ * collapsed is the stale-documentation failure in message form, and this one is
+ * read by the person deciding.
+ *
+ * Before P-9 these lines also spelled out the hook's wait and retry grace in
+ * seconds and minutes, a tally of class names, and a sentence about log events
+ * and identical retries. The reader is whoever holds the phone, so what is left
+ * is the one thing they need: how many are listed, and why nobody needs an
+ * answer to them now. The age of each one moves onto its own line
+ * ({@link staleAges}).
  */
 export function staleLines(
   requests: ChannelRequest[],
-  now: string,
+  _now: string,
   superseded: ReadonlySet<string> = new Set(),
 ): string[] {
-  const nowMs = Date.parse(now);
-  const ages = requests
-    .map((request) => nowMs - Date.parse(request.requested_ts.value))
-    .filter((age) => !Number.isNaN(age));
-  const oldest = ages.length === 0 ? null : Math.max(...ages);
-  const tally = new Map<string, number>();
-  for (const request of requests) {
-    const cls = request.class.value;
-    tally.set(cls, (tally.get(cls) ?? 0) + 1);
-  }
+  const count = requests.length;
+  const listed = `${String(count)} older ${count === 1 ? "one is" : "ones are"} listed here`;
   const replaced = requests.filter((request) => superseded.has(request.action_key.value)).length;
-  const abandoned = requests.length - replaced;
-  const why =
-    replaced === 0
-      ? `all older than the hook's ${durationText(HOOK_DEFAULT_WAIT_MS)} wait plus its ${durationText(HOOK_RETRY_GRACE_MS)} retry grace`
-      : abandoned === 0
-        ? "all superseded by a newer pending request for the same bytes and class"
-        : `${String(abandoned)} older than the hook's ${durationText(HOOK_DEFAULT_WAIT_MS)} wait plus its ${durationText(HOOK_RETRY_GRACE_MS)} retry grace, ${String(replaced)} superseded by a newer pending request for the same bytes and class`;
+  const abandoned = count - replaced;
+  if (replaced === 0) {
+    return [`${listed}; nobody is waiting on ${count === 1 ? "it" : "them"} any more.`];
+  }
+  if (abandoned === 0) {
+    return [`${listed}; your agent has asked the same thing again since, so answer the newer one instead.`];
+  }
   return [
-    `${String(requests.length)} pending requests, ${why}`,
-    `oldest: ${oldest === null ? "unknown age" : ageText(oldest)}`,
-    `classes: ${[...tally.entries()]
-      .map(([cls, count]) => (count === 1 ? cls : `${cls} ×${String(count)}`))
-      .join(", ")}`,
-    "collapsed into this one message because nothing is waiting on them; each one stays pending in the log, and a decision on any of them can still authorize an identical retry",
+    `${listed}. Nobody is waiting on ${String(abandoned)} of them, and your agent has asked the same thing again since for the other ${String(replaced)}.`,
   ];
+}
+
+/**
+ * How long ago each collapsed request was asked, in the order given (P-9).
+ *
+ * Computed from the verified log's own `requested_ts`, like the rest of the
+ * summary, and rendered beside each member's claimed summary line so the
+ * resident can tell the requests apart without an action key.
+ */
+export function staleAges(requests: readonly ChannelRequest[], now: string): string[] {
+  const nowMs = Date.parse(now);
+  return requests.map((request) => {
+    const at = Date.parse(request.requested_ts.value);
+    return Number.isNaN(nowMs) || Number.isNaN(at) ? "unknown age" : ageText(nowMs - at);
+  });
 }
 
 /**
@@ -2762,8 +2853,17 @@ async function collapseStale(
 
   let delivered: Awaited<ReturnType<TelegramChannel["notifyStale"]>> = null;
   try {
+    // P-9: the summary carries this cycle's reminder, counting everything it
+    // re-sends (the collapsed members plus the cards that follow), and the
+    // banner is then skipped. `undecided` is exactly that set on a first cycle.
     delivered = await setup.channel.notifyStale(stale, {
+      reminder: staleReminderLines(
+        undecided.length,
+        undecided.length - stale.length,
+        setup.channel.staleCopyEnabled(),
+      ),
       lines: staleLines(stale, now, superseded),
+      ages: staleAges(stale, now),
     });
   } catch (cause) {
     delivered = null;

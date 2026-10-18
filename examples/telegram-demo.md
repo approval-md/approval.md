@@ -475,20 +475,21 @@ approval channel telegram listen
 notified task-demo:chaser (message 504)
 ```
 
-Your phone now has the request, as four messages: a one-line header, then the
+Your phone now has the request, as four messages: a two-line reminder, then the
 three blocks below. The message id is Telegram's own, so yours will differ.
 
 ```
-1 pending — oldest just now — communicate.email.external
+Reminder: 1 request is waiting for you.
+It is below. Buttons on older messages above still work.
 
 APPROVAL REQUIRED
 task-demo:chaser
 
-COMPUTED — derived by the runtime from the log, the policy and the payload bytes
+Checked by approval.md
 • class: communicate.email.external (log)
 • waiting: requested just now · expires tomorrow 00:54 UTC (clock)
 
-PAYLOAD — the canonical rendering this approval's display_hash names; raw bytes at the store path inside
+Exactly what you are approving
 --- canonical rendering begins ---
 renderer: approval.md/wysiwys/2
 class: communicate.email.external
@@ -507,7 +508,7 @@ payload — no structural view applies to this shape; every byte of it is in the
 }
 --- canonical rendering ends ---
 
-WHAT THIS DOES — CLAIMED by agent:drafter, NOT verified by the runtime
+What your agent says (not checked) — agent:drafter
 • summary: Send the deposit chaser to agency@example.co.uk (agent:drafter)
 • est. cost: $0.02 (agent:drafter)
 ```
