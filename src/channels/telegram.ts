@@ -1590,6 +1590,13 @@ export interface DigestMemberState {
   /** The agent's cost estimate, formatted. Claimed. */
   cost: string;
   /**
+   * The member's class, computed, set only when the digest's members differ in
+   * class (APRV-287: the several classes of one tool call). Their summaries are
+   * then one command's summary repeated, and the class is what tells the lines
+   * apart and what each "Approve" covers (P-9, in place of the action key).
+   */
+  kind?: string;
+  /**
    * The terminal outcome, once one has been observed for this member. Written
    * only from a gate record or the verified log, never inferred here.
    */
@@ -1647,8 +1654,11 @@ export interface DigestState {
   batchDeliveryId: DeliveryId;
   /** The nonce the "all" buttons were issued under. */
   allNonce: string;
-  /** The computed facts every member shares, already rendered as text. */
-  facts: { label: string; text: string; origin: string }[];
+  /**
+   * The one computed line the digest states about its members, already
+   * rendered as text ({@link digestLine}); empty for a stale summary.
+   */
+  line: string;
   /**
    * The collapsed re-delivery this message is, or `null` for an ordinary digest
    * (APRV-287). See {@link StaleSummary}.
@@ -1675,47 +1685,32 @@ export interface DigestState {
 }
 
 /**
- * The computed facts a digest's members share, as the digest states them.
+ * The one computed line a digest states about its members (P-9).
  *
- * Every one is read off the first member, which is sound precisely because the
- * grouping key made them equal across the set: a digest whose members disagreed
- * about their class or their task is a digest the listener would not have
- * built. The last line is the one an approver needs most — it says how many
- * payloads are above and that each request has its own.
+ * Read off the members themselves, which is sound precisely because the
+ * grouping key made them alike: a digest whose members disagreed about their
+ * class or their task is a digest the listener would not have built. What the
+ * line says is the thing an approver needs before the buttons: why these are
+ * one message, and that every request it decides is shown in full above it
+ * (SPEC.md §10.3).
+ *
+ * Before P-9 this was five facts with origin tags: the class name, the
+ * autonomy, the task id, the grouping key (`keys:body,from,subject,to`) and the
+ * payload binding. Each is still on every member's own card above, where an
+ * operator who wants it finds it; the digest is where a resident answers, and
+ * there it was ids and vocabulary between them and the buttons.
  */
-export function digestFacts(
-  members: ChannelRequest[],
-): { label: string; text: string; origin: string }[] {
+export function digestLine(members: ChannelRequest[]): string {
   const first = members[0];
-  if (first === undefined) return [];
-  // APRV-287. A digest may now carry the several classes of ONE tool call, so
-  // the class line states the set rather than the first member's, and the
-  // grouping line says which of the two groupings put this set together. A
-  // digest whose members share one class reads exactly as it did.
-  const classes = [...new Set(members.map((member) => member.class.value))];
-  const shared = sharedPayload(members);
-  const autonomies = [...new Set(members.map((member) => member.autonomy.value))];
-  return [
-    { label: "class", text: classes.join(", "), origin: originOf(first.class) },
-    { label: "autonomy", text: autonomies.join(", "), origin: originOf(first.autonomy) },
-    { label: "task", text: first.task.value ?? "(none)", origin: originOf(first.task) },
-    {
-      label: "grouped by",
-      text:
-        shared === null
-          ? `one class, one task, one payload shape (${payloadShapeKey(first.fullPayload.value?.value)})`
-          : `one tool call: one task, one payload, ${String(classes.length)} class(es) of the same command`,
-      origin: "grouping",
-    },
-    {
-      label: "payloads",
-      text:
-        shared === null
-          ? `${members.length} full payloads, one per request, in the ${members.length} prompts above this message`
-          : `one payload, shared by all ${members.length} requests, in the prompt above this message`,
-      origin: originOf(first.fullPayload),
-    },
-  ];
+  if (first === undefined) return "";
+  const count = String(members.length);
+  if (sharedPayload(members) !== null) {
+    return `All ${count} are about one action, shown once in full above.`;
+  }
+  const task = first.task.value;
+  return task === null || task.length === 0
+    ? `All ${count} are the same kind of request. Each one is shown in full above.`
+    : `All ${count} come from the same task. Each one is shown in full above.`;
 }
 
 /**
@@ -1827,9 +1822,9 @@ function renderStaleSummary(
 
 /** The digest's headline, given how much of it is still open. */
 function digestHeadline(open: number, total: number): string {
-  if (open === 0) return `ALL ${total} REQUESTS DECIDED`;
-  if (open === total) return `${total} REQUESTS AWAITING APPROVAL`;
-  return `${open} OF ${total} REQUESTS STILL AWAITING APPROVAL`;
+  if (open === 0) return `All ${total} requests decided`;
+  if (open === total) return `${total} requests are waiting for you`;
+  return `${open} of ${total} requests still waiting for you`;
 }
 
 /**
@@ -1856,21 +1851,19 @@ export function renderDigest(digest: DigestState): {
 
   if (stale !== null) return renderStaleSummary(digest, stale, open.length, total);
 
+  // P-9: a headline, one computed line, then the agent's own words under a
+  // label that says they are the agent's and unchecked. No action key: the
+  // members are told apart by number, and the numbers are on the buttons.
   const lines: string[] = [
     `<b>${escapeHtml(digestHeadline(open.length, total))}</b>`,
+    escapeHtml(digest.line),
     "",
-    "<b>COMPUTED — derived by the runtime from the log and the policy</b>",
-    ...digest.facts.map(
-      (fact) =>
-        `• <b>${escapeHtml(fact.label)}:</b> ${escapeHtml(fact.text)} <i>(${escapeHtml(fact.origin)})</i>`,
-    ),
-    "",
-    `<b>CLAIMED — authored by ${escapeHtml(digest.author)}, NOT verified by the runtime</b>`,
+    `<b>${escapeHtml(claimedLabelFor(digest.author))}</b>`,
   ];
 
   for (const [index, member] of digest.members.entries()) {
     lines.push(
-      `${index + 1}. <code>${escapeHtml(member.actionKey)}</code> — ${escapeHtml(member.summary)} · ${escapeHtml(member.cost)}`,
+      `${index + 1}. ${member.kind === undefined ? "" : `${escapeHtml(member.kind)} — `}${escapeHtml(member.summary)} · agent's estimate ${escapeHtml(member.cost)}`,
     );
     if (member.settled !== null) {
       lines.push(`   <b>${escapeHtml(member.settled.headline)}</b>`);
@@ -1878,12 +1871,16 @@ export function renderDigest(digest: DigestState): {
     }
   }
 
-  lines.push(
-    "",
-    escapeHtml(
-      `Each button decides ONE request, numbered as above. "all" is ${open.length} separate decisions, one log event each; the full payload of every request is in the messages above this one.`,
-    ),
-  );
+  if (open.length > 0) {
+    lines.push(
+      "",
+      escapeHtml(
+        open.length > 1
+          ? `Each button answers one request, by number. "All" answers every request still open.`
+          : "Each button answers one request, by number.",
+      ),
+    );
+  }
 
   const rows: InlineButton[][] = [];
   for (const [index, member] of digest.members.entries()) {
@@ -3667,6 +3664,7 @@ export class TelegramChannel implements TestableChannel {
     const windowMs = windows.includes(null)
       ? null
       : Math.max(...windows.filter((window): window is number => window !== null));
+    const mixedClasses = new Set(members.map((member) => member.class.value)).size > 1;
     const state: DigestState = {
       deliveredAtMs,
       windowMs,
@@ -3675,13 +3673,14 @@ export class TelegramChannel implements TestableChannel {
       batchDeliveryId,
       allNonce,
       stale,
-      facts: stale === null ? digestFacts(members) : [],
+      line: stale === null ? digestLine(members) : "",
       author: originOf((members[0] as ChannelRequest).summary),
       members: members.map((member) => ({
         actionKey: member.action_key.value,
         nonce: this.makeNonce(),
         summary: member.summary.value ?? "(none given)",
         cost: `$${member.est_cost_usd.value.toFixed(2)}`,
+        ...(mixedClasses ? { kind: member.class.value } : {}),
         settled: null,
       })),
     };
@@ -3706,7 +3705,7 @@ export class TelegramChannel implements TestableChannel {
       for (const [index, member] of members.entries()) {
         const one = await this.sendPrompt(
           member,
-          `REQUEST ${index + 1} OF ${members.length} — decide it on the digest below`,
+          `Request ${index + 1} of ${members.length} — answer it on the summary below`,
           null,
         );
         rendered.push({ ...one.rendered, batchDeliveryId });
@@ -3714,7 +3713,7 @@ export class TelegramChannel implements TestableChannel {
     } else {
       const one = await this.sendPrompt(
         shared,
-        `THE COMMAND ALL ${members.length} REQUESTS ARE ABOUT — decide it on the digest below`,
+        `What all ${members.length} requests are about — answer them on the summary below`,
         null,
       );
       for (const member of members) {

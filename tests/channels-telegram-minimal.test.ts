@@ -1206,7 +1206,7 @@ test("B2: a request delivered as part of a batch is the technical card, and the 
   assert.deepEqual(decisionPayload(live.unit, "vote:b1")["rendering"], { style: "technical", fallback: "batch" });
   // A batch whose digest does not fit falls back to one card per member: technical too.
   const long = recordingChannel({ promptStyle: "minimal", say: VILLAGE_SAY });
-  const big = (key: string) => ({ ...intentRequest("x", key), summary: claimed("s".repeat(1_900), AGENT) });
+  const big = (key: string) => ({ ...intentRequest("x", key), summary: claimed("s".repeat(2_100), AGENT) });
   const twice = await long.channel.notifyBatch({ requests: [big("intent:b2"), big("intent:b3")] });
   assert.equal(twice.digestId, null);
   assert.ok(sends(long.sent).every((entry) => !textOf(entry).includes("<blockquote expandable>")));

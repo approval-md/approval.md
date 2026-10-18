@@ -1022,7 +1022,7 @@ test("a digest member keeps the same order and no buttons at all", async () => {
 
   const messages = sends().slice(before);
   const digest = messages[messages.length - 1] as { text: string; replyMarkup: unknown };
-  assert.match(digest.text, /3 REQUESTS AWAITING APPROVAL/u);
+  assert.match(digest.text, /3 requests are waiting for you/u);
   assert.ok(digest.replyMarkup !== undefined, "the digest lost its keyboard");
 
   const members = messages.slice(0, -1);
@@ -1031,10 +1031,10 @@ test("a digest member keeps the same order and no buttons at all", async () => {
   }
   // Each member: its own header, its payload, then its claimed block last.
   for (const [index, key] of world.keys.entries()) {
-    const start = members.findIndex((message) => message.text.includes(`REQUEST ${index + 1} OF 3`));
+    const start = members.findIndex((message) => message.text.includes(`Request ${index + 1} of 3`));
     assert.ok(start >= 0, `${key} was never prompted`);
     const end = members.findIndex(
-      (message, position) => position > start && message.text.includes("REQUEST "),
+      (message, position) => position > start && message.text.includes("<b>Request "),
     );
     const own = members.slice(start, end < 0 ? undefined : end);
     assert.ok((own[0] as { text: string }).text.includes("COMPUTED — derived by the runtime"));
@@ -1749,9 +1749,14 @@ test("a digest annotates member by member: one decided, the rest still armed", a
   const afterFirst = mock.edits().slice(editedBefore);
   assert.equal(afterFirst.length, 1, "one member decided is one redraw of the digest");
   const mixed = String(afterFirst[0]?.text);
-  assert.match(mixed, /1 OF 2 REQUESTS STILL AWAITING APPROVAL/u);
+  assert.match(mixed, /1 of 2 requests still waiting for you/u);
   assert.match(mixed, /✓ APPROVED/u);
-  assert.ok(mixed.includes(firstKey) && mixed.includes(secondKey), "a member left the digest");
+  // P-9: members are named by number and summary, not by action key.
+  assert.ok(
+    mixed.includes("1. chase invoice 41") && mixed.includes("2. chase invoice 42"),
+    "a member left the digest",
+  );
+  assert.ok(!mixed.includes(firstKey) && !mixed.includes(secondKey), "the digest named an action key");
 
   // The still-open member keeps its buttons; the decided one has lost them, and
   // with one left there is no "all" row to press by accident.
@@ -1767,7 +1772,7 @@ test("a digest annotates member by member: one decided, the rest still armed", a
   assert.equal((await press(channel, secondKey, "reject"))?.ok, true);
   const afterSecond = mock.edits().slice(editedBefore + 1);
   assert.equal(afterSecond.length, 1);
-  assert.match(String(afterSecond[0]?.text), /ALL 2 REQUESTS DECIDED/u);
+  assert.match(String(afterSecond[0]?.text), /All 2 requests decided/u);
   assert.match(String(afterSecond[0]?.text), /✗ REJECTED/u);
   assert.equal(afterSecond[0]?.replyMarkup, undefined, "a fully decided digest keeps no buttons");
   assertNoTokenInEdits();
@@ -1895,17 +1900,23 @@ test("a burst of similar requests yields one digest, and mixed decisions land pe
 
   // AC3, structurally: the buttons are on the LAST message, and every member's
   // payload arrived in a message above it.
-  assert.match(digestText, /3 REQUESTS AWAITING APPROVAL/u);
+  assert.match(digestText, /3 requests are waiting for you/u);
   const above = texts.slice(0, -1).join("\n");
   for (const [index, key] of world.keys.entries()) {
-    assert.ok(digestText.includes(key), `${key} has no line on the digest`);
+    // P-9: a member's line on the digest is its number and the agent's
+    // summary, never its action key; the key stays on its own card above.
+    assert.ok(
+      digestText.includes(`${index + 1}. chase invoice ${41 + index} · agent's estimate $0.02`),
+      `${key} has no line on the digest`,
+    );
+    assert.equal(digestText.includes(key), false, `${key} is named on the digest`);
     assert.ok(above.includes(key), `${key} was never prompted above the digest`);
     assert.ok(
       above.includes(`Invoice ${41 + index} chaser`),
       `the payload of ${key} was not on screen before the buttons`,
     );
     assert.ok(
-      above.includes(`REQUEST ${index + 1} OF 3`),
+      above.includes(`Request ${index + 1} of 3 — answer it on the summary below`),
       "a digest member's prompt must say which request it is",
     );
   }
@@ -1992,7 +2003,7 @@ test("Approve all is N decisions: one event per member, each bound to its own ac
   // The digest now says so, and offers nothing further.
   const edits = editsFor(delivered.digestId as string);
   assert.equal(edits.length, 1, "one tap over the set is one redraw");
-  assert.match(String(edits[0]?.text), /ALL 3 REQUESTS DECIDED/u);
+  assert.match(String(edits[0]?.text), /All 3 requests decided/u);
   assert.equal(edits[0]?.replyMarkup, undefined);
   // APRV-206: the tap's one answer is the early ack, sent before any of the
   // three decisions ran. The tally the toast used to carry is on the operator's
@@ -2121,10 +2132,11 @@ test("a withdrawn digest member is annotated on its own line; the rest stay arme
   const edits = editsFor(digestId);
   assert.equal(edits.length, 1, "one member settling is one redraw");
   const text = String(edits[0]?.text);
-  assert.match(text, /1 OF 2 REQUESTS STILL AWAITING APPROVAL/u);
+  assert.match(text, /1 of 2 requests still waiting for you/u);
   assert.match(text, /WITHDRAWN — no decision is needed/u);
   assert.match(text, /withdrawn by the requester at 10:11 UTC \(timeout\) · nothing to do/u);
-  assert.ok(text.includes(second), "the surviving member left the digest");
+  assert.ok(text.includes("2. chase invoice 42"), "the surviving member left the digest");
+  assert.equal(text.includes(second), false, "the digest named an action key");
 
   // Mixed state, and the survivor keeps exactly its own buttons.
   const keyboard = edits[0]?.replyMarkup as
@@ -5558,27 +5570,32 @@ test("APRV-287: the five classes of one command are one card with one approve", 
 
   const sent = mock.sentTexts().slice(from);
   assert.equal(
-    sent.filter((text) => text.includes("THE COMMAND ALL 5 REQUESTS ARE ABOUT")).length,
+    sent.filter((text) => text.includes("What all 5 requests are about — answer them on the summary below")).length,
     1,
     "the shared payload was not sent once",
   );
   assert.equal(
-    sent.filter((text) => text.includes("REQUEST 1 OF 5")).length,
+    sent.filter((text) => text.includes("Request 1 of 5")).length,
     0,
     "the members were prompted one by one",
   );
   const digest = sent[sent.length - 1] as string;
   // ONE gesture decides the command: the all-row is on the one card.
-  const buttons = buttonsOnMessageContaining("REQUESTS AWAITING APPROVAL");
+  const buttons = buttonsOnMessageContaining("5 requests are waiting for you");
   assert.equal(
     buttons.some((label) => label.includes("Approve all (5)")),
     true,
     `no approve-all on the card: ${buttons.join(", ")}`,
   );
-  assert.match(digest, /one payload, shared by all 5 requests/u);
-  assert.match(digest, /one tool call: one task, one payload, 5 class\(es\)/u);
+  assert.match(digest, /All 5 are about one action, shown once in full above\./u);
   for (const cls of classes) {
     assert.equal(digest.includes(cls), true, `the digest hid the class ${cls}`);
+  }
+  // P-9: one command's summary repeated five times, so each member line leads
+  // with its class, and none names its action key.
+  assert.match(digest, new RegExp(`\\n1\\. ${(classes[0] as string).replace(/\./gu, "\\.")} — git add`, "u"));
+  for (const key of world.keys) {
+    assert.equal(digest.includes(key), false, `the digest named the action key ${key}`);
   }
   // The whole command reached the approver before any button did: five classes,
   // one set of bytes, sent above the card that decides them.
