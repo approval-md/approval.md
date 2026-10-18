@@ -356,40 +356,51 @@ export const TELEGRAM_STALE_UNKNOWN =
 export const TELEGRAM_PROMPT_HEADING = "APPROVAL REQUIRED";
 
 /**
- * What the label over the payload chunks names (APRV-162).
+ * What the label over the payload chunks names (APRV-162), in a resident's
+ * words (P-9).
  *
  * The chunks carry the canonical rendering, which is a deterministic function
- * of the bytes and not the bytes themselves; calling it "the exact bytes" told
- * the reader that a diff view and a JSON file were the same object. The
- * rendering names its own `display_hash`, and the store path inside it is the
- * route back to the bytes.
+ * of the bytes and not the bytes themselves, and the rendering names its own
+ * `display_hash` and store path inside the block (SPEC.md §10.3, bound
+ * verbatim by `display_hash`). This label sits OUTSIDE that block, so it is
+ * free to say what the block is for the person reading it: what they are
+ * approving. Before P-9 it said "the canonical rendering this approval's
+ * display_hash names; raw bytes at the store path inside", which is the
+ * block's own first lines restated in the system's vocabulary.
  */
-export const PAYLOAD_CHUNK_LABEL_TAIL =
-  "the canonical rendering this approval's display_hash names; raw bytes at the store path inside";
-export const PAYLOAD_CHUNK_LABEL = `PAYLOAD — ${PAYLOAD_CHUNK_LABEL_TAIL}`;
-
-/**
- * What the claimed block is headed, and what a second claimed message is headed
- * when a rationale overflows one (APRV-165).
- *
- * Both say CLAIMED and both say NOT verified, because a continuation is a
- * message a reader may see first, and a claimed line that arrives under no
- * heading at all reads as the runtime's own.
- */
-export const TELEGRAM_CLAIMED_HEADING_PREFIX = "WHAT THIS DOES — CLAIMED by";
-export const TELEGRAM_CLAIMED_HEADING_SUFFIX = "NOT verified by the runtime";
-export const TELEGRAM_CLAIMED_CONTINUED_HEADING = `WHAT THIS DOES (continued) — CLAIMED, ${TELEGRAM_CLAIMED_HEADING_SUFFIX}`;
+export const PAYLOAD_CHUNK_LABEL_TAIL = "what you are approving";
+export const PAYLOAD_CHUNK_LABEL = `Exactly ${PAYLOAD_CHUNK_LABEL_TAIL}`;
 
 /**
  * The plain-words label over lines the requesting agent wrote (P-9).
  *
  * The same words the minimal card uses for the agent's own summary: the reader
  * learns that the agent said it and that nobody checked it, which is what the
- * old "CLAIMED ... NOT verified by the runtime" said in the system's vocabulary.
- * The author id stays after it, because which agent said a thing is part of
- * what an approver weighs (APRV-144).
+ * old "CLAIMED ... NOT verified by the runtime" said in the system's
+ * vocabulary. The author id stays after it, because which agent said a thing
+ * is part of what an approver weighs (APRV-144).
  */
 export const TELEGRAM_CLAIMED_LABEL = "What your agent says (not checked)";
+
+/**
+ * What the claimed block is headed, and what a second claimed message is headed
+ * when a rationale overflows one (APRV-165).
+ *
+ * Both say the lines are the agent's and not checked, because a continuation
+ * is a message a reader may see first, and a claimed line that arrives under
+ * no heading at all reads as the runtime's own.
+ */
+export const TELEGRAM_CLAIMED_HEADING_PREFIX = `${TELEGRAM_CLAIMED_LABEL} —`;
+export const TELEGRAM_CLAIMED_CONTINUED_HEADING = "What your agent says (continued, not checked)";
+
+/**
+ * The heading over the rows the runtime derived itself (P-9): the class, the
+ * wait, the budget. Before P-9 it read "COMPUTED — derived by the runtime from
+ * the log, the policy and the payload bytes". The rows keep their origin tags,
+ * which the village relay reads (its quiet hold matches the `ttl` row up to
+ * its `<i>(` tag).
+ */
+export const TELEGRAM_COMPUTED_HEADING = "Checked by approval.md";
 
 /** {@link TELEGRAM_CLAIMED_LABEL} naming who wrote the lines under it. */
 export function claimedLabelFor(author: string): string {
@@ -1251,12 +1262,12 @@ export function renderTelegram(
     `<b>${escapeHtml(heading)}</b>`,
     `<code>${escapeHtml(request.action_key.value)}</code>`,
     "",
-    "<b>COMPUTED — derived by the runtime from the log, the policy and the payload bytes</b>",
+    `<b>${TELEGRAM_COMPUTED_HEADING}</b>`,
     ...computedLines.map(render),
   ].join("\n");
 
   const claimedText = [
-    `<b>${TELEGRAM_CLAIMED_HEADING_PREFIX} ${escapeHtml(author)}, ${TELEGRAM_CLAIMED_HEADING_SUFFIX}</b>`,
+    `<b>${escapeHtml(claimedLabelFor(author))}</b>`,
     ...claimedLines.map(render),
   ].join("\n");
 
@@ -3794,7 +3805,7 @@ export class TelegramChannel implements TestableChannel {
         const label =
           chunks.length === 1
             ? `<b>${PAYLOAD_CHUNK_LABEL}</b>`
-            : `<b>PAYLOAD ${index + 1}/${chunks.length} — ${PAYLOAD_CHUNK_LABEL_TAIL}</b>`;
+            : `<b>${PAYLOAD_CHUNK_LABEL} (part ${index + 1} of ${chunks.length})</b>`;
         segments.push(`${label}\n<pre>${escapeHtml(chunk)}</pre>`);
       }
     }

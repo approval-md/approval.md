@@ -546,8 +546,8 @@ test("computed and claimed are separated, and the payload is sent verbatim", asy
 
   const texts = mock.sentTexts().slice(before);
   const whole = texts.join("\n");
-  assert.match(whole, /COMPUTED — derived by the runtime/u);
-  assert.match(whole, /WHAT THIS DOES — CLAIMED by agent:drafter, NOT verified by the runtime/u);
+  assert.match(whole, /<b>Checked by approval\.md<\/b>/u);
+  assert.match(whole, /<b>What your agent says \(not checked\) — agent:drafter<\/b>/u);
   assert.ok(whole.includes(PAYLOAD_CHUNK_LABEL_TAIL), whole);
   assert.match(whole, new RegExp(`<code>${key}</code>`, "u"), "the action key is shown verbatim");
 
@@ -780,7 +780,7 @@ test("a policy layout reaches the messages the bot actually sends (APRV-218)", a
   assert.equal(recordsOf(world.unit.logPath).length, 3);
 });
 
-const CLAIMED_HEADING_ANYWHERE = /<b>WHAT THIS DOES — CLAIMED by [^<]+, NOT verified by the runtime<\/b>/u;
+const CLAIMED_HEADING_ANYWHERE = /<b>What your agent says \(not checked\) — [^<]+<\/b>/u;
 
 // ---------------------------------------------------------------------------
 // The claimed block beside the buttons (APRV-165)
@@ -796,7 +796,7 @@ function sends(): { text: string; replyMarkup: unknown }[] {
     }));
 }
 
-const CLAIMED_HEADING = /^<b>WHAT THIS DOES — CLAIMED by [^<]+, NOT verified by the runtime<\/b>/u;
+const CLAIMED_HEADING = /^<b>What your agent says \(not checked\) — [^<]+<\/b>/u;
 
 test("the claimed block is the last message of a prompt, and carries the buttons", async () => {
   const world = live(2);
@@ -815,8 +815,8 @@ test("the claimed block is the last message of a prompt, and carries the buttons
   // what the act means — which is the message the thumb is next to.
   const first = messages[0]?.text ?? "";
   assert.ok(first.startsWith(`<b>${TELEGRAM_PROMPT_HEADING}</b>`), first);
-  assert.ok(first.includes("COMPUTED — derived by the runtime"), first);
-  assert.equal(first.includes("WHAT THIS DOES"), false, "the claimed block is still in the header");
+  assert.ok(first.includes("<b>Checked by approval.md</b>"), first);
+  assert.equal(first.includes("What your agent says"), false, "the claimed block is still in the header");
 
   const middle = messages.slice(1, -1).map((message) => message.text).join("\n");
   assert.ok(middle.includes(PAYLOAD_CHUNK_LABEL_TAIL), "the payload is not between the two blocks");
@@ -913,20 +913,20 @@ test("an unbounded rationale becomes more claimed messages, buttons on the last"
   await channel.notify(request_);
 
   const messages = sends().slice(before);
-  const claimedChunks = messages.filter((message) => message.text.includes("WHAT THIS DOES"));
+  const claimedChunks = messages.filter((message) => message.text.includes("What your agent says"));
   assert.ok(claimedChunks.length >= 2, `the oversized rationale did not chunk: ${claimedChunks.length}`);
   for (const message of messages) {
     assert.ok(message.text.length <= 4096, "a claimed chunk exceeded Telegram's limit");
   }
   // Every chunk says whose words these are and that nobody checked them.
   for (const chunk of claimedChunks.slice(1)) {
-    assert.ok(chunk.text.startsWith("<b>WHAT THIS DOES (continued)"), chunk.text);
+    assert.ok(chunk.text.startsWith("<b>What your agent says (continued, not checked)</b>"), chunk.text);
   }
   // Complete, and escaped: the whole rationale arrived, as text. The
   // continuation headings are dropped first, because they are the only thing
   // the chunking ADDS to what was rendered.
   const whole = claimedChunks
-    .map((chunk) => chunk.text.replace(/^<b>WHAT THIS DOES \(continued\)[^\n]*\n/u, ""))
+    .map((chunk) => chunk.text.replace(/^<b>What your agent says \(continued, not checked\)<\/b>\n/u, ""))
     .join("");
   assert.equal(
     whole.split("the vendor &amp; &lt;counsel&gt; both asked.").length - 1,
@@ -941,7 +941,7 @@ test("an unbounded rationale becomes more claimed messages, buttons on the last"
   }
 
   const last = messages[messages.length - 1] as { text: string; replyMarkup: unknown };
-  assert.ok(last.text.includes("WHAT THIS DOES"), "the keyboard left the claimed block");
+  assert.ok(last.text.includes("What your agent says"), "the keyboard left the claimed block");
   assert.ok(last.replyMarkup !== undefined, "the keyboard is not on the final chunk");
   assert.equal(
     claimedChunks[claimedChunks.length - 2]?.replyMarkup,
@@ -1003,7 +1003,7 @@ test("a payload-less request is two messages: computed, then claimed with the bu
 
   const messages = sends().slice(before);
   assert.equal(messages.length, 2, JSON.stringify(messages.map((message) => message.text)));
-  assert.ok((messages[0] as { text: string }).text.includes("COMPUTED — derived by the runtime"));
+  assert.ok((messages[0] as { text: string }).text.includes("<b>Checked by approval.md</b>"));
   assert.match((messages[1] as { text: string }).text, CLAIMED_HEADING);
   assert.ok((messages[1] as { replyMarkup: unknown }).replyMarkup !== undefined);
 });
@@ -1038,7 +1038,7 @@ test("a digest member keeps the same order and no buttons at all", async () => {
       (message, position) => position > start && message.text.includes("<b>Request "),
     );
     const own = members.slice(start, end < 0 ? undefined : end);
-    assert.ok((own[0] as { text: string }).text.includes("COMPUTED — derived by the runtime"));
+    assert.ok((own[0] as { text: string }).text.includes("<b>Checked by approval.md</b>"));
     assert.match((own[own.length - 1] as { text: string }).text, CLAIMED_HEADING);
     assert.ok(
       own.slice(1, -1).some((message) => message.text.includes(PAYLOAD_CHUNK_LABEL_TAIL)),
