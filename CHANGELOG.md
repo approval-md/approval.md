@@ -264,6 +264,25 @@ on the hook for enforcement.
   its inline script needs a person; a shape-row binary spelled that way is
   `unclassified`.
 
+### Changed
+
+- **Telegram reminders, summaries, digests and `/queue` speak plainly (P-9).**
+  A restart with stale requests now sends one reminder instead of two: the stale
+  summary opens with the count of everything the restart re-sends and says
+  whether older buttons still work, and the separate banner is skipped. The
+  stale summary, the digest and `/queue` name each request by the agent's own
+  summary and its age (or the agent's cost estimate), under "What your agent
+  says (not checked)", and no longer show action keys, task ids, class tallies,
+  grouping keys or text about hooks, retry grace and log events. The paced
+  opening is a reminder that says whether older buttons still work, which
+  matters behind a relay where they do not. The request card's headings read
+  "Checked by approval.md", "Exactly what you are approving" and "What your
+  agent says (not checked)". The card's action-key row and its canonical payload
+  block are unchanged, the first because it is a required row and the second
+  because `display_hash` binds it (SPEC.md §10.3), and so are decisions,
+  buttons, grouping, pacing and retries. `/queue`'s header now names the oldest
+  request correctly when the list is shown newest first.
+
 ### Channels and identity
 
 - **The Telegram re-delivery banner speaks plainly.** Under `delivery: burst`,
