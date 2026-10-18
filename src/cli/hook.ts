@@ -112,6 +112,7 @@ import {
   NODE_SKILL_SCRIPT_RULE,
   protectedPathClass,
   SKILL_SCRIPT_RULE,
+  SUBSTITUTION_SENTINEL,
   type ClassifiedSegment,
   type CommandClassification,
   type ProtectedPathEntry,
@@ -2962,9 +2963,17 @@ const DIRECTORY_COPIERS: ReadonlySet<string> = new Set(["cp", "rsync", "scp"]);
  * A word opening with a tilde prefix this hook does not expand (`~+`, `~-`,
  * `~name`) is a credential read (fix round 1, M-C). A relative word read after an
  * unresolvable `cd` is a credential read even when it holds a `$` this hook
- * cannot expand (fix round 1, S-2). Otherwise a word left with such a `$` is
- * judged by its text alone, as the pure rule judges it: a path held in a
- * variable, or produced by a substitution's output, is the accepted limit.
+ * cannot expand (fix round 1, S-2). Otherwise a word left with such a `$` (a
+ * variable, or the substitution sentinel a `$(…)` leaves) is judged here for
+ * every adapter (APRV-524): by its text, by its literal prefix landed from
+ * each working directory, and, when its last component is the unresolved
+ * one, as a read of whatever that prefix holds, so a home or a directory that
+ * holds credentials makes it a credential read. A word holding the sentinel is
+ * judged once more with every sentinel removed, as a resolved path (the
+ * reading before APRV-511), so an empty substitution is judged too. The Hermes
+ * disk pass also fails closed on every recursive reader of such a word; this
+ * pass does not. Beyond that, a path held in a variable (which may be empty)
+ * or produced by a substitution's output is the accepted limit.
  *
  * `cwd` may name several directories (fix round 1, S-1): every one is a place
  * the command may start in, and each is judged.
@@ -2985,6 +2994,11 @@ export function credentialReadLandings(
   // command around it, so a printed word is as good as a piped one.
   // Fix round 2: the basenames of a configured Hermes home, for the steered rule.
   const hermesNames = configuredHermesNames(env);
+  // APRV-524: the configured home, for an unresolved word whose prefix lands in
+  // a home not named `.hermes` (as {@link resolvedPathClasses} computes it).
+  const configuredHermesHome = env["APPROVAL_HERMES_HOME"] ?? env["HERMES_HOME"] ?? null;
+  const configuredHome =
+    configuredHermesHome !== null && configuredHermesHome.length > 0 ? canonicalPath(configuredHermesHome) : null;
   const walk = (
     text: string,
     startCwds: readonly string[],
@@ -3125,7 +3139,22 @@ export function credentialReadLandings(
           // reader.
           const spelled = target.text.replace(/^\$(?:\{HERMES_HOME\}|HERMES_HOME)/u, "/.hermes");
           const kind = gateRootKind(spelled);
-          if (isCredentialPath(spelled) || (recursive && kind !== null && kind !== "scripts")) hit(word);
+          if (isCredentialPath(spelled) || (recursive && kind !== null && kind !== "scripts")) {
+            hit(word);
+            return;
+          }
+          // APRV-524, the same judgement as an unresolved word below: the
+          // unknown home is one more unknown segment to the text rule, and an
+          // unresolved LAST component directly in the home, the approval home
+          // or a home's `approval/` reads whatever that directory holds.
+          const { prefix, rest } = unresolvedPrefix(spelled);
+          const holder = gateRootKind(prefix);
+          if (
+            unresolvedReadCouldNameCredential(target.text) ||
+            (lastComponentUnresolved(rest) && holder !== null && holder !== "scripts")
+          ) {
+            hit(word);
+          }
           return;
         }
         // M-C: a tilde prefix this hook does not expand lands somewhere unknown.
@@ -3144,7 +3173,37 @@ export function credentialReadLandings(
           return;
         }
         if (target.unresolved) {
-          if (isCredentialPath(target.text)) hit(word);
+          // APRV-524. Since APRV-511 a `$(…)` stays in the word as the
+          // substitution sentinel, so a word whose last component is a
+          // substitution is unresolved here, where before it was read as the
+          // directory the substitution sits in (and a directory reader of a
+          // home took this class from that). The Hermes disk pass judges such
+          // a word again, but only for an adapter that states a per-call
+          // directory; this pass runs for every adapter, so the judgement is
+          // made here too. It fails closed: the word is a credential read when
+          // its text could name one ({@link unresolvedReadCouldNameCredential}),
+          // when its literal prefix, landed from each working directory in all
+          // three readings, makes it one, or when its LAST component is the
+          // unresolved one and that prefix lands on a credential path or a
+          // directory that holds credentials ({@link holdsCredentials}).
+          if (unresolvedReadCouldNameCredential(target.text)) {
+            hit(word);
+            return;
+          }
+          const { prefix, rest } = unresolvedPrefix(target.text);
+          const lastComponent = lastComponentUnresolved(rest);
+          for (const from of cwds) {
+            const lexical = resolvePathSegments(from, prefix);
+            for (const landed of new Set([lexical, canonicalPath(lexical), physicalLanding(from, prefix)])) {
+              if (
+                (lastComponent && lands(landed, true)) ||
+                landedSpellings(landed, rest, configuredHome).some(unresolvedReadCouldNameCredential)
+              ) {
+                hit(word);
+                return;
+              }
+            }
+          }
           return;
         }
         for (const from of cwds) {
@@ -3181,6 +3240,19 @@ export function credentialReadLandings(
         }
       };
       const judge = (word: string, recursive: boolean, steeredToo = true): void => {
+        // APRV-524 (review-b M1): a word holding the substitution sentinel is
+        // judged a second time with every sentinel removed. That is how the
+        // release before APRV-511 read it, its lexer adding nothing for a
+        // `$(…)`: the literal text left, landed, its globs expanded on disk,
+        // and a directory reader of a directory that holds credentials a
+        // credential read. The unresolved branch below models a substitution
+        // as one segment of any name; this reading covers the empty one, so a
+        // substitution in a middle component, one glued to a directory's own
+        // name, and one after a glob that matches such a directory on disk are
+        // judged too. Both judgements only record, so the stricter stands.
+        if (word.includes(SUBSTITUTION_SENTINEL)) {
+          judge(word.split(SUBSTITUTION_SENTINEL).join(""), recursive, steeredToo);
+        }
         const spellings = new Set<string>();
         for (const parameter of parameterSpellings(word)) {
           spellings.add(parameter);
@@ -8193,6 +8265,18 @@ function segmentsCouldNameCredential(segments: readonly string[]): boolean {
     if (unknownSegment(segment)) afterUnknown = true;
   }
   return false;
+}
+
+/**
+ * APRV-524: is the unexpanded span in the LAST component of the word? `rest`
+ * is {@link unresolvedPrefix}'s, which starts at the span's component. Split
+ * on `/` alone, the kernel's separator (a backslash is a character of a name),
+ * with empty and `.` components dropped, so a trailing `/` or `/.` still
+ * leaves the span last. The stricter reading on every count.
+ */
+function lastComponentUnresolved(rest: string): boolean {
+  const components = rest.split("/").filter((component) => component.length > 0 && component !== ".");
+  return components.length === 1 && /[$`]/u.test(components[0] as string);
 }
 
 /**

@@ -597,9 +597,23 @@ Five overrides sit on top of the table:
   shell handed an inline script in a shape the classifier does not unwrap are
   credential reads too.
 
-  Out of reach, stated so nobody assumes otherwise: a path held in a variable,
-  or produced by a substitution's output, is judged by its text alone (an
-  absolute one always, a relative one unless the directory is unknown); a
+  A path held in a variable, or produced by a substitution's output, is judged
+  on every adapter (APRV-524): it is a credential read when its text could
+  name credential material, when its literal prefix lands somewhere that makes
+  it one, or when its LAST component is the unresolved one and the prefix
+  lands on a Hermes home, a profile home, the install's `hermes-agent/`, an
+  approval home or a directory that holds credentials. A word holding a
+  substitution is also judged with the substitution empty, as the literal
+  path left (its globs expanded on disk), so a substitution in a middle
+  component, glued to a directory's name or after a glob is judged where that
+  literal path lands. The Hermes hook, and Muse with a `workdir`, go further:
+  there every recursive read of such a word is a credential read.
+
+  Out of reach, stated so nobody assumes otherwise: beyond that, a path held
+  in a variable or produced by a substitution's output (an unknown span may
+  hold a `/` or a `..`, which moves the literal names after it, and a
+  variable may be empty, which moves them as much: only a substitution is
+  also read empty); a
   recursive search of an ANCESTOR of a credential directory with a filename
   filter; after a `CDPATH`-steerable `cd`, a symlink inside the unknown
   directory, a `CDPATH` entry that itself lies inside a credential subtree,
