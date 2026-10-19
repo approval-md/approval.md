@@ -149,6 +149,7 @@ import {
   pacedReminderLines,
   queueLines,
   reviewHandlerFor,
+  staleLines,
   staleReminderLines,
   summaryLines,
   REVIEW_OFFER_ATTEMPTS,
@@ -3092,10 +3093,11 @@ function distinctPayloadFor(index: number): Record<string, unknown> {
 function staged(
   count: number,
   makePayload: (index: number) => Record<string, unknown> = payloadFor,
+  policy: string = POLICY,
 ): Live {
   fixtureCounter += 1;
   const prefix = `staged${fixtureCounter}`;
-  const unit = newScenario(scratch.root, POLICY);
+  const unit = newScenario(scratch.root, policy);
   attest(unit, T0);
 
   const payloads = new Map<string, unknown>();
@@ -4786,6 +4788,12 @@ test("a throw BEFORE any ack still falls back to the wrapper's toast (APRV-196)"
  * proving it: by counting the records in the log before and after.
  */
 
+// Most cases below stage a policy with no TTL (aprv#646 S2). They lay requests
+// minutes apart and expect the walkthrough to open on the OLDEST, which is the
+// order orderPending gives requests past their approval window. Since APRV-464
+// a request under a TTL is live until it expires, and live requests come
+// newest first (APRV-425), so only a request nothing expires is old by age.
+
 /** How many records the log holds, read through the verifying path. */
 function recordCount(world: Live): number {
   const read = readVerifiedRecords(world.unit.logPath);
@@ -4799,7 +4807,7 @@ function sentSince(from: number): string[] {
 }
 
 test("paced delivery opens with one summary and the oldest request alone (APRV-216)", async () => {
-  const world = staged(3, distinctPayloadFor);
+  const world = staged(3, distinctPayloadFor, POLICY_NO_TTL);
   const setup = setupFor(world, channelFor(), undefined, "paced");
   const state = newDispatchState();
   const { streams, err } = capture();
@@ -4854,7 +4862,7 @@ test("paced delivery opens with one summary and the oldest request alone (APRV-2
 });
 
 test("a decision on the shown request sends the next one on the next cycle (APRV-216)", async () => {
-  const world = staged(3, distinctPayloadFor);
+  const world = staged(3, distinctPayloadFor, POLICY_NO_TTL);
   const channel = channelFor();
   const setup = setupFor(world, channel, undefined, "paced");
   const state = newDispatchState();
@@ -4889,7 +4897,7 @@ test("a decision on the shown request sends the next one on the next cycle (APRV
 });
 
 test("/skip shows the next request and brings the skipped one round last (APRV-216)", async () => {
-  const world = staged(3, distinctPayloadFor);
+  const world = staged(3, distinctPayloadFor, POLICY_NO_TTL);
   const channel = channelFor();
   const setup = setupFor(world, channel, undefined, "paced");
   const state = newDispatchState();
@@ -4937,7 +4945,7 @@ test("/skip shows the next request and brings the skipped one round last (APRV-2
 });
 
 test("/next moves past the shown request without showing it again (APRV-216)", async () => {
-  const world = staged(2, distinctPayloadFor);
+  const world = staged(2, distinctPayloadFor, POLICY_NO_TTL);
   const channel = channelFor();
   const setup = setupFor(world, channel, undefined, "paced");
   const state = newDispatchState();
@@ -4977,7 +4985,7 @@ test("/next moves past the shown request without showing it again (APRV-216)", a
 });
 
 test("/queue lists every pending request while one is being shown (APRV-216)", async () => {
-  const world = staged(3, distinctPayloadFor);
+  const world = staged(3, distinctPayloadFor, POLICY_NO_TTL);
   const channel = channelFor();
   const setup = setupFor(world, channel, undefined, "paced");
   const state = newDispatchState();
@@ -5121,7 +5129,7 @@ test("the commands answer a queue with nothing selected without naming a card (A
 });
 
 test("a paced restart re-shows the oldest, and the pre-restart copy still decides (APRV-216)", async () => {
-  const world = staged(2, distinctPayloadFor);
+  const world = staged(2, distinctPayloadFor, POLICY_NO_TTL);
   const first = channelFor();
   const setup = setupFor(world, first, undefined, "paced");
   const state = newDispatchState();
@@ -5182,7 +5190,7 @@ test("a paced restart re-shows the oldest, and the pre-restart copy still decide
 test("digest grouping still applies to the request being shown (APRV-216)", async () => {
   // Two requests of the same shape and one of another: the pair is one thing to
   // read, and pacing shows it as one thing.
-  const world = staged(3, (index) => (index < 2 ? payloadFor(index) : distinctPayloadFor(index)));
+  const world = staged(3, (index) => (index < 2 ? payloadFor(index) : distinctPayloadFor(index)), POLICY_NO_TTL);
   const channel = channelFor();
   const setup = setupFor(world, channel, undefined, "paced");
   const state = newDispatchState();
@@ -5738,8 +5746,10 @@ test("APRV-287: a restarted listener collapses the stale queue into one message"
   // The flood of 2026-09-06: a daemon restarted behind a stale socket and
   // re-delivered a dozen requests whose hooks had long since given up, one
   // message each. They go out as ONE message now, and a request somebody may
-  // still be waiting on keeps its own.
-  const world = staged(3, distinctPayloadFor);
+  // still be waiting on keeps its own. No TTL: since APRV-464 a request with
+  // one is live until it expires, so only a request nothing expires is stale
+  // by age (aprv#646 S2, pinned by the case after this one).
+  const world = staged(3, distinctPayloadFor, POLICY_NO_TTL);
   const setup = setupFor(world, channelFor());
   const state = newDispatchState();
   const { streams, err } = capture();
@@ -5830,11 +5840,39 @@ test("APRV-287: a restarted listener collapses the stale queue into one message"
   assertClean(world.unit);
 });
 
+test("aprv#646 S2: under a TTL an old but unexpired request keeps its card, and the digest states no grace", async () => {
+  // Since APRV-464 a hook question is live and carryable until its TTL, so a
+  // restarted listener must not collapse it behind a reject-all button on the
+  // strength of the hook's 55s wait plus a 5m grace that no longer applies.
+  const world = staged(3, distinctPayloadFor);
+  const setup = setupFor(world, channelFor(), undefined, "burst");
+  const keys = [requestAt(world, 0, at(1)), requestAt(world, 1, at(2)), requestAt(world, 2, at(60))];
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(setup, capture().streams, newDispatchState(), at(61));
+  assert.equal(cycle.collapsed, undefined, "an unexpired request was collapsed");
+  assert.equal(mock.sentTexts().slice(from).some((text) => text.includes("STALE REQUEST")), false);
+  assert.deepEqual(cycle.delivered.map((entry) => entry.action_key).sort(), [...keys].sort());
+
+  // The request's own expiry decides; the digest's lines name no grace.
+  const expired = pendingLike({ key: "expired", ts: at(1), remainingMs: 0 });
+  const unexpired = pendingLike({ key: "unexpired", ts: at(1), remainingMs: 60_000 });
+  assert.deepEqual(
+    collapsibleStale([expired, unexpired], at(100)).map((request) => request.action_key.value),
+    ["expired"],
+  );
+  const lines = staleLines([expired, pendingLike({ key: "no-ttl", ts: at(1) })], at(100));
+  assert.deepEqual(lines, ["2 older ones are listed here; nobody is waiting on them any more."]);
+  assert.doesNotMatch(lines.join("\n"), /grace|nothing is waiting/u);
+  assertClean(world.unit);
+});
+
 test("P-9: the stale summary's reminder counts every re-send and tells a relay approver to use the new buttons", async () => {
   // The village shape: burst delivery behind a relay, so the earlier copies'
   // buttons no longer decide (APRV-456). Two stale requests and one live one
   // used to be the summary, then a banner counting "1 request" under it.
-  const world = staged(3, distinctPayloadFor);
+  // No TTL: since APRV-464 only a request nothing expires is stale by age
+  // (aprv#646 S2).
+  const world = staged(3, distinctPayloadFor, POLICY_NO_TTL);
   const setup = setupFor(world, channelFor({ staleCopy: false }));
   const { streams, err } = capture();
   requestAt(world, 0, at(1));
@@ -5869,7 +5907,7 @@ test("P-9: the stale summary's reminder counts every re-send and tells a relay a
 });
 
 test("APRV-287: a collapsed send that fails leaves every request to be shown again", async () => {
-  const world = staged(2, distinctPayloadFor);
+  const world = staged(2, distinctPayloadFor, POLICY_NO_TTL);
   const setup = setupFor(world, channelFor());
   const { streams, err } = capture();
   const old = [requestAt(world, 0, at(1)), requestAt(world, 1, at(2))];
@@ -5920,10 +5958,13 @@ function pendingLike(overrides: {
   payload?: string;
   proposal?: boolean;
   task?: string;
+  /** TTL left; `null` (the default) is a request nothing expires (aprv#646 S2). */
+  remainingMs?: number | null;
 }): ChannelRequest {
   const base = healthy();
   return {
     ...base,
+    ttl_remaining_ms: computed(overrides.remainingMs ?? null, "clock"),
     ...(overrides.task === undefined ? {} : { task: computed(overrides.task, "log") }),
     action_key: computed(overrides.key, "log"),
     requested_ts: computed(overrides.ts, "log"),
@@ -6021,7 +6062,7 @@ test("APRV-425: a restart with every pending request stale sends ONE message and
   // AC1, against the injected fetch. The flood was N+1 messages: a banner and
   // one prompt each. It is one now, and the one is a summary rather than a
   // prompt: no payload, no approve, and every request still pending.
-  const world = staged(4, distinctPayloadFor);
+  const world = staged(4, distinctPayloadFor, POLICY_NO_TTL);
   const setup = setupFor(world, channelFor());
   const state = newDispatchState();
   const { streams, err } = capture();
@@ -6159,8 +6200,9 @@ function assertPlainWords(text: string, ids: readonly string[], where: string): 
 
 test("P-9: no action key or task id in the stale summary, the digest, the paced reminder or /queue", async () => {
   // Burst: two stale requests and two similar live ones, so one restart sends
-  // the stale summary and a digest.
-  const burst = staged(4);
+  // the stale summary and a digest. No TTL: since APRV-464 only a request
+  // nothing expires is stale by age (aprv#646 S2).
+  const burst = staged(4, payloadFor, POLICY_NO_TTL);
   const { streams, err } = capture();
   const keys = [
     requestAt(burst, 0, at(1)),

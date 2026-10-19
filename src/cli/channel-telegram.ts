@@ -2175,7 +2175,7 @@ export async function dispatchPending(
   // pending set and re-delivers it. For a queue somebody is waiting on that is
   // exactly right; for one nobody is, it is the flood of 2026-09-06 — a dozen
   // requests whose hooks had long since given up, one message each. The ones
-  // older than the hook's wait go out as ONE message with a single reject-all,
+  // past their approval window go out as ONE message with a single reject-all,
   // and the rest are delivered as they always were.
   //
   // `state.banner.sent` is this process's own "have I completed a cycle yet",
@@ -2575,7 +2575,8 @@ export function reviewOfferBackoffMs(attempts: number): number {
 
 /**
  * How old a pending request must be, on a listener's first cycle, to be one
- * nobody is waiting on (APRV-287).
+ * nobody is waiting on (APRV-287), for a request nothing expires. A request
+ * with a TTL is judged by its own expiry instead ({@link pastItsWindow}).
  *
  * The hook's own wait PLUS its retry grace, read from the same module the hook
  * reads (`core/harness-wait.ts`), because two numbers would be two answers to
@@ -2595,6 +2596,21 @@ export const COLLAPSE_STALE_AFTER_MS = abandonedAfterMs(
   HOOK_DEFAULT_WAIT_MS,
   HOOK_RETRY_GRACE_MS,
 );
+
+/**
+ * Is a request past the window an answer to it still reaches anyone in?
+ * (aprv#646 refute S2, after APRV-464.)
+ *
+ * The request's own expiry when it has one (`ttl_remaining_ms`, the policy's
+ * TTL narrowed by any recorded harness cap): since APRV-464 a hook question
+ * stays live and carryable for the whole TTL by default, so its age says
+ * nothing until then. Only a request nothing expires falls back to
+ * {@link COLLAPSE_STALE_AFTER_MS}, the hook's wait plus its no-TTL grace.
+ */
+function pastItsWindow(request: ChannelRequest, ageMs: number): boolean {
+  const remaining = request.ttl_remaining_ms.value;
+  return remaining === null ? ageMs >= COLLAPSE_STALE_AFTER_MS : remaining <= 0;
+}
 
 /**
  * How many stale requests it takes to collapse them (APRV-287).
@@ -2673,9 +2689,10 @@ export function supersededPending(requests: ChannelRequest[]): Set<string> {
  *    placement is not this function's to relitigate, so proposals are lifted
  *    out, ordered among themselves by nothing at all (log order), and put back
  *    at the end.
- * 2. **Live requests first, newest first.** Live means younger than
- *    {@link COLLAPSE_STALE_AFTER_MS}, the hook's wait plus its retry grace,
- *    which is the same boundary the collapse uses — one number, one meaning of
+ * 2. **Live requests first, newest first.** Live means not
+ *    {@link pastItsWindow}: unexpired, or for a request with no TTL younger
+ *    than the hook's wait plus its retry grace, which is the same boundary
+ *    the collapse uses — one rule, one meaning of
  *    "somebody may still be holding this". Newest first because the newest is
  *    the one most likely to have a tool call blocked on it right now, and the
  *    observed failure was a live prompt buried behind dead ones.
@@ -2711,7 +2728,7 @@ export function orderPending(requests: ChannelRequest[], now: string): ChannelRe
     // TTL says (days), and its requester polls rather than blocks, so the
     // hook's wait-plus-grace boundary says nothing about whether anyone is
     // still holding it. It is always live.
-    const stalePosition = nowMs - at >= COLLAPSE_STALE_AFTER_MS && !isProposalTask(request.task.value);
+    const stalePosition = pastItsWindow(request, nowMs - at) && !isProposalTask(request.task.value);
     (stalePosition ? stale : live).push({ request, at, index });
   });
 
@@ -2787,9 +2804,9 @@ export function staleAges(requests: readonly ChannelRequest[], now: string): str
  *
  * ## Two ways in, one exit (APRV-425)
  *
- * A request is collapsed when it is older than the hook's wait plus its retry
- * grace (nobody is holding it), or when a NEWER pending request names the same
- * payload bytes and class ({@link supersededPending} — the newer one is the live
+ * A request is collapsed when it is past its approval window
+ * ({@link pastItsWindow}: nobody is holding it), or when a NEWER pending
+ * request names the same payload bytes and class ({@link supersededPending} — the newer one is the live
  * asking, whatever the age of either). The second is what answers the observed
  * complaint that a live prompt arrives buried behind dead ones.
  *
@@ -2827,7 +2844,7 @@ export function collapsibleStale(
     if (isProposalTask(request.task.value)) return false;
     const at = Date.parse(request.requested_ts.value);
     const age = Number.isNaN(at) ? 0 : nowMs - at;
-    return age >= COLLAPSE_STALE_AFTER_MS || superseded.has(request.action_key.value);
+    return pastItsWindow(request, age) || superseded.has(request.action_key.value);
   });
 }
 

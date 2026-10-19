@@ -451,6 +451,20 @@ because this is the harness with the smallest ceiling:
   reads the log once and answers `hook-timeout` at once, leaving the question
   open for the retry grace. The refusal above covers a question this run would
   open; the clamp covers one it only waits on.
+- **The retry grace and who ends it (APRV-464).** With no `--retry-grace` the
+  grace ends at the policy's `approval_ttl` (five minutes under a policy with
+  none), and a capped request ends sooner, at the ceiling-derived window. A
+  question past its grace is taken back only by this actor's next non-read
+  tool call that the gate admits or asks about; a `read_file` or
+  `search_files` call never takes it back. A late tap is refused `expired` once
+  the window has lapsed, or `request-withdrawn` after a withdrawal. Two
+  residuals are left (both accepted), and both authorize nothing, since a retry past the grace
+  does not carry a grant (APRV-410, #538). With an operator-shortened
+  `--retry-grace`, a tap between that grace and the window, before any
+  withdrawal, is recorded as a grant. Under a policy with no `approval_ttl`, a
+  tap after the 5-minute default grace, before any withdrawal, is recorded as a
+  grant too, and the retry asks again. The full sequence is
+  in `docs/claude-code-hook.md`, "How long the question outlives the wait".
 
 ## What is gated
 
