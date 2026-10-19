@@ -359,16 +359,22 @@ is the other half. Both are deliberate acts by the human.
 
 **There is no wall any more.** The default since APRV-216 is
 `channels.telegram.delivery: paced`, and a restart with five pending requests
-sends two things: one summary line (`5 pending — oldest 2h 10m ago —
-policy.edit ×3, network.call ×2`) and the OLDEST request, with its buttons. The
-next one arrives on the first cycle after you decide that one, `/skip` it (it
+sends two things: one reminder (`Reminder: 5 requests are waiting for you.`,
+then `One is below. Only its buttons work right now; the others come next, with
+new buttons, after you answer it.`, or on a relayed listener a line saying the
+buttons on older messages above no longer work) and the OLDEST request, with
+its buttons. If more requests arrive while nothing is in front of you, the count is
+sent again as one line (`7 requests are waiting for you (oldest 2h 10m ago).`),
+and that same line heads `/queue`. The next one arrives on the first cycle after you decide that one, `/skip` it (it
 comes round again, last) or `/next` past it (this process does not show it
 again). `/queue` lists everything pending at any time, including while a request
 is selected, and that list is read from the log rather than from the chat, so it
-is right even when the chat is not. The list carries no decision buttons and
-does not claim to know where the selected request's card ended up; if you cannot
-find that card, `/skip` puts the request at the back of the order without
-deciding it and a fresh card follows on a later cycle.
+is right even when the chat is not. Each line is the agent's own summary and its
+age (`1. chase invoice 41 · 9 min ago · sent to you earlier`), with no action
+key or task id. The list carries no buttons and does not claim to know where
+the selected request's card ended up; if you cannot find that card, `/skip`
+puts the request at the back of the order without deciding it and a fresh card
+follows on a later cycle.
 
 Nothing is withheld by this. Every request is still pending in the log, still
 listed by `approval queue`, and still decidable from any copy of its message
@@ -386,12 +392,18 @@ natural response (tap it again, harder) was the one response that could not
 help. Four things changed.
 
 **A restart announces itself.** Under `burst`, the first batch a listener sends is
-preceded by one line: `LISTENER STARTED — re-sending N pending requests`,
-followed by the requests. A flood that says what it is is a re-delivery; the
-same flood in silence is an incident. Later cycles send no banner, because a
-request that arrives at 14:00 is a notification and not a re-delivery. The line
-says *started* rather than *restarted* because the listener genuinely cannot
-tell the two apart: it keeps nothing across a restart, on purpose.
+preceded by one short message in plain words: `Reminder: N requests are still
+waiting for you.`, then either `They are repeated below; buttons on older
+messages above still work, and nothing is answered twice.` (the default) or, on a
+relayed listener (a non-Telegram `--api-base`, or `--no-stale-copy`; APRV-456),
+whose older buttons are refused,
+`Use the buttons below; buttons on older messages above no longer work.`. The
+requests follow. A flood that says what it is is a re-delivery; the same flood
+in silence is an incident. Later cycles send no banner, because a request that
+arrives at 14:00 is a notification and not a re-delivery. The message says
+neither *started* nor *restarted*, because the listener genuinely cannot tell
+the two apart (it keeps nothing across a restart, on purpose); "still waiting"
+is true either way.
 
 **The live one is on top, and the dead ones are one message** (APRV-425). A
 restart no longer sends a message per pending request. The requests nobody can
@@ -401,6 +413,15 @@ pending request has superseded: two requests naming the same payload bytes and
 the same class are two askings of one question, and the older one's session is
 gone. So a restart with five stale requests is ONE message rather than six, and a
 restart with nothing live sends nothing else at all.
+
+That one message is also the restart's reminder (P-9), so no banner follows it.
+It opens with the count of everything the restart re-sends, collapsed or not
+(`Reminder: 3 requests are still waiting for you.`), says how many it lists and
+why (`2 older ones are listed here; nobody is waiting on them any more.`), and,
+when cards follow it, says so and says whether older buttons still work. Each
+member is its summary and its age, under `What your agent says (not checked)`;
+there are no action keys. The footer says it shows no payload and so has no
+approve button, and how to approve one instead.
 
 What is still live arrives newest first, then the stale backlog oldest first,
 with any attestation prompt last. `/queue` lists them in the same order, because

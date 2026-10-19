@@ -48,8 +48,8 @@
  * dependency sense as well: `policy-match.ts` itself imports only types.
  */
 
-import { isDateDisplay } from "./date-argv.js";
-import { parseGitPushArgv, splitGitPush } from "./git-push-argv.js";
+import { isDateDisplay, isZoneValue } from "./date-argv.js";
+import { isUnreadablePushWord, parseGitPushArgv, splitGitPush } from "./git-push-argv.js";
 import {
   isBareInfo,
   isDfDisplay,
@@ -106,7 +106,34 @@ export interface ClassifiedSegment {
    * profile is the caller's, and a profile a caller wrote can allow anything.
    */
   sandbox?: SandboxWrapper;
+  /**
+   * The program an `exec.code` segment runs, present only on such a segment
+   * (APRV-510). Text only, like everything this file returns: the hook hashes
+   * the inline source, or reads and hashes the file, and binds the hash and the
+   * length, never the text (SPEC.md §11.1 invariant 3).
+   */
+  execCode?: ExecCodeSource;
 }
+
+/**
+ * What an `exec.code` segment runs, as the classifier read it (APRV-510).
+ *
+ * `source` is the inline program (`python3 -c <source>`, `node -e <source>`,
+ * `deno eval <source>`) or the file path as written (`python3 <source>`,
+ * `bun <source>`). `argv` is the segment's argv from the binary on, verbatim,
+ * and `sourceIndex` names the word of `argv` that carries `source`, so a
+ * caller can bind the argv with that one word replaced by its hash.
+ */
+export interface ExecCodeSource {
+  interpreter: string;
+  mode: ExecCodeMode;
+  source: string;
+  argv: string[];
+  sourceIndex: number;
+}
+
+/** How an `exec.code` segment carries its program (APRV-510). */
+export type ExecCodeMode = "inline" | "file";
 
 /**
  * Who wrote the profile a wrapped command runs under (APRV-193).
@@ -314,6 +341,306 @@ function matchesEntry(segments: readonly string[], entry: ProtectedEntry): boole
   return want.every((segment, index) => segment === segments[offset + index]);
 }
 
+/** The most words one brace-expanded path may stand for before it is judged unknown. */
+const BRACE_EXPANSION_CAP = 256;
+
+/**
+ * The most group expansions one word may take before it is judged unknown
+ * (APRV-511 refuter recheck S(new)). Each step rescans the word once, so this
+ * bounds the work a crafted word can cost, including a long run of groups that
+ * each collapse to one word (`{s..s}{s..s}…`), which the word cap alone would
+ * never stop.
+ */
+const BRACE_EXPANSION_STEPS = 1024;
+
+/**
+ * The words bash's brace expansion makes of `word`, or `null` when there would
+ * be more than {@link BRACE_EXPANSION_CAP}, or making them would take more than
+ * {@link BRACE_EXPANSION_STEPS} expansions (APRV-511 refuter M2, recheck S(new)).
+ *
+ * A group is `{` … `}` holding a top-level comma (`{a,b}`, `{,s}`) or a
+ * sequence (`{1..3}`, `{a..c}`, `{1..9..2}`); a `{` right after `$` opens a
+ * parameter expansion and is never a group, and anything else stays literal,
+ * as it does in bash. Groups nest and multiply. The lexer has already removed
+ * quoting, so a quoted brace pair reads as a group too, which can only make an
+ * answer stricter.
+ *
+ * The expansion is iterative, never recursive: a work list holds the words
+ * still carrying a group, and both bounds are tested BEFORE a word is
+ * expanded further, so no input reaches the stack limit or runs unbounded.
+ * Every caller reads `null` as the stricter class.
+ */
+export function braceExpansions(word: string): string[] | null {
+  const results: string[] = [];
+  const pending: string[] = [word];
+  let steps = 0;
+  while (pending.length > 0) {
+    const text = pending.pop() as string;
+    const group = firstBraceGroup(text);
+    if (group === null) {
+      results.push(text);
+      if (results.length > BRACE_EXPANSION_CAP) return null;
+      continue;
+    }
+    steps += 1;
+    if (steps > BRACE_EXPANSION_STEPS) return null;
+    if (results.length + pending.length + group.alternatives.length > BRACE_EXPANSION_CAP) return null;
+    // Pushed in reverse so the words come out in bash's left-to-right order.
+    for (let index = group.alternatives.length - 1; index >= 0; index -= 1) {
+      const next = text.slice(0, group.open) + (group.alternatives[index] as string) + text.slice(group.close + 1);
+      // Only an expansion that changed the word is expanded again; one that
+      // did not (which a well-formed group never makes) is a literal word.
+      if (next === text) results.push(next);
+      else pending.push(next);
+    }
+  }
+  return results;
+}
+
+/**
+ * The words a path word may stand for once bash has expanded its brace groups,
+ * plus, for any word that still carries a stray `{` or `}` outside a parameter
+ * expansion, the same word with the stray braces removed (APRV-511 review).
+ * Bash keeps a stray brace literally (`{~/.hermes/.op.env` names a directory
+ * called `{~`), but a word whose only distance from an organ or a credential is
+ * a stray brace is judged as that organ: the stricter of the two readings.
+ * `null` when the expansion exceeds {@link BRACE_EXPANSION_CAP}, unless every
+ * group is a sequence or list of plain numbers ({@link numericRepresentative}).
+ */
+export function braceCandidates(word: string): string[] | null {
+  const expanded = braceExpansions(word) ?? numericRepresentative(word);
+  if (expanded === null) return null;
+  const out = [...expanded];
+  for (const each of expanded) {
+    const outsideParameters = each.replace(/\$\{[^{}]*\}/gu, "");
+    if (/[{}]/u.test(outsideParameters)) {
+      const stripped = each.replace(/\$\{[^{}]*\}|[{}]/gu, (match) => (match.length > 1 ? match : ""));
+      if (!out.includes(stripped)) out.push(stripped);
+    }
+  }
+  return out;
+}
+
+/**
+ * A word over the brace cap whose every group yields plain numbers only
+ * (`{1..300}`, `notes{1..500}.md`, `d{1..9}{0..99}`), as its FIRST expansion
+ * (APRV-511 fix round 3, N-a). Its words differ from one another only in runs
+ * of digits, and no organ or credential name turns on a digit, so the first
+ * answers for all of them; `echo {1..300}` stays `read.shell` instead of
+ * refusing as a credential read. `null` when any group yields anything else
+ * (`{a..z}{a..z}` can spell a name), which stays the stricter class.
+ */
+function numericRepresentative(word: string): string[] | null {
+  let text = word;
+  for (let steps = 0; steps < BRACE_EXPANSION_STEPS; steps += 1) {
+    const group = firstBraceGroup(text);
+    if (group === null) return [text];
+    const first = group.alternatives[0];
+    if (first === undefined || !group.alternatives.every((each) => /^-?\d+$/u.test(each))) return null;
+    text = text.slice(0, group.open) + first + text.slice(group.close + 1);
+  }
+  return null;
+}
+
+/** The longest text between a sequence's braces (`-2147483648..2147483647..1` fits). */
+const BRACE_SEQUENCE_MAX = 64;
+
+/**
+ * The first brace group in `text`, with its alternatives, or `null`.
+ *
+ * One left-to-right pass pairs every brace (a `${` opener pairs too, so its
+ * `}` never closes a group, but it never opens one); an unmatched `{` is
+ * literal to bash, which keeps scanning for a later group (APRV-511 review:
+ * `.op.en{v,v}{` still expands its group). The first group is the valid pair
+ * with the leftmost opener. Linear in `text` (APRV-511 recheck S(new)).
+ */
+function firstBraceGroup(text: string): { open: number; close: number; alternatives: string[] } | null {
+  const stack: { open: number; parameter: boolean; commas: number[] }[] = [];
+  let best: { open: number; close: number; commas: number[] } | null = null;
+  for (let at = 0; at < text.length; at += 1) {
+    const ch = text[at];
+    if (ch === "{") stack.push({ open: at, parameter: at > 0 && text[at - 1] === "$", commas: [] });
+    else if (ch === "}") {
+      const pair = stack.pop();
+      if (pair === undefined || pair.parameter) continue;
+      if (best !== null && best.open < pair.open) continue;
+      if (pair.commas.length > 0) best = { open: pair.open, close: at, commas: pair.commas };
+      else if (at - pair.open - 1 <= BRACE_SEQUENCE_MAX && braceSequence(text.slice(pair.open + 1, at)) !== null) {
+        best = { open: pair.open, close: at, commas: [] };
+      }
+    } else if (ch === ",") {
+      const top = stack[stack.length - 1];
+      if (top !== undefined) top.commas.push(at);
+    }
+  }
+  if (best === null) return null;
+  if (best.commas.length === 0) {
+    return { open: best.open, close: best.close, alternatives: braceSequence(text.slice(best.open + 1, best.close)) ?? [] };
+  }
+  const alternatives: string[] = [];
+  let from = best.open + 1;
+  for (const comma of [...best.commas, best.close]) {
+    alternatives.push(text.slice(from, comma));
+    from = comma + 1;
+  }
+  return { open: best.open, close: best.close, alternatives };
+}
+
+/** `1..3`, `a..c`, `1..9..2` as bash expands them, or `null` when not a sequence. */
+function braceSequence(inner: string): string[] | null {
+  const match = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?$/u.exec(inner);
+  if (match === null) return null;
+  const [, from, to, stepText] = match as unknown as [string, string, string, string | undefined];
+  const numeric = /^-?\d+$/u.test(from) && /^-?\d+$/u.test(to);
+  if (!numeric && (/\d/u.test(from) || /\d/u.test(to))) return null;
+  const start = numeric ? Number(from) : from.charCodeAt(0);
+  const end = numeric ? Number(to) : to.charCodeAt(0);
+  const step = Math.max(1, Math.abs(Number(stepText ?? "1")));
+  const out: string[] = [];
+  for (let value = start; start <= end ? value <= end : value >= end; value += start <= end ? step : -step) {
+    out.push(numeric ? String(value) : String.fromCharCode(value));
+    if (out.length > BRACE_EXPANSION_CAP) break;
+  }
+  return out;
+}
+
+/**
+ * A braced parameter expansion collapsed to its bare name, `${NAME}`, before a
+ * path is split into segments (APRV-511 review round 3). An operator inside the
+ * braces may carry a slash (`${HERMES_HOME:-/x}/config.yaml`), which would
+ * otherwise split the expansion across segments so that neither half reads as
+ * the home; collapsed, `${HERMES_HOME:-/x}` is the home, as it is whenever the
+ * variable is set, and any other name is a variable segment as before.
+ */
+function collapseBracedVariables(candidate: string): string {
+  return candidate.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/gu, "${$1}");
+}
+
+/**
+ * Does this path segment name a Hermes home (APRV-511)?
+ *
+ * - `"home"`: the `.hermes` segment, compared without case (a case-insensitive
+ *   filesystem, macOS's default, opens `~/.Hermes/plugins` as the home's), or an
+ *   unexpanded `$HERMES_HOME` / `${HERMES_HOME}`, which is the home whatever it
+ *   expands to. Before this the pure classifier read `>> $HERMES_HOME/.env` as
+ *   a workspace write: the Hermes hook's disk pass expanded it, but a caller
+ *   with no disk pass (`approval hook classify`, Claude Code, Cursor) did not.
+ * - `"maybe"`: any other segment carrying an unexpanded variable (`$X`,
+ *   `${OUT}`, `pre$N`), which can expand to the home; only the organ and
+ *   credential rows below it apply, never the bare-home or scheduler rows,
+ *   since `$OUT` alone or `$OUT/scripts/x.sh` is ordinary work far more often.
+ */
+function hermesHomeKind(segment: string): "home" | "maybe" | null {
+  if (segment.toLowerCase() === ".hermes") return "home";
+  if (segment === "$HERMES_HOME" || segment === "${HERMES_HOME}") return "home";
+  if (/\$(?:[A-Za-z_]|\{)/u.test(segment)) return "maybe";
+  return null;
+}
+
+/**
+ * Judge the part of a path below a Hermes home twice, as spelled and with its
+ * `..` segments resolved, and return the strictest answer (APRV-511). A tail
+ * whose `..` climbs out of the home has no resolved reading here; the segment
+ * walk meets any later home on its own. The `.codex` row's rule, that a `..`
+ * under the organ directory is itself the organ, is the precedent; resolving
+ * instead keeps `~/.hermes/workspace/../workspace/x` ordinary.
+ */
+function hermesTailClass(
+  tail: readonly string[],
+  judge: (tail: readonly string[]) => string | null,
+): string | null {
+  const answers = [judge(tail)];
+  const resolved: string[] = [];
+  let escaped = false;
+  for (const part of tail) {
+    if (part === "..") {
+      if (resolved.length === 0) {
+        escaped = true;
+        break;
+      }
+      resolved.pop();
+    } else {
+      resolved.push(part);
+    }
+  }
+  if (!escaped && tail.includes("..")) answers.push(judge(resolved));
+  for (const strictest of ["policy.core", HERMES_SCHEDULED_SCRIPT_CLASS, "credential"]) {
+    if (answers.includes(strictest)) return strictest;
+  }
+  return null;
+}
+
+/**
+ * The tails a variable segment that MAY be the home can stand over (APRV-511
+ * refuter M1): the tail as written, and the rest after each `..` in it, since
+ * `$X/../plugins/x` is the plugin directory when `$X` is any directory one
+ * level under the home (`$(pwd)/../plugins/x` from the workspace).
+ */
+function maybeHomeTails(tail: readonly string[]): (readonly string[])[] {
+  const tails: (readonly string[])[] = [tail];
+  for (const [at, part] of tail.entries()) if (part === "..") tails.push(tail.slice(at + 1));
+  return tails;
+}
+
+/** The tail below a profile home (`profiles/<p>/...`), or the tail itself. */
+function hermesProfileTail(tail: readonly string[]): readonly string[] {
+  return tail[0]?.toLowerCase() === "profiles" && tail[1] !== undefined ? tail.slice(2) : tail;
+}
+
+/**
+ * The class a write below a Hermes home takes, by the home's organ rows
+ * (APRV-398, APRV-445, APRV-511). Names compare without case.
+ */
+function hermesOrganClass(fullTail: readonly string[]): string | null {
+  const tail = hermesProfileTail(fullTail);
+  const next = tail[0]?.toLowerCase();
+  if (
+    next === undefined ||
+    next === "config.yaml" ||
+    next === "config.yml" ||
+    next === "agent-hooks" ||
+    next === "approval" ||
+    next === ".env" ||
+    next.startsWith(".env.") ||
+    next === "auth.json" ||
+    next.startsWith("shell-hooks-allowlist.json") ||
+    next.startsWith("hooks") ||
+    next === "hermes-agent" ||
+    next === "plugins" ||
+    next === ".op.env" ||
+    next.startsWith(".op.env.")
+  ) {
+    return "policy.core";
+  }
+  if (next === "scripts") return HERMES_SCHEDULED_SCRIPT_CLASS;
+  return null;
+}
+
+/**
+ * Is the file below a Hermes home credential material (APRV-398, APRV-511)?
+ *
+ * `.env`, `.env.*` and `auth.json`, as before; `.op.env` (and `.op.env.*`),
+ * the 1Password bootstrap file Hermes loads into the gateway; and the source
+ * install's `hermes-agent/.env` and `.env.*`, its PROJECT_ROOT dotenv, except
+ * `.env.example`, the template the install ships. Reading the rest of the
+ * runtime's source is not a credential read. Names compare without case.
+ */
+function hermesCredentialTail(fullTail: readonly string[]): boolean {
+  const tail = hermesProfileTail(fullTail);
+  const next = tail[0]?.toLowerCase();
+  if (next === undefined) return false;
+  if (next === ".env" || next.startsWith(".env.")) return true;
+  if (next === "auth.json") return true;
+  if (next === ".op.env" || next.startsWith(".op.env.")) return true;
+  if (next === "hermes-agent") {
+    const file = tail[1]?.toLowerCase();
+    // `.env.example` exactly: on a case-sensitive filesystem `.env.EXAMPLE` is
+    // another file, and only the template the install ships is exempt.
+    return file !== undefined && (file === ".env" || (file.startsWith(".env.") && tail[1] !== ".env.example"));
+  }
+  return false;
+}
+
 /**
  * Which protected class does this path name, if any? (APRV-198.)
  *
@@ -374,7 +701,23 @@ export function protectedPathClass(
   extra: readonly ProtectedPathEntry[] = [],
 ): string | null {
   if (candidate.length === 0) return null;
-  const segments = pathSegments(candidate);
+  // APRV-511 refuter M2: bash expands an unquoted brace group before the
+  // command sees the word, so `~/.hermes/plugin{s,s}/x` IS the plugin
+  // directory. Each expansion is judged and the strictest answers; a group too
+  // large to expand is the stricter class.
+  const expansions = braceCandidates(candidate);
+  if (expansions === null) return "policy.core";
+  let strictest: string | null = null;
+  for (const expansion of expansions) {
+    const cls = protectedPathClassOfWord(expansion, extra);
+    if (cls !== null && (strictest === null || protectedRank(cls) < protectedRank(strictest))) strictest = cls;
+  }
+  return strictest;
+}
+
+/** {@link protectedPathClass} for one word that brace expansion has already made. */
+function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): string | null {
+  const segments = pathSegments(collapseBracedVariables(candidate));
 
   // 1. The log directory, before anything else that would call it a policy file.
   for (let index = 0; index < segments.length; index += 1) {
@@ -483,28 +826,33 @@ export function protectedPathClass(
     // process it starts, which makes it the switch for the gate itself
     // (`HERMES_ACCEPT_HOOKS`) as well as a secret store. Reads stay
     // `account.credential`.
-    if (segment === ".hermes") {
-      // Recheck 3 (lows): a profile home, `.hermes/profiles/<p>/`, is a home of
-      // its own with the same organs, so its paths are judged one level down.
-      const next =
-        segments[index + 1] === "profiles" && segments[index + 2] !== undefined
-          ? segments[index + 3]
-          : segments[index + 1];
-      if (
-        next === undefined ||
-        next === "config.yaml" ||
-        next === "config.yml" ||
-        next === "agent-hooks" ||
-        next === "approval" ||
-        next === ".env" ||
-        next.startsWith(".env.") ||
-        next === "auth.json" ||
-        next.startsWith("shell-hooks-allowlist.json") ||
-        next.startsWith("hooks")
-      ) {
+    //
+    // APRV-511 adds the home's three other organs, from the custody refutation
+    // (M1) and Hermes v2026.9.24's own loaders. `hermes-agent/` is the runtime's
+    // source install on an Agent Village box: its `.env` is the PROJECT_ROOT
+    // `.env` that `load_hermes_dotenv` loads into the gateway after the home's
+    // (setting any name the home's left absent), its `plugins/` is the bundled
+    // plugin directory, and the rest is the code the gateway runs. `plugins/` is
+    // where user plugins load from, the gate's own `av-approval` among them, so
+    // an edit there is an edit of the gate. `.op.env` is loaded the same way as
+    // the project `.env` (`override=False`). A WRITE to any of them is
+    // `policy.core`; a READ of `.op.env` or `hermes-agent/.env` is
+    // `account.credential` (`isCredentialPath`), and a read of the rest of the
+    // runtime's source stays what it was.
+    // APRV-511: the home is matched by the `.hermes` segment in any case, by an
+    // unexpanded `$HERMES_HOME`/`${HERMES_HOME}` (which IS the home), and by any
+    // other unexpanded variable (which MAY be the home, so only its organ rows
+    // apply); the tail is judged as spelled and with its `..` resolved. See
+    // {@link hermesHomeKind} and {@link hermesOrganClass}.
+    const home = segment === undefined ? null : hermesHomeKind(segment);
+    if (home !== null) {
+      const cls = hermesTailClass(segments.slice(index + 1), hermesOrganClass);
+      if (home === "home" && cls !== null) return cls;
+      if (home === "maybe" && maybeHomeTails(segments.slice(index + 1)).some(
+        (tail) => tail.length > 0 && hermesTailClass(tail, hermesOrganClass) === "policy.core",
+      )) {
         return "policy.core";
       }
-      if (next === "scripts") return HERMES_SCHEDULED_SCRIPT_CLASS;
     }
     // Codex installs its hook through these configuration and script paths.
     if (segment === ".codex") {
@@ -657,7 +1005,78 @@ const CREDENTIAL_CLASS = "account.credential";
  */
 export function isCredentialPath(candidate: string): boolean {
   if (candidate.length === 0) return false;
-  const segments = pathSegments(candidate);
+  // APRV-511 refuter M2: any brace expansion that names a credential is one.
+  const expansions = braceCandidates(candidate);
+  if (expansions === null) return true;
+  return expansions.some((expansion) => isCredentialWord(expansion));
+}
+
+/**
+ * {@link isCredentialPath} for one word that brace expansion has already made.
+ *
+ * Merge of APRV-511 and APRV-522: the word is judged as written and with its
+ * braced variables collapsed (APRV-511), and each of those on every splitting,
+ * as written and with `..` resolved, case folded and not (APRV-522). True when
+ * any reading names credential material, so neither side's rule is narrowed.
+ */
+function isCredentialWord(word: string): boolean {
+  const collapsed = collapseBracedVariables(word);
+  const candidates = collapsed === word ? [word] : [word, collapsed];
+  return candidates.some((candidate) => credentialWordReadings(candidate));
+}
+
+function credentialWordReadings(candidate: string): boolean {
+  // APRV-522 (M3). Judged on two spellings of the same path, and true when
+  // either one names credential material:
+  //
+  // - the segments as written, case folded, which is how the rows always read
+  //   (a `..` before the approval home keeps its `.approval` run);
+  // - the same segments with `..` resolved lexically, so a `..` out of a
+  //   sibling directory inside the approval home lands on the file it names.
+  //   Pure text cannot say what a symlinked parent does to
+  //   a `..`; the hook's disk pass judges the physical landing as well.
+  //
+  // Case is folded on every platform. macOS and Windows volumes are case
+  // insensitive by default, so an upper-case spelling opens the environment map
+  // there; on a case-sensitive volume the fold names a different file as a
+  // credential, which costs an approval prompt and never an exposure.
+  //
+  // APRV-522 fix round 2 (path-parser differential): a backslash separates
+  // segments only on Windows. On macOS and Linux it is a character of a name,
+  // so a profile directory whose name holds one is ONE segment to the kernel
+  // and two to the split above, which moves the profile row's offset. When the
+  // path holds a backslash, the `/`-only reading is judged as well.
+  const splittings = [pathSegments(candidate)];
+  if (candidate.includes("\\")) {
+    splittings.push(candidate.split(/\/+/u).filter((segment) => segment.length > 0 && segment !== "."));
+  }
+  return splittings.some((segments) => credentialSegmentsAsWrittenOrResolved(segments));
+}
+
+/**
+ * The credential rows over one splitting, as written and with `..` resolved,
+ * case folded (APRV-522) and as spelled (APRV-511's rows read an unexpanded
+ * `$HERMES_HOME` by its exact spelling, which the fold would turn into a
+ * "maybe" home).
+ */
+function credentialSegmentsAsWrittenOrResolved(segments: readonly string[]): boolean {
+  const folded = segments.map((segment) => segment.toLowerCase());
+  const spellings = folded.every((segment, index) => segment === segments[index]) ? [folded] : [folded, [...segments]];
+  for (const written of spellings) {
+    if (credentialSegments(written)) return true;
+    if (!written.includes("..")) continue;
+    const resolved: string[] = [];
+    for (const segment of written) {
+      if (segment === ".." && resolved.length > 0 && resolved[resolved.length - 1] !== "..") resolved.pop();
+      else resolved.push(segment);
+    }
+    if (credentialSegments(resolved)) return true;
+  }
+  return false;
+}
+
+/** The credential rows over already-split segments. */
+function credentialSegments(segments: readonly string[]): boolean {
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
     // APRV-398. Hermes Agent's own home holds two files of credential material
@@ -671,18 +1090,20 @@ export function isCredentialPath(candidate: string): boolean {
     // whose organ this codebase now recognises, whose credential files it did
     // not, would be a Never-list item the classifier does not enforce — which is
     // exactly the hole APRV-194 was filed for, one harness along.
-    if (segment === ".hermes") {
-      const next =
-        segments[index + 1] === "profiles" && segments[index + 2] !== undefined
-          ? segments[index + 3]
-          : segments[index + 1];
-      if (next === ".env" || next?.startsWith(".env.") === true) return true;
-      if (next === "auth.json") return true;
+    // APRV-511: the same home matching as `protectedPathClass` (any case, an
+    // unexpanded `$HERMES_HOME`, any other unexpanded variable, `..` resolved
+    // in the tail); see {@link hermesCredentialTail}.
+    const home = segment === undefined ? null : hermesHomeKind(segment);
+    if (home !== null) {
+      const credential = (tail: readonly string[]): boolean =>
+        hermesTailClass(tail, (t) => (hermesCredentialTail(t) ? "credential" : null)) !== null;
+      const tails = home === "maybe" ? maybeHomeTails(segments.slice(index + 1)) : [segments.slice(index + 1)];
+      if (tails.some(credential)) return true;
       continue;
     }
     if (segment !== ".approval") continue;
     const next = segments[index + 1];
-    if (next === undefined) return false;
+    if (next === undefined) continue;
     if (next.startsWith("vault")) return true;
     if (next === "keys") return true;
     if (next === "env" || next.startsWith("env.")) return true;
@@ -706,6 +1127,20 @@ export function isCredentialPath(candidate: string): boolean {
  * exfiltrating one is the one worth naming: a `cp` touching credential material
  * is `account.credential` in either direction. Both classes are gated, so the
  * choice is about what the approver is told, not about whether they are asked.
+ *
+ * `git` left this list with APRV-522 (M2). It was here for `git add`, `git rm`
+ * and `git checkout -- <path>` (still exempt, through
+ * {@link GIT_PATH_WRITE_OPTIONS}), and it made the credential rule decline every
+ * git verb, the readers included: diff and grep without an index, log with a
+ * patch and show of a `<rev>:<path>` print the file, and classified
+ * `read.shell`. git is direction-blind the way `cp` is, so
+ * it is judged the way `cp` is, and its credential words stay in the protected
+ * scan ({@link credentialProtectedScanKeeps}), so a writing verb keeps its
+ * `policy.core` answer with the credential class carried beside it.
+ *
+ * `ln` left with it. A link to the environment map is a second name for the
+ * secret that a later read can open, so its source is a read of
+ * the material; it is kept in the protected scan for the same reason git is.
  */
 const CREDENTIAL_WRITE_BINS: readonly string[] = [
   "rm",
@@ -714,11 +1149,9 @@ const CREDENTIAL_WRITE_BINS: readonly string[] = [
   "truncate",
   "chmod",
   "chown",
-  "ln",
   "touch",
   "mkdir",
   "rmdir",
-  "git",
   "dd",
   "install",
 ];
@@ -834,20 +1267,203 @@ function credentialWritesOnly(basename: string, args: readonly string[]): boolea
     basename === "sed" &&
     (hasFlag(args, ["--in-place"]) ||
       args.some((arg) => arg.startsWith("-i") && !arg.startsWith("--")));
-  return CREDENTIAL_WRITE_BINS.includes(basename) || inPlaceSed;
+  const gitPathWrite = basename === "git" && gitWritesNamedPathsOnly(args);
+  return CREDENTIAL_WRITE_BINS.includes(basename) || inPlaceSed || gitPathWrite;
 }
 
-function credentialTouch(
-  basename: string,
-  args: readonly string[],
-  positionals: readonly string[],
-): CredentialOutcome | null {
-  const writesOnly = credentialWritesOnly(basename, args);
-  if (!writesOnly) {
-    const named = positionals.find((arg) => isCredentialPath(arg));
-    if (named !== undefined) {
-      return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
+/**
+ * Does this git argv only WRITE the paths it names? (APRV-522.) `true` only
+ * when the verb is read unambiguously, is one of
+ * {@link GIT_PATH_WRITE_OPTIONS}, and every option before `--` is on that
+ * verb's allow-list.
+ *
+ * The verb is found the way APRV-520's {@link gitGlobalRefusal} reads the
+ * globals: zero-value globals are skipped, and ANY other flag before the verb
+ * (a global that takes a value, `-C dir`, `-c k=v`, `--git-dir x`, a joined
+ * `--work-tree=`, or one this table does not know) leaves the verb unknown, so
+ * the argv is a READER. `classifySegment` refuses those globals anyway; this
+ * does not rely on that ordering.
+ *
+ * The options are a closed list, never a deny-list: git accepts any unique
+ * prefix of a long option (`--pat` is `--patch`), several verbs print the
+ * file's hunks (`git add -p`, `git checkout -p`, `git restore --patch`), and
+ * `git checkout-index --prefix=/tmp/` writes a copy elsewhere. So an option
+ * not listed for the verb (an abbreviation, a short letter bundled with one
+ * not listed, `-fp`, an unknown flag) makes the argv a reader, and the
+ * credential rule judges what it names.
+ */
+/**
+ * Where git's verb sits in its argv, read the way {@link gitWritesNamedPathsOnly}
+ * reads it (APRV-522 fix round 2): only zero-value globals may come before it,
+ * and any other flag leaves the verb unknown (`null`). The hook's credential
+ * pass uses it so that, under a directory a `CDPATH` lookup may have chosen,
+ * the verb word is not judged as a path: git never opens its verb.
+ */
+export function gitVerbIndex(args: readonly string[]): number | null {
+  let at = 0;
+  while (at < args.length && isFlag(args[at] as string)) {
+    if (!GIT_ZERO_VALUE_GLOBALS.includes(args[at] as string)) return null;
+    at += 1;
+  }
+  return at < args.length ? at : null;
+}
+
+function gitWritesNamedPathsOnly(args: readonly string[]): boolean {
+  let at = 0;
+  while (at < args.length && isFlag(args[at] as string)) {
+    if (!GIT_ZERO_VALUE_GLOBALS.includes(args[at] as string)) return false;
+    at += 1;
+  }
+  const verb = args[at];
+  if (verb === undefined || !Object.hasOwn(GIT_PATH_WRITE_OPTIONS, verb)) return false;
+  const allowed = GIT_PATH_WRITE_OPTIONS[verb] as GitWriteOptions;
+  for (const arg of args.slice(at + 1)) {
+    if (arg === "--") break;
+    if (!isFlag(arg)) continue;
+    if (arg.startsWith("--")) {
+      if (allowed.long.includes(arg)) continue;
+      if (allowed.joined.some((prefix) => arg.startsWith(prefix))) continue;
+      return false;
     }
+    if (!Array.from(arg.slice(1)).every((letter) => allowed.short.includes(letter))) return false;
+  }
+  return true;
+}
+
+interface GitWriteOptions {
+  /** Short letters, each of which may appear alone or bundled. */
+  short: string;
+  /** Long options, matched whole (never as a prefix). */
+  long: readonly string[];
+  /** `--name=` spellings whose value names no file read. */
+  joined: readonly string[];
+}
+
+/**
+ * The git verbs whose named paths are only WRITTEN in the worktree or the
+ * index (APRV-522), each with the options (git 2.50) known not to print file
+ * content or copy it elsewhere. The exemption git had as a whole, narrowed to
+ * the verbs and spellings it was for. Every other verb, an unknown one
+ * included, reads what it names; `stash` is absent on purpose (`git stash
+ * show -p` prints). `--pathspec-from-file=` is never listed: it reads a file.
+ */
+const GIT_PATH_WRITE_OPTIONS: Readonly<Record<string, GitWriteOptions>> = {
+  add: {
+    short: "fuANnv",
+    long: ["--force", "--update", "--all", "--no-all", "--intent-to-add", "--dry-run", "--verbose", "--ignore-errors", "--ignore-missing", "--renormalize", "--sparse", "--ignore-removal", "--no-ignore-removal"],
+    joined: ["--chmod="],
+  },
+  rm: {
+    short: "frnq",
+    long: ["--force", "--dry-run", "--cached", "--quiet", "--ignore-unmatch", "--sparse"],
+    joined: [],
+  },
+  mv: { short: "fknv", long: ["--force", "--dry-run", "--verbose", "--sparse"], joined: [] },
+  restore: {
+    short: "sSWqm",
+    long: ["--source", "--staged", "--worktree", "--quiet", "--ours", "--theirs", "--merge", "--ignore-unmerged", "--overlay", "--no-overlay", "--progress", "--no-progress"],
+    joined: ["--source="],
+  },
+  checkout: {
+    short: "fqmbB",
+    long: ["--force", "--quiet", "--ours", "--theirs", "--merge", "--overlay", "--no-overlay", "--ignore-skip-worktree-bits", "--progress", "--no-progress"],
+    joined: [],
+  },
+  switch: {
+    short: "cCdfqm",
+    long: ["--create", "--force-create", "--detach", "--force", "--discard-changes", "--quiet", "--merge", "--progress", "--no-progress"],
+    joined: [],
+  },
+  reset: { short: "qN", long: ["--quiet", "--soft", "--mixed", "--hard", "--keep", "--merge", "--no-refresh"], joined: [] },
+  clean: { short: "fdxXnq", long: ["--force", "--dry-run", "--quiet"], joined: [] },
+  "update-index": {
+    short: "q",
+    long: ["--add", "--remove", "--force-remove", "--refresh", "--really-refresh", "--assume-unchanged", "--no-assume-unchanged", "--skip-worktree", "--no-skip-worktree"],
+    joined: ["--chmod="],
+  },
+  "checkout-index": { short: "fuqna", long: ["--force", "--index", "--quiet", "--no-create", "--all"], joined: [] },
+};
+
+/**
+ * Binaries whose credential words stay in the protected-path scan although
+ * they READ them (APRV-522). `git` is direction-blind: one verb writes the
+ * gate's directory and another prints the secret, from the same argv shape. Keeping its credential words in the scan means a
+ * writing verb keeps `policy.core` (the stricter surface by
+ * {@link outranksCredential}) with `account.credential` carried beside it, and
+ * a reading verb, which the protected scan never reads, answers
+ * `account.credential`.
+ */
+function credentialProtectedScanKeeps(basename: string): boolean {
+  return basename === "git" || basename === "ln";
+}
+
+/**
+ * The words of a segment the credential rule reads as paths (APRV-522), for
+ * the pure classifier and the hook's disk pass alike: one judgement, so the two
+ * cannot disagree about which words a reader opens.
+ *
+ * Empty for a binary that only WRITES what it names
+ * ({@link credentialWritesOnly}). Otherwise:
+ *
+ * - every positional (the words that are not flags, a flag's separate value
+ *   included);
+ * - the value of every `--name=value` flag and of every short flag carrying
+ *   its value attached (`-fFILE`), because a reader's file operand may arrive
+ *   inside its own option (M6);
+ * - the file half of an upload spelling, `@FILE` and `name=@FILE;type=…`, and
+ *   `name=<FILE`, which curl reads the same way;
+ * - for git, the path half of a `<rev>:<path>` or `:<path>` word, pathspec
+ *   magic (`:(top)`, `:/`) stripped, because show and cat-file print the blob
+ *   such a word names.
+ *
+ * Over-reading a word costs an approval prompt when it happens to spell a
+ * credential path; under-reading one costs the property.
+ */
+export function credentialReadWords(basename: string, args: readonly string[]): string[] {
+  if (credentialWritesOnly(basename, args)) return [];
+  const words: string[] = [];
+  for (const arg of args) {
+    if (!isFlag(arg)) {
+      words.push(arg);
+    } else if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      if (equals !== -1 && equals < arg.length - 1) words.push(arg.slice(equals + 1));
+    } else if (arg.length > 2) {
+      words.push(arg.slice(2));
+      const equals = arg.indexOf("=");
+      if (equals !== -1 && equals < arg.length - 1) words.push(arg.slice(equals + 1));
+    }
+  }
+  // A snapshot: the loop appends to `words`.
+  const spelled = words.slice();
+  for (const word of spelled) {
+    for (let at = word.search(/[@<]/u); at !== -1; ) {
+      const rest = (word.slice(at + 1).split(";")[0] ?? "").trim();
+      if (rest.length > 0) words.push(rest);
+      const next = word.slice(at + 1).search(/[@<]/u);
+      at = next === -1 ? -1 : at + 1 + next;
+    }
+  }
+  if (basename !== "git") return words;
+  const out: string[] = [];
+  for (const word of words) {
+    out.push(word);
+    for (let at = word.indexOf(":"); at !== -1; at = word.indexOf(":", at + 1)) {
+      let rest = word.slice(at + 1);
+      if (rest.startsWith("(")) {
+        const close = rest.indexOf(")");
+        rest = close === -1 ? rest.slice(1) : rest.slice(close + 1);
+      }
+      if (rest.length > 0) out.push(rest);
+    }
+  }
+  return out;
+}
+
+function credentialTouch(basename: string, args: readonly string[]): CredentialOutcome | null {
+  const named = credentialReadWords(basename, args).find((word) => isCredentialPath(word));
+  if (named !== undefined) {
+    return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
   }
 
   for (const word of args) {
@@ -855,6 +1471,19 @@ function credentialTouch(
       return { class: CREDENTIAL_CLASS, rule: "credential-env" };
     }
   }
+  return null;
+}
+
+/**
+ * The credential an upload or request-body option reads (fix round 4,
+ * M(L5f-1)): a source path that is a credential file, else an embedded value
+ * whose file the text cannot read ({@link uploadSourcePaths}), which may be
+ * one. The rule id is the argument rule's own.
+ */
+function uploadCredentialTouch(sources: readonly string[], unknown: string | null): CredentialOutcome | null {
+  const named = sources.find((path) => isCredentialPath(path));
+  if (named !== undefined) return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
+  if (unknown !== null) return { class: CREDENTIAL_CLASS, rule: "credential-path", path: unknown };
   return null;
 }
 
@@ -919,6 +1548,36 @@ interface LexWord {
   quoted: boolean;
   /** Inner text of each `$(…)` in this word, for recursive classification. */
   substitutions: string[];
+  /**
+   * An UNQUOTED variable or `$(…)` is part of the word, so the shell may split
+   * its value into several words (APRV-511 fix round 3, S(open)).
+   */
+  splits: boolean;
+  /**
+   * An UNQUOTED `{`, `*`, `?` or `[` is part of the word, so brace expansion or
+   * a glob may make it several words or change its head (fix round 3).
+   */
+  expands: boolean;
+  /**
+   * Is `text` exactly the bytes the shell would hand the command for this
+   * word? (APRV-510.) `false` when the shell would still change it: a `$`
+   * outside single quotes (a parameter expansion), an unquoted glob or brace
+   * character, a leading unquoted `~`, or a backslash inside double quotes
+   * before a character the shell keeps it for (this lexer drops every such
+   * backslash, the shell drops only five). Read by the `exec.code` shape alone,
+   * which hashes a word and so needs the word's bytes to be the program's
+   * bytes; every other reader keeps reading `text` exactly as before.
+   */
+  exact: boolean;
+  /**
+   * Is this word an assignment to bash (APRV-523)? bash decides that on the
+   * word as WRITTEN, before quote removal: the name, an optional subscript, the
+   * `+` and the `=` must carry no quoting or escaping character, and the name
+   * no `$`, backtick or brace. {@link ASSIGNMENT} applied to the source
+   * spelling, not to `text`: a word whose name is quoted or escaped has the
+   * same `text` as an assignment and is a command word, the program bash runs.
+   */
+  assignment: boolean;
 }
 
 interface LexRedirect {
@@ -939,6 +1598,32 @@ interface LexSegment {
   bodySubstitutions: string[];
   /** Set when the segment contains a construct whose effect cannot be read. */
   opaque: string | null;
+  /**
+   * Did this segment open a heredoc (`<<EOF`, `<<-EOF`)? (APRV-510.) The body
+   * is skipped and never classified, and an unquoted body still expands
+   * (APRV-504), so the `exec.code` shape declines a segment carrying one.
+   */
+  heredoc: boolean;
+  /**
+   * Does this segment's stdin come from somewhere the text names as input:
+   * the previous segment of a pipeline (`a | b`, `a |& b`), or a descriptor
+   * duplicated onto it (`<&3`)? (APRV-510, security review round 2.) A program
+   * can read its real source from stdin (`echo '<src>' | python3 -c
+   * 'exec(sys.stdin.read())'`), outside the hash, so the `exec.code` shape
+   * declines a segment fed this way.
+   */
+  stdinFed: boolean;
+  /**
+   * Is this segment inside a subshell `( … )`? (APRV-510, refuter rS2.) A
+   * redirection or heredoc written after the closing `)` feeds the stdin of
+   * every command inside it (`(python3 -c '…') < evil.py`), and lands on a
+   * segment of its own, so `stdinFed`, `heredoc` and `redirects` never reach
+   * the program's segment. The `exec.code` shape declines any segment inside a
+   * subshell at all, the stricter form of "a subshell carrying a redirection".
+   * A depth that goes negative (an unmatched `)`, as in a `case` pattern)
+   * counts as inside.
+   */
+  subshell: boolean;
 }
 
 type LexResult =
@@ -1004,6 +1689,9 @@ function lex(command: string): LexResult {
   let redirects: LexRedirect[] = [];
   let bodySubstitutions: string[] = [];
   let opaque: string | null = null;
+  let heredoc = false;
+  let stdinFed = false;
+  let depth = 0;
   let segmentStart = 0;
   let index = 0;
   const pending: PendingHeredoc[] = [];
@@ -1016,12 +1704,19 @@ function lex(command: string): LexResult {
         redirects,
         bodySubstitutions,
         opaque,
+        heredoc,
+        stdinFed,
+        subshell: depth !== 0,
       });
+      // Kept across an EMPTY flush, so the `&` of `|&` (or a newline after a
+      // trailing `|`) does not drop the pipe into the next real segment.
+      stdinFed = false;
     }
     words = [];
     redirects = [];
     bodySubstitutions = [];
     opaque = null;
+    heredoc = false;
     segmentStart = end;
   };
 
@@ -1033,6 +1728,9 @@ function lex(command: string): LexResult {
   const readWord = (): LexWord | null => {
     let text = "";
     let quoted = false;
+    let splits = false;
+    let expands = false;
+    let exact = true;
     const substitutions: string[] = [];
     const start = index;
 
@@ -1045,6 +1743,9 @@ function lex(command: string): LexResult {
       if (ch === "\\") {
         const next = command[index + 1];
         if (next === undefined) {
+          // APRV-510 (refuter N1): a backslash ending the input is dropped by
+          // a shell that reads the line as a script, so the text is not its.
+          exact = false;
           text += "\\";
           continue;
         }
@@ -1069,6 +1770,7 @@ function lex(command: string): LexResult {
         text += scan.text;
         substitutions.push(...scan.substitutions);
         if (scan.opaque !== null) opaque = scan.opaque;
+        if (!scan.exact) exact = false;
         quoted = true;
         index = scan.end;
         continue;
@@ -1096,10 +1798,25 @@ function lex(command: string): LexResult {
         const scan = readSubstitution(command, index + 1);
         if (scan === null) return null;
         substitutions.push(scan.inner);
+        // APRV-511 refuter M1: the substitution's OUTPUT is part of the word,
+        // and a path rule must not read `$(echo ~/.hermes)/plugins/x` as
+        // `/plugins/x`. The sentinel is an unexpanded variable to every rule
+        // after the lexer: it may be the home (the organ and credential rows
+        // apply) and it decides the directory (the Hermes disk pass).
+        text += SUBSTITUTION_SENTINEL;
+        splits = true;
         index = scan.end;
         continue;
       }
 
+      if (ch === "$") splits = true;
+      else if (ch === "{" || ch === "*" || ch === "?" || ch === "[") expands = true;
+      // APRV-510: what the shell would still expand in an unquoted run. The
+      // text is kept as it always was; only the `exact` flag records it.
+      if (ch === "$" || ch === "*" || ch === "?" || ch === "[" || ch === "{") exact = false;
+      // Bash expands an unquoted `~` at a word's start and after `=` or `:` in
+      // an assignment-shaped argument; any unquoted `~` is treated as one.
+      if (ch === "~") exact = false;
       text += ch;
     }
 
@@ -1107,7 +1824,8 @@ function lex(command: string): LexResult {
     // word that consumed characters and produced no text is still a word (`''`,
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
-    return { text, quoted, substitutions };
+    const assignment = ASSIGNMENT.test(command.slice(start, index));
+    return { text, quoted, substitutions, splits, expands, exact, assignment };
   };
 
   while (index < command.length) {
@@ -1172,6 +1890,7 @@ function lex(command: string): LexResult {
         };
       }
       if (op === "<<" || op === "<<-") {
+        heredoc = true;
         while (command[index] === " " || command[index] === "\t") index += 1;
         const delimiterStart = index;
         const terminator = readWord();
@@ -1199,6 +1918,13 @@ function lex(command: string): LexResult {
         continue;
       }
       if (op === ">&" || op === "<&") {
+        // APRV-510: a dup ONTO stdin (`<&3`, `0<&3`, `<&-`) feeds the command
+        // input the text never names. Set before the dup or refusal below, so
+        // every `<&` form closes `exec.code` for the segment it feeds. Bash's
+        // `n>&m` is `dup2(m, n)` whichever way the arrow points, so a `>&`
+        // whose descriptor prefix is 0 (`0>&3`, `0>& 1`, `00>&9`) feeds stdin
+        // exactly as `0<&3` does and closes the class too (refuter rS1).
+        if (op === "<&" || (op === ">&" && /^0+$/u.test(redirect[1] ?? ""))) stdinFed = true;
         // `2>&1`, `>&2`, `3<&0`, `2>&-`: a descriptor dup or close, no path
         // involved. Anything else after `>&` is a FILE (APRV-508 refutation
         // M1): bash reads `>&word` as `>word 2>&1`, so `paste a >& APPROVAL.md`
@@ -1209,7 +1935,11 @@ function lex(command: string): LexResult {
         // reading. After `<&` a non-descriptor word is refused.
         while (command[index] === " " || command[index] === "\t") index += 1;
         const target = readWord();
-        if (target === null || target.text === "") {
+        // A target that is nothing but `$(…)` (`>&$(x)`) keeps the refusal it
+        // had before the substitution sentinel (APRV-511): the sentinel stands
+        // for output this classifier cannot settle, and bash may read that
+        // output as a descriptor or a file, so neither answer is admitted.
+        if (target === null || target.text.split(SUBSTITUTION_SENTINEL).join("") === "") {
           return { ok: false, detail: `redirection ${op} has no target` };
         }
         const dup =
@@ -1233,10 +1963,28 @@ function lex(command: string): LexResult {
       continue;
     }
 
+    // APRV-521 (review-b M1): `NAME=(…)` and `NAME+=(…)` are bash's compound
+    // (array) assignment, not a word followed by a subshell. Read as a
+    // subshell, the list's words became a command and whatever followed the
+    // `)` lost the assignment in front of it. Refused: a `(` straight after an
+    // unquoted `=` is that assignment or a syntax error to bash.
+    if (ch === "(" && command[index - 1] === "=") {
+      return {
+        ok: false,
+        detail: "a compound (array) assignment NAME=(…) is not read by this classifier; assign the elements one by one",
+      };
+    }
+
     if (ch === "&" || ch === "|" || ch === ";" || ch === "(" || ch === ")") {
       const boundary = index;
+      // APRV-510: a single `|` (or `|&`) pipes the previous segment into the next.
+      const pipe = ch === "|" && command[index + 1] !== "|";
       index += ch === "&" && command[index + 1] === "&" ? 2 : ch === "|" && command[index + 1] === "|" ? 2 : 1;
       flush(boundary);
+      // APRV-510 (refuter rS2): the subshell depth, read by the next flush.
+      if (ch === "(") depth += 1;
+      if (ch === ")") depth -= 1;
+      if (pipe) stdinFed = true;
       segmentStart = index;
       continue;
     }
@@ -1288,18 +2036,29 @@ const QUOTED_BACKTICK_OPAQUE =
 function readDoubleQuoted(
   command: string,
   start: number,
-): { text: string; end: number; substitutions: string[]; opaque: string | null } | null {
+): {
+  text: string;
+  end: number;
+  substitutions: string[];
+  opaque: string | null;
+  exact: boolean;
+} | null {
   let text = "";
   const substitutions: string[] = [];
   let opaque: string | null = null;
+  // APRV-510, see `LexWord.exact`.
+  let exact = true;
   let index = start + 1;
 
   for (; index < command.length; index += 1) {
     const ch = command[index] as string;
-    if (ch === '"') return { text, end: index, substitutions, opaque };
+    if (ch === '"') return { text, end: index, substitutions, opaque, exact };
     if (ch === "\\") {
       const next = command[index + 1];
       if (next === undefined) break;
+      // The shell keeps the backslash before any other character; this lexer
+      // drops it, so the text is no longer the shell's bytes.
+      if (!DOUBLE_QUOTE_ESCAPES.has(next)) exact = false;
       if (next !== "\n") text += next;
       index += 1;
       continue;
@@ -1322,13 +2081,29 @@ function readDoubleQuoted(
       const scan = readSubstitution(command, index + 1);
       if (scan === null) return null;
       substitutions.push(scan.inner);
+      text += SUBSTITUTION_SENTINEL; // APRV-511 refuter M1, as in `readWord`.
       index = scan.end;
       continue;
     }
+    if (ch === "$") exact = false;
     text += ch;
   }
   return null;
 }
+
+/**
+ * What a `$(…)` leaves in a word's text (APRV-511 refuter M1): an unexpanded
+ * variable, which is exactly what the shell's substitution is to a classifier
+ * that does not run it. The name cannot collide with a real expansion a
+ * command would carry, and it is braced so no brace-expansion reading applies.
+ */
+export const SUBSTITUTION_SENTINEL = "${__APPROVAL_SUBST__}";
+
+/**
+ * The characters a backslash escapes inside double quotes, in the shell's own
+ * reading (APRV-510): before anything else the backslash is kept.
+ */
+const DOUBLE_QUOTE_ESCAPES: ReadonlySet<string> = new Set(["$", "`", '"', "\\", "\n"]);
 
 /**
  * Scan `(…)` starting at the opening paren, honouring nesting and quotes, and
@@ -1500,6 +2275,32 @@ export interface ClassifierContext {
    * here, forgetting it cannot loosen anything.
    */
   unwrapShell?: boolean;
+  /**
+   * A variable git could inherit that the command line's own shell sets
+   * (APRV-521, {@link gitEnvironmentWrite}). {@link classifyCommand} fills it
+   * from its own segments and hands it down to a substitution and an
+   * unwrapped script, which run in a shell that inherits it; every `git`
+   * segment under it is `unclassified`. A caller that sets it only refuses
+   * more.
+   */
+  shellEnvWrite?: string;
+  /**
+   * May an opaque PROGRAM be classified `exec.code` rather than refused
+   * (APRV-510)?
+   *
+   * `false` by default, and the default is today's answer exactly: `python3 -c`,
+   * `node -e`, `perl -e`, `ruby -e` and `deno eval` stay `opaque`, `bun -e`,
+   * `python3 <file>` and `bun <file>.ts` stay `unclassified`. `src/cli/hook.ts`
+   * passes `true` only when the loaded policy declares
+   * `exec.code.custody: attested`, the operator's statement that the agent's
+   * code cannot reach credentials it should not hold. Like `scratchRoots`, a
+   * caller that forgets it gets the stricter answer: a refusal.
+   *
+   * It opens a SHAPE and nothing wider ({@link execCodeShape}): `bash -c`,
+   * `sh -c`, `eval`, a pipe into an interpreter and `python3 -` (stdin) are
+   * refused whatever this says.
+   */
+  execCode?: boolean;
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -1603,6 +2404,14 @@ export interface CommandRule {
    * `NAME=value` words in front of the binary, verbatim.
    */
   shape?: (args: readonly string[], assignments: readonly string[]) => boolean;
+  /**
+   * Match only an argv in the `exec.code` shape, and only when the caller
+   * opened the class (APRV-510, {@link ClassifierContext.execCode},
+   * {@link execCodeShape}). The `probe`, `skillScript` and `shape` device again:
+   * an argv outside the shape does not match the row at all, so it keeps the
+   * answer it has today.
+   */
+  execCode?: boolean;
 }
 
 /** Is `word` a flag rather than a positional? */
@@ -1643,7 +2452,39 @@ const V_PREFIXED_SEMVER = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[
 function isTagRef(name: string): boolean {
   if (name.startsWith("refs/tags/")) return true;
   if (name.startsWith("refs/heads/")) return false;
+  // APRV-518: git's ref DWIM tries `refs/<name>` first, so `tags/t1` is
+  // `refs/tags/t1` wherever that tag exists (a local source always, a remote
+  // destination when the remote has it).
+  if (name.startsWith("tags/")) return true;
   return V_PREFIXED_SEMVER.test(name);
+}
+
+/**
+ * The branch a push destination names, the way git's ref DWIM reads it
+ * (APRV-518), or `null` when it names no branch. `refs/heads/x` and `x` are
+ * `x`; so is `heads/x`, because git matches a short destination against the
+ * remote's refs through `refs/%s` first, and `git push origin lane:heads/main`
+ * moved the remote trunk on git 2.50.1. Any other `refs/…` or `tags/…` /
+ * `remotes/…` is not a branch.
+ */
+function destinationBranch(destination: string): string | null {
+  if (destination.startsWith("refs/heads/")) return destination.slice("refs/heads/".length);
+  if (destination.startsWith("refs/")) return null;
+  if (destination.startsWith("heads/")) return destination.slice("heads/".length);
+  if (destination.startsWith("tags/") || destination.startsWith("remotes/")) return null;
+  return destination;
+}
+
+/** The branch names every push reading treats as a trunk. */
+const TRUNK_BRANCHES: readonly string[] = ["main", "master"];
+
+/**
+ * Is this branch a trunk? Compared without case: on a case-insensitive
+ * filesystem a remote's loose `refs/heads/MAIN` is its `refs/heads/main`.
+ */
+function isTrunkBranch(branch: string, trunks: readonly string[]): boolean {
+  const lower = branch.toLowerCase();
+  return trunks.some((trunk) => trunk.toLowerCase() === lower);
 }
 
 /** Does either source or destination of this refspec explicitly name a tag? */
@@ -1702,6 +2543,30 @@ interface PushFacts {
   /** Pushes every branch (`--all`, `--mirror`, a submodule push): the trunk among them. */
   all: boolean;
   refspecs: string[];
+  /**
+   * What a colon-less `HEAD` or `@` refspec pushes to (APRV-518). Absent: the
+   * word is read as a branch of that name, which is the answer this row gave
+   * before and is the floor. Present: the branch it stands for, `main` when
+   * the current branch is the trunk or cannot be known.
+   */
+  headAs?: string;
+  /**
+   * Branch names that are trunks beside main and master (APRV-518): the
+   * branch `refs/remotes/origin/HEAD` names, when the hook could read it.
+   */
+  trunks?: readonly string[];
+}
+
+/**
+ * A refspec that pushes the current branch to the branch of the same name
+ * (APRV-518): `HEAD` or `@` with no `:dst`. Which branch that is, is a fact
+ * about the checkout, so the text alone cannot say it is not the trunk. Any
+ * case, because on a case-insensitive filesystem `git push origin head`
+ * resolves the file `.git/HEAD` and pushes the current branch too (git 2.50.1
+ * on macOS, proven in tests/git-push-remote-config.test.ts).
+ */
+export function isCurrentBranchRefspec(refspec: string): boolean {
+  return /^(?:head|@)$/iu.test(refspec);
 }
 
 /**
@@ -1779,20 +2644,35 @@ function pushFactsClass(facts: PushFacts): Refinement & { class: string } {
     return { class: REF_DELETE_CLASS, rule: "git-ref-delete", path: deleted.join(" ") };
   }
   let sawMain = facts.all;
+  // Did the trunk come ONLY from a `HEAD`/`@` that stands for it (APRV-518)?
+  // Then the rule says so, and the repository-reading pass in the hook knows
+  // which segments a current branch could answer.
+  let headMain = false;
+  const trunks = [...TRUNK_BRANCHES, ...(facts.trunks ?? [])];
   for (const refspec of refspecs) {
     const colon = refspec.indexOf(":");
-    const destination = colon === -1 ? refspec : refspec.slice(colon + 1);
+    if (facts.headAs !== undefined && isCurrentBranchRefspec(refspec)) {
+      const branch = destinationBranch(facts.headAs);
+      if (branch !== null && isTrunkBranch(branch, trunks)) headMain = true;
+      continue;
+    }
+    // A colon-less refspec pushes to the ref its source names, so `heads/main`
+    // alone is the trunk too. A leading `+` has already answered above.
+    const destination = (colon === -1 ? refspec : refspec.slice(colon + 1)).replace(/^\+/u, "");
     if (isUnknownValue(destination)) {
       sawMain = true;
       continue;
     }
-    const branch = destination.replace(/^refs\/heads\//u, "");
-    if (branch === "main" || branch === "master") sawMain = true;
+    const branch = destinationBranch(destination);
+    if (branch !== null && isTrunkBranch(branch, trunks)) sawMain = true;
   }
-  return sawMain
-    ? { class: "vcs.push.main", rule: "git-push-main" }
-    : { class: "vcs.push.branch", rule: "git-push-branch" };
+  if (sawMain) return { class: "vcs.push.main", rule: "git-push-main" };
+  if (headMain) return { class: "vcs.push.main", rule: GIT_PUSH_HEAD_RULE_ID };
+  return { class: "vcs.push.branch", rule: "git-push-branch" };
 }
+
+/** A `git push` whose `HEAD`/`@` may be the trunk (APRV-518). */
+const GIT_PUSH_HEAD_RULE_ID = "git-push-head";
 
 /**
  * `git push`, read twice and answered by the stricter reading (APRV-517).
@@ -1813,24 +2693,260 @@ function pushFactsClass(facts: PushFacts): Refinement & { class: string } {
  * refs are the ones git will act on.
  */
 function refineGitPush(ctx: RuleContext): Refinement {
-  const floor = pushFactsClass(wordPushFacts(ctx.args.slice(1)));
-  const split = splitGitPush(ctx.args);
+  return gitPushClass(ctx.args, ctx.assignments, ctx.substituted, { kind: "text" });
+}
+
+// ---------------------------------------------------------------------------
+// What the repository says about a push (APRV-518)
+// ---------------------------------------------------------------------------
+
+/**
+ * The facts of a checkout that decide what a `git push` sends when its text
+ * does not (APRV-518). `src/cli/hook.ts` reads them with plumbing and hands
+ * them in; this file never touches the disk.
+ *
+ * Four things the command line alone cannot show, each proven against git
+ * 2.50.1 on a bare local remote in tests/git-push-remote-config.test.ts:
+ *
+ * - `remote.<name>.mirror` turns a refspec-less push to that remote into
+ *   `--mirror`: every remote branch the checkout lacks is deleted and every
+ *   other one is force-updated. `--tags` and `--all` do not stop it.
+ * - `remote.<name>.push` is the refspec list of a refspec-less push, so
+ *   `:refs/heads/x` there deletes and `+…` there forces; and a colon-less
+ *   refspec on the command line (`git push origin lane`) takes its
+ *   destination AND its force from the configured refspec that maps it, so
+ *   `+refs/heads/lane:refs/heads/main` makes `git push origin lane` a forced
+ *   update of the trunk.
+ * - `HEAD` and `@` push the current branch, which may be the trunk. They do
+ *   not take a configured mapping.
+ * - A colon-less word naming a local tag (`git push origin t1`) publishes the
+ *   tag; `push.followTags` publishes tags beside any push, and
+ *   `push.recurseSubmodules` (or `submodule.recurse`) pushes submodule
+ *   branches, which may be their trunks.
+ */
+export interface PushRepoFacts {
+  /** The current branch's short name, or `null` when HEAD is detached or names no branch. */
+  head: string | null;
+  /** Is `head` a trunk: `main`, `master`, or the branch `refs/remotes/origin/HEAD` names? */
+  headIsDefault: boolean;
+  /** The branch `refs/remotes/origin/HEAD` names, or `null`; a trunk beside main and master. */
+  defaultBranch: string | null;
+  /**
+   * Every remote configuration names a `mirror` or `push` key for, by its
+   * subsection name verbatim (a URL can be one: `[remote "../r.git"]` applies
+   * to `git push ../r.git`).
+   */
+  remotes: ReadonlyMap<string, { mirror: boolean; push: readonly string[] }>;
+  /**
+   * Names with a legacy `$GIT_DIR/remotes/<name>` or `branches/<name>` file.
+   * Those files can carry `Push:` lines this pass does not parse, so a push
+   * that may use one is read as unreadable.
+   */
+  legacyRemotes: readonly string[];
+  /** Short names under `refs/tags/`. */
+  tags: ReadonlySet<string>;
+  /** `push.followTags` is on. */
+  followTags: boolean;
+  /** `push.recurseSubmodules` (or, unset, `submodule.recurse`) pushes submodules. */
+  submodules: boolean;
+}
+
+/** How much a `git push` reading may know beyond its text. */
+type PushRepoView =
+  /** The pure classifier: no repository, a `HEAD` may be the trunk. */
+  | { kind: "text" }
+  /** The hook tried and could not read the checkout the push runs in. */
+  | { kind: "unreadable" }
+  | { kind: "read"; facts: PushRepoFacts };
+
+/** The rule a push takes when the configuration that decides it cannot be read. */
+const GIT_PUSH_CONFIG_UNREADABLE_RULE = "git-push-config-unreadable";
+
+/**
+ * The rule ids the `git-push` row answers with, so the repository pass in the
+ * hook can find the segments it may need to re-read.
+ */
+export const GIT_PUSH_RULES: readonly string[] = [
+  "git-push-force",
+  "git-push-tag",
+  "git-ref-delete",
+  "git-push-prune",
+  "git-push-implicit",
+  "git-push-main",
+  GIT_PUSH_HEAD_RULE_ID,
+  "git-push-branch",
+  "git-push-unreadable",
+];
+
+/** The strictest of several push answers; on a tie the earliest is kept. */
+function strictestPush(candidates: readonly (Refinement & { class: string })[]): Refinement & { class: string } {
+  let best = candidates[0] as Refinement & { class: string };
+  for (const candidate of candidates.slice(1)) {
+    if (PUSH_CLASS_ORDER.indexOf(candidate.class) < PUSH_CLASS_ORDER.indexOf(best.class)) best = candidate;
+  }
+  return best;
+}
+
+/**
+ * `git push` under one {@link PushRepoView}. `args` are the words after the
+ * `git` binary, `push` and any global options in front of it included.
+ *
+ * Every view keeps APRV-517's two readings (the git grammar and the old word
+ * scan, stricter wins), so nothing here answers looser than the classifier
+ * did before this task. What the view adds:
+ *
+ * - `text`: a colon-less `HEAD`/`@` may be the trunk, so it reads as one.
+ * - `unreadable`: a push whose refs or remote configuration decides (no
+ *   refspec, or a colon-less refspec other than `HEAD`/`@`) is
+ *   `vcs.history.rewrite`, because configuration can make either a mirror or
+ *   a forced update; a `HEAD`/`@` alone, which takes no configured mapping,
+ *   reads as the trunk.
+ * - `read`: the current branch answers `HEAD`/`@`, and mirror, configured
+ *   refspecs, local tags, `push.followTags` and submodule recursion each add
+ *   the class they imply.
+ */
+function gitPushClass(
+  args: readonly string[],
+  assignments: readonly string[],
+  substituted: boolean,
+  view: PushRepoView,
+): Refinement {
+  const floor = pushFactsClass(wordPushFacts(args.slice(1)));
+  const split = splitGitPush(args);
   if (split === null) return { opaque: "git push: the push subcommand is not where the classifier found it" };
-  const parsed = parseGitPushArgv(split.words, ctx.assignments, ctx.substituted, split.globals);
+  const parsed = parseGitPushArgv(split.words, assignments, substituted, split.globals);
   if (!parsed.ok) {
     if (parsed.kind === "unreadable") return { class: "vcs.history.rewrite", rule: "git-push-unreadable" };
     return { opaque: parsed.detail };
   }
   const { reading } = parsed;
-  const exact = pushFactsClass({
+  const refspecs = reading.positionals.slice(1);
+  const base = {
     force: reading.force,
     tags: reading.tags,
     remove: reading.remove,
     prune: reading.prune,
     all: reading.all,
-    refspecs: reading.positionals.slice(1),
-  });
-  return PUSH_CLASS_ORDER.indexOf(floor.class) < PUSH_CLASS_ORDER.indexOf(exact.class) ? floor : exact;
+    refspecs,
+  };
+  // Colon-less refspecs other than `HEAD`/`@`: their destination, and their
+  // force, come from a configured refspec when one maps them. A deletion's
+  // refs do not (`--delete x` removes `x` whatever `remote.*.push` says).
+  const named = refspecs.filter((refspec) => !refspec.includes(":") && !isCurrentBranchRefspec(refspec));
+  const configDecides = !reading.remove && (refspecs.length === 0 || named.length > 0);
+
+  if (view.kind === "text") return strictestPush([pushFactsClass({ ...base, headAs: "main" }), floor]);
+  if (view.kind === "unreadable") {
+    if (configDecides) return { class: "vcs.history.rewrite", rule: GIT_PUSH_CONFIG_UNREADABLE_RULE };
+    // The refs are on the line, but `push.followTags` (or submodule
+    // recursion) may add a tag publication the configuration alone decides.
+    // A push that only deletes pushes no tags.
+    const pushesRefs = !reading.remove && refspecs.some((refspec) => deletedRef(refspec) === null);
+    const configured: (Refinement & { class: string })[] = pushesRefs
+      ? [{ class: "release.publish", rule: GIT_PUSH_CONFIG_UNREADABLE_RULE }]
+      : [];
+    return strictestPush([pushFactsClass({ ...base, headAs: "main" }), floor, ...configured]);
+  }
+
+  const { facts } = view;
+  const remoteWord = reading.positionals[0];
+  // No repository word (`git push`, `git push --repo=m`): the push may use any
+  // configured remote, so every one of them is in play.
+  const inPlay = remoteWord === undefined ? [...facts.remotes.keys()] : [remoteWord];
+  const legacy =
+    remoteWord === undefined ? facts.legacyRemotes.length > 0 : facts.legacyRemotes.includes(remoteWord);
+  if (legacy) return { class: "vcs.history.rewrite", rule: GIT_PUSH_CONFIG_UNREADABLE_RULE };
+
+  const headAs = facts.head === null || facts.headIsDefault ? "main" : `refs/heads/${facts.head}`;
+  const trunks = facts.defaultBranch === null ? [] : [facts.defaultBranch];
+  const candidates: (Refinement & { class: string })[] = [pushFactsClass({ ...base, headAs, trunks }), floor];
+  const mirrored = inPlay.filter((name) => facts.remotes.get(name)?.mirror === true);
+  if (mirrored.length > 0) {
+    // A mirror push forces and deletes. With a refspec on the line git refuses
+    // to run at all, which the stricter reading costs nothing to cover.
+    candidates.push({ class: "vcs.history.rewrite", rule: "git-push-config-mirror", path: mirrored.join(" ") });
+  }
+  if (configDecides) {
+    const configured = inPlay.flatMap((name) => facts.remotes.get(name)?.push ?? []);
+    if (configured.length > 0) {
+      const answer = pushFactsClass({
+        force: false,
+        tags: false,
+        remove: false,
+        prune: false,
+        all: false,
+        refspecs: [...configured],
+        trunks,
+      });
+      candidates.push({
+        class: answer.class,
+        rule: "git-push-config-refspec",
+        ...("path" in answer && answer.path !== undefined ? { path: answer.path } : {}),
+      });
+    }
+  }
+  const localTags = named
+    .map((refspec) => refspec.replace(/^\+/u, ""))
+    .filter((name) => facts.tags.has(name));
+  if (localTags.length > 0) {
+    candidates.push({ class: "release.publish", rule: "git-push-local-tag", path: localTags.join(" ") });
+  }
+  if (!reading.remove && facts.followTags) {
+    candidates.push({ class: "release.publish", rule: "git-push-config-tags" });
+  }
+  if (!reading.remove && facts.submodules) {
+    candidates.push({ class: "vcs.push.main", rule: "git-push-config-submodules" });
+  }
+  return strictestPush(candidates);
+}
+
+/**
+ * One `git push` segment re-read under what the checkout says (APRV-518).
+ *
+ * `segmentText` is a {@link ClassifiedSegment.text} the classifier answered
+ * with one of {@link GIT_PUSH_RULES}; it is lexed again by the SAME lexer, and
+ * a sandbox wrapper is opened the same way {@link classifySegment} opens it,
+ * so the argv judged here is the argv the classifier judged. `facts` holds
+ * one entry per directory the push may run in (the strictest answer wins),
+ * and is `null` when the hook could not read one of them.
+ *
+ * Returns `null` when the text is not exactly one direct `git push` (the
+ * caller then fails closed), and never an answer looser than the pure
+ * classifier's except one: a `HEAD`/`@` the current branch shows is not the
+ * trunk, which is the `vcs.push.branch` the classifier gave before APRV-518.
+ */
+export function gitPushSegmentClass(
+  segmentText: string,
+  facts: readonly PushRepoFacts[] | null,
+): { class: string; rule: string; path?: string } | null {
+  const lexed = lex(segmentText);
+  if (!lexed.ok || lexed.segments.length !== 1) return null;
+  const segment = lexed.segments[0] as LexSegment;
+  if (segment.opaque !== null) return null;
+  const words = segment.words.map((word) => word.text);
+  let cursor = 0;
+  while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+  const assignments = words.slice(0, cursor);
+  for (let depth = 0; depth < SANDBOX_WRAPPER_DEPTH; depth += 1) {
+    const found = sandboxWrapper(words, cursor);
+    if (found === null) break;
+    if (found.kind === "unreadable") return null;
+    cursor += found.skip;
+  }
+  const bin = words[cursor];
+  if (bin === undefined || (pathSegments(bin).slice(-1)[0] ?? bin) !== "git") return null;
+  const substituted = segment.words.slice(cursor + 1).some((word) => word.substitutions.length > 0);
+  const views: PushRepoView[] =
+    facts === null ? [{ kind: "unreadable" }] : facts.map((one) => ({ kind: "read", facts: one }));
+  const answers: (Refinement & { class: string })[] = [];
+  for (const view of views) {
+    const answer = gitPushClass(words.slice(cursor + 1), assignments, substituted, view);
+    if ("opaque" in answer) return null;
+    answers.push(answer);
+  }
+  if (answers.length === 0) return null;
+  const { class: cls, rule, path } = strictestPush(answers) as { class: string; rule: string; path?: string };
+  return { class: cls, rule, ...(path === undefined ? {} : { path }) };
 }
 
 /**
@@ -2046,7 +3162,113 @@ function refineHarness(ctx: RuleContext): Refinement {
   if (name === undefined) {
     return { opaque: `${ctx.bin} is an agent harness this table cannot name` };
   }
+  if (name === "hermes") {
+    const organWrite = hermesOrganWrite(ctx.args);
+    if (organWrite !== null) return organWrite;
+  }
   return harnessRefinement(name, ctx.args);
+}
+
+/** The rule id a `hermes` subcommand that rewrites the home's organs takes (APRV-511). */
+const HERMES_ORGAN_WRITE_RULE = "hermes-organ-write";
+
+/**
+ * `hermes` subcommands that rewrite the gate's organs, each with the verbs that
+ * only read (APRV-511), read off Hermes v2026.9.24's parsers and dispatchers. A
+ * verb not on the read list is the write, so a verb a later Hermes adds is
+ * assumed to change something. `bare` is what the group does with no verb:
+ * `hermes config` shows the configuration and `hermes hooks` prints usage, while
+ * bare `hermes plugins` opens the interactive enable/disable toggle.
+ *
+ * - `plugins` installs, updates, removes, enables and disables code under
+ *   `$HERMES_HOME/plugins/` and the `plugins.enabled`/`disabled` lists in
+ *   `config.yaml`; `pack install` does the same in bulk.
+ * - `config` `set`/`unset`/`edit`/`migrate` rewrite `config.yaml`.
+ * - `hooks` `revoke` (`remove`, `rm`) rewrites the consent allowlist.
+ * - `update` rewrites `$HERMES_HOME/hermes-agent/`, and `uninstall` removes it.
+ *
+ * A write through the CLI is the same act as the file write it performs, so it
+ * takes the same class, `policy.core`. On an Agent Village box the overlay
+ * installs and enables plugins at provisioning, outside any hooked tool call.
+ * Every other subcommand keeps `harness.launch.hermes`.
+ */
+const HERMES_ORGAN_SUBCOMMANDS: Readonly<Record<string, { reads: readonly string[]; bare: "read" | "write" }>> = {
+  plugins: {
+    reads: ["search", "browse", "validate", "list", "ls", "capabilities", "doctor", "compat", "show", "info"],
+    bare: "write",
+  },
+  config: { reads: ["show", "get", "path", "env-path", "check"], bare: "read" },
+  hooks: { reads: ["list", "ls", "test", "doctor"], bare: "read" },
+  update: { reads: [], bare: "write" },
+  uninstall: { reads: [], bare: "write" },
+};
+
+/**
+ * The `policy.core` answer for a `hermes` argv that rewrites an organ, or
+ * `null` for every other argv (APRV-511).
+ *
+ * The classifier does not know which of Hermes's flags take a value, so a word
+ * directly after a flag written without `=` may be that flag's value, and every
+ * reading below that depends on such a word resolves to the write:
+ *
+ * - The subcommand is the first word that is not a flag, skipping a word that
+ *   directly follows a flag (`hermes -p work plugins install x`). A group word
+ *   in that position is still taken as the group, the stricter reading.
+ * - The verb is the first word after the group that is not a flag. When it
+ *   directly follows a flag (`hermes plugins --source list install x`, where
+ *   `list` may be the value), the verb is unknown and the answer is the write.
+ * - A help request (`--help`, `-h`) keeps the earlier answer only as a flag in
+ *   its own right: argparse prints usage and exits before any handler runs. It
+ *   is not honoured when it directly follows a flag (`hermes plugins install
+ *   --name --help`, where it may be the value), nor after `--`.
+ * - An end-of-options `--` anywhere in the argv makes every later word a
+ *   positional to the real CLI (`hermes plugins install x -- --help` installs),
+ *   so an organ group's argv carrying one is the write, whatever else it says,
+ *   and so is an organ group word after a leading `--` (`hermes -- plugins
+ *   install x`), which argparse still dispatches to the subcommand.
+ *
+ * `hermes plugins --help install x` is a read: the `plugins` parser meets
+ * `--help` before the verb and exits with usage.
+ */
+function hermesOrganWrite(args: readonly string[]): Refinement | null {
+  const write: Refinement = { class: "policy.core", rule: HERMES_ORGAN_WRITE_RULE, path: args.join(" ") };
+  /** Could `args[index]` be the value of the flag before it? */
+  const mayBeValue = (index: number): boolean => {
+    const previous = index === 0 ? undefined : args[index - 1];
+    return previous !== undefined && previous.startsWith("-") && previous !== "--" && !previous.includes("=");
+  };
+  let at = -1;
+  for (const [index, arg] of args.entries()) {
+    if (arg === "--") {
+      // argparse still hands a subcommand word after `--` to its subparsers
+      // (`hermes -- plugins install x`), so an organ group there is the write.
+      return args.slice(index + 1).some((word) => Object.hasOwn(HERMES_ORGAN_SUBCOMMANDS, word)) ? write : null;
+    }
+    if (arg.startsWith("-")) continue;
+    if (Object.hasOwn(HERMES_ORGAN_SUBCOMMANDS, arg)) {
+      at = index;
+      break;
+    }
+    if (mayBeValue(index)) continue;
+    return null;
+  }
+  if (at === -1) return null;
+  if (args.includes("--")) return write;
+  const helped = args.some((arg, index) => (arg === "--help" || arg === "-h") && !mayBeValue(index));
+  if (helped) return null;
+  const spec = HERMES_ORGAN_SUBCOMMANDS[args[at] as string] as { reads: readonly string[]; bare: "read" | "write" };
+  const verbAt = args.findIndex((arg, index) => index > at && !arg.startsWith("-"));
+  if (verbAt === -1) return spec.bare === "read" ? null : write;
+  if (mayBeValue(verbAt)) return write;
+  const verb = args[verbAt] as string;
+  if (spec.reads.includes(verb)) return null;
+  // `plugins pack` writes only in its `install` form.
+  if (args[at] === "plugins" && verb === "pack") {
+    const formAt = args.findIndex((arg, index) => index > verbAt && !arg.startsWith("-"));
+    const form = formAt === -1 ? undefined : args[formAt];
+    if ((form === "show" || form === "export") && !mayBeValue(formAt)) return null;
+  }
+  return write;
 }
 
 /**
@@ -2074,7 +3296,8 @@ const HARNESS_RULES: readonly CommandRule[] = Object.entries(HARNESS_BINS).map((
   id: `${HARNESS_LAUNCH_RULE_PREFIX}${name}`,
   bins: [bin],
   class: `${HARNESS_LAUNCH_PREFIX}${name}`,
-  emits: [HARNESS_PROBE_CLASS],
+  // APRV-511: `hermes plugins install` and its kin rewrite the home's organs.
+  emits: name === "hermes" ? [HARNESS_PROBE_CLASS, "policy.core"] : [HARNESS_PROBE_CLASS],
   refine: refineHarness,
 }));
 
@@ -2164,6 +3387,28 @@ function escapedReadTarget(
   return null;
 }
 
+/**
+ * The first `<` target the text places outside every root, or `null`
+ * (APRV-522, S2). The same verdict a positional read target gets: a `<` opens
+ * its target for reading, so a reader fed a file through `<` reads the file
+ * it would read named as a positional. A relative target is `needs-disk` and is left to the
+ * hook's disk pass, as a relative positional is.
+ */
+function redirectReadEscape(
+  readTargets: readonly string[],
+  roots: readonly string[],
+): { path: string; rule: string } | null {
+  for (const target of readTargets) {
+    if (readTargetVerdict(target, roots) === "out-of-scope") {
+      return {
+        path: target,
+        rule: isUnreadableTarget(target) ? READ_UNREADABLE_TARGET_RULE : READ_OUT_OF_SCOPE_RULE,
+      };
+    }
+  }
+  return null;
+}
+
 /** `rm` — everything outside the workspace, and every unreadable path, is manual. */
 function refineRm(ctx: RuleContext): Refinement {
   const recursive =
@@ -2192,6 +3437,338 @@ function refineRm(ctx: RuleContext): Refinement {
   return { class: "files.write.workspace", rule: "rm-workspace" };
 }
 
+// ---------------------------------------------------------------------------
+// git global options (APRV-520)
+// ---------------------------------------------------------------------------
+
+/**
+ * The git global options that take a value, read from git 2.50.1's
+ * `handle_options` table (the options git(1) lists between `git` and
+ * `<command>`, plus the undocumented `--shallow-file`; the strings are in the
+ * installed binary). The separate spelling consumes the NEXT argv word, so the
+ * first positional this classifier reads is that value and not the subcommand:
+ * `git -C status push --force origin main` is a force push in the directory
+ * `status`, and it classified as `read.shell`. The `=`-joined long spellings
+ * shift nothing, but they repoint the repository, its configuration or (for
+ * `--exec-path=`) the directory git runs its helpers and hooks from, which is
+ * the same question this table answers for the separate spelling: what does
+ * the command act on? So every one of them leaves the segment `unclassified`,
+ * which the hook refuses (`hook-unclassified`, in every mode, an open window
+ * included), rather than this classifier re-deriving the subcommand.
+ * `--super-prefix` is gone from git 2.50 and kept here because an older git
+ * still consumes its value.
+ */
+const GIT_VALUE_GLOBALS: readonly string[] = [
+  "-C",
+  "-c",
+  "--config-env",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--super-prefix",
+  "--attr-source",
+  "--shallow-file",
+];
+
+/** The `=`-joined long spellings git accepts for a value-taking global. */
+const GIT_JOINED_VALUE_GLOBALS: readonly string[] = [
+  "--config-env=",
+  "--git-dir=",
+  "--work-tree=",
+  "--namespace=",
+  "--super-prefix=",
+  "--attr-source=",
+  "--exec-path=",
+];
+
+/**
+ * The git global options that take no value, exactly as git 2.50.1 spells
+ * them (no prefix abbreviation: git compares each one whole). Each is skipped
+ * as it was before APRV-520. `--html-path`, `--man-path`, `--info-path`, a bare
+ * `--exec-path` and `--list-cmds=` print and exit before any subcommand runs,
+ * so reading on past them only ever answers stricter than git behaves.
+ */
+const GIT_ZERO_VALUE_GLOBALS: readonly string[] = [
+  "-p",
+  "--paginate",
+  "-P",
+  "--no-pager",
+  "--no-replace-objects",
+  "--no-lazy-fetch",
+  "--bare",
+  "--literal-pathspecs",
+  "--no-literal-pathspecs",
+  "--glob-pathspecs",
+  "--noglob-pathspecs",
+  "--icase-pathspecs",
+  "--no-optional-locks",
+  "--no-advice",
+  "--html-path",
+  "--man-path",
+  "--info-path",
+  "--exec-path",
+];
+
+/**
+ * The options at which git stops reading globals: it runs `git version` or
+ * `git help` with the rest of the line as that command's arguments. Left to
+ * the handling they had before APRV-520.
+ */
+const GIT_GLOBALS_END: readonly string[] = ["-h", "--help", "-v", "--version"];
+
+/**
+ * Why the git global options in front of the subcommand leave this segment
+ * `unclassified`, or `null` when they do not (APRV-520). Only the words before
+ * the first non-flag word are globals; after it they belong to the subcommand
+ * (`git commit -C <commit>` is the commit's own option).
+ */
+function gitGlobalRefusal(args: readonly string[]): string | null {
+  for (const word of args) {
+    if (!isFlag(word) || GIT_GLOBALS_END.includes(word)) return null;
+    if (GIT_ZERO_VALUE_GLOBALS.includes(word) || word.startsWith("--list-cmds=")) continue;
+    if (GIT_VALUE_GLOBALS.includes(word)) {
+      return `no rule for git ${word} <value>: the global option takes the next word as its value, so the first positional is not the subcommand`;
+    }
+    const joined = GIT_JOINED_VALUE_GLOBALS.find((prefix) => word.startsWith(prefix));
+    if (joined !== undefined) {
+      return `no rule for git ${joined}<value>: the global option repoints what the subcommand acts on`;
+    }
+    return `no rule for the git global option ${word}: an option this classifier does not know may take the next word as its value`;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Environment assignments in front of git (APRV-521)
+// ---------------------------------------------------------------------------
+
+/**
+ * The `NAME=value` words that may stand in front of `git`, compared as whole
+ * words (APRV-521). A CLOSED list: any other assignment in front of `git`
+ * leaves the segment `unclassified`, because git(1)'s ENVIRONMENT section is
+ * mostly variables that run a program (`GIT_PAGER`, `GIT_EDITOR`,
+ * `GIT_SEQUENCE_EDITOR`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`,
+ * `GIT_EXTERNAL_DIFF`), repoint the repository (`GIT_DIR`, `GIT_WORK_TREE`,
+ * `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+ * `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_NAMESPACE`,
+ * `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`), redirect the
+ * configuration (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`,
+ * `GIT_CONFIG_NOSYSTEM`, and git-config(1)'s `GIT_CONFIG_COUNT`,
+ * `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>`; `GIT_CONFIG_PARAMETERS` is the
+ * internal carrier of `-c`), move the helper directory (`GIT_EXEC_PATH`), or
+ * write a file (`GIT_TRACE*=<absolute path>` appends to it). `GIT_PAGER=evil
+ * git log` ran `evil` and classified `read.shell`.
+ *
+ * Each entry below can only remove a program git would otherwise run, or
+ * swap it for a no-op, and none names a path, a repository or configuration:
+ *
+ * - `GIT_TERMINAL_PROMPT=0`: git(1), "If this Boolean environment variable is
+ *   set to false, git will not prompt on the terminal". It silences a prompt.
+ * - `GIT_PAGER=cat`: git(1), "If it is set to an empty string or to the value
+ *   "cat", Git will not launch a pager". No program runs.
+ * - `PAGER=cat`: git(1) GIT_PAGER "overrides $PAGER", and the same `cat` test
+ *   applies to whichever source supplied the pager. Where `GIT_PAGER` or
+ *   `core.pager` is set, that pager runs with or without this word.
+ * - `GIT_EDITOR=true`, `GIT_EDITOR=:`: git(1) GIT_EDITOR "overrides $EDITOR and
+ *   $VISUAL". git skips the editor outright for `:` and runs the no-op `true`
+ *   otherwise, so the file is left as git wrote it. `GIT_SEQUENCE_EDITOR`
+ *   still outranks it for a rebase todo list, exactly as without the word.
+ * - `EDITOR=true`, `EDITOR=:`, `VISUAL=true`, `VISUAL=:`: the fallbacks below
+ *   `GIT_EDITOR` and `core.editor`, set to the same no-ops. These four and the
+ *   two above are APRV-433's (#648) harmless-assignment list, kept equal so a
+ *   spelling that list judges local is not refused here first.
+ *
+ * {@link isHarmlessGitAssignment} also admits the locale and the zone with a
+ * plain value. git(1) names neither: git reads them only through the C library
+ * (`setlocale`, `localtime`), and a value with no `/` and no `..` is looked up
+ * inside the system's locale or zone database, never as a file the agent
+ * chose. `LANGUAGE` is left out (git(1) does not name it either, and its
+ * colon list is read by gettext).
+ */
+const GIT_HARMLESS_ASSIGNMENTS: readonly string[] = [
+  "GIT_TERMINAL_PROMPT=0",
+  "GIT_PAGER=cat",
+  "PAGER=cat",
+  "GIT_EDITOR=true",
+  "GIT_EDITOR=:",
+  "EDITOR=true",
+  "EDITOR=:",
+  "VISUAL=true",
+  "VISUAL=:",
+];
+
+/** The locale variables, POSIX's and glibc's, admitted with a plain value. */
+const GIT_LOCALE_NAMES: readonly string[] = [
+  "LANG",
+  "LC_ALL",
+  "LC_COLLATE",
+  "LC_CTYPE",
+  "LC_MESSAGES",
+  "LC_MONETARY",
+  "LC_NUMERIC",
+  "LC_TIME",
+  "LC_ADDRESS",
+  "LC_IDENTIFICATION",
+  "LC_MEASUREMENT",
+  "LC_NAME",
+  "LC_PAPER",
+  "LC_TELEPHONE",
+];
+
+/** A locale name (`C`, `POSIX`, `C.UTF-8`, `en_US.UTF-8`, `sr_RS@latin`), never a path. */
+const PLAIN_LOCALE = /^[A-Za-z][A-Za-z0-9_@.-]*$/u;
+
+/**
+ * May this assignment word stand in front of `git` without changing what the
+ * subcommand runs, reads or writes ({@link GIT_HARMLESS_ASSIGNMENTS})? A word
+ * carrying a command substitution never may: its value is not in the text.
+ */
+function isHarmlessGitAssignment(word: LexWord): boolean {
+  if (word.substitutions.length > 0) return false;
+  const text = word.text;
+  // Only the plain `NAME=value` spelling ({@link PLAIN_ASSIGNMENT}).
+  if (!PLAIN_ASSIGNMENT.test(text)) return false;
+  if (GIT_HARMLESS_ASSIGNMENTS.includes(text)) return true;
+  const equals = text.indexOf("=");
+  if (equals <= 0) return false;
+  const name = text.slice(0, equals);
+  const value = text.slice(equals + 1);
+  if (name === "TZ") return isZoneValue(value);
+  if (GIT_LOCALE_NAMES.includes(name)) return PLAIN_LOCALE.test(value) && !value.includes("..");
+  return false;
+}
+
+/**
+ * Why the assignments in front of `git` leave the segment `unclassified`, or
+ * `null` when every one is harmless (APRV-521).
+ */
+function gitAssignmentRefusal(prefix: readonly LexWord[]): string | null {
+  const word = prefix.find((candidate) => !isHarmlessGitAssignment(candidate));
+  if (word === undefined) return null;
+  return `no rule for ${assignmentHead(word.text)}… in front of git: an environment assignment can run a program, repoint the repository or its configuration, or write a file`;
+}
+
+/**
+ * Is this a variable git, or a program git starts (its pager, editor, ssh,
+ * askpass helper, hooks), reads to pick a program, a library, a repository,
+ * configuration or a file to write (APRV-521)? Read by the command-line scan
+ * ({@link gitEnvironmentWrite}) and the bare-assignment rule, where a value
+ * reaches git only if the name was already exported: so the scan is bounded
+ * to these names, and an ordinary script variable (`b=$(git branch
+ * --show-current); git push origin "$b"`) is left alone. In front of `git`
+ * itself no name is trusted: {@link gitAssignmentRefusal} is a closed list.
+ */
+function isGitInheritedName(name: string): boolean {
+  if (/^(?:GIT_|XDG_|LESS|LC_|LD_|DYLD_)/u.test(name)) return true;
+  return [
+    "PAGER",
+    "EDITOR",
+    "VISUAL",
+    "LV",
+    "HOME",
+    "PATH",
+    "TMPDIR",
+    "SSH_ASKPASS",
+    "BASH_ENV",
+    "ENV",
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    "TZDIR",
+    "LOCPATH",
+    "GCONV_PATH",
+    "GNUPGHOME",
+  ].includes(name);
+}
+
+/** The builtins that set or export a variable named in their arguments. */
+const SHELL_SETTING_BUILTINS: readonly string[] = ["export", "declare", "typeset", "readonly", "local"];
+
+/**
+ * POSIX's special builtins: an assignment in front of one persists in the
+ * shell (in `sh` and in bash's POSIX mode) rather than reaching that command
+ * alone.
+ */
+const POSIX_SPECIAL_BUILTINS: readonly string[] = [
+  ":",
+  ".",
+  "break",
+  "continue",
+  "eval",
+  "exec",
+  "exit",
+  "export",
+  "readonly",
+  "return",
+  "set",
+  "shift",
+  "times",
+  "trap",
+  "unset",
+];
+
+/**
+ * `${NAME=word}` and `${NAME:=word}` assign NAME in the shell that expands
+ * them, and so do `${NAME[i]=word}` and `${NAME[i]:=word}` (review-b N2).
+ */
+const PARAMETER_ASSIGNMENT = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?:?=/u;
+
+/**
+ * The first variable git could inherit ({@link isGitInheritedName}) that this
+ * command line's own shell sets to something other than a harmless value, or
+ * `null` (APRV-521). Counted: a bare `NAME=value` (it reaches every later
+ * command when NAME is already exported), an assignment in front of a POSIX
+ * special builtin, the arguments of `export`, `declare`, `typeset`, `readonly`
+ * and `local` (a bare `export NAME` exports a value the text does not show),
+ * `printf -v NAME`, and `${NAME=word}` / `${NAME:=word}` in any word.
+ *
+ * The whole line is read, not just the part before a `git` segment: a loop
+ * body runs again after its own later assignments. A subshell or a pipeline
+ * stage that keeps its assignment to itself is counted too, which only ever
+ * refuses more.
+ */
+function gitEnvironmentWrite(segments: readonly LexSegment[]): string | null {
+  const nameOf = assignedName;
+  for (const segment of segments) {
+    const words = segment.words;
+    let cursor = 0;
+    while (cursor < words.length && ASSIGNMENT.test((words[cursor] as LexWord).text)) cursor += 1;
+    const binWord = words[cursor];
+    const base = binWord === undefined ? null : (pathSegments(binWord.text).slice(-1)[0] ?? binWord.text);
+    if (base === null || POSIX_SPECIAL_BUILTINS.includes(base)) {
+      for (const word of words.slice(0, cursor)) {
+        if (isGitInheritedName(nameOf(word.text)) && !isHarmlessGitAssignment(word)) return nameOf(word.text);
+      }
+    }
+    if (base !== null && SHELL_SETTING_BUILTINS.includes(base)) {
+      for (const word of words.slice(cursor + 1)) {
+        if (isFlag(word.text)) continue;
+        const name = nameOf(word.text);
+        // The name as written, subscript included: `a[$x]` is not a name the text settles.
+        const written = word.text.includes("=") ? word.text.slice(0, word.text.indexOf("=")) : word.text;
+        if (/[$`]/u.test(written)) return name;
+        if (isGitInheritedName(name) && !isHarmlessGitAssignment(word)) return name;
+      }
+    }
+    if (base === "printf") {
+      const args = words.slice(cursor + 1).map((word) => word.text);
+      for (let at = 0; at < args.length; at += 1) {
+        const arg = args[at] as string;
+        if (arg === "--") break;
+        const name = arg === "-v" ? args[at + 1] : arg.startsWith("-v") ? arg.slice(2) : undefined;
+        if (name === undefined) continue;
+        const bare = name.replace(/\[.*$/su, "");
+        if (/[$`]/u.test(bare) || isGitInheritedName(bare)) return bare;
+      }
+    }
+    for (const word of [...words, ...segment.redirects.map((redirect) => redirect.target)]) {
+      const match = PARAMETER_ASSIGNMENT.exec(word.text);
+      if (match !== null && isGitInheritedName(match[1] as string)) return match[1] as string;
+    }
+  }
+  return null;
+}
+
 /** `git commit --amend` rewrites; a plain commit does not. */
 function refineGitCommit(ctx: RuleContext): Refinement {
   return hasFlag(ctx.args, ["--amend"])
@@ -2204,6 +3781,91 @@ function refineGitReset(ctx: RuleContext): Refinement {
   return hasFlag(ctx.args, ["--hard"])
     ? { class: "vcs.history.rewrite", rule: "git-reset-hard" }
     : { class: "vcs.commit.branch", rule: "git-reset" };
+}
+
+/**
+ * `git remote` that only reads (APRV-518). A closed list; every other form,
+ * and every form whose words the text cannot read, writes.
+ *
+ * `git remote add --mirror=push m <url>` used to be `read.vcs.remote`, and a
+ * following `git push m` read as an implicit `vcs.push.main`. It is a mirror
+ * push: on git 2.50.1 it deleted every remote branch the checkout lacked. The
+ * other writing subcommands move the same configuration around: `rename`
+ * carries a mirror or push refspec onto another name (`origin`), `set-url`
+ * points one at another repository, `set-head` changes the branch
+ * `refs/remotes/origin/HEAD` names (which is how a trunk other than main is
+ * recognised), and `remove`, `prune`, `set-branches` and `update --prune`
+ * delete or re-scope the refs and keys a later reading relies on.
+ *
+ * So a writing form takes the class of the push it can arm, the strictest the
+ * push row answers: a mirror push is `vcs.history.rewrite` (APRV-517 reads
+ * `--mirror` as a force). No narrower existing class fits: `vcs.ref.delete`
+ * is below a mirror push, and `policy.*` is the gate's own surface.
+ *
+ * What reads, and why it is safe to keep reading:
+ *
+ * - `git remote`, `git remote -v` / `--verbose`: lists.
+ * - `show [-n] <name>…`: prints, asking the remote (`-n` asks nothing).
+ * - `get-url [--push] [--all] <name>`: prints a configured URL.
+ * - `update [--no-prune] [<group>|<remote>…]`: `git fetch` of those remotes,
+ *   which is what `git fetch` is everywhere in this table. With `-p` /
+ *   `--prune` (or any other option) it writes.
+ */
+const GIT_REMOTE_WRITE: Refinement = { class: "vcs.history.rewrite", rule: "git-remote-write" };
+const GIT_REMOTE_READ: Refinement = { class: "read.vcs.remote", rule: "git-remote-read" };
+
+function refineGitRemote(ctx: RuleContext): Refinement {
+  if (ctx.sub !== "remote") return GIT_REMOTE_READ;
+  // A word that came out of a substitution may be the subcommand.
+  if (ctx.substituted) return GIT_REMOTE_WRITE;
+  const at = ctx.args.findIndex((word) => !isFlag(word));
+  const rest = ctx.args.slice(at + 1);
+  let index = 0;
+  while (index < rest.length && (rest[index] === "-v" || rest[index] === "--verbose")) index += 1;
+  const sub = rest[index];
+  if (sub === undefined) return GIT_REMOTE_READ;
+  const tail = rest.slice(index + 1);
+  const only = (flags: readonly string[]): boolean =>
+    tail.every((word) => (isFlag(word) ? flags.includes(word) : true));
+  switch (sub) {
+    case "show":
+      return only(["-n"]) ? GIT_REMOTE_READ : GIT_REMOTE_WRITE;
+    case "get-url":
+      return only(["--push", "--all", "--no-push", "--no-all"]) ? GIT_REMOTE_READ : GIT_REMOTE_WRITE;
+    case "update":
+      // A word the shell may expand could be `--prune`.
+      return only(["--no-prune"]) && !tail.some(isUnreadablePushWord) ? GIT_REMOTE_READ : GIT_REMOTE_WRITE;
+    default:
+      return GIT_REMOTE_WRITE;
+  }
+}
+
+/** The rule a write into a git directory takes (APRV-518). */
+const GIT_DIR_WRITE_RULE = "git-dir-write";
+
+/** Does this path have a `.git` segment (the directory, or a worktree's `.git` file)? */
+function namesGitDirectory(word: string): boolean {
+  return pathSegments(word).some((segment) => segment.toLowerCase() === ".git");
+}
+
+/** The rule a write to a git configuration file outside a repository takes (APRV-518). */
+const GIT_CONFIG_FILE_WRITE_RULE = "git-config-file-write";
+
+/**
+ * Is this path one of git's own configuration files outside a repository:
+ * a `.gitconfig` (the user file and its usual include targets), anything
+ * under `.config/git/` (the XDG user directory), or `/etc/gitconfig`? Each
+ * is read by every push, so a write to one arms a push exactly as a write to
+ * `.git/config` does.
+ */
+function namesGitConfigFile(word: string): boolean {
+  const segments = pathSegments(word).map((segment) => segment.toLowerCase());
+  const last = segments[segments.length - 1];
+  if (last === ".gitconfig" || last === "gitconfig") return true;
+  for (let at = 0; at + 2 < segments.length; at += 1) {
+    if (segments[at] === ".config" && segments[at + 1] === "git") return true;
+  }
+  return false;
 }
 
 /** `git branch` reads until it is asked to delete, rename or force-set one. */
@@ -3313,6 +4975,227 @@ function refineSkillScript(ctx: RuleContext): Refinement {
     : { class: SKILL_SCRIPT_CLASS, rule: SKILL_SCRIPT_RULE, path: script };
 }
 
+// ---------------------------------------------------------------------------
+// Opaque agent code (APRV-510)
+// ---------------------------------------------------------------------------
+
+/**
+ * The class an opaque program takes once a policy opens it: an inline program
+ * or an interpreter run of a file the gate cannot read as a skill script.
+ * Under `exec.*` (SPEC.md §7) beside `exec.local`, and deliberately not under
+ * it: `exec.local` is code in the workspace the runtime may name, this is code
+ * whose effect nothing here reads. A record of it says the program EXISTED
+ * (its hash and length), never what it did: every tool call the program then
+ * makes through the harness is its own hook event, and a shell command it
+ * spawns is not seen at all.
+ */
+export const EXEC_CODE_CLASS = "exec.code";
+
+/** The table row that matches the `exec.code` shape. */
+export const EXEC_CODE_ROW = "exec-code";
+
+/** The rule id of an inline program (`python3 -c`, `node -e`, ...). */
+export const EXEC_CODE_INLINE_RULE = "exec-code-inline";
+
+/** The rule id of an interpreter running a file (`python3 x.py`, `bun x.ts`). */
+export const EXEC_CODE_FILE_RULE = "exec-code-file";
+
+/**
+ * The inline-program flag of each interpreter the shape knows (APRV-510).
+ * `deno` is absent because its inline form is a subcommand (`deno eval`).
+ * `node -p` / `--print` is absent on purpose: the brief's list, kept tight.
+ */
+const EXEC_CODE_INLINE_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  python: ["-c"],
+  python3: ["-c"],
+  node: ["-e", "--eval"],
+  bun: ["-e", "--eval"],
+  perl: ["-e", "-E"],
+  ruby: ["-e"],
+};
+
+/** Every binary the `exec.code` row may match. */
+const EXEC_CODE_BINS: readonly string[] = [...Object.keys(EXEC_CODE_INLINE_FLAGS), "deno"];
+
+/**
+ * The interpreters whose FILE runs take `exec.code`. `node <file>` is absent:
+ * the table already answers it (`node-script`, `files.write.workspace`), and a
+ * name the table classifies from its arguments is not re-read here.
+ */
+const EXEC_CODE_FILE_BINS: ReadonlySet<string> = new Set(["python", "python3", "bun"]);
+
+/**
+ * The file a `bun` run must name to be read as a file rather than a
+ * subcommand: bun prefers a subcommand over a file of the same name, so only a
+ * word that cannot be one (a script extension) is taken.
+ */
+const BUN_SCRIPT_FILE = /\.(?:[cm]?[jt]s|[jt]sx)$/u;
+
+/** Where an `exec.code` argv carries its program (an index into the args). */
+export interface ExecCodeShape {
+  mode: ExecCodeMode;
+  /** Index into the args (the words after the binary) of the source word. */
+  index: number;
+}
+
+/** A word as {@link execCodeShape} needs it: its text and whether the shell would change it. */
+interface ExecShapeWord {
+  exact: boolean;
+  substitutions: readonly string[];
+}
+
+/**
+ * The `exec.code` shape of an interpreter argv, or `null` (APRV-510).
+ *
+ * An ALLOWLIST, like {@link skillScriptArg}, and the same flags are inert here:
+ *
+ * - inline: `[inert flags…] <inline flag> <program>`, and NOTHING after the
+ *   program, for every interpreter. A word after it is handed to the program
+ *   (`sys.argv`, `process.argv`, `ARGV`), and a one-line loader
+ *   (`python3 -c 'import sys; exec(sys.argv[1])' '<real program>'`) would put
+ *   the real program there, outside the hash and inside the argv the payload
+ *   carries verbatim (security review of APRV-510, finding 3a). `deno` is
+ *   exactly `deno eval <program>`;
+ * - file (python, python3 and bun only): `[inert flags…] <path> [args…]`,
+ *   where the path is not a skill script (those are `exec.local`, APRV-502)
+ *   and, for `bun`, carries a script extension.
+ *
+ * Anything else is not the shape: a value-taking flag, `--flag=value`, `-m`,
+ * a lone `-` (stdin), an inline flag with no program, two programs, a cluster
+ * hiding the inline flag (`-Ic`), and, when `words` is given, a source word the
+ * shell would still change (`LexWord.exact`) or one built from a substitution:
+ * the hash binds the program's bytes, so the word must BE them.
+ */
+export function execCodeShape(
+  bin: string,
+  args: readonly string[],
+  words: readonly ExecShapeWord[] | null = null,
+): ExecCodeShape | null {
+  const exactAt = (index: number): boolean => {
+    if (words === null) return true;
+    const word = words[index];
+    return word !== undefined && word.exact && word.substitutions.length === 0;
+  };
+  if (bin === "deno") {
+    if (args.length !== 2 || args[0] !== "eval") return null;
+    return exactAt(1) ? { mode: "inline", index: 1 } : null;
+  }
+  const inline = EXEC_CODE_INLINE_FLAGS[bin];
+  if (inline === undefined) return null;
+  const python = bin === "python" || bin === "python3";
+  const inert = SKILL_SCRIPT_FLAGS[bin] ?? [];
+  for (const [position, arg] of args.entries()) {
+    if (inline.includes(arg)) {
+      const index = position + 1;
+      if (index !== args.length - 1) return null;
+      return exactAt(index) ? { mode: "inline", index } : null;
+    }
+    if (!arg.startsWith("-")) {
+      if (!EXEC_CODE_FILE_BINS.has(bin)) return null;
+      if (isSkillScriptPath(arg)) return null;
+      // Refuter N5: a device or process path is a descriptor, not a program
+      // file (`/dev/stdin`, `/dev/fd/0`, `/proc/self/fd/0`).
+      if (arg.startsWith("/dev/") || arg.startsWith("/proc/")) return null;
+      if (bin === "bun" && !BUN_SCRIPT_FILE.test(arg)) return null;
+      return exactAt(position) ? { mode: "file", index: position } : null;
+    }
+    if (inert.includes(arg)) continue;
+    if (python && PYTHON_SKILL_SCRIPT_FLAGS.test(arg)) continue;
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Is `bin` an interpreter spelling the `exec.code` row accepts? A bare name
+ * (found on the PATH the harness's shell started with: a segment earlier in
+ * the same command that can change name resolution closes the class for the
+ * rest of the line, see {@link movesNameResolution}), or an absolute path in
+ * one of the `bin` directories of {@link SYSTEM_BIN_DIRS}: `/bin`, `/usr/bin`
+ * and `/usr/local/bin` (security review of APRV-510, finding 1).
+ *
+ * One list for the whole classifier (refuter N6, the reconcile with APRV-508):
+ * a shape row's binary and an interpreter are spelled from the same system
+ * directories, read by the same {@link isSystemBinWord} (`..` and `//`
+ * refused). The interpreter reads the stricter part of it: the `sbin`
+ * directories hold administrative tools, never an interpreter, and
+ * `/opt/homebrew/bin` (admitted before the reconcile) is in neither. It is a
+ * rule about SPELLING rather than about who can write there:
+ * `/usr/local/bin` is often owned by the user on macOS (refuter N3), and a
+ * bare `python3` resolves through it anyway. What the rule refuses is a
+ * spelling the agent chooses outright (`/home/hermes/x/bin/python3`, a venv,
+ * the workspace, a Homebrew path). Anything else, a relative path
+ * (`./python3`, `.venv/bin/python`) included, keeps today's answer.
+ */
+function isExecCodeInterpreter(bin: string): boolean {
+  if (!bin.includes("/")) return true;
+  const cut = bin.lastIndexOf("/");
+  if (cut >= bin.length - 1 || !isSystemBinWord(bin)) return false;
+  return !bin.slice(0, cut + 1).endsWith("/sbin/");
+}
+
+/**
+ * The builtins that can change which program a bare name runs: `PATH` (`export`,
+ * `declare`, `set`), a function or alias of that name, the hash table.
+ */
+const NAME_RESOLUTION_BUILTINS: ReadonlySet<string> = new Set([
+  "export",
+  "declare",
+  "typeset",
+  "readonly",
+  "local",
+  "set",
+  "unset",
+  "alias",
+  "unalias",
+  "hash",
+  "enable",
+  "builtin",
+  "command",
+  "function",
+  // Refuter S4: builtins that WRITE a shell variable (PATH among them).
+  "read",
+  "readarray",
+  "mapfile",
+  "getopts",
+  "let",
+]);
+
+/**
+ * Can this segment change what a LATER bare interpreter name resolves to?
+ * (Security review of APRV-510, finding 1.) A bare assignment (`PATH=/tmp/x`,
+ * which reaches the lookup when `PATH` is exported, as it always is) or one of
+ * {@link NAME_RESOLUTION_BUILTINS}. Text only, and deliberately broad: a
+ * segment this answers `true` for only closes `exec.code` for the rest of the
+ * command line, which leaves those segments their pre-APRV-510 answer.
+ */
+function movesNameResolution(segment: LexSegment): boolean {
+  const words = segment.words.map((word) => word.text);
+  let cursor = 0;
+  while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+  const bin = words[cursor];
+  if (bin === undefined) return cursor > 0;
+  const base = pathSegments(bin).slice(-1)[0] ?? bin;
+  // Refuter S4: `printf -v PATH …` assigns a variable, and the `printf` row
+  // reads it as `read.shell`.
+  if (base === "printf" && words.slice(cursor + 1).some((word) => word.startsWith("-v"))) {
+    return true;
+  }
+  return NAME_RESOLUTION_BUILTINS.has(base);
+}
+
+/** The `exec.code` row's answer: inline or file, with the file bound as the path. */
+function refineExecCode(ctx: RuleContext): Refinement {
+  const shape = execCodeShape(ctx.bin, ctx.args);
+  if (shape === null || shape.mode === "inline") {
+    // `matchRule` lets this row match only the shape, so `null` is unreachable;
+    // it is answered as the row's own class rather than as a `null` refinement,
+    // which this table reads as "opaque".
+    return { class: EXEC_CODE_CLASS, rule: EXEC_CODE_INLINE_RULE };
+  }
+  return { class: EXEC_CODE_CLASS, rule: EXEC_CODE_FILE_RULE, path: ctx.args[shape.index] as string };
+}
+
 /**
  * `node` — an inline script is opaque, the gate's own entry point is
  * pass-through, a skill script is `exec.local` (APRV-502), and anything else
@@ -3407,6 +5290,11 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     bins: ["git"],
     subs: ["fetch", "ls-remote", "remote"],
     class: "read.vcs.remote",
+    // APRV-518: `git remote` reads only in the forms {@link refineGitRemote}
+    // names; every other `git remote` writes the configuration a later push
+    // reads.
+    emits: ["vcs.history.rewrite"],
+    refine: refineGitRemote,
   },
   {
     id: "git-read",
@@ -3536,6 +5424,19 @@ export const COMMAND_RULES: readonly CommandRule[] = [
   ...HARNESS_RULES,
 
   // -- workspace tools -----------------------------------------------------
+  // APRV-510. Opaque agent code, matched ONLY when the caller opened the class
+  // and the argv is exactly the shape ({@link execCodeShape}). Above `node`, so
+  // `node -e` reaches it before `refineNode` answers opaque; below every `bun`
+  // row of the package-manager group, so a `bun` argv the table already
+  // classifies keeps its class. With the class closed the row never matches,
+  // and every argv keeps the answer it had before the row existed.
+  {
+    id: EXEC_CODE_ROW,
+    bins: EXEC_CODE_BINS,
+    class: EXEC_CODE_CLASS,
+    execCode: true,
+    refine: refineExecCode,
+  },
   // APRV-193: three of the rules below hand control to code the runtime did not
   // author, and they are named in {@link CODE_EXECUTING_RULES}.
   {
@@ -3927,7 +5828,16 @@ const INLINE_SCRIPT_FLAG = /^-[li]*c$/u;
  * - a substitution in any of the three words, whose effect happens before the
  *   shell even starts;
  * - a nested shell inside the script, refused by {@link ClassifierContext} when
- *   the recursion runs (the inner classification unwraps nothing).
+ *   the recursion runs (the inner classification unwraps nothing);
+ * - a shell word that is not the system's binary ({@link isSystemBinWord}): a
+ *   relative path, or an absolute one outside the system-bin directories, is
+ *   whatever program sits there, which its last path segment does not name
+ *   (APRV-523 fix round, review-b S1);
+ * - a shell word that is assignment-shaped, in its source spelling
+ *   ({@link LexWord.assignment}) or its dequoted text ({@link ASSIGNMENT}).
+ *   bash runs a word whose name is quoted or escaped as a program named by the
+ *   whole word, and {@link classifySegment} refuses that segment; unwrapping
+ *   it here would answer before that check runs.
  *
  * The BINDING does not move. `cli/hook.ts` binds the outer command and argv
  * exactly as APRV-362 built them; what this changes is only which text is
@@ -3942,6 +5852,10 @@ export function loginShellScript(segment: LexSegment): string | null {
   if (shell.substitutions.length > 0) return null;
   if (flag.substitutions.length > 0) return null;
   if (script.substitutions.length > 0) return null;
+  // APRV-523 fix round (review-b S1): only the system's shell, named as
+  // written. A bare name and a system-bin path keep the route.
+  if (shell.assignment || ASSIGNMENT.test(shell.text)) return null;
+  if (!isSystemBinWord(shell.text, shell.exact)) return null;
   const base = pathSegments(shell.text).slice(-1)[0] ?? shell.text;
   if (!UNWRAPPABLE_SHELLS.has(base)) return null;
   if (!INLINE_SCRIPT_FLAG.test(flag.text)) return null;
@@ -3963,8 +5877,58 @@ const INLINE_SOURCE_BINS: Readonly<Record<string, readonly string[]>> = {
 // Classification
 // ===========================================================================
 
-/** `VAR=value` prefixes, which are not the command. */
-const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+/**
+ * `VAR=value` prefixes, which are not the command: every spelling of bash's
+ * assignment word (APRV-521, review-b M1). A name, an optional `[subscript]`,
+ * then `=` or the append operator `+=`: `NAME=v`, `NAME+=v`, `NAME[i]=v`,
+ * `NAME[i]+=v`. bash puts each one in the environment of the command it
+ * precedes, so a cursor that stopped at `NAME+=v` took that word for the
+ * program and judged the real one as its argument. The compound form
+ * `NAME=(…)` never reaches here: the tokenizer refuses it ({@link lex}).
+ *
+ * bash applies this grammar to the word as written (APRV-523). Applied to the
+ * source spelling ({@link LexWord.assignment}) it is bash's rule: a quote, a
+ * backslash, a `$`, a backtick or a brace in the name is none of
+ * `[A-Za-z0-9_]`, so such a word is a command word. Applied to a word's
+ * dequoted `text` it says only that the word is assignment-SHAPED, which is
+ * what the deliberately broad line scans read ({@link gitEnvironmentWrite},
+ * {@link movesNameResolution}): they count both readings and only refuse more.
+ */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u;
+
+/**
+ * The one spelling a rule may read past: a bare name and `=`. An append keeps
+ * whatever value the name already had, so its text does not say what the
+ * command will see, and a subscript writes an array element. Either one in
+ * front of a command leaves the segment `unclassified`.
+ */
+const PLAIN_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+
+/**
+ * A command word that opens like an assignment with a subscript (`NAME[`) but
+ * is not one {@link ASSIGNMENT} reads. bash reads the subscript as a bracketed
+ * pair in command position, spaces and operators included, so a word this
+ * tokenizer split there may still be one assignment to bash, ahead of the
+ * real program. No program is named like this, so it is refused, not guessed.
+ */
+const ASSIGNMENT_LIKE = /^[A-Za-z_][A-Za-z0-9_]*\[/u;
+
+/**
+ * The variable an assignment word sets: the name in front of `=`, of the
+ * append operator `+=`, or of a `[subscript]`. `GIT_PAGER+=x` sets GIT_PAGER
+ * and `PATH[0]=x` sets PATH. A word with no `=` is returned without its
+ * subscript and `+`.
+ */
+function assignedName(word: string): string {
+  const equals = word.indexOf("=");
+  const head = equals === -1 ? word : word.slice(0, equals);
+  return head.replace(/\[.*$/su, "").replace(/\+$/u, "");
+}
+
+/** The assignment word's spelling up to its value (`NAME=`, `NAME+=`, `NAME[i]=`), for a refusal detail. */
+function assignmentHead(word: string): string {
+  return ASSIGNMENT.exec(word)?.[0] ?? `${assignedName(word)}=`;
+}
 
 /**
  * Redirection targets that create no file (APRV-283).
@@ -4056,13 +6020,20 @@ function outrankingProtected(
   writesOnly: boolean,
   protectedPaths: readonly ProtectedPathEntry[],
 ): { surface: string; path: string } | null {
+  // APRV-522: a credential word whose OWN protected class outranks
+  // `policy.core` stays in the scan. Since `..` resolves in the credential
+  // rule, a `..` spelling can name the environment map while its spelling also
+  // names the log directory; the stricter of the two must not be dropped.
+  const isTheRead = (word: string): boolean =>
+    isCredentialPath(word) &&
+    protectedRank(protectedPathClass(word, protectedPaths) ?? "policy.core") >= protectedRank("policy.core");
   const named = strictestProtected(
-    writesOnly ? positionals : positionals.filter((arg) => !isCredentialPath(arg)),
+    writesOnly ? positionals : positionals.filter((arg) => !isTheRead(arg)),
     protectedPaths,
     true,
   );
   const fed = strictestProtected(
-    readTargets.filter((target) => !isCredentialPath(target)),
+    readTargets.filter((target) => !isTheRead(target)),
     protectedPaths,
   );
   const found =
@@ -4140,6 +6111,481 @@ function proseNamingProtectedPath(
 }
 
 /**
+ * How the shell may still change one argv word before the program sees it
+ * (APRV-511 fix round 3, S(open)): `splits`, an unquoted variable or `$(…)` is
+ * in it; `expands`, an unquoted brace or glob character is. A caller that
+ * cannot say passes neither, and only the text is read.
+ */
+export interface ArgExpansion {
+  splits: boolean;
+  expands: boolean;
+}
+
+const LITERAL_ARG: ArgExpansion = { splits: false, expands: false };
+
+/**
+ * Could the shell turn this argv word into an option the program then obeys,
+ * or into a different NUMBER of words (APRV-511 fix round 3, S(open), the class
+ * rule)? For `curl`, `wget`, `cp`, `mv`, `ln` and `install`, an option may name
+ * a write target (`-o`, `-O`, `-t`, `--output-dir`, `-P`), so a word whose
+ * expansion this text cannot see makes the whole argv unknowable:
+ *
+ * - in a slot where the program reads OPTIONS (`option`): a word that begins
+ *   with a variable or a substitution (`$OPTS`, `"$U"`, `${…}`), whose value
+ *   may begin with `-`, quoted or not; an unquoted variable or substitution
+ *   anywhere in it, whose value may split into `-o FILE`; an unquoted glob at
+ *   its head, which may match a file named `-o…`; an unquoted brace group that
+ *   makes a word beginning with `-` or `$`, or too many words to know
+ *   (`curl {-o,~/.hermes/config.yaml}`);
+ * - in an option's VALUE slot: an unquoted variable or substitution, or an
+ *   unquoted brace or glob that may make other than one word, because the
+ *   words after the first are read as options again.
+ *
+ * Words after `--` are operands and never reach this test.
+ */
+function argvWordUnknowable(word: string, flags: ArgExpansion, slot: "option" | "value"): boolean {
+  if (flags.splits) return true;
+  if (slot === "option" && word.startsWith("$")) return true;
+  if (!flags.expands) return false;
+  const words = braceExpansions(word);
+  if (words === null) return true;
+  if (slot === "value") return words.length !== 1 || /[*?[]/u.test(word);
+  return words.some((each) => /^[-$*?[]/u.test(each));
+}
+
+/**
+ * The first word of a `cp`, `mv`, `ln` or `install` argv that makes its write
+ * targets unknowable (APRV-511 fix round 3, S(open)), or `null`. GNU permutes
+ * options, so every word before `--` is in an option slot.
+ */
+export function copyArgvUnknown(args: readonly string[], flags: readonly ArgExpansion[] = []): string | null {
+  for (const [at, arg] of args.entries()) {
+    if (arg === "--") return null;
+    if (argvWordUnknowable(arg, flags[at] ?? LITERAL_ARG, "option")) return arg;
+  }
+  return null;
+}
+
+/**
+ * The destination directories a `cp`, `mv`, `ln` or `install` argv names by
+ * flag (APRV-511 refuter S3, recheck S(open)): `-t DIR`, `-tDIR`, `-t` anywhere
+ * in a short cluster (`-vtDIR`, `-rt DIR`, `-ftDIR`, `-stDIR`), and the long
+ * option by any unique prefix GNU accepts (`--target-directory=DIR`,
+ * `--target-dir=DIR`, `--t DIR`). A cluster is read from its first `t` even
+ * where an earlier letter would have taken the rest as its own value: one more
+ * target judged can only make the answer stricter. Words after `--` are
+ * operands. An absent value is not returned (the operand scan judges the rest).
+ */
+export function copyTargetDirectories(args: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") break;
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+      if (name.length === 0 || !"target-directory".startsWith(name)) continue;
+      const value = eq === -1 ? args[at + 1] : arg.slice(eq + 1);
+      if (value !== undefined) out.push(value);
+      continue;
+    }
+    if (!arg.startsWith("-") || arg.length < 2) continue;
+    const t = arg.indexOf("t", 1);
+    if (t === -1) continue;
+    const value = t + 1 < arg.length ? arg.slice(t + 1) : args[at + 1];
+    if (value !== undefined) out.push(value);
+  }
+  return out;
+}
+
+/**
+ * What one `curl` or `wget` option does to the file system (APRV-511 review):
+ * `safe` writes nothing (a value, if it takes one, is not an output path),
+ * `file` names a file it writes, `dir` names the directory it writes
+ * server-chosen names into, `remote` makes curl write the remote name into the
+ * output directory, and `config` reads more options from a file or a string,
+ * so its outputs cannot be known, and `format` is curl's `-w`/`--write-out`,
+ * whose `%output{FILE}` writes FILE (recheck S(open)). `source` names a file
+ * the program READS and sends or reads URLs from (fix round 4, M(L5f-1)): an
+ * upload or request-body flag, judged by {@link uploadSourcePaths} with its
+ * `source` reading. `value` says whether it takes an argument.
+ */
+interface FetchOption {
+  value: boolean;
+  effect: "safe" | "file" | "dir" | "remote" | "config" | "format" | "source";
+  source?: UploadSourceKind;
+}
+
+/**
+ * How an upload or request-body option names the file it reads (fix round 4,
+ * M(L5f-1)): `file`, the value IS the path (`curl -T`, `--upload-file`; wget
+ * `--post-file`, `--body-file`, `--input-file`/`-i`); `data`, a value that
+ * begins with `@` reads the file after it (`-d`, `--data*`, `--json`);
+ * `urlencode`, `@file` or `name@file` (`--data-urlencode`); `form`, `name=@file`
+ * or `name=<file` (`-F`, `--form*`).
+ */
+type UploadSourceKind = "file" | "data" | "urlencode" | "form";
+
+const bodySource = (kind: UploadSourceKind): FetchOption => ({ value: true, effect: "source", source: kind });
+
+const safe = (value: boolean): FetchOption => ({ value, effect: "safe" });
+
+/** curl's long options this classifier knows, by full name. */
+const CURL_LONG_OPTIONS: Readonly<Record<string, FetchOption>> = {
+  output: { value: true, effect: "file" },
+  "dump-header": { value: true, effect: "file" },
+  "cookie-jar": { value: true, effect: "file" },
+  trace: { value: true, effect: "file" },
+  "trace-ascii": { value: true, effect: "file" },
+  stderr: { value: true, effect: "file" },
+  "etag-save": { value: true, effect: "file" },
+  hsts: { value: true, effect: "file" },
+  "alt-svc": { value: true, effect: "file" },
+  libcurl: { value: true, effect: "file" },
+  "write-out": { value: true, effect: "format" },
+  "output-dir": { value: true, effect: "dir" },
+  "remote-name": { value: false, effect: "remote" },
+  "remote-name-all": { value: false, effect: "remote" },
+  config: { value: true, effect: "config" },
+  // Fix round 4 (M(L5f-1)): the files a request body or an upload reads.
+  "upload-file": bodySource("file"),
+  data: bodySource("data"),
+  "data-raw": bodySource("data"),
+  "data-binary": bodySource("data"),
+  "data-ascii": bodySource("data"),
+  json: bodySource("data"),
+  "data-urlencode": bodySource("urlencode"),
+  form: bodySource("form"),
+  "form-string": bodySource("form"),
+  ...Object.fromEntries(
+    [
+      "silent", "show-error", "fail", "fail-with-body", "fail-early", "location", "location-trusted", "insecure",
+      "verbose", "include", "head", "get", "compressed", "http1.0", "http1.1", "http2", "http2-prior-knowledge",
+      "http3", "ipv4", "ipv6", "no-buffer", "no-progress-meter", "progress-bar", "globoff", "netrc",
+      "netrc-optional", "no-keepalive", "raw", "tcp-nodelay", "ssl", "ssl-reqd", "tlsv1", "tlsv1.0", "tlsv1.1",
+      "tlsv1.2", "tlsv1.3", "anyauth", "basic", "digest", "ntlm", "negotiate", "no-sessionid", "disable",
+      "path-as-is", "create-dirs", "remote-header-name", "remote-time", "list-only", "append", "crlf",
+      "ignore-content-length", "junk-session-cookies", "post301", "post302", "post303", "styled-output",
+      "no-styled-output", "suppress-connect-headers", "false-start", "tr-encoding", "ssl-no-revoke",
+      "proxy-insecure", "retry-all-errors", "retry-connrefused", "parallel", "parallel-immediate", "skip-existing",
+      "no-clobber", "no-alpn", "no-npn", "manual", "help", "version", "disable-epsv", "disable-eprt",
+    ].map((name) => [name, safe(false)]),
+  ),
+  ...Object.fromEntries(
+    [
+      "header", "request", "user-agent", "user", "referer", "max-time", "connect-timeout", "retry", "retry-delay",
+      "retry-max-time", "range", "url", "proxy", "proxy-user", "resolve", "connect-to", "cacert", "capath", "cert",
+      "key", "cert-type", "key-type", "pass", "cookie", "max-filesize", "max-redirs", "limit-rate", "speed-limit",
+      "speed-time", "time-cond", "interface", "dns-servers", "oauth2-bearer", "aws-sigv4",
+      "keepalive-time", "expect100-timeout", "local-port", "ciphers", "tls-max", "proto", "proto-redir",
+      "proto-default", "request-target", "unix-socket", "url-query", "parallel-max", "quote", "mail-from",
+      "mail-rcpt", "preproxy", "noproxy", "socks5", "socks5-hostname", "continue-at", "etag-compare", "variable",
+    ].map((name) => [name, safe(true)]),
+  ),
+};
+
+/** curl's short options this classifier knows. */
+const CURL_SHORT_OPTIONS: Readonly<Record<string, FetchOption>> = {
+  o: { value: true, effect: "file" },
+  D: { value: true, effect: "file" },
+  c: { value: true, effect: "file" },
+  w: { value: true, effect: "format" },
+  O: { value: false, effect: "remote" },
+  K: { value: true, effect: "config" },
+  T: bodySource("file"),
+  d: bodySource("data"),
+  F: bodySource("form"),
+  ...Object.fromEntries(
+    ["s", "S", "f", "L", "k", "v", "i", "I", "G", "N", "n", "q", "j", "J", "l", "R", "Z", "0", "1", "2", "3", "4", "6", "#", "a", "B", "M", "p", "g", "h", "V"].map(
+      (letter) => [letter, safe(false)],
+    ),
+  ),
+  ...Object.fromEntries(
+    ["H", "X", "A", "u", "e", "m", "r", "x", "U", "E", "b", "Y", "y", "z", "Q", "C", "t", "P"].map(
+      (letter) => [letter, safe(true)],
+    ),
+  ),
+};
+
+/** wget's long options this classifier knows, by full name. */
+const WGET_LONG_OPTIONS: Readonly<Record<string, FetchOption>> = {
+  "output-document": { value: true, effect: "file" },
+  "output-file": { value: true, effect: "file" },
+  "append-output": { value: true, effect: "file" },
+  "save-cookies": { value: true, effect: "file" },
+  "warc-file": { value: true, effect: "file" },
+  "rejected-log": { value: true, effect: "file" },
+  "directory-prefix": { value: true, effect: "dir" },
+  execute: { value: true, effect: "config" },
+  config: { value: true, effect: "config" },
+  "post-file": bodySource("file"),
+  "body-file": bodySource("file"),
+  "input-file": bodySource("file"),
+  ...Object.fromEntries(
+    [
+      "quiet", "verbose", "no-verbose", "server-response", "spider", "no-check-certificate", "continue",
+      "timestamping", "no-clobber", "inet4-only", "inet6-only", "no-cache", "no-cookies", "ignore-length",
+      "content-disposition", "trust-server-names", "show-progress", "no-dns-cache", "debug", "https-only",
+      "no-parent", "no-directories", "force-directories", "no-host-directories", "adjust-extension",
+      "recursive", "mirror", "page-requisites", "convert-links", "help", "version", "no-config", "keep-session-cookies",
+      "auth-no-challenge", "no-http-keep-alive", "retry-connrefused", "force-html", "span-hosts", "relative",
+    ].map((name) => [name, safe(false)]),
+  ),
+  ...Object.fromEntries(
+    [
+      "tries", "timeout", "wait", "user-agent", "header", "user", "password", "http-user", "http-password",
+      "post-data", "method", "body-data", "limit-rate", "level", "accept", "reject",
+      "domains", "exclude-domains", "referer", "max-redirect", "ca-certificate", "ca-directory", "certificate",
+      "private-key", "base", "dns-timeout", "connect-timeout", "read-timeout", "waitretry", "quota",
+      "restrict-file-names", "local-encoding", "remote-encoding", "progress", "bind-address", "cut-dirs",
+      "load-cookies", "include-directories", "exclude-directories", "secure-protocol", "proxy-user",
+      "proxy-password", "https-proxy", "http-proxy",
+    ].map((name) => [name, safe(true)]),
+  ),
+};
+
+/** wget's short options this classifier knows (`-n` takes its sub-letters). */
+const WGET_SHORT_OPTIONS: Readonly<Record<string, FetchOption>> = {
+  O: { value: true, effect: "file" },
+  o: { value: true, effect: "file" },
+  a: { value: true, effect: "file" },
+  P: { value: true, effect: "dir" },
+  e: { value: true, effect: "config" },
+  // `-b` backgrounds and writes `wget-log` into the working directory.
+  b: { value: false, effect: "remote" },
+  i: bodySource("file"),
+  ...Object.fromEntries(
+    ["q", "v", "V", "h", "S", "c", "N", "r", "m", "p", "k", "K", "E", "H", "L", "x", "4", "6", "F"].map((letter) => [letter, safe(false)]),
+  ),
+  ...Object.fromEntries(
+    ["t", "T", "w", "U", "l", "A", "R", "D", "B", "Q", "I", "X"].map((letter) => [letter, safe(true)]),
+  ),
+};
+
+/**
+ * A long option by its full name or by a unique prefix, as both tools accept
+ * abbreviations (GNU wget always; curl's parser tries the same). `null` when
+ * the name is unknown or ambiguous.
+ */
+function fetchLongOption(table: Readonly<Record<string, FetchOption>>, name: string): FetchOption | null {
+  const exact = table[name];
+  if (exact !== undefined) return exact;
+  const matches = Object.keys(table).filter((known) => known.startsWith(name));
+  return matches.length === 1 ? (table[matches[0] as string] as FetchOption) : null;
+}
+
+/**
+ * Where `curl` and `wget` write (APRV-511 refuter S1 and review): `files`,
+ * paths written by name (`curl -o F`, `-sSLoF`, `--output F`, `--outp=F`,
+ * `-D`, `-c`, `--trace`, `--stderr`; `wget -O F`, `--output-doc=F`, `-o`/`-a`
+ * logs), and `directories`, directories written with a name the server
+ * chooses (`curl -O` into `--output-dir` or `.`; `wget` without `-O` into
+ * `-P`/`--directory-p…` or `.`). `unknown` names the first option that makes
+ * the outputs unknowable: one this table does not know, an ambiguous prefix,
+ * or a config source (`curl -K`/`--config`, `wget -e`/`--execute`/`--config`).
+ * `-` is standard output and writes nothing. Any other binary writes nothing.
+ *
+ * Fix round 4 (M(L5f-1)): `sources` are the files an upload or request-body
+ * option READS ({@link uploadSourcePaths}), in every spelling: separated
+ * (`-T F`, `--data @F`), joined by `=` (`--upload-file=F`, `--data=@F`) and
+ * glued (`-TF`, `-sd@F`, `-Ff=@F`). `sourceUnknown` is the first option word
+ * whose EMBEDDED value names a file this text cannot read (a variable, a
+ * substitution, a glob or a brace in it). A separated value is a word of its
+ * own and is judged as the positional it also is.
+ */
+export function fetchOutputs(
+  bin: string,
+  args: readonly string[],
+  flags: readonly ArgExpansion[] = [],
+): { files: string[]; directories: string[]; unknown: string | null; sources: string[]; sourceUnknown: string | null } {
+  const files: string[] = [];
+  const directories: string[] = [];
+  let unknown: string | null = null;
+  const sources: string[] = [];
+  let sourceUnknown: string | null = null;
+  if (bin !== "curl" && bin !== "wget") return { files, directories, unknown, sources, sourceUnknown };
+  const longTable = bin === "curl" ? CURL_LONG_OPTIONS : WGET_LONG_OPTIONS;
+  const shortTable = bin === "curl" ? CURL_SHORT_OPTIONS : WGET_SHORT_OPTIONS;
+  let remote = false;
+  let named = false;
+  let directory: string | null = null;
+  // curl's `-o`/`--output` values, which `--output-dir` places (recheck S(open)).
+  const curlNamed: string[] = [];
+  // Fix round 3 (S(open)): curl fills `#1`, `#2`… in an output name from the
+  // URL's glob (`'https://e/{s}' -o ~/.hermes/plugin#1/x`), so a value holding
+  // `#<digit>` names a file this text cannot place.
+  const placeable = (value: string): boolean => !value.includes("$") && !/#\d/u.test(value);
+  // `word` is the option word itself when the value is embedded in it.
+  const apply = (option: FetchOption, value: string | undefined, spelled: string, word?: string): void => {
+    if (option.effect === "config") unknown ??= spelled;
+    else if (option.effect === "source") {
+      if (value === undefined) return;
+      const paths = uploadSourcePaths(option.source ?? "file", value);
+      if (paths !== null) sources.push(...paths);
+      else if (word !== undefined) sourceUnknown ??= word;
+    }
+    else if (option.effect === "file") {
+      // Recheck S(open): an absent value, or one a variable or a substitution
+      // decides, is a target this classifier cannot place: the stricter class.
+      if (value === undefined || !placeable(value)) unknown ??= spelled;
+      else {
+        files.push(value);
+        if (bin === "wget" && (spelled === "-O" || spelled.startsWith("--output-d"))) named = true;
+        if (bin === "curl" && (spelled === "-o" || spelled === "--output")) curlNamed.push(value);
+      }
+    } else if (option.effect === "dir") {
+      if (value === undefined || !placeable(value)) unknown ??= spelled;
+      else directory = value;
+    } else if (option.effect === "remote") remote = true;
+    else if (option.effect === "format") {
+      // `-w @FILE` (or `@-`) reads the format from elsewhere, so its
+      // `%output{…}` targets are unknowable; otherwise each `%output{FILE}`
+      // (`%output{>>FILE}` appends) is a file curl writes.
+      if (value === undefined || value.startsWith("@")) {
+        unknown ??= spelled;
+        return;
+      }
+      for (const match of value.matchAll(/%output\{(?:>>)?([^}]*)\}/gu)) {
+        const target = match[1] ?? "";
+        if (target.length === 0 || !placeable(target)) unknown ??= spelled;
+        else files.push(target);
+      }
+      // A `%output{` without its closing brace still names some file.
+      if (/%output\{(?![^}]*\})/u.test(value)) unknown ??= spelled;
+    }
+  };
+  /** Fix round 3 (S(open)): the word at `at`, in `slot`, may become an option. */
+  const unknowable = (at: number, slot: "option" | "value"): boolean =>
+    at < args.length && argvWordUnknowable(args[at] as string, flags[at] ?? LITERAL_ARG, slot);
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") break;
+    if (unknowable(at, "option")) {
+      unknown ??= arg;
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+      // `--no-<option>` turns a boolean off and writes nothing more.
+      const option = fetchLongOption(longTable, name) ?? (name.startsWith("no-") ? fetchLongOption(longTable, name.slice(3)) : null);
+      if (option === null) {
+        unknown ??= arg;
+        continue;
+      }
+      let value: string | undefined;
+      if (option.value) {
+        value = eq === -1 ? args[at + 1] : arg.slice(eq + 1);
+        if (eq === -1) {
+          if (unknowable(at + 1, "value")) unknown ??= arg;
+          at += 1;
+        }
+      }
+      apply(
+        option,
+        value,
+        `--${Object.keys(longTable).find((known) => longTable[known] === option) ?? name}`,
+        eq === -1 ? undefined : arg,
+      );
+      continue;
+    }
+    if (arg.startsWith("-") && arg.length > 1) {
+      const letters = arg.slice(1);
+      for (let index = 0; index < letters.length; index += 1) {
+        const letter = letters[index] as string;
+        if (bin === "wget" && letter === "n") {
+          // `-nv`, `-nc`, `-nd`, `-nH`, `-np`: wget reads every letter after
+          // `n` as one of those; any other letter there is not a known form.
+          if (!/^[vcdHp]+$/u.test(letters.slice(index + 1))) unknown ??= arg;
+          break;
+        }
+        const option = shortTable[letter];
+        if (option === undefined) {
+          unknown ??= arg;
+          break;
+        }
+        if (option.value) {
+          const rest = letters.slice(index + 1);
+          let value: string | undefined = rest;
+          if (rest.length === 0) {
+            value = args[at + 1];
+            if (unknowable(at + 1, "value")) unknown ??= arg;
+            at += 1;
+          }
+          apply(option, value, `-${letter}`, rest.length === 0 ? undefined : arg);
+          break;
+        }
+        apply(option, undefined, `-${letter}`);
+      }
+    }
+  }
+  if (bin === "curl" && remote) directories.push(directory ?? ".");
+  // Recheck S(open): curl stores every `-o` output in `--output-dir` too, so a
+  // named output lands there (`--output-dir <organ> -o x.py`); fix round 3:
+  // an ABSOLUTE one too, as curl joins the two strings whatever the value
+  // (`--output-dir ~/.hermes -o /plugins/x.py` writes `~/.hermes/plugins/x.py`).
+  // The value as spelled stays judged as well: the stricter of the two readings.
+  // (`directory` is assigned inside `apply`, which the compiler cannot follow.)
+  const outputDir = directory as string | null;
+  if (bin === "curl" && outputDir !== null) {
+    for (const value of curlNamed) {
+      if (value !== "-") files.push(`${outputDir.replace(/\/+$/u, "")}/${value.replace(/^\/+/u, "")}`);
+    }
+  }
+  if (bin === "wget" && (!named || remote)) directories.push(directory ?? ".");
+  return { files: files.filter((file) => file !== "-"), directories, unknown, sources, sourceUnknown };
+}
+
+/**
+ * The file an upload or request-body option value reads, for each reading of
+ * it (fix round 4, M(L5f-1)): `[]` when the value reads no file (`--data=hello`,
+ * `-F name=value`), `null` when the text cannot say which file it reads.
+ *
+ * curl reads a `--data`/`-d`/`--json` file only when the value begins with `@`;
+ * `--data-urlencode` when an `@` comes before any `=` (`@F`, `name@F`); `-F`
+ * when the part after the first `=` begins with `@` or `<`, and there the path
+ * may be double-quoted and followed by `;type=…` or a `,` list, so the path is
+ * judged whole, unquoted, and cut at each `;` and `,` (one more path judged can
+ * only be stricter).
+ * `--data-raw` and `--form-string` never read a file, and are read the same
+ * way all the same: the stricter of two answers. The round-3 class rule, for a
+ * value the option word carries: a variable or a substitution (`$`, which
+ * the substitution sentinel also begins with), a glob (`*`, `?`, `[`; curl
+ * globs `-T` itself) or a brace group (`{`) in the path, or a variable where
+ * the `@` would be, makes the file unknowable.
+ */
+function uploadSourcePaths(kind: UploadSourceKind, value: string): string[] | null {
+  const literal = (text: string): boolean => !/[$`*?[{]/u.test(text);
+  if (kind === "file") return literal(value) ? [value] : null;
+  if (kind === "data") {
+    if (value.startsWith("$")) return null;
+    if (!value.startsWith("@")) return [];
+    const file = value.slice(1);
+    return literal(file) ? [file] : null;
+  }
+  if (kind === "urlencode") {
+    const at = value.search(/[@=$]/u);
+    if (at === -1 || value[at] === "=") return [];
+    if (value[at] === "$") return null;
+    const file = value.slice(at + 1);
+    return literal(file) ? [file] : null;
+  }
+  const eq = value.search(/[=$]/u);
+  if (eq === -1) return [];
+  if (value[eq] === "$") return null;
+  const rest = value.slice(eq + 1);
+  if (rest.startsWith("$")) return null;
+  if (!rest.startsWith("@") && !rest.startsWith("<")) return [];
+  const file = rest.slice(1);
+  if (!literal(file)) return null;
+  // curl lets the path be double-quoted (`f=@"x;y";type=…`): judged unquoted too.
+  const unquoted = file.replaceAll('"', "");
+  return [...new Set([file, unquoted, ...file.split(/[;,]/u), ...unquoted.split(/[;,]/u)])].filter(
+    (path) => path.length > 0,
+  );
+}
+
+/**
  * The strictest protected surface named by these words, with the word itself.
  *
  * `null` when none of them is protected. The word is returned verbatim, which
@@ -4202,6 +6648,12 @@ export const CODE_EXECUTING_RULES: readonly string[] = [
    */
   SKILL_SCRIPT_RULE,
   NODE_SKILL_SCRIPT_RULE,
+  /**
+   * `python3 -c`, `node -e` and kin, and an interpreter running a file that is
+   * not a skill script, once a policy opens `exec.code` (APRV-510).
+   */
+  EXEC_CODE_INLINE_RULE,
+  EXEC_CODE_FILE_RULE,
   /** `npx`, `tsx`, `tsc`, `vitest`, `jest`, `make`, and kin. */
   "workspace-tool",
   /**
@@ -4424,14 +6876,24 @@ function sandboxWrapper(words: readonly string[], start: number): SandboxWrapper
  * goes? (APRV-508 refutation S1; `HOME` and `CDPATH` from the recheck.)
  */
 function isSteeringAssignment(word: string): boolean {
-  const name = word.slice(0, word.indexOf("="));
+  const name = assignedName(word);
   if (["TZ", "TZDIR", "PATH", "LOCPATH", "GCONV_PATH", "LANG", "LANGUAGE", "HOME", "CDPATH"].includes(name)) {
     return true;
   }
+  // APRV-518's `GIT_CONFIG_GLOBAL=/tmp/g; git push origin` (a configuration
+  // the hook never read) and `XDG_CONFIG_HOME=/tmp/x; git push` (git's user
+  // config moved) are refused by APRV-521's bare-assignment rule below
+  // ({@link isGitInheritedName}, less {@link isHarmlessGitAssignment}) and by
+  // its line scan ({@link gitEnvironmentWrite}), not here: naming every
+  // `GIT_*` here would also refuse the harmless `GIT_PAGER=cat` APRV-521 admits.
   return name.startsWith("LC_") || name.startsWith("LD_");
 }
 
-/** The directories a shape row's binary may be spelled from, besides a bare name. */
+/**
+ * The directories a shape row's binary (APRV-508) and an `exec.code`
+ * interpreter (APRV-510, {@link isExecCodeInterpreter}) may be spelled from,
+ * besides a bare name. The classifier's one system-bin list.
+ */
 const SYSTEM_BIN_DIRS: readonly string[] = ["/bin/", "/usr/bin/", "/usr/local/bin/", "/sbin/", "/usr/sbin/"];
 
 /**
@@ -4439,8 +6901,18 @@ const SYSTEM_BIN_DIRS: readonly string[] = ["/bin/", "/usr/bin/", "/usr/local/bi
  * place? A bare name is looked up on PATH; a path in a system directory names
  * that file. `./date` or `/tmp/x/date` is whatever program sits there, and a
  * shape row (APRV-508) does not vouch for it.
+ *
+ * Only a word whose `text` is the bytes bash runs can be judged by its text
+ * (APRV-523 fix round 2, review-b S1-R and N6). A word that is not
+ * {@link LexWord.exact} still changes under expansion, and bash may then see a
+ * slash this text does not show; a backslash in `text` is a path separator to
+ * {@link pathSegments} but a plain character to bash, so the basename read
+ * from it is not the program's name. Either is refused here, before the bare
+ * name is admitted. Callers holding only a string pass no flag: theirs is
+ * already exact ({@link isExecCodeInterpreter} runs on the exact-only shape).
  */
-function isSystemBinWord(word: string): boolean {
+function isSystemBinWord(word: string, exact = true): boolean {
+  if (!exact || word.includes("\\")) return false;
   if (!word.includes("/")) return true;
   if (word.includes("..") || word.includes("//")) return false;
   return SYSTEM_BIN_DIRS.some((dir) => word.startsWith(dir) && !word.slice(dir.length).includes("/"));
@@ -4471,11 +6943,24 @@ function matchRule(
   assigned = false,
   assignments: readonly string[] = [],
   binWord: string = bin,
+  /**
+   * Did the caller open `exec.code` AND does this segment have the shape?
+   * (APRV-510.) Computed by `classifySegment`, which holds the words.
+   */
+  execShaped = false,
+  /** Is `binWord` the bytes bash runs ({@link LexWord.exact})? (APRV-523 fix round 2, review-b N6.) */
+  binExact = true,
 ): CommandRule | null {
   for (const rule of COMMAND_RULES) {
     if (!rule.bins.includes(bin)) continue;
     if (rule.probe === true && !isVersionProbe(args)) continue;
-    if (rule.shape !== undefined && (substituted || !isSystemBinWord(binWord) || !rule.shape(args, assignments))) continue;
+    if (
+      rule.shape !== undefined &&
+      (substituted || !isSystemBinWord(binWord, binExact) || !rule.shape(args, assignments))
+    ) {
+      continue;
+    }
+    if (rule.execCode === true && !execShaped) continue;
     // APRV-502: see the doc comment above; any of the three declines the row.
     if (
       rule.skillScript === true &&
@@ -4507,6 +6992,8 @@ type SegmentOutcome =
        * sees it: the hook refuses when ANY class is human-only.
        */
       also?: CredentialOutcome;
+      /** The program an `exec.code` answer runs (APRV-510). */
+      execCode?: ExecCodeSource;
     }
   | { ok: false; code: ClassifierFailureCode; detail: string };
 
@@ -4532,8 +7019,14 @@ function classifySegment(
     ...segment.words,
     ...segment.redirects.map((redirect) => redirect.target),
     // APRV-504: the `$(…)` of an unquoted heredoc body run when it is read.
-    { text: "", quoted: false, substitutions: segment.bodySubstitutions },
+    { text: "", quoted: false, substitutions: segment.bodySubstitutions, splits: false, expands: false },
   ];
+  // APRV-522 (S2): the first read inside a substitution that the read scope
+  // places outside every root. A substitution that only reads is inert, and its
+  // out-of-scope read used to vanish with it, and the outer segment was
+  // `read.shell`. It tightens a `read.shell` answer below, as a named target
+  // would.
+  let substitutedEscape: { path: string; rule: string } | null = null;
   for (const word of expanded) {
     for (const inner of word.substitutions) {
       const nested = classifyCommand(inner, protectedPaths, context);
@@ -4552,6 +7045,12 @@ function classifySegment(
           detail: `command substitution $(${inner}) is ${effectful.join(", ")}; only read.* substitutions run unattended`,
         };
       }
+      if (substitutedEscape === null) {
+        const escaped = nested.segments.find((found) => found.class === READ_OUT_OF_SCOPE_CLASS);
+        if (escaped !== undefined) {
+          substitutedEscape = { path: escaped.path ?? inner, rule: escaped.rule };
+        }
+      }
     }
   }
 
@@ -4562,6 +7061,9 @@ function classifySegment(
   const assigned = cursor > 0;
   // APRV-508: the same words, for a `shape` row that admits some.
   const assignments = words.slice(0, cursor);
+  // APRV-521 (review-b M1): the word after the assignments, before a sandbox
+  // wrapper moves the cursor. Judged below the protected-redirect answer.
+  const afterAssignments = words[cursor];
 
   // APRV-193. A sandbox wrapper is not a command: it is a room, and what
   // matters is what runs inside it. `approval sandbox -- npm install` is
@@ -4621,7 +7123,7 @@ function classifySegment(
     const touched =
       (writer === null
         ? null
-        : credentialTouch(writer, writerArgs, writerArgs.filter((arg) => !isFlag(arg)))) ??
+        : credentialTouch(writer, writerArgs)) ??
       redirectCredentialTouch(readTargets, redirectTargets);
     return {
       ok: true,
@@ -4629,6 +7131,47 @@ function classifySegment(
       rule: "redirect-protected",
       path: redirected.path,
       ...(touched === null ? {} : { also: touched }),
+    };
+  }
+
+  // APRV-521 (review-b M1). Every spelling of bash's assignment word is read
+  // past by the cursor above ({@link ASSIGNMENT}), and only the plain one is
+  // judged by the rules below. An append (`NAME+=v`) or a subscripted write
+  // (`NAME[i]=v`) leaves the segment `unclassified`, in front of git or any
+  // other program and on its own: its text does not say what value the
+  // command inherits. So does a command word that opens like a subscripted
+  // assignment the grammar cannot read in full ({@link ASSIGNMENT_LIKE}).
+  //
+  // APRV-523. The cursor above reads past every assignment-SHAPED word, judged
+  // on its dequoted text. bash reads past only the words it accepts as
+  // assignments as written ({@link LexWord.assignment}): a word whose name is
+  // quoted or escaped is the program bash runs, named by the whole word, and
+  // the word after it is that program's argument. Where the two stop at
+  // different words this classifier would judge a program that does not run,
+  // so the segment is `unclassified`. No program this table admits is named
+  // like an assignment, so the word is refused, not resolved.
+  const bashCursor = bashAssignmentCount(segment.words);
+  if (bashCursor !== assignments.length) {
+    const runs = words[Math.min(bashCursor, assignments.length)] as string;
+    return {
+      ok: false,
+      code: "unclassified",
+      detail: `no rule for ${assignmentHead(runs)}…: a word whose name is quoted or escaped is a command word to bash, not an assignment`,
+    };
+  }
+  const unplain = assignments.find((word) => !PLAIN_ASSIGNMENT.test(word));
+  if (unplain !== undefined) {
+    return {
+      ok: false,
+      code: "unclassified",
+      detail: `no rule for ${assignmentHead(unplain)}…: an append or subscripted assignment, whose value the text does not settle`,
+    };
+  }
+  if (afterAssignments !== undefined && ASSIGNMENT_LIKE.test(afterAssignments)) {
+    return {
+      ok: false,
+      code: "unclassified",
+      detail: `no rule for ${afterAssignments.slice(0, afterAssignments.indexOf("[") + 1)}…: a subscripted assignment this classifier cannot read in full`,
     };
   }
 
@@ -4648,19 +7191,37 @@ function classifySegment(
     // variables that pick which program runs, which libraries it loads, or
     // which file it reads as a zone, a locale or a charset converter are not
     // answered as reads.
-    const steering = assignments.find((word) => isSteeringAssignment(word));
+    // APRV-521: a variable git or its pager, editor, ssh or hooks read joins
+    // them, unless the word is one git(1) shows to be harmless.
+    const steering =
+      assignments.find((word) => isSteeringAssignment(word)) ??
+      segment.words
+        .slice(0, cursor)
+        .find((word) => isGitInheritedName(assignedName(word.text)) && !isHarmlessGitAssignment(word))
+        ?.text;
     if (steering !== undefined) {
       return {
         ok: false,
         code: "unclassified",
-        detail: `no rule for the assignment ${steering.slice(0, steering.indexOf("="))}=…: it steers which program or file later commands use`,
+        detail: `no rule for the assignment ${assignmentHead(steering)}…: it steers which program or file later commands use`,
       };
     }
     // `VAR=value` alone, or a bare redirection. `> file` truncates, so it is a
     // write; an assignment on its own touches nothing.
-    return writeTargets.length > 0
-      ? { ok: true, class: "files.write.workspace", rule: "redirect-write" }
-      : { ok: true, class: "read.shell", rule: "assignment" };
+    if (writeTargets.length > 0) {
+      return { ok: true, class: "files.write.workspace", rule: "redirect-write" };
+    }
+    // APRV-522 (S2): inside a substitution, a bare `<` redirection IS the
+    // read, and an assignment reads through its substitution, so both take
+    // the read scope a named target takes.
+    const bareEscape =
+      (context.readRoots ?? []).length > 0
+        ? (redirectReadEscape(readTargets, context.readRoots ?? []) ?? substitutedEscape)
+        : null;
+    if (bareEscape !== null) {
+      return { ok: true, class: READ_OUT_OF_SCOPE_CLASS, rule: bareEscape.rule, path: bareEscape.path };
+    }
+    return { ok: true, class: "read.shell", rule: "assignment" };
   }
 
   const basename = pathSegments(bin).slice(-1)[0] ?? bin;
@@ -4680,12 +7241,62 @@ function classifySegment(
     return { ok: false, code: "opaque", detail: `${basename} ${opaqueReason}` };
   }
 
+  // APRV-510. The `exec.code` shape, read only when the caller opened the
+  // class, and declined by anything that would make the hashed words differ
+  // from the program that runs: an assignment prefix (`PYTHONSTARTUP`,
+  // `NODE_OPTIONS`), a substitution anywhere in the segment, a heredoc, any
+  // redirection other than a write to a discard device (stdin is a second
+  // program, a write target is a second effect), a segment inside a subshell
+  // (a redirection after its `)` feeds the program's stdin; refuter rS2), an
+  // interpreter spelled by a relative path, or a source word the shell would
+  // still change.
+  const execWords = segment.words.slice(cursor + 1);
+  const execShape =
+    context.execCode === true &&
+    !assigned &&
+    !segment.heredoc &&
+    !segment.stdinFed &&
+    !segment.subshell &&
+    segment.words.every((word) => word.substitutions.length === 0) &&
+    segment.redirects.every((redirect) => redirect.op !== "<" && isDiscardTarget(redirect.target.text)) &&
+    (segment.words[cursor]?.exact ?? false) &&
+    isExecCodeInterpreter(bin)
+      ? execCodeShape(basename, args, execWords)
+      : null;
+
   const inlineFlags = INLINE_SOURCE_BINS[basename];
-  if (inlineFlags !== undefined && hasFlag(args, inlineFlags)) {
+  if (inlineFlags !== undefined && hasFlag(args, inlineFlags) && execShape === null) {
     return { ok: false, code: "opaque", detail: `${basename} runs inline source` };
   }
 
   const positionals = args.filter((arg) => !isFlag(arg));
+
+  // APRV-520: a git global option that takes a value, or one this table does
+  // not know, leaves the segment unclassified ({@link gitGlobalRefusal}). It is
+  // checked before the credential and table reads below, because the first
+  // positional they would read may be the option's value rather than the
+  // subcommand, and refused rather than parsed so no spelling of it can turn
+  // into an answer.
+  //
+  // APRV-521: so does an environment assignment in front of git that is not on
+  // the closed list git(1) shows to be harmless ({@link gitAssignmentRefusal};
+  // the words before a sandbox wrapper count, since the wrapper passes the
+  // environment on), and a variable git could inherit that the line's own
+  // shell sets ({@link gitEnvironmentWrite}). `GIT_PAGER=<cmd> git log` runs
+  // `<cmd>`, and `GIT_DIR=x git status` reads another repository.
+  if (basename === "git") {
+    const assignmentRefusal = gitAssignmentRefusal(segment.words.slice(0, assignments.length));
+    if (assignmentRefusal !== null) return { ok: false, code: "unclassified", detail: assignmentRefusal };
+    if (context.shellEnvWrite !== undefined) {
+      return {
+        ok: false,
+        code: "unclassified",
+        detail: `no rule for git after ${context.shellEnvWrite} is set on the same command line: git and the programs it starts inherit the shell's exported environment`,
+      };
+    }
+    const refusal = gitGlobalRefusal(args);
+    if (refusal !== null) return { ok: false, code: "unclassified", detail: refusal };
+  }
 
   // APRV-508 recheck S-R1: `printf -v NAME` assigns NAME, so `printf -v PATH
   // %s /tmp/x; cat f` is the bare `PATH=/tmp/x` the assignment rule above
@@ -4752,13 +7363,53 @@ function classifySegment(
   // protected class, the credential touch is carried beside it as a second
   // class of the command (`also`), never dropped. Write targets need no check
   // here: a protected one has already answered above, carrying it the same way.
-  const credential = credentialTouch(basename, args, positionals);
+  //
+  // Fix round 4 (M(L5f-1)): the file a curl or wget upload or request-body
+  // option reads is judged with the positionals, so `--upload-file=F`, `-TF`,
+  // `--data=@F`, `-Ff=@F`, wget `--post-file=F`, `--body-file=F` and
+  // `--input-file=F` take the class `-T F` and `--data @F` take (a credential
+  // file `account.credential`, an organ its class). An embedded value whose
+  // file the text cannot read is a credential read of an unknown file. The
+  // upload's answer never displaces a download output that outranks the
+  // credential class (`policy.core`, `fetch-output-unknown`): those answer below.
+  const argFlags: ArgExpansion[] = segment.words
+    .slice(cursor + 1)
+    .map((word) => ({ splits: word.splits, expands: word.expands }));
+  const fetched = fetchOutputs(basename, args, argFlags);
+  const judged = fetched.sources.length === 0 ? positionals : [...positionals, ...fetched.sources];
+  const fetchedOutputProtected = strictestProtected(
+    [...fetched.files, ...fetched.directories.filter((directory) => directory !== ".")],
+    protectedPaths,
+  );
+  const fetchOutranksCredential =
+    fetched.unknown !== null || (fetchedOutputProtected !== null && outranksCredential(fetchedOutputProtected.surface));
+  const uploadCredential = fetchOutranksCredential ? null : uploadCredentialTouch(fetched.sources, fetched.sourceUnknown);
+  // Merge of APRV-511 and APRV-522: APRV-522's credential read words (option
+  // and redirect targets, git's readers) and APRV-511's upload sources. An
+  // upload option word APRV-522 also reads is named by the file it sends, as
+  // APRV-511 names it; a positional or an environment reference keeps its own.
+  const argCredential = credentialTouch(basename, args);
+  const credential =
+    argCredential === null
+      ? uploadCredential
+      : uploadCredential !== null && argCredential.path !== undefined && !positionals.includes(argCredential.path)
+        ? uploadCredential
+        : argCredential;
   const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets);
   const outranking =
     credential === null && redirectCredential === null
       ? null
-      : outrankingProtected(positionals, readTargets, credentialWritesOnly(basename, args), protectedPaths);
-  if (outranking === null) {
+      : outrankingProtected(
+          judged,
+          readTargets,
+          credentialWritesOnly(basename, args) || credentialProtectedScanKeeps(basename),
+          protectedPaths,
+        );
+  // Merge of APRV-511 and APRV-522: APRV-522's credential read words include
+  // an upload's option words, so a credential answer is deferred, never taken
+  // here, while a download output outranks it (`policy.core`,
+  // `fetch-output-unknown` answer below), as APRV-511 keeps the upload's own.
+  if (outranking === null && !fetchOutranksCredential) {
     if (credential !== null) return { ok: true, ...credential };
     if (redirectCredential !== null) return { ok: true, ...redirectCredential };
   }
@@ -4767,7 +7418,8 @@ function classifySegment(
   const substituted = segment.words
     .slice(cursor + 1)
     .some((word) => word.substitutions.length > 0);
-  const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin);
+  const binExact = (segment.words[cursor] as LexWord).exact;
+  const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin, execShape !== null, binExact);
   if (rule === null) {
     return {
       ok: false,
@@ -4795,6 +7447,46 @@ function classifySegment(
   // matched, verbatim, so an approver is told WHICH refs a deletion names
   // rather than being handed a class and left to re-read the command.
   const boundPath = refined !== null && "path" in refined ? refined.path : undefined;
+
+  // APRV-511 refuter S1: a download's output file is a write target, whatever
+  // class the fetch earned (`curl -o ~/.hermes/plugins/x/__init__.py URL` is
+  // `read.web` by its method). A protected output answers with its class, as a
+  // redirection onto it would.
+  // Refuter S3: the destination directory a copy, move, link or install names
+  // in a flag (`-t<dir>`, `--target-directory=<dir>`) is a write target too;
+  // `-t <dir>` already reaches the positional scan below.
+  const copyFamily = ["cp", "mv", "ln", "install"].includes(basename);
+  const targetDirectories = copyFamily ? copyTargetDirectories(args) : [];
+  // Fix round 3 (S(open)): what the shell may still do to each argv word
+  // (`argFlags`, and `fetched` from it, are read above the credential tier).
+  // A directory a download writes server-chosen names into is judged as the
+  // directory: an organ directory, or the home root, is an organ write.
+  const fetchedDirectories = fetched.directories.filter((directory) => directory !== ".");
+  const fetchedProtected = strictestProtected(
+    [...fetched.files, ...targetDirectories, ...fetchedDirectories],
+    protectedPaths,
+  );
+  if (fetchedProtected !== null) {
+    return { ok: true, class: fetchedProtected.surface, rule: "protected-path", path: fetchedProtected.path };
+  }
+  // APRV-511 review: a download whose output this table cannot know (an
+  // option it does not know, an ambiguous prefix, a config file or string) is
+  // a write to an unknown target, and an unknown target may be an organ.
+  if (fetched.unknown !== null) {
+    return { ok: true, class: "policy.core", rule: "fetch-output-unknown", path: fetched.unknown };
+  }
+  // Fix round 3 (S(open)): a copy, move or link argv word the shell may still
+  // turn into an option (`cp $X f`, `cp *.md d/`, `mv {-t,DIR} f`) may name
+  // the destination, so the destination is unknown: `policy.core`, unless a
+  // named path already earns a class at least as strict (the log).
+  const copyUnknown = copyFamily ? copyArgvUnknown(args, argFlags) : null;
+  if (copyUnknown !== null) {
+    const named = strictestProtected([...positionals, ...readTargets], protectedPaths);
+    if (named !== null && protectedRank(named.surface) <= protectedRank("policy.core")) {
+      return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
+    }
+    return { ok: true, class: "policy.core", rule: "copy-target-unknown", path: copyUnknown };
+  }
 
   // A protected path anywhere in an effectful segment takes that path's class:
   // the command is editing the gate, whatever else it is doing. Every
@@ -4844,7 +7536,7 @@ function classifySegment(
         also: deferredCredential,
       };
     }
-    const named = strictestProtected(positionals, protectedPaths, true);
+    const named = strictestProtected(judged, protectedPaths, true);
     const fed = strictestProtected(readTargets, protectedPaths);
     const touched =
       fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))
@@ -4870,6 +7562,53 @@ function classifySegment(
     ruleId = "redirect-write";
   }
 
+  // APRV-518. A write into a git directory can arm a push: `printf '[remote
+  // "origin"]\n\tpush = :refs/heads/lane\n' >> .git/config && git push origin`
+  // deleted `lane` on git 2.50.1 while it read as a workspace write and an
+  // implicit trunk push. The configuration is `.git/config`, and a hook under
+  // `.git/hooks/` runs on the next push, so ANY write whose target has a
+  // `.git` segment (any case: `.GIT/config` is the same file on a
+  // case-insensitive filesystem) takes the class of the strictest push it can
+  // arm. Redirection targets always; positionals (and `--flag=value` values)
+  // of a segment that is not a read, since the text cannot say which one the
+  // binary writes, except `git`'s own. A word with whitespace in it is prose,
+  // not a path.
+  // `curl -o` / `wget -O` write a file while reading as `read.web`, so their
+  // words are scanned too.
+  if ((!cls.startsWith("read.") || basename === "curl" || basename === "wget") && cls !== GATE_SELF_CLASS) {
+    const flagValues = args
+      .filter((arg) => isFlag(arg) && arg.includes("="))
+      .map((arg) => arg.slice(arg.indexOf("=") + 1));
+    // `git`'s own words are not file writes: `--git-dir=x/.git` names the
+    // repository it runs against, and the git rows classify what git writes
+    // (a `git config` write has no row and stays refused).
+    const named = basename === "git" ? [] : [...positionals, ...flagValues];
+    const gitDir =
+      writeTargets.find(namesGitDirectory) ??
+      named.find((word) => !/\s/u.test(word) && namesGitDirectory(word));
+    if (gitDir !== undefined) {
+      return {
+        ok: true,
+        class: "vcs.history.rewrite",
+        rule: GIT_DIR_WRITE_RULE,
+        path: gitDir,
+        ...(sandbox === null ? {} : { sandbox }),
+      };
+    }
+    const gitConfig =
+      writeTargets.find(namesGitConfigFile) ??
+      named.find((word) => !/\s/u.test(word) && namesGitConfigFile(word));
+    if (gitConfig !== undefined) {
+      return {
+        ok: true,
+        class: "vcs.history.rewrite",
+        rule: GIT_CONFIG_FILE_WRITE_RULE,
+        path: gitConfig,
+        ...(sandbox === null ? {} : { sandbox }),
+      };
+    }
+  }
+
   // APRV-347, last because it is the narrowest: a read whose target the TEXT
   // places outside every root the caller named. Only `read.shell` is scoped —
   // `read.web` reaches no file, and a segment that has already taken a
@@ -4877,7 +7616,13 @@ function classifySegment(
   // and symlinked cases are deliberately NOT decided here; they are left at
   // `read.shell` for the hook's disk pass, which tightens and never loosens.
   if (cls === "read.shell" && (context.readRoots ?? []).length > 0) {
-    const escaped = escapedReadTarget(basename, positionals, args, context.readRoots ?? []);
+    // APRV-522 (S2): a `<` target is opened for reading whatever the binary
+    // is, so it is scoped for every binary, and a substitution's escaped read
+    // counts as the segment's own.
+    const escaped =
+      escapedReadTarget(basename, positionals, args, context.readRoots ?? []) ??
+      redirectReadEscape(readTargets, context.readRoots ?? []) ??
+      substitutedEscape;
     if (escaped !== null) {
       return {
         ok: true,
@@ -4889,12 +7634,27 @@ function classifySegment(
     }
   }
 
+  // APRV-510: the program, for the hook to hash. Attached only when the
+  // segment's FINAL class is `exec.code`: a protected or credential answer
+  // above has already replaced it, and carries no program.
+  const execCode: ExecCodeSource | null =
+    cls === EXEC_CODE_CLASS && rule.id === EXEC_CODE_ROW && execShape !== null
+      ? {
+          interpreter: basename,
+          mode: execShape.mode,
+          source: args[execShape.index] as string,
+          argv: words.slice(cursor),
+          sourceIndex: execShape.index + 1,
+        }
+      : null;
+
   return {
     ok: true,
     class: cls,
     rule: ruleId,
     ...(boundPath === undefined ? {} : { path: boundPath }),
     ...(sandbox === null ? {} : { sandbox }),
+    ...(execCode === null ? {} : { execCode }),
   };
 }
 
@@ -4935,9 +7695,21 @@ export function classifyCommand(
     return { ok: false, code: "unclassified", segment: command.trim(), detail: "empty command" };
   }
 
+  // APRV-521: a variable git could inherit, set by this line's own shell,
+  // reaches every git segment on the line and in its substitutions.
+  const shellEnvWrite = context.shellEnvWrite ?? gitEnvironmentWrite(lexed.segments) ?? undefined;
+  if (shellEnvWrite !== undefined) context = { ...context, shellEnvWrite };
+
   const segments: ClassifiedSegment[] = [];
   const classes: string[] = [];
+  // APRV-510 (security review, finding 1): once a segment may have changed
+  // what a bare name resolves to, `exec.code` is closed for the rest of the
+  // line, so a later `python3 -c` keeps its pre-APRV-510 refusal.
+  let execContext = context;
   for (const segment of lexed.segments) {
+    if (execContext.execCode === true && movesNameResolution(segment)) {
+      execContext = { ...execContext, execCode: false };
+    }
     // APRV-380. A LOGIN-SHELL WRAPPER is classified by the script it runs.
     // `loginShellScript` states the exact shape and why this is not the second
     // parser `OPAQUE_BINS` refuses; the inner classification is run with
@@ -4945,7 +7717,14 @@ export function classifyCommand(
     // and the recursion is one level deep by construction.
     const script = context.unwrapShell === false ? null : loginShellScript(segment);
     if (script !== null) {
-      const inner = classifyCommand(script, protectedPaths, { ...context, unwrapShell: false });
+      // APRV-510: and with `exec.code` closed. `bash -c` and `sh -c` stay out of
+      // the class's scope, so a program inside an unwrapped shell script keeps
+      // the refusal it had before the class existed.
+      const inner = classifyCommand(script, protectedPaths, {
+        ...context,
+        unwrapShell: false,
+        execCode: false,
+      });
       if (!inner.ok) {
         // The refusal is the INNER one, reported against the inner segment: an
         // operator told `hook-opaque` for `zsh` learns nothing, and one told
@@ -4961,7 +7740,7 @@ export function classifyCommand(
       }
       continue;
     }
-    const outcome = classifySegment(segment, protectedPaths, context);
+    const outcome = classifySegment(segment, protectedPaths, execContext);
     if (!outcome.ok) {
       return { ok: false, code: outcome.code, segment: segment.text, detail: outcome.detail };
     }
@@ -4971,6 +7750,7 @@ export function classifyCommand(
       rule: outcome.rule,
       ...(outcome.path === undefined ? {} : { path: outcome.path }),
       ...(outcome.sandbox === undefined ? {} : { sandbox: outcome.sandbox }),
+      ...(outcome.execCode === undefined ? {} : { execCode: outcome.execCode }),
     });
     if (!classes.includes(outcome.class)) classes.push(outcome.class);
     // APRV-503 recheck: the credential touch a protected answer outranked, as
@@ -5036,6 +7816,20 @@ export function commandSegmentWriteTargets(command: string): string[][] | null {
 }
 
 /**
+ * How many words open the segment that bash takes as assignments, judged on
+ * each word as written ({@link LexWord.assignment}, APRV-523). The word after
+ * them is the program bash runs: a word whose name is quoted or escaped is
+ * that program, not an assignment, so the shapes below name it as the binary.
+ * On a line the classifier answers the count equals its own cursor's, because
+ * {@link classifySegment} refuses any segment where the two differ.
+ */
+function bashAssignmentCount(words: readonly LexWord[]): number {
+  let cursor = 0;
+  while (cursor < words.length && (words[cursor] as LexWord).assignment) cursor += 1;
+  return cursor;
+}
+
+/**
  * Every segment of `command` with its binary (or `null`), its arguments and the
  * paths it writes through a redirection, from ONE lex of the whole command
  * (APRV-445 recheck). Lexing a segment's text on its own fails for a heredoc,
@@ -5045,22 +7839,60 @@ export interface CommandSegmentShape {
   text: string;
   bin: string | null;
   args: string[];
+  /** What the shell may still do to each of `args` (APRV-511 fix round 3). */
+  argFlags: ArgExpansion[];
   writes: string[];
   /** Paths read through `<` (APRV-445 recheck 3, SF3c). */
   reads: string[];
+  /**
+   * Could the shell make a write target, or a word after the binary, into
+   * text this shape does not show (a `$`, a backtick, or a `$(…)` whose text
+   * the lexer set aside)? Read by the push-repository pass (APRV-518).
+   */
+  expands: { writes: boolean; args: boolean };
+  /** Is this segment's stdin the previous segment's output? (APRV-522.) */
+  stdinFed: boolean;
+  /**
+   * The inner text of every `$(…)` this segment expands: in its words, its
+   * redirection targets and an unquoted heredoc's body (APRV-522), so the
+   * hook's disk pass judges the reads a substitution makes.
+   */
+  substitutions: string[];
+  /**
+   * The `NAME=value` words before the binary (APRV-522 fix round 1, M-B): a
+   * prefix such as `CDPATH=` or `HOME=` steers where a `cd` lands.
+   */
+  assignments: string[];
+  /**
+   * The script of a login-shell wrapper, exactly as {@link loginShellScript}
+   * reads it for `classifyCommand` (APRV-522 fix round 1, M-A), or `null`.
+   */
+  script: string | null;
+  /**
+   * A known shell handed an inline-script flag in a shape
+   * {@link loginShellScript} does not unwrap (APRV-522 fix round 1, M-A): what
+   * its script reads cannot be judged, so the hook's disk pass fails closed.
+   */
+  opaqueShell: boolean;
 }
 
 export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
   const lexed = lex(command);
   if (!lexed.ok) return null;
+  const expands = (word: LexWord): boolean => word.substitutions.length > 0 || /[$`]/u.test(word.text);
   return lexed.segments.map((segment) => {
     const words = segment.words.map((word) => word.text);
-    let cursor = 0;
-    while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+    const cursor = bashAssignmentCount(segment.words);
+    const script = loginShellScript(segment);
     return {
+      expands: {
+        writes: segment.redirects.some((redirect) => redirect.op !== "<" && expands(redirect.target)),
+        args: segment.words.slice(cursor + 1).some(expands),
+      },
       text: segment.text,
       bin: words[cursor] ?? null,
       args: words.slice(cursor + 1),
+      argFlags: segment.words.slice(cursor + 1).map((word) => ({ splits: word.splits, expands: word.expands })),
       writes: segment.redirects
         .filter((redirect) => redirect.op !== "<")
         .map((redirect) => redirect.target.text)
@@ -5068,8 +7900,29 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
       reads: segment.redirects
         .filter((redirect) => redirect.op === "<")
         .map((redirect) => redirect.target.text),
+      stdinFed: segment.stdinFed,
+      substitutions: [
+        ...segment.words.flatMap((word) => word.substitutions),
+        ...segment.redirects.flatMap((redirect) => redirect.target.substitutions),
+        ...segment.bodySubstitutions,
+      ],
+      assignments: words.slice(0, cursor),
+      script,
+      opaqueShell: script === null && inlineShellFlagged(words[cursor] ?? null, words.slice(cursor + 1)),
     };
   });
+}
+
+/**
+ * Is this a known shell handed an inline-script flag anywhere in its argv?
+ * (APRV-522 fix round 1, M-A.) Broader than {@link INLINE_SCRIPT_FLAG} on
+ * purpose: any short bundle carrying `c` counts, wherever it sits.
+ */
+function inlineShellFlagged(bin: string | null, args: readonly string[]): boolean {
+  if (bin === null) return false;
+  const base = pathSegments(bin).slice(-1)[0] ?? bin;
+  if (!UNWRAPPABLE_SHELLS.has(base)) return false;
+  return args.some((arg) => /^-[A-Za-z]*c[A-Za-z]*$/u.test(arg) || arg === "--command");
 }
 
 export function commandSegmentWords(command: string): CommandSegmentWords[] | null {
@@ -5079,8 +7932,7 @@ export function commandSegmentWords(command: string): CommandSegmentWords[] | nu
   const out: CommandSegmentWords[] = [];
   for (const segment of lexed.segments) {
     const words = segment.words.map((word) => word.text);
-    let cursor = 0;
-    while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+    const cursor = bashAssignmentCount(segment.words);
     const bin = words[cursor];
     if (bin === undefined) continue;
     out.push({ text: segment.text, bin, args: words.slice(cursor + 1) });

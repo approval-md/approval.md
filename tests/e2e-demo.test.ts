@@ -479,9 +479,9 @@ test("the demo: request -> telegram approval -> executed run -> clean chain", as
     const delivered = mock.sentTexts().slice(before_).join("\n");
     assert.match(delivered, /APPROVAL REQUIRED/u);
     assert.match(delivered, new RegExp(`<code>${ACTION}</code>`, "u"));
-    assert.match(delivered, /COMPUTED — derived by the runtime/u);
-    assert.match(delivered, new RegExp(`WHAT THIS DOES — CLAIMED by ${AGENT}, NOT verified`, "u"));
-    assert.match(delivered, /PAYLOAD — the canonical rendering/u);
+    assert.match(delivered, /<b>Checked by approval\.md<\/b>/u);
+    assert.match(delivered, new RegExp(`What your agent says \\(not checked\\) — ${AGENT}`, "u"));
+    assert.match(delivered, /Exactly what you are approving/u);
     assert.match(delivered, new RegExp(PAYLOAD_HASH, "u"), "the binding is shown to the approver");
     // The payload arrives whole, and HTML-escaped: agent-authored bytes must
     // not become markup on their way to a phone.

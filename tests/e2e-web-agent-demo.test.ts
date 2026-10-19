@@ -629,7 +629,7 @@ test("the web-agent demo: an attendee submits, the gate holds, a phone decides",
     assert.match(messages, /APPROVAL REQUIRED/u);
     assert.match(messages, new RegExp(`<code>${actionKey}</code>`, "u"));
     assert.match(messages, /echo/u, "the approver was not shown the command");
-    assert.match(messages, new RegExp(`CLAIMED by ${AGENT}`, "u"));
+    assert.match(messages, new RegExp(`What your agent says \\(not checked\\) — ${AGENT}`, "u"));
     const firstKeyboard = mock.callbackDataFor(actionKey, "grant");
     assert.equal(events().length, 3, "a delivery decided something");
 

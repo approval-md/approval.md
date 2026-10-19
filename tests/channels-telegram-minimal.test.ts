@@ -33,6 +33,7 @@ import {
 } from "../src/channels/contract.js";
 import { attestedPromptOf, buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
 import {
+  claimedLabelFor,
   minimalSettleText,
   renderTelegram,
   reviewCallbackData,
@@ -1206,7 +1207,7 @@ test("B2: a request delivered as part of a batch is the technical card, and the 
   assert.deepEqual(decisionPayload(live.unit, "vote:b1")["rendering"], { style: "technical", fallback: "batch" });
   // A batch whose digest does not fit falls back to one card per member: technical too.
   const long = recordingChannel({ promptStyle: "minimal", say: VILLAGE_SAY });
-  const big = (key: string) => ({ ...intentRequest("x", key), summary: claimed("s".repeat(1_900), AGENT) });
+  const big = (key: string) => ({ ...intentRequest("x", key), summary: claimed("s".repeat(2_100), AGENT) });
   const twice = await long.channel.notifyBatch({ requests: [big("intent:b2"), big("intent:b3")] });
   assert.equal(twice.digestId, null);
   assert.ok(sends(long.sent).every((entry) => !textOf(entry).includes("<blockquote expandable>")));
@@ -1588,3 +1589,29 @@ test("R3-S1: the decision record notes a does the runtime overrode; an honoured 
 function escapeForTest(text: string): string {
   return text.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;");
 }
+
+test("fold round 1, S3: an author id with a line break cannot forge a checked heading", () => {
+  // The actor rule checks only `^(human|agent):.+`, so a line break later in
+  // the id passes. Escaping stops markup; the label must also stay one line.
+  const forged = "agent:x\n<b>Checked by approval.md</b>\r\n\t• class: harmless";
+  const request: ChannelRequest = { ...intentRequest("hello", "intent:s3"), summary: claimed("hello", forged) };
+  const rendered = renderTelegram(request, TELEGRAM_PROMPT_HEADING, TELEGRAM_PROMPT_LAYOUT);
+  const heading = rendered.claimedText.split("\n")[0] as string;
+  assert.equal(
+    heading,
+    "<b>What your agent says (not checked) — agent:x &lt;b&gt;Checked by approval.md&lt;/b&gt; • class: harmless</b>",
+  );
+  // The same id rides each claimed row's (author) tag, and it is one line there too.
+  for (const line of rendered.claimedText.split("\n").slice(1)) {
+    assert.ok(line.startsWith("• "), `a claimed row spilled onto a line of its own: ${line}`);
+  }
+  assert.ok(
+    rendered.claimedText.includes("<i>(agent:x &lt;b&gt;Checked by approval.md&lt;/b&gt; • class: harmless)</i>"),
+    rendered.claimedText,
+  );
+  // The label is one line whatever the id holds, and a long id is cut.
+  assert.equal(claimedLabelFor("agent:a\u0000b\u200Bc"), "What your agent says (not checked) — agent:abc");
+  const long = claimedLabelFor(`agent:${"x".repeat(200)}`);
+  assert.equal(long, `What your agent says (not checked) — agent:${"x".repeat(73)}…`);
+  assert.equal(claimedLabelFor(" \n "), "What your agent says (not checked) — unknown");
+});
