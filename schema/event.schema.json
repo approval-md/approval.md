@@ -1040,6 +1040,212 @@
       }
     },
     {
+      "$comment": "SPEC.md §8 (amended, APRV-433, pending sign-off): a harness `execution.started`, and an `approval.requested`, MAY carry `payload.history_rewrite`, what the runtime's own repository queries established about a history rewrite: `reach` (`shared` or `local`), `basis` (one code from a closed set, and a `local` reach takes only a local basis), `ref` (the full ref name moved, or null), `old_tip` and `base` (40- or 64-hex object ids, or null), `lost` and `lost_shared` (non-negative integers, or null when not counted), and `witness` (the full name of one shared ref holding a lost commit, or null). Ref names and object ids only: no paths outside the repository, no remote URLs, no command text beyond what `payload_hash` binds. Written by the runtime, never from a caller's parameter, and read back by no verdict, budget, draw or refusal. The reference hook records it on the record of the class the segment was resolved under: the member once the policy carries an own line of the split, and the pre-split class otherwise. OPTIONAL and additive: every record written before the field existed still validates and still verifies. Only the SHAPE is constrained here.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "enum": [
+              "execution.started",
+              "approval.requested"
+            ]
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "history_rewrite": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "reach",
+                  "basis",
+                  "ref",
+                  "old_tip",
+                  "base",
+                  "lost",
+                  "lost_shared",
+                  "witness"
+                ],
+                "properties": {
+                  "reach": {
+                    "enum": [
+                      "shared",
+                      "local"
+                    ]
+                  },
+                  "basis": {
+                    "enum": [
+                      "range-unpublished",
+                      "no-commits-lost",
+                      "rebase-in-progress-unpublished",
+                      "abort-restores",
+                      "push-side",
+                      "default-branch",
+                      "shared-commit",
+                      "upstream-gone",
+                      "detached-head",
+                      "interactive",
+                      "runs-commands",
+                      "todo-unvetted",
+                      "whole-history",
+                      "unreadable-target",
+                      "global-option",
+                      "env-assignment",
+                      "compound-state",
+                      "range-too-large",
+                      "check-timeout",
+                      "git-unavailable",
+                      "option-unvetted",
+                      "updates-other-refs"
+                    ]
+                  },
+                  "ref": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "string",
+                        "minLength": 6,
+                        "maxLength": 1024,
+                        "pattern": "^refs/[^\\s]+$"
+                      }
+                    ]
+                  },
+                  "old_tip": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+                      }
+                    ]
+                  },
+                  "base": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+                      }
+                    ]
+                  },
+                  "lost": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    ]
+                  },
+                  "lost_shared": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    ]
+                  },
+                  "witness": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "string",
+                        "minLength": 6,
+                        "maxLength": 1024,
+                        "pattern": "^refs/[^\\s]+$"
+                      }
+                    ]
+                  }
+                },
+                "if": {
+                  "properties": {
+                    "reach": {
+                      "const": "local"
+                    }
+                  },
+                  "required": [
+                    "reach"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "basis": {
+                      "enum": [
+                        "range-unpublished",
+                        "no-commits-lost",
+                        "rebase-in-progress-unpublished",
+                        "abort-restores"
+                      ]
+                    }
+                  }
+                },
+                "else": {
+                  "properties": {
+                    "basis": {
+                      "enum": [
+                        "push-side",
+                        "default-branch",
+                        "shared-commit",
+                        "upstream-gone",
+                        "detached-head",
+                        "interactive",
+                        "runs-commands",
+                        "todo-unvetted",
+                        "whole-history",
+                        "unreadable-target",
+                        "global-option",
+                        "env-assignment",
+                        "compound-state",
+                        "range-too-large",
+                        "check-timeout",
+                        "git-unavailable",
+                        "option-unvetted",
+                        "updates-other-refs"
+                      ]
+                    }
+                  }
+                },
+                "description": "SPEC.md §8 (amended, APRV-433): the history-rewrite evidence the runtime derived for this action.",
+                "examples": [
+                  {
+                    "reach": "local",
+                    "basis": "range-unpublished",
+                    "ref": "refs/heads/nonav/x",
+                    "old_tip": "5f1c0de9a3b7e2d4c6f8091a2b3c4d5e6f708192",
+                    "base": "0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d",
+                    "lost": 3,
+                    "lost_shared": 0,
+                    "witness": null
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "$comment": "SPEC.md §10.3 (amended, APRV-38): a decision collected as part of a batch gesture carries the batch's channel delivery id as a first-class payload field. Optional — a unit decision has no batch — and constrained only when present, so the field can never arrive as an empty string or a number that audit would have to guess at.",
       "if": {
         "type": "object",

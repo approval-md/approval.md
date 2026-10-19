@@ -173,8 +173,10 @@ import {
   harnessLaunchNeedsRule,
   harnessLaunchUnruledRefusal,
   humanOnlyRefusal,
+  isHistoryRewriteMember,
   resolve,
   type AgentRequestability,
+  type HistoryRewriteEvidence,
   type Resolution,
 } from "./policy-match.js";
 import {
@@ -1414,6 +1416,24 @@ function attemptRegister(
     }
   }
 
+  // APRV-433 (amended SPEC.md §7): a `vcs.history.rewrite` member is derived
+  // by the runtime from the repository, and an implementation MUST NOT accept
+  // it as a self-declared class. Reserved to the harness hook on the same
+  // terms as `harness.tool.unmapped` above: `.local` can resolve autonomous
+  // where the bare class is human-only, so a declaration of it would borrow a
+  // verdict nobody derived. Refused before the log is read.
+  if (options.toolMapHook !== true) {
+    const member = actionsOf(resolved.envelope).find((action) =>
+      isHistoryRewriteMember(action.class),
+    );
+    if (member !== undefined) {
+      return refuse(
+        "envelope-invalid",
+        `action ${JSON.stringify(member.idempotency_key)} declares class ${member.class}, which the runtime derives from the repository and never accepts as declared (amended SPEC.md §7, APRV-433). Declare the action as vcs.history.rewrite; the harness hook alone splits it. Nothing was appended.`,
+      );
+    }
+  }
+
   const read = readGateRecords(logPath);
   if (!read.ok) return read;
 
@@ -1628,6 +1648,14 @@ export interface RequestInput {
    * {@link startHarnessExecution}, which re-checks the same streaks.
    */
   loopFloor?: boolean;
+  /**
+   * What the harness hook's history-rewrite step established about this action
+   * (amended SPEC.md §8, APRV-433), recorded as `payload.history_rewrite` on a
+   * harness request. Written from the runtime's own repository queries; it
+   * resolves nothing, and the event schema constrains its shape at the write
+   * boundary.
+   */
+  historyRewrite?: HistoryRewriteEvidence;
   /**
    * `"self"` when the requesting process will consume its own grant, in its own
    * process, and no other principal needs the raw token (APRV-211).
@@ -2105,6 +2133,15 @@ function attemptRequest(
     return refuse(
       "envelope-invalid",
       `action ${JSON.stringify(input.actionKey)} is declared under ${UNMAPPED_TOOL_CLASS}, which is reserved to the harness hook: only the hook asks about it, as a harness request that mints no token, and nothing else may request it. Nothing was appended.`,
+    );
+  }
+
+  // APRV-433, the request-time half of the registration refusal: a member is
+  // asked about only by the hook, as a harness request.
+  if (isHistoryRewriteMember(input.cls) && input.execution !== "harness") {
+    return refuse(
+      "envelope-invalid",
+      `action ${JSON.stringify(input.actionKey)} is declared under ${input.cls}, which the runtime derives from the repository and never accepts as declared (amended SPEC.md §7, APRV-433). Nothing was appended.`,
     );
   }
 
@@ -2642,6 +2679,12 @@ function attemptRequest(
   // lengthen anything. `core/state.ts` takes the minimum of this and the
   // policy's TTL; see `RequestInput.harnessCapMs`.
   if (input.harnessCapMs !== undefined) payload["harness_cap_ms"] = input.harnessCapMs;
+  // APRV-433 (amended SPEC.md §8): what the hook's own repository queries
+  // established about the rewrite being asked about. A computed field the
+  // prompt can show; no verdict reads it back. Harness requests only.
+  if (input.historyRewrite !== undefined && input.execution === "harness") {
+    payload["history_rewrite"] = { ...input.historyRewrite };
+  }
 
   const appended = append(
     logPath,
@@ -3785,6 +3828,13 @@ export interface ConsumeHarnessOptions extends GateOptions {
    * approved bytes would have been refused `payload-mismatch` first.
    */
   harnessTool?: string;
+  /**
+   * The history-rewrite evidence of the call doing the spending (APRV-433),
+   * written to the start as `payload.history_rewrite`, exactly as the
+   * policy-authorized start writes it. It authorizes nothing: the member is
+   * the class, and the grant is bound to that class.
+   */
+  historyRewrite?: HistoryRewriteEvidence;
 }
 
 /**
@@ -4164,6 +4214,8 @@ function attemptHarnessConsume(
   if (derivation.decisionSeq !== null) payload["grant_seq"] = derivation.decisionSeq;
   // APRV-499 (refutation S3): which tool a mapped or unmapped spend was.
   if (options.harnessTool !== undefined) payload["harness_tool"] = options.harnessTool;
+  // APRV-433: the rewrite evidence of the spending call.
+  if (options.historyRewrite !== undefined) payload["history_rewrite"] = { ...options.historyRewrite };
 
   const appended = append(
     logPath,
@@ -4218,6 +4270,13 @@ export interface HarnessStartInput {
    * Shape-checked by the event schema at the write boundary.
    */
   harness_tool?: string;
+  /**
+   * What the harness hook's history-rewrite step established about this
+   * command (amended SPEC.md §8, APRV-433), recorded as
+   * `payload.history_rewrite`. The runtime's own repository queries, never a
+   * caller's parameter of the gated command; it resolves nothing.
+   */
+  history_rewrite?: HistoryRewriteEvidence;
 }
 
 export type HarnessStartResult = { ok: true; record: EventRecord } | GateRefusal;
@@ -4524,6 +4583,8 @@ function attemptHarnessStart(
     ...harnessStartPolicyStamp(attested.sha256),
     // APRV-499: which tool a mapped or unmapped start was, by name only.
     ...(input.harness_tool === undefined ? {} : { harness_tool: input.harness_tool }),
+    // APRV-433: the rewrite evidence, when the hook refined one.
+    ...(input.history_rewrite === undefined ? {} : { history_rewrite: { ...input.history_rewrite } }),
   };
 
   const appended = append(

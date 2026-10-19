@@ -562,7 +562,8 @@ test("allow-listed words combine, and pass through a sandbox wrapper", () => {
     "read.shell/git-read",
   );
   assert.equal(answer("GIT_EDITOR=true git commit --amend --no-edit"), "vcs.history.rewrite/git-commit-amend");
-  assert.equal(answer("GIT_EDITOR=: git rebase main"), "vcs.history.rewrite/git-rewrite");
+  // APRV-433 split the old `git-rewrite` row; a plain rebase is `git-rebase`.
+  assert.equal(answer("GIT_EDITOR=: git rebase main"), "vcs.history.rewrite/git-rebase");
   assert.equal(answer("PAGER=cat git push origin lane"), "vcs.push.branch/git-push-branch");
   assert.equal(answer("GIT_PAGER=cat approval sandbox -- git log"), answer("approval sandbox -- git log"));
 });

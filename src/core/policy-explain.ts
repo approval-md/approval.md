@@ -48,6 +48,11 @@ import type {
 } from "./policy-load.js";
 import {
   agentRequestability,
+  HISTORY_REWRITE_CLASS,
+  HISTORY_REWRITE_FAMILY,
+  HISTORY_REWRITE_OWN_LINES,
+  HISTORY_REWRITE_SHARED,
+  isHistoryRewriteMember,
   resolve,
   STRICTNESS,
   type AgentRequestability,
@@ -301,7 +306,7 @@ export function explain(
 
   const candidates = annotate(final.candidates, final.matched?.pattern ?? null);
   describeCandidates(decisionPath, actionClass, candidates);
-  describeWinner(decisionPath, load, base.provenance, base.autonomy, candidates, actionClass);
+  describeWinner(decisionPath, load, base.provenance, base.autonomy, candidates, actionClass, base);
 
   const overridden = final.floorApplied
     ? { pattern: final.matched?.pattern ?? null, autonomy: base.declaredAutonomy }
@@ -465,7 +470,31 @@ function describeWinner(
   autonomy: Autonomy,
   candidates: ExplanationCandidate[],
   actionClass: string,
+  resolution?: ReturnType<typeof resolve>,
 ): void {
+  // APRV-433: the three ways a `vcs.history.rewrite` member resolves that no
+  // other class does. The trace names each, because SPEC §7 requires that a
+  // reader can tell an own line from inheritance from the pre-split fallback.
+  if (isHistoryRewriteMember(actionClass)) {
+    if (provenance === "legacy") {
+      decisionPath.push(
+        `the policy has no ${HISTORY_REWRITE_OWN_LINES.map(quote).join(", ")} line, so this member resolves as the class the pre-split runtime answered (SPEC §7, APRV-433); with no repository to ask, that is ${quote(HISTORY_REWRITE_CLASS)}${resolution?.matched === null || resolution?.matched === undefined ? "" : ` via ${quote(resolution.matched.pattern)}`} -> ${autonomy}. The hook passes the segment's own pre-split class, which may be vcs.commit.branch`,
+      );
+      return;
+    }
+    if (provenance === "inherited") {
+      decisionPath.push(
+        `no own line names this member; it inherits ${quote(HISTORY_REWRITE_CLASS)}${resolution?.matched === null || resolution?.matched === undefined ? "" : ` via ${quote(resolution.matched.pattern)}`} (SPEC §7, APRV-433) -> ${autonomy}`,
+      );
+      return;
+    }
+    if (provenance === "floor" && resolution?.historyFloor === true) {
+      decisionPath.push(
+        `${quote(HISTORY_REWRITE_FAMILY)} would set it lower, and ${quote(HISTORY_REWRITE_SHARED)} is never inferred below manual from the family key; only its exact key may (SPEC §7, APRV-433) -> manual`,
+      );
+      return;
+    }
+  }
   if (provenance === "rule") {
     const winner = candidates.find((candidate) => candidate.winner);
     const reason =
