@@ -919,7 +919,8 @@ checkout's real answer: `git add -A && git commit -m x` first, then `git push
 Writes to git's own configuration files outside a repository (`~/.gitconfig`,
 anything under `~/.config/git/`, `/etc/gitconfig`) are `vcs.history.rewrite`
 too (rule `git-config-file-write`), and a bare `GIT_*=` or
-`XDG_CONFIG_HOME=` assignment is refused, as `HOME=` already was.
+`XDG_CONFIG_HOME=` assignment is refused, as `HOME=` already was (APRV-521's
+bare-assignment rule; its harmless words, such as `GIT_PAGER=cat`, still pass).
 
 Destinations are read the way git's ref DWIM reads them, in the pure
 classifier too: `heads/main` is `refs/heads/main` (git tries `refs/<name>`

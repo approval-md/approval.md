@@ -53,7 +53,8 @@ was `vcs.push.branch` even on main.
   has a `.git` segment now takes the class of the push it can arm. Reads are
   unmoved. Writes to `~/.gitconfig`, `~/.config/git/` and `/etc/gitconfig`
   take the class too (rule `git-config-file-write`), and a bare `GIT_*=` or
-  `XDG_CONFIG_HOME=` assignment is refused.
+  `XDG_CONFIG_HOME=` assignment is refused (APRV-521's rule in 0.4.6, which
+  still admits its harmless words such as `GIT_PAGER=cat`).
 - **The hook trusts its reading of the checkout only when nothing else on the
   line can change it.** Any non-read segment before the push (`git checkout
   main && git push origin HEAD`, `npm test && git push -u origin lane`), or

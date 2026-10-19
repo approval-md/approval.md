@@ -6880,10 +6880,12 @@ function isSteeringAssignment(word: string): boolean {
   if (["TZ", "TZDIR", "PATH", "LOCPATH", "GCONV_PATH", "LANG", "LANGUAGE", "HOME", "CDPATH"].includes(name)) {
     return true;
   }
-  // APRV-518: `GIT_CONFIG_GLOBAL=/tmp/g; git push origin` hands every later
-  // git on the line (when the variable is already exported) a configuration
-  // the hook never read, and `XDG_CONFIG_HOME` moves git's user config.
-  if (name === "XDG_CONFIG_HOME" || name.startsWith("GIT_")) return true;
+  // APRV-518's `GIT_CONFIG_GLOBAL=/tmp/g; git push origin` (a configuration
+  // the hook never read) and `XDG_CONFIG_HOME=/tmp/x; git push` (git's user
+  // config moved) are refused by APRV-521's bare-assignment rule below
+  // ({@link isGitInheritedName}, less {@link isHarmlessGitAssignment}) and by
+  // its line scan ({@link gitEnvironmentWrite}), not here: naming every
+  // `GIT_*` here would also refuse the harmless `GIT_PAGER=cat` APRV-521 admits.
   return name.startsWith("LC_") || name.startsWith("LD_");
 }
 

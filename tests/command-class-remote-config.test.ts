@@ -443,8 +443,11 @@ test("reads of a git directory, .gitignore and prose naming .git are unmoved", (
   assert.equal(only("echo x > .gitignore").class, "files.write.workspace");
   assert.equal(only("git add .gitignore").class, "vcs.commit.branch");
   assert.equal(only('git commit -m "fix the .git/config path"').class, "vcs.commit.branch");
-  assert.equal(only("git --git-dir=/tmp/x/.git commit -m x").class, "vcs.commit.branch");
-  assert.equal(only("git --git-dir=/tmp/x/.git log > .git/out").rule, "git-dir-write");
+  // Since APRV-520 (0.4.6) a git global option that takes a value is refused,
+  // which is stricter than the commit this line used to be.
+  assert.equal(refusal("git --git-dir=/tmp/x/.git commit -m x"), "unclassified");
+  assert.equal(refusal("git --git-dir=/tmp/x/.git log > .git/out"), "unclassified");
+  assert.equal(only("git log > .git/out").rule, "git-dir-write");
 });
 
 const DWIM_TRUNK: readonly string[] = [
@@ -514,8 +517,12 @@ test("a bare GIT_* or XDG_CONFIG_HOME assignment is refused: it re-points every 
   ]) {
     assert.equal(refusal(command), "unclassified", command);
   }
-  // A prefix assignment on the push itself was already the rewrite class (APRV-517).
-  assert.equal(only("GIT_CONFIG_COUNT=1 git push origin lane").class, REWRITE);
+  // A prefix assignment on the push itself was the rewrite class under APRV-517;
+  // since APRV-521 (0.4.6) it is refused in front of git, which is stricter.
+  assert.equal(refusal("GIT_CONFIG_COUNT=1 git push origin lane"), "unclassified");
+  // APRV-521's closed list of harmless words still passes.
+  const harmless = classifyCommand("GIT_PAGER=cat; git log");
+  assert.deepEqual(harmless.ok ? harmless.classes : harmless, ["read.shell"]);
 });
 
 test("unreadable configuration: an explicit or HEAD push may still publish tags (push.followTags)", () => {
