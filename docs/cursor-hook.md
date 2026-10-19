@@ -411,7 +411,11 @@ judge takes only the options on its verb's closed list of options that take
 no value, exact spellings, and never skips an option word (APRV-648 fix round
 3): an abbreviation such as `--inter`, `--exe`, `--am` or `--h`, an option that
 takes a value, `--`, and an unknown option are shared, `option-unvetted`, and
-a positional the judge does not model is shared, `unreadable-target`. The
+a positional the judge does not model is shared, `unreadable-target`. So is
+a positional the shell may still change before git sees it (APRV-648 S1): a
+`$`, a backtick, a glob character, an unquoted brace or `~` anywhere (`HEAD~2`
+included), or a backslash the shell keeps inside double quotes; `'HEAD~2'` or
+`HEAD^^` is read. The
 text classifier reads a `git pull` argv the way git's parse-options does, so a
 `--no-rebase` that is the value of `-o` or `--server-option` keeps neither the
 rebasing pull out of the family nor the configuration from promoting a bare

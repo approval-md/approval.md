@@ -378,10 +378,12 @@ test("cases 7-11: reset --hard is judged on the commits it removes", () => {
   assertMember(dir, "git reset --hard", "local", "no-commits-lost", BARE);
   commit(dir, "l4");
   commit(dir, "l5");
-  // 8: two unpushed on top of the upstream (newly opened).
-  assertMember(dir, "git reset --hard HEAD~2", "local", "range-unpublished", BARE);
+  // 8: two unpushed on top of the upstream (newly opened). Quoted: an
+  // unquoted `~` is not `LexWord.exact`, so `HEAD~2` bare is shared (APRV-648 S1).
+  assertMember(dir, "git reset --hard 'HEAD~2'", "local", "range-unpublished", BARE);
+  assertMember(dir, "git reset --hard HEAD~2", "shared", "unreadable-target", BARE);
   // 9: the third is pushed.
-  const nine = assertMember(dir, "git reset --hard HEAD~3", "shared", "shared-commit", BARE);
+  const nine = assertMember(dir, "git reset --hard 'HEAD~3'", "shared", "shared-commit", BARE);
   assert.equal(nine.lost, 3);
   assert.equal(nine.lost_shared, 1);
   assert.equal(nine.witness, "refs/remotes/origin/lane");
@@ -729,7 +731,7 @@ test("adversarial: a detached HEAD is shared for amend and reset --hard too", ()
   commit(dir, "l1");
   git(dir, "checkout", "--quiet", "--detach", "HEAD");
   assertMember(dir, "git commit --amend --no-edit", "shared", "detached-head", BARE);
-  assertMember(dir, "git reset --hard HEAD~1", "shared", "detached-head", BARE);
+  assertMember(dir, "git reset --hard 'HEAD~1'", "shared", "detached-head", BARE);
 });
 
 test("adversarial: no upstream configured, a rebase or a rebasing pull that names no base is shared", () => {
@@ -750,7 +752,7 @@ test("adversarial: an upstream deleted locally, or configured and never fetched,
   // The remote-tracking ref removed by hand, with the upstream still configured.
   git(dir, "update-ref", "-d", "refs/remotes/origin/lane");
   assertMember(dir, "git commit --amend", "shared", "upstream-gone", BARE);
-  assertMember(dir, "git reset --hard HEAD~1", "shared", "upstream-gone", BARE);
+  assertMember(dir, "git reset --hard 'HEAD~1'", "shared", "upstream-gone", BARE);
   // An upstream configured by hand that was never fetched reads as gone too.
   branch(dir, "fresh");
   commit(dir, "f1");
@@ -766,7 +768,7 @@ test("adversarial: a branch NAMED like .local gets nothing from its name; reacha
   pushUpstream(dir, "lane.local");
   const pushed = assertMember(dir, "git commit --amend", "shared", "shared-commit", BARE);
   assert.equal(pushed.witness, "refs/remotes/origin/lane.local");
-  assertMember(dir, "git reset --hard HEAD~1", "shared", "shared-commit", BARE);
+  assertMember(dir, "git reset --hard 'HEAD~1'", "shared", "shared-commit", BARE);
   // The same name with nothing published is local, exactly as any name is.
   branch(dir, "wip.local");
   commit(dir, "w1");
@@ -869,7 +871,7 @@ test("adversarial: reset --hard and commit --amend in the abbreviations git acce
   assertMember(dir, "git commit --amend --no-edit", "shared", "shared-commit", BARE);
   assertMember(dir, "git commit --am --no-edit", "shared", "option-unvetted", BARE);
   assertMember(dir, "git reset --ha HEAD~1", "shared", "option-unvetted", BARE);
-  assertMember(dir, "git reset --hard HEAD~1", "shared", "shared-commit", BARE);
+  assertMember(dir, "git reset --hard 'HEAD~1'", "shared", "shared-commit", BARE);
 });
 
 test("adversarial: only a closed list of earlier segments and assignments leaves a rewrite judgeable", () => {
@@ -1566,7 +1568,50 @@ test("APRV-648 fix round 3, M2: reset --hard reads no option's value as its targ
   // The zero-value spellings are still judged.
   assertMember(dir, "git reset --hard", "local", "no-commits-lost", BARE);
   assertMember(dir, "git reset -q --hard --no-refresh HEAD", "local", "no-commits-lost", BARE);
-  assertMember(dir, "git reset --hard HEAD~1", "shared", "shared-commit", BARE);
+  assertMember(dir, "git reset --hard 'HEAD~1'", "shared", "shared-commit", BARE);
+});
+
+// ---------------------------------------------------------------------------
+// APRV-648 S1: a positional the shell may still change is shared
+// ---------------------------------------------------------------------------
+//
+// Each pair below is the same target spelled two ways. The lexer reads both
+// as the same text, a ref that resolves, but only the first is
+// `LexWord.exact`: in the second the shell would hand git other bytes. `.local`
+// needs a positive reading of every word, so the second is shared.
+
+test("APRV-648 S1 (a): a brace-expansion positional is shared; the quoted spelling is judged", () => {
+  const dir = newRepo();
+  // A ref whose name is the brace word: git resolves the lexer's text, while
+  // bash hands git `b b` for the unquoted spelling.
+  git(dir, "branch", "b{,}", "main");
+  branch(dir, "lane");
+  commit(dir, "l1");
+  commit(dir, "l2");
+  assertMember(dir, "git reset --hard 'b{,}'", "local", "range-unpublished", BRANCH);
+  assertMember(dir, "git reset --hard b{,}", "shared", "unreadable-target", BRANCH);
+});
+
+test("APRV-648 S1 (b): a double-quoted backslash the shell keeps makes the positional shared", () => {
+  const dir = newRepo();
+  branch(dir, "lane");
+  commit(dir, "l1");
+  commit(dir, "l2");
+  assertMember(dir, 'git reset --hard "origin/main"', "local", "range-unpublished", BRANCH);
+  // The lexer drops the backslash and reads `origin/main`; the shell keeps it.
+  assertMember(dir, 'git reset --hard "origin/m\\ain"', "shared", "unreadable-target", BRANCH);
+});
+
+test("APRV-648 S1 (c): an unquoted non-leading tilde makes the positional shared", () => {
+  const dir = newRepo();
+  branch(dir, "lane");
+  commit(dir, "l1");
+  commit(dir, "l2");
+  assertMember(dir, "git reset --hard 'origin/main~0'", "local", "range-unpublished", BRANCH);
+  assertMember(dir, "git reset --hard origin/main~0", "shared", "unreadable-target", BRANCH);
+  // The rebase judge reads its upstream through the same predicate.
+  assertMember(dir, "git rebase 'origin/main~0'", "local", "range-unpublished", BRANCH);
+  assertMember(dir, "git rebase origin/main~0", "shared", "unreadable-target", BRANCH);
 });
 
 test("APRV-648 fix round 3, M3: a rebasing pull hidden behind a swallowed --no-rebase joins the family, shared", () => {

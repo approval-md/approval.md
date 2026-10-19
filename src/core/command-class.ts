@@ -1584,6 +1584,9 @@ interface LexWord {
    * backslash, the shell drops only five). Read by the `exec.code` shape alone,
    * which hashes a word and so needs the word's bytes to be the program's
    * bytes; every other reader keeps reading `text` exactly as before.
+   * {@link gitInvocationShape} also reads it: a git argument that is not exact
+   * is `unreadable`, so the history-rewrite judges never call it `.local`
+   * (APRV-648 S1).
    */
   exact: boolean;
   /**
@@ -7948,7 +7951,11 @@ export interface GitInvocationShape {
   /**
    * Per word of `args`: could the shell change it before git sees it? True
    * for a `$` (a parameter or a `$(…)`, kept verbatim by the lexer), a
-   * backtick, a glob character, or a leading `~`.
+   * backtick, a glob character, a leading `~`, and every word that is not
+   * {@link LexWord.exact}: a brace expansion, a backslash inside double quotes
+   * that the shell keeps, a `~` anywhere unquoted (APRV-648 S1). A `.local`
+   * answer needs a positive reading of every word, so a word whose bytes the
+   * shell may still change is shared, never `.local`.
    */
   unreadable: boolean[];
   /**
@@ -8023,6 +8030,7 @@ export function gitInvocationShape(segmentText: string): GitInvocationShape | nu
     args: rest.map((word) => word.text),
     unreadable: rest.map(
       (word) =>
+        !word.exact ||
         word.substitutions.length > 0 ||
         /[$`*?[]/u.test(word.text) ||
         word.text.startsWith("~"),

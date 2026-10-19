@@ -278,7 +278,17 @@ test("gitInvocationShape: assignments, global options, the subcommand, unreadabl
   ]);
   assert.deepEqual(gitInvocationShape('git reset --hard "$REV"')?.unreadable, [false, true]);
   assert.deepEqual(gitInvocationShape("git reset --hard $(git rev-parse x)")?.unreadable, [false, true]);
-  assert.deepEqual(gitInvocationShape("git reset --hard HEAD~2")?.unreadable, [false, false]);
+  // APRV-648 S1: a word that is not `LexWord.exact` is unreadable, so an
+  // unquoted `~` anywhere, a brace and a kept double-quoted backslash are;
+  // the quoted spellings are read.
+  assert.deepEqual(gitInvocationShape("git reset --hard HEAD~2")?.unreadable, [false, true]);
+  assert.deepEqual(gitInvocationShape("git reset --hard 'HEAD~2'")?.unreadable, [false, false]);
+  assert.deepEqual(gitInvocationShape("git reset --hard HEAD^^")?.unreadable, [false, false]);
+  assert.deepEqual(gitInvocationShape("git reset --hard a=~/x")?.unreadable, [false, true]);
+  assert.deepEqual(gitInvocationShape("git reset --hard b{,}")?.unreadable, [false, true]);
+  assert.deepEqual(gitInvocationShape("git reset --hard 'b{,}'")?.unreadable, [false, false]);
+  assert.deepEqual(gitInvocationShape('git reset --hard "m\\ain"')?.unreadable, [false, true]);
+  assert.deepEqual(gitInvocationShape('git reset --hard "main"')?.unreadable, [false, false]);
   assert.deepEqual(gitInvocationShape("git reset --hard ma*")?.unreadable, [false, true]);
   assert.equal(gitInvocationShape("approval sandbox -- git rebase main"), null);
   assert.equal(gitInvocationShape("git a && git b"), null, "one segment only");

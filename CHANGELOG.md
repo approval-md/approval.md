@@ -65,6 +65,12 @@ before a tag.
   does, never answering milder than before, and only the bare word `git`
   counts as git for the earlier-segment list and the judges (`./git
   status && …` is shared).
+  A positional the shell may still change before git sees it is shared,
+  `unreadable-target` (APRV-648 S1): besides a `$`, a backtick, a glob
+  character and a leading `~`, now an unquoted brace, an unquoted `~`
+  anywhere and a backslash the shell keeps inside double quotes. Cost:
+  `git reset --hard HEAD~2` and `git rebase origin/main~1` are shared;
+  `'HEAD~2'` or `HEAD^^` is judged as before.
 - Conformance: `command-class` 1.10.0, thirty-seven new `rewrite-*` vectors
   (1.9.0 went to APRV-511 at merge), and `schema-validation` 3.5.0, seven new
   `payload.history_rewrite` fixtures (3.4.0 went to APRV-510 at merge); no
