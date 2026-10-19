@@ -5870,7 +5870,9 @@ test("P-9: the stale summary's reminder counts every re-send and tells a relay a
   // The village shape: burst delivery behind a relay, so the earlier copies'
   // buttons no longer decide (APRV-456). Two stale requests and one live one
   // used to be the summary, then a banner counting "1 request" under it.
-  const world = staged(3, distinctPayloadFor);
+  // No TTL: since APRV-464 only a request nothing expires is stale by age
+  // (aprv#646 S2).
+  const world = staged(3, distinctPayloadFor, POLICY_NO_TTL);
   const setup = setupFor(world, channelFor({ staleCopy: false }));
   const { streams, err } = capture();
   requestAt(world, 0, at(1));
@@ -6198,8 +6200,9 @@ function assertPlainWords(text: string, ids: readonly string[], where: string): 
 
 test("P-9: no action key or task id in the stale summary, the digest, the paced reminder or /queue", async () => {
   // Burst: two stale requests and two similar live ones, so one restart sends
-  // the stale summary and a digest.
-  const burst = staged(4);
+  // the stale summary and a digest. No TTL: since APRV-464 only a request
+  // nothing expires is stale by age (aprv#646 S2).
+  const burst = staged(4, payloadFor, POLICY_NO_TTL);
   const { streams, err } = capture();
   const keys = [
     requestAt(burst, 0, at(1)),
