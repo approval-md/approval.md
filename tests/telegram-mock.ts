@@ -34,6 +34,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import type { Socket } from "node:net";
 
+import { actionRefOf } from "../src/channels/telegram.js";
+
 /** The failure modes the mock can inject. */
 export type MockFailure =
   /** Accept the request and never answer it. The client's own timeout fires. */
@@ -201,24 +203,6 @@ export interface MockBotApi {
   restart(): Promise<void>;
   /** Shut down for good. */
   close(): Promise<void>;
-}
-
-/**
- * The member number a digest gives `actionKey`, or `null` when `text` is not a
- * digest that lists it (APRV-115).
- *
- * A digest lists its members as `<n>. <code>key</code> — …`. Matched by string
- * search rather than by a built regular expression, because an action key
- * carries `:` and whatever else a task id contains.
- */
-function digestNumberOf(text: string, actionKey: string): number | null {
-  for (const line of text.split("\n")) {
-    const marker = line.indexOf(`. <code>${actionKey}</code>`);
-    if (marker <= 0) continue;
-    const number = Number.parseInt(line.slice(0, marker), 10);
-    if (Number.isInteger(number)) return number;
-  }
-  return null;
 }
 
 /** A test's `apiBase` points at loopback. Called before every channel is built. */
@@ -564,44 +548,29 @@ export async function startMockBotApi(
       }
     },
     callbackDataFor(actionKey, decision) {
-      // Two shapes reach a phone, and this reads both the way a phone would.
-      //
-      // A single prompt: the header naming the action key, then the payload
-      // chunks, and the LAST message carries the keyboard. So walk forward,
-      // remember whose header was seen last, and take the keyboard that
-      // follows it.
-      //
-      // A digest (APRV-115): the buttons are on a message that names every
-      // member itself, as numbered lines, and the buttons are labelled with
-      // the same numbers. So a keyboard message that lists the action key
-      // answers for itself, and the row is found by that label.
-      let current: string | null = null;
+      // Found by the button's own bytes, the way the listener resolves a tap:
+      // every per-request button carries `<g|r>:<nonce>:<action ref>`, and the
+      // action ref is a function of the action key alone (`actionRefOf`). One
+      // rule covers an ordinary card, a minimal card and a digest row, and it
+      // reads nothing from the text a resident sees (P-9): the copy can change
+      // without ~50 tests changing with it. The LAST such button wins, which is
+      // the copy most recently put in front of the approver.
+      const prefix = decision === "grant" ? "g:" : "r:";
+      const suffix = `:${actionRefOf(actionKey)}`;
       let found: string | null = null;
       for (const entry of requests) {
         if (entry.method !== "sendMessage") continue;
-        const text = typeof entry.body["text"] === "string" ? entry.body["text"] : "";
-        const match = /<code>([^<]+)<\/code>/u.exec(text);
-        if (text.includes("APPROVAL REQUIRED") && match !== null) current = match[1] ?? null;
         const markup = entry.body["reply_markup"] as
           | { inline_keyboard?: { text: string; callback_data: string }[][] }
           | undefined;
-        if (markup === undefined) continue;
-        const rows = markup.inline_keyboard ?? [];
-
-        const numbered = digestNumberOf(text, actionKey);
-        if (numbered !== null) {
-          const label = decision === "grant" ? `✅ Approve ${numbered}` : `🛑 Reject ${numbered}`;
-          for (const row of rows) {
-            const button = row.find((candidate) => candidate.text === label);
-            if (button !== undefined) found = button.callback_data;
+        for (const row of markup?.inline_keyboard ?? []) {
+          for (const button of row) {
+            const data = button.callback_data;
+            if (typeof data === "string" && data.startsWith(prefix) && data.endsWith(suffix)) {
+              found = data;
+            }
           }
-          continue;
         }
-
-        if (current !== actionKey) continue;
-        const row = rows[0] ?? [];
-        const button = decision === "grant" ? row[0] : row[1];
-        if (button !== undefined) found = button.callback_data;
       }
       assert.ok(
         found !== null,

@@ -632,7 +632,10 @@ test("SF2: variables, cd, heredocs, globs and symlinks cannot launder a write or
     { tool: "terminal", input: { command: "echo X >> $HERMES_HOME/.env", workdir: dir }, want: "policy.core", env: { HERMES_HOME: home } },
     { tool: "terminal", input: { command: "cat $HERMES_HOME/.env", workdir: dir }, want: "account.credential" },
     { tool: "terminal", input: { command: "cat ${HERMES_HOME}/.env", workdir: dir }, want: "account.credential", env: { APPROVAL_HERMES_HOME: home } },
-    { tool: "terminal", input: { command: "cp /tmp/x $HERMES_HOME/.env", workdir: dir }, want: "policy.core" },
+    // APRV-511: the pure classifier now reads `$HERMES_HOME` as the home, so
+    // this copy answers as `cp /tmp/x ~/.hermes/.env` does: a cp naming a
+    // credential file is account.credential in either direction (APRV-198).
+    { tool: "terminal", input: { command: "cp /tmp/x $HERMES_HOME/.env", workdir: dir }, want: "account.credential" },
     // (b) cd tracking.
     { tool: "terminal", input: { command: `cd ${home} && echo X >> .env`, workdir: dir }, want: "policy.core" },
     { tool: "terminal", input: { command: "cd .hermes; echo X >> .env", workdir: dir }, want: "policy.core" },
@@ -710,7 +713,6 @@ test("recheck 3: ordinary work under the home is allowed; the home's roots, glob
     ["terminal", { command: "du -sh .", workdir: workspace }],
     ["terminal", { command: "rm -f *.tmp", workdir: workspace }],
     ["terminal", { command: 'echo hi > "out_$N.txt"', workdir: workspace }],
-    ["terminal", { command: 'mkdir -p "$OUT"', workdir: workspace }],
     ["terminal", { command: "cp /tmp/a.txt .", workdir: workspace }],
     ["terminal", { command: "cp -r /tmp/stuff/. .", workdir: workspace }],
     ["terminal", { command: "tar -xf /tmp/x.tar", workdir: workspace }],
@@ -730,6 +732,12 @@ test("recheck 3: ordinary work under the home is allowed; the home's roots, glob
     ["search_files", { path: home, pattern: "TOKEN" }, "account.credential"],
     ["terminal", { command: "rm -f *.tmp", workdir: home }, "policy.core"],
     ["terminal", { command: 'echo x > "$F"', workdir: join(home, "scripts") }, "policy.core"],
+    // APRV-511 (CUSTODY recheck M1'): a variable that decides the directory
+    // may land on an organ, wherever the call runs from. Recheck 3 allowed
+    // this one from the workspace; a variable inside a final name after a
+    // literal prefix (`out_$N.txt`, above) still is.
+    ["terminal", { command: 'mkdir -p "$OUT"', workdir: workspace }, "policy.core"],
+    ["terminal", { command: 'echo x > "$OUT/notes.md"', workdir: workspace }, "policy.core"],
     ["terminal", { command: "cp -r /tmp/stuff/. .", workdir: home }, "policy.core"],
     ["terminal", { command: "tar -xf /tmp/x.tar", workdir: home }, "policy.core"],
     ["terminal", { command: `tar -xf /tmp/x.tar -C ${home}`, workdir: dir }, "policy.core"],

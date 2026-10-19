@@ -4599,7 +4599,7 @@ to.
 
 | Command  | What it does |
 | -------- | ------------ |
-| `/queue` | Replies with the summary and a numbered list of every pending request (action key, task, class, age), marking the one this listener has selected. Derived from the verified log at reply time, and it works while a request is selected. |
+| `/queue` | Replies with the count line and a numbered list of every pending request (the agent's summary and its age, no action key or task id), marking the one this listener has selected. Derived from the verified log at reply time, and it works while a request is selected. |
 | `/skip`  | Selects the next request; the skipped one goes to the BACK of this process's order and comes round again after the rest, with a fresh card when it does. |
 | `/next`  | Selects the next request; this process does not offer the passed-over one again, and sends no further card for it. |
 
@@ -4613,7 +4613,7 @@ it away from you.
 **`/queue` is a list, and it says so** (APRV-256). The reply carries no decision
 buttons of its own, and it names no position for the ones it points at: a
 request is decided on its own approval card, wherever that card has ended up in
-the chat. The marker on the selected line reads `selected — card sent earlier`,
+the chat. The marker on the selected line reads `sent to you earlier`,
 because that is the whole of what the listener knows. Delivery bookkeeping
 records that a send returned success; the Bot API never reports that a message
 is still there, and a card can be deleted, buried, or lost with the chat
@@ -5723,7 +5723,12 @@ its own flags are not parsed as this verb's.
   ONE inline script is classified by that script since APRV-380, so
   `zsh -lc 'git push origin main'` is `vcs.push.main`; a script file, an extra
   word, a redirection on the wrapper, an assignment prefix and a nested shell
-  all stay opaque.
+  all stay opaque. So does a shell that is not the system's, named as written
+  (APRV-523): one spelled by a path outside `/bin`, `/usr/bin`,
+  `/usr/local/bin`, `/sbin` and `/usr/sbin` (a relative path, a Homebrew
+  shell under `/opt`), or by a word with an expansion or a backslash in it.
+  An assignment-shaped shell word with a quoted or escaped name is
+  `hook-unclassified`.
 - `hook-unparseable` — the command line could not be tokenized.
 - `hook-rejected` — a human said no.
 - `hook-revoked` — a granted approval was withdrawn.

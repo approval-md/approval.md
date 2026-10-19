@@ -289,6 +289,13 @@ whatever class they have anywhere else. Single quotes make the same text
 literal, which is the spelling to reach for when a note has to quote a command.
 Quoting that does not balance is `hook-unparseable`, never a guess.
 
+A `curl`, `wget`, `cp`, `mv`, `ln` or `install` argv word the shell may still
+turn into an option (an unquoted variable or `$(…)` anywhere in it, a variable
+at its head quoted or not, an unquoted glob at its head, or a brace group making
+a word that begins with `-`) may name a write target this text cannot see, so
+the command is `policy.core` (`fetch-output-unknown`, `copy-target-unknown`)
+unless the word follows `--` (APRV-511 fix round 3).
+
 ### The rule table
 
 One row per binary group. The first row whose binary and subcommand match
@@ -336,6 +343,7 @@ an addition).
 | `harness-launch-hermes` | hermes | (any) | harness.launch.hermes, read.shell (APRV-398) |
 | `node` | node | (any) | files.write.workspace, gate.self, log.sync, log.advance, exec.local (rule `node-skill-script` for a skill script, APRV-502) |
 | `skill-script` | bun, python, python3 | a skill-script path § | exec.local (APRV-502) |
+| `exec-code` | python, python3, node, bun, deno, perl, ruby | an inline program, or a file that is not a skill script, only when the policy declares `exec.code.custody: attested` | exec.code (`exec-code-inline`, `exec-code-file`; APRV-510) |
 | `approval` | approval | (any) | gate.self, log.sync, log.advance |
 | `workspace-tool` | npx, tsx, ts-node, tsc, oxlint, eslint, prettier, vitest, jest, backlog, make | (any) | files.write.workspace (plus the `harness.launch.*` family, for `npx` naming a harness package exactly — APRV-354) |
 | `workspace-write` | mkdir, cp, mv, touch, tee, ln, chmod, truncate, rmdir | (any) | files.write.workspace |
@@ -532,6 +540,85 @@ Five overrides sit on top of the table:
   traversal back out of it (`.approval-journal/../.approval/vault.enc`) is
   protected again, and a copy FROM credential material INTO the journal is
   still `account.credential`, because that rule reads every argument.
+
+  **Every spelling, and every landing (APRV-522).** The credential rows match
+  after `..`, `.` and `//` are resolved and with case folded, in the shell and
+  in the read tools alike. git is judged as `cp` is: a reading verb that names
+  credential material is `account.credential`, and only the path-writing verbs,
+  read past the globals and with every option on that verb's closed list, keep
+  their `policy.core` answer. A file named inside a reader's own option
+  (`--name=FILE`, an attached short value, curl's `@FILE` forms) is a read. The
+  hook then lands every path a segment reads, whatever class the segment took,
+  inside every `$(…)` and inside the script of every `bash -c`-style wrapper
+  the classifier unwraps: through earlier `cd`s, symlinks (lexical and
+  physical `..`), globs, brace lists, `~`, `$HOME`, `$PWD` and
+  `${VAR:-default}`, and adds `credential-path-resolved` → `account.credential`
+  beside the segment's own class when one lands on credential material. A
+  directory handed to a recursive reader (the grep family, `rg`, `find`,
+  `tar`, a copier, git and `diff` among them) is a read of what it holds; a
+  recursive search and `git grep` read the working directory too, whether or
+  not they name a path; a one-operand `ln` reads its only operand. The pass
+  starts from the hook process's directory AND the envelope's `cwd`.
+
+  Where the hook cannot know where a read lands, the read is a credential
+  read. After a `cd` it cannot resolve, every later relative read word is one,
+  a word holding an unexpandable `$` included. A `cd` is unresolvable when its
+  operand is a variable, `-`, a glob, a brace list or an unexpanded tilde
+  prefix; when it carries an assignment prefix (`CDPATH=`, `HOME=`); and when
+  its argv is one bash and zsh read differently from a plain directory (an
+  option other than `-L`, `-P`, `-e`, `-q`, `-s`; two or more operands; an
+  operand that is empty or opens with `-` or `+`). `popd` always is.
+
+  A relative operand that does not open with `./` or `../` (and is not exactly
+  `.` or `..`) may be found through `CDPATH`, which the hook cannot see. The
+  hook keeps the directory the operand names from the known one, and also
+  judges each later relative word as `<unknown directory>/<operand>/<word>`.
+  That word is a credential read only when the path could name credential
+  material or a gate home: the operand carries a credential name (`keys`,
+  `vault*`, `env*`, `.env*`, `auth.json`); the joined path matches a
+  credential row with the unknown directory taken as an approval, Hermes or
+  profiles directory; the word reaches `.env*` or `auth.json` directly below
+  the operand's directory, which may be a profile home of any name; or the
+  path ends in `.approval`, `.hermes`, the configured Hermes home's name or
+  `profiles/<name>`. So `cd src && npm test` keeps its normal class. What this
+  still costs: after such a `cd`, a recursive reader (the grep family, `rg`,
+  `find`, `tar`, a copier such as `cp`, git or `diff` with a path or message
+  word), a word holding `..`, and a `**` glob are credential reads, because
+  what they reach below an unknown directory cannot be bounded. A `./`
+  spelling or an absolute `cd` avoids that.
+
+  `$OLDPWD` and the directory stack fail closed as `~-` does. A `cd ..` is
+  judged against the directory as spelled (the shell's logical `cd`) as well
+  as with its symlinks resolved. A recursive `**` glob judges the directory it
+  starts from as a recursive read. A word opening with `~+`, `~-` or `~name`,
+  a brace list past 64 words, `$(…)` or script nesting past 8 levels, and a
+  shell handed an inline script in a shape the classifier does not unwrap are
+  credential reads too.
+
+  A path held in a variable, or produced by a substitution's output, is judged
+  on every adapter (APRV-524): it is a credential read when its text could
+  name credential material, when its literal prefix lands somewhere that makes
+  it one, or when its LAST component is the unresolved one and the prefix
+  lands on a Hermes home, a profile home, the install's `hermes-agent/`, an
+  approval home or a directory that holds credentials. A word holding a
+  substitution is also judged with the substitution empty, as the literal
+  path left (its globs expanded on disk), so a substitution in a middle
+  component, glued to a directory's name or after a glob is judged where that
+  literal path lands. The Hermes hook, and Muse with a `workdir`, go further:
+  there every recursive read of such a word is a credential read.
+
+  Out of reach, stated so nobody assumes otherwise: beyond that, a path held
+  in a variable or produced by a substitution's output (an unknown span may
+  hold a `/` or a `..`, which moves the literal names after it, and a
+  variable may be empty, which moves them as much: only a substitution is
+  also read empty); a
+  recursive search of an ANCESTOR of a credential directory with a filename
+  filter; after a `CDPATH`-steerable `cd`, a symlink inside the unknown
+  directory, a `CDPATH` entry that itself lies inside a credential subtree,
+  and a `cdable_vars` option or `cd` function from the user's profile; and a
+  Bash directory that is neither the hook process's nor the
+  envelope's `cwd` (the Bash tool keeps its directory between calls, and the
+  hook sees only what the envelope reports).
 - **`redirect-write` → `files.write.workspace`.** A read command with a `>` or
   `>>` writes a file, and the class says so. Since APRV-283 a redirection onto a
   DISCARD device is exempt, because it creates nothing: `/dev/null`,
@@ -1417,6 +1504,8 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-unsupported-execution-context` | the harness does not tell the hook where the call will run, so no verdict over the visible bytes can bind the action. Never produced on this adapter: Claude Code's events carry the directory. It is the refusal native Codex Bash takes on every event, because Codex 0.152.1 honours a per-call working directory that appears in no field of the event (`docs/codex-hook.md`) |
 | `hook-muse-contributor-model` | the session names a Contributor-tier model, so every tool call is refused above the policy: Meta trains on that tier's prompts and completions, and a session on one discloses every byte it reads. Never produced on this adapter, which is Anthropic's; it is Meta Muse Code's (`docs/muse-hook.md`). The repair is to change the model in Muse's own picker, not to ask an approver |
 | `hook-hermes-execute-code-unbound` | a Hermes Agent `execute_code` call, refused before anything else looks at it: it carries a program and no path, no argv and no working directory, so no class can be resolved and no payload can bind what it would do. Never produced on this adapter; it is Hermes Agent's (`docs/hermes-hook.md`). Distinct from `hook-opaque`, whose repair is to write the command differently — there is no spelling of an `execute_code` call this hook could answer, so the repair is to do the work through the shell tool or through `approval run` with a granted token |
+| `hook-exec-code-custody-unattested` | an opaque program (`python3 -c`, `node -e` and kin, an interpreter running a file that is not a skill script, or a Hermes `execute_code` with `exec.code.execute_code: hooked`) under a policy that NAMES the `exec.code` class (a row, or the `exec` block) without declaring `exec.code.custody: attested` (APRV-510). The repair is that line in the attested policy. A policy that never names `exec.code` keeps `hook-opaque` / `hook-unclassified` byte for byte. Nothing is appended |
+| `hook-exec-code-unreadable` | an `exec.code` file program this hook cannot read and hash: absent, EACCES, not a regular file, over 16 MiB, or relative after a `cd` in the same line (APRV-510); or one it cannot place by the kernel's reading: a path with `..` (or a `.` or empty component after the first), a directory that is not its own realpath, a program that is not the line's sole segment, or an envelope with no absolute `cwd` (fix round 2). A record of an opaque program binds its hash, so a program whose bytes cannot be read is refused rather than recorded without one. Nothing is appended |
 | `hook-io` | malformed hook input, or an unreadable log |
 
 `hook-opaque` is the one worth knowing by sight. `eval`, `source`, `sudo`,
@@ -1424,9 +1513,33 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 any `$(…)` that is not purely a read: all deny. The fix is to write the command
 out, or to run the effect through `approval run` with a granted token.
 
+**An operator can open the inline programs as a class of their own** (APRV-510).
+With `exec.code.custody: attested` in the attested policy, `python3 -c`, `node -e`
+/ `--eval`, `bun -e`, `deno eval`, `perl -e`, `ruby -e`, and `python3` / `bun`
+running a file that is not a skill script classify `exec.code` and the policy
+decides (an `exec.code` row, an `exec.*` row, or `defaults.autonomy`). The record
+binds the program's SHA-256 and length and the command line's SHA-256, never the
+program text, and it records that the program existed rather than what it did.
+The shape is exact and everything outside it keeps the refusal above: `bash -c`
+and every shell wrapper, `eval`, `env`, `sudo`, a pipe into an interpreter, stdin
+(`python3 -`), an assignment prefix, a substituted or shell-expanded program word,
+a heredoc, a redirection other than a discard write, a program inside a
+subshell `( … )` or a `{ …; }` group, a word after an inline
+program, an interpreter outside `/usr/bin`, `/bin` and `/usr/local/bin` or
+spelled relatively, and anything after a segment that can
+change what a bare name resolves to. The open window does not reach the class.
+A FILE program is read from the directory the event's `cwd` names, never the
+hook process's own directory, and an event with no absolute `cwd` gets no file
+mode (`hook-exec-code-unreadable`); it must also be the line's sole segment and
+be named by a path with no `..` through directories that are their own
+realpath. `docs/hermes-hook.md` has the payload and the limits.
+
 **A login shell around one inline script is the exception** (APRV-380). When
 the words are exactly a known shell (`bash`, `sh`, `zsh`, `dash`, `ksh`,
-`fish`, with or without a path), one inline-script flag (`-c`, `-lc`, `-ic` and
+`fish`, bare or at a path in `/bin`, `/usr/bin`, `/usr/local/bin`, `/sbin` or
+`/usr/sbin`, spelled with no expansion and no backslash; APRV-523: any other
+path, an assignment-shaped word, or a word the shell would still expand
+keeps the wrapper opaque), one inline-script flag (`-c`, `-lc`, `-ic` and
 the like), and one script, the SCRIPT is classified, through this same
 classifier and the same segment rules. So `/bin/zsh -lc 'git push origin main'`
 is `vcs.push.main`, and the command bound in the record is still the outer one

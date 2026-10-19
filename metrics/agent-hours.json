@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-12T10:30:15.777Z",
+  "generated_at": "2026-10-18T22:00:13.407Z",
   "repo": "approval-md/approval.md",
   "method": {
     "active_time": "sum of gaps between consecutive transcript events, each capped at gap_seconds, attributed to the most recent assistant model",
@@ -31,11 +31,11 @@
       "input_tokens": 19925848
     },
     "claude-opus": {
-      "hours": 319.2,
-      "sessions": 1051,
-      "turns": 96154,
-      "output_tokens": 31653890,
-      "input_tokens": 19295503630
+      "hours": 322.6,
+      "sessions": 1216,
+      "turns": 97884,
+      "output_tokens": 33842442,
+      "input_tokens": 19434882758
     },
     "claude-sonnet": {
       "hours": 9.7,
@@ -43,27 +43,6 @@
       "turns": 4435,
       "output_tokens": 980212,
       "input_tokens": 471193068
-    },
-    "codex-astra": {
-      "hours": 31,
-      "sessions": 14,
-      "turns": 148,
-      "output_tokens": 1156314,
-      "input_tokens": 519770118
-    },
-    "codex-review": {
-      "hours": 7.8,
-      "sessions": 42,
-      "turns": 578,
-      "output_tokens": 297084,
-      "input_tokens": 376018748
-    },
-    "codex-sol": {
-      "hours": 40.5,
-      "sessions": 19,
-      "turns": 236,
-      "output_tokens": 1910549,
-      "input_tokens": 725127110
     },
     "cursor": {
       "hours": 1.7,
@@ -74,7 +53,7 @@
       "approx": true
     }
   },
-  "total_hours": 674.3,
+  "total_hours": 598.4,
   "weeks": {
     "2026-W32": {
       "claude-fable": 15.8,
@@ -100,19 +79,13 @@
       "claude-haiku": 0.4,
       "claude-opus": 108.4,
       "claude-sonnet": 3.1,
-      "codex-astra": 4.5,
-      "codex-review": 1.6,
-      "codex-sol": 2.5,
       "cursor": 0
     },
     "2026-W37": {
       "claude-fable": 14.1,
       "claude-haiku": 0.3,
       "claude-opus": 8.2,
-      "claude-sonnet": 0.9,
-      "codex-astra": 22,
-      "codex-review": 2,
-      "codex-sol": 35
+      "claude-sonnet": 0.9
     },
     "2026-W38": {
       "claude-fable": 35.9,
@@ -123,10 +96,7 @@
     "2026-W39": {
       "claude-fable": 20.1,
       "claude-opus": 28.8,
-      "claude-sonnet": 0.2,
-      "codex-astra": 4.5,
-      "codex-review": 4.2,
-      "codex-sol": 3
+      "claude-sonnet": 0.2
     },
     "2026-W40": {
       "claude-fable": 25.8,
@@ -139,7 +109,7 @@
       "claude-opus": 6.4
     },
     "2026-W42": {
-      "claude-opus": 0.4
+      "claude-opus": 3.7
     }
   }
 }

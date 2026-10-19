@@ -160,7 +160,12 @@ Tool names are Muse's own, observed rather than guessed:
 command is classified against `tool_input.workdir` rather than the session root,
 so a relative path resolves the way the shell will resolve it. A `workdir` that
 is not absolute is ignored in favour of the session `cwd`: a self-reported field
-may raise scrutiny, never lower it.
+may raise scrutiny, never lower it. An `exec.code` FILE program (APRV-510) is the
+exception to that fallback: a call that carries a `workdir` which is not
+absolute gets no file mode at all (`hook-exec-code-unreadable`), because the
+command runs in a directory the hook cannot place and hashing the file under the
+session `cwd` would bind a different file. Only a call with no `workdir` key
+resolves a file program against the session `cwd`.
 
 **`search` names a list, and one out-of-scope entry gates the whole call.** A
 search over five directories where one is outside the read scope is an

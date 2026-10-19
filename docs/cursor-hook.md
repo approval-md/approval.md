@@ -136,6 +136,7 @@ an addition).
 | `harness-launch-hermes` | hermes | (any) | harness.launch.hermes, read.shell (APRV-398) |
 | `node` | node | (any) | files.write.workspace, gate.self, log.sync, log.advance, exec.local (rule `node-skill-script` for a skill script, APRV-502) |
 | `skill-script` | bun, python, python3 | a skill-script path § | exec.local (APRV-502) |
+| `exec-code` | python, python3, node, bun, deno, perl, ruby | an inline program, or a file that is not a skill script, only when the policy declares `exec.code.custody: attested` | exec.code (`exec-code-inline`, `exec-code-file`; APRV-510) |
 | `approval` | approval | (any) | gate.self, log.sync, log.advance |
 | `workspace-tool` | npx, tsx, ts-node, tsc, oxlint, eslint, prettier, vitest, jest, backlog, make | (any) | files.write.workspace |
 | `workspace-write` | mkdir, cp, mv, touch, tee, ln, chmod, truncate, rmdir | (any) | files.write.workspace |
@@ -540,6 +541,8 @@ Never `ask`. The `agent_message` is `<code>: <detail>`, and the codes are frozen
 | `hook-unsupported-execution-context` | the harness does not tell the hook where the call will run, so no verdict over the visible bytes can bind the action. Never produced on this adapter: Cursor's events carry the directory. It is the refusal native Codex Bash takes on every event (`docs/codex-hook.md`) |
 | `hook-muse-contributor-model` | the session names a Contributor-tier model, so every tool call is refused above the policy: Meta trains on that tier's prompts and completions, and a session on one discloses every byte it reads. Never produced on this adapter; it is Meta Muse Code's (`docs/muse-hook.md`). The repair is to change the model in Muse's own picker, not to ask an approver |
 | `hook-hermes-execute-code-unbound` | a Hermes Agent `execute_code` call, refused before anything else looks at it: it carries a program and no path, no argv and no working directory, so no class can be resolved and no payload can bind what it would do. Never produced on this adapter; it is Hermes Agent's (`docs/hermes-hook.md`). Distinct from `hook-opaque`, whose repair is to rewrite the command: there is no spelling of an `execute_code` call this hook could answer |
+| `hook-exec-code-custody-unattested` | an opaque program (`python3 -c`, `node -e` and kin, or an interpreter running a file that is not a skill script) under a policy that names the `exec.code` class without declaring `exec.code.custody: attested` (APRV-510). A policy that never names `exec.code` keeps `hook-opaque` / `hook-unclassified` byte for byte. Nothing is appended (`docs/claude-code-hook.md`) |
+| `hook-exec-code-unreadable` | an `exec.code` file program the hook cannot read and hash (absent, EACCES, not a regular file, too large, or relative after a `cd`), APRV-510; or one it cannot place by the kernel's reading (a path with `..`, a directory that is not its own realpath, a program that is not the line's sole segment, or an event with no absolute `cwd`), fix round 2. Nothing is appended |
 | `hook-io` | malformed hook input, or an unreadable log |
 
 `hook-opaque` is the one worth knowing by sight. `eval`, `source`, `sudo`,
@@ -548,7 +551,8 @@ any `$(…)` that is not purely a read: all deny. The fix is to write the comman
 out, or to run the effect through `approval run` with a granted token.
 
 **A login shell around one inline script is the exception** (APRV-380). Words
-that are exactly a known shell, one inline-script flag (`-c`, `-lc`, `-ic` and
+that are exactly a known shell (bare, or at a system-bin path, spelled with no
+expansion and no backslash), one inline-script flag (`-c`, `-lc`, `-ic` and
 the like) and one script are classified by the SCRIPT, through this same
 classifier: `/bin/zsh -lc 'git push origin main'` is `vcs.push.main`, and the
 record still binds the outer command you wrote. A script FILE, a fourth word, a

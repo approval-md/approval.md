@@ -356,29 +356,91 @@ export const TELEGRAM_STALE_UNKNOWN =
 export const TELEGRAM_PROMPT_HEADING = "APPROVAL REQUIRED";
 
 /**
- * What the label over the payload chunks names (APRV-162).
+ * What the label over the payload chunks names (APRV-162), in a resident's
+ * words (P-9).
  *
  * The chunks carry the canonical rendering, which is a deterministic function
- * of the bytes and not the bytes themselves; calling it "the exact bytes" told
- * the reader that a diff view and a JSON file were the same object. The
- * rendering names its own `display_hash`, and the store path inside it is the
- * route back to the bytes.
+ * of the bytes and not the bytes themselves, and the rendering names its own
+ * `display_hash` and store path inside the block (SPEC.md §10.3, bound
+ * verbatim by `display_hash`). This label sits OUTSIDE that block, so it is
+ * free to say what the block is for the person reading it: what they are
+ * approving. Before P-9 it said "the canonical rendering this approval's
+ * display_hash names; raw bytes at the store path inside", which is the
+ * block's own first lines restated in the system's vocabulary.
  */
-export const PAYLOAD_CHUNK_LABEL_TAIL =
-  "the canonical rendering this approval's display_hash names; raw bytes at the store path inside";
-export const PAYLOAD_CHUNK_LABEL = `PAYLOAD — ${PAYLOAD_CHUNK_LABEL_TAIL}`;
+export const PAYLOAD_CHUNK_LABEL_TAIL = "what you are approving";
+export const PAYLOAD_CHUNK_LABEL = `Exactly ${PAYLOAD_CHUNK_LABEL_TAIL}`;
+
+/**
+ * The plain-words label over lines the requesting agent wrote (P-9).
+ *
+ * The same words the minimal card uses for the agent's own summary: the reader
+ * learns that the agent said it and that nobody checked it, which is what the
+ * old "CLAIMED ... NOT verified by the runtime" said in the system's
+ * vocabulary. The author id stays after it, because which agent said a thing
+ * is part of what an approver weighs (APRV-144).
+ */
+export const TELEGRAM_CLAIMED_LABEL = "What your agent says (not checked)";
 
 /**
  * What the claimed block is headed, and what a second claimed message is headed
  * when a rationale overflows one (APRV-165).
  *
- * Both say CLAIMED and both say NOT verified, because a continuation is a
- * message a reader may see first, and a claimed line that arrives under no
- * heading at all reads as the runtime's own.
+ * Both say the lines are the agent's and not checked, because a continuation
+ * is a message a reader may see first, and a claimed line that arrives under
+ * no heading at all reads as the runtime's own.
  */
-export const TELEGRAM_CLAIMED_HEADING_PREFIX = "WHAT THIS DOES — CLAIMED by";
-export const TELEGRAM_CLAIMED_HEADING_SUFFIX = "NOT verified by the runtime";
-export const TELEGRAM_CLAIMED_CONTINUED_HEADING = `WHAT THIS DOES (continued) — CLAIMED, ${TELEGRAM_CLAIMED_HEADING_SUFFIX}`;
+export const TELEGRAM_CLAIMED_HEADING_PREFIX = `${TELEGRAM_CLAIMED_LABEL} —`;
+export const TELEGRAM_CLAIMED_CONTINUED_HEADING = "What your agent says (continued, not checked)";
+
+/**
+ * The heading over the rows the runtime derived itself (P-9): the class, the
+ * wait, the budget. Before P-9 it read "COMPUTED — derived by the runtime from
+ * the log, the policy and the payload bytes". The rows keep their origin tags,
+ * which the village relay reads (its quiet hold matches the `ttl` row up to
+ * its `<i>(` tag).
+ */
+export const TELEGRAM_COMPUTED_HEADING = "Checked by approval.md";
+
+/** The most characters of an author id the claimed label shows (fold round 1, S3). */
+export const TELEGRAM_CLAIMED_AUTHOR_MAX = 80;
+
+/**
+ * {@link TELEGRAM_CLAIMED_LABEL} naming who wrote the lines under it.
+ *
+ * The author is the requester's actor id, which the actor rule
+ * (`^(human|agent):.+`) checks only at its start: a line break later in it
+ * passes. Escaping stops markup, but not a second line inside the bold heading
+ * that reads like the runtime's own "Checked by approval.md" (fold round 1,
+ * S3). So every run of whitespace, line breaks included, becomes one space,
+ * control and format characters are dropped, and the id is cut at
+ * {@link TELEGRAM_CLAIMED_AUTHOR_MAX} characters with an ellipsis. The label is
+ * always one line.
+ */
+export function claimedLabelFor(author: string): string {
+  return `${TELEGRAM_CLAIMED_LABEL} — ${oneLineAuthor(author)}`;
+}
+
+/**
+ * An author id as one short line (fold round 1, S3): whitespace runs, line
+ * breaks included, become one space; control and format characters go; the id
+ * is cut at {@link TELEGRAM_CLAIMED_AUTHOR_MAX} characters with an ellipsis.
+ * Used by {@link claimedLabelFor} and by the `(author)` tag on each claimed
+ * row, which carries the same id. A computed row's origin is a fixed word, so
+ * this changes nothing there.
+ */
+export function oneLineAuthor(author: string): string {
+  const flat = author
+    .replace(/\s+/gu, " ")
+    .replace(/[\p{Cc}\p{Cf}]/gu, "")
+    .trim();
+  const chars = Array.from(flat);
+  const shown =
+    chars.length > TELEGRAM_CLAIMED_AUTHOR_MAX
+      ? `${chars.slice(0, TELEGRAM_CLAIMED_AUTHOR_MAX - 1).join("")}…`
+      : flat;
+  return shown.length === 0 ? "unknown" : shown;
+}
 
 /**
  * The most members one digest may carry (APRV-115).
@@ -1229,18 +1291,18 @@ export function renderTelegram(
     request.summary.kind === "claimed" ? request.summary.author : "the requesting party";
 
   const render = (entry: Line): string =>
-    `• <b>${escapeHtml(entry.label)}:</b> ${escapeHtml(entry.text)} <i>(${escapeHtml(entry.origin)})</i>`;
+    `• <b>${escapeHtml(entry.label)}:</b> ${escapeHtml(entry.text)} <i>(${escapeHtml(oneLineAuthor(entry.origin))})</i>`;
 
   const header = [
     `<b>${escapeHtml(heading)}</b>`,
     `<code>${escapeHtml(request.action_key.value)}</code>`,
     "",
-    "<b>COMPUTED — derived by the runtime from the log, the policy and the payload bytes</b>",
+    `<b>${TELEGRAM_COMPUTED_HEADING}</b>`,
     ...computedLines.map(render),
   ].join("\n");
 
   const claimedText = [
-    `<b>${TELEGRAM_CLAIMED_HEADING_PREFIX} ${escapeHtml(author)}, ${TELEGRAM_CLAIMED_HEADING_SUFFIX}</b>`,
+    `<b>${escapeHtml(claimedLabelFor(author))}</b>`,
     ...claimedLines.map(render),
   ].join("\n");
 
@@ -1574,6 +1636,13 @@ export interface DigestMemberState {
   /** The agent's cost estimate, formatted. Claimed. */
   cost: string;
   /**
+   * The member's class, computed, set only when the digest's members differ in
+   * class (APRV-287: the several classes of one tool call). Their summaries are
+   * then one command's summary repeated, and the class is what tells the lines
+   * apart and what each "Approve" covers (P-9, in place of the action key).
+   */
+  kind?: string;
+  /**
    * The terminal outcome, once one has been observed for this member. Written
    * only from a gate record or the verified log, never inferred here.
    */
@@ -1599,8 +1668,28 @@ export interface DigestMemberState {
  * terminal.
  */
 export interface StaleSummary {
-  /** Computed lines: how many, how old the oldest is, which classes. */
+  /**
+   * The reminder this message opens with on a restart (P-9), the first line in
+   * bold: how many requests this cycle re-sends in all, and, when cards follow
+   * it, whether the buttons on older messages still work. It replaces the
+   * separate re-delivery banner for that cycle. Shown only while every member
+   * is still open: once one is decided, the count it states is no longer true.
+   */
+  reminder?: string[];
+  /** Computed lines: how many are listed, and why nobody is waiting on them. */
   lines: string[];
+  /**
+   * How long ago each member was asked, computed, in member order (P-9). Shown
+   * beside each claimed summary so the members can be told apart without an
+   * action key.
+   */
+  ages?: string[];
+  /**
+   * Whether the buttons on earlier copies still decide (APRV-456), which the
+   * footer's advice depends on. Filled from the channel's own setting by
+   * {@link TelegramChannel.notifyStale} when the caller leaves it out.
+   */
+  staleCopy?: boolean;
 }
 
 /** One digest message, as the delivering process remembers it. */
@@ -1611,8 +1700,11 @@ export interface DigestState {
   batchDeliveryId: DeliveryId;
   /** The nonce the "all" buttons were issued under. */
   allNonce: string;
-  /** The computed facts every member shares, already rendered as text. */
-  facts: { label: string; text: string; origin: string }[];
+  /**
+   * The one computed line the digest states about its members, already
+   * rendered as text ({@link digestLine}); empty for a stale summary.
+   */
+  line: string;
   /**
    * The collapsed re-delivery this message is, or `null` for an ordinary digest
    * (APRV-287). See {@link StaleSummary}.
@@ -1639,47 +1731,32 @@ export interface DigestState {
 }
 
 /**
- * The computed facts a digest's members share, as the digest states them.
+ * The one computed line a digest states about its members (P-9).
  *
- * Every one is read off the first member, which is sound precisely because the
- * grouping key made them equal across the set: a digest whose members disagreed
- * about their class or their task is a digest the listener would not have
- * built. The last line is the one an approver needs most — it says how many
- * payloads are above and that each request has its own.
+ * Read off the members themselves, which is sound precisely because the
+ * grouping key made them alike: a digest whose members disagreed about their
+ * class or their task is a digest the listener would not have built. What the
+ * line says is the thing an approver needs before the buttons: why these are
+ * one message, and that every request it decides is shown in full above it
+ * (SPEC.md §10.3).
+ *
+ * Before P-9 this was five facts with origin tags: the class name, the
+ * autonomy, the task id, the grouping key (`keys:body,from,subject,to`) and the
+ * payload binding. Each is still on every member's own card above, where an
+ * operator who wants it finds it; the digest is where a resident answers, and
+ * there it was ids and vocabulary between them and the buttons.
  */
-export function digestFacts(
-  members: ChannelRequest[],
-): { label: string; text: string; origin: string }[] {
+export function digestLine(members: ChannelRequest[]): string {
   const first = members[0];
-  if (first === undefined) return [];
-  // APRV-287. A digest may now carry the several classes of ONE tool call, so
-  // the class line states the set rather than the first member's, and the
-  // grouping line says which of the two groupings put this set together. A
-  // digest whose members share one class reads exactly as it did.
-  const classes = [...new Set(members.map((member) => member.class.value))];
-  const shared = sharedPayload(members);
-  const autonomies = [...new Set(members.map((member) => member.autonomy.value))];
-  return [
-    { label: "class", text: classes.join(", "), origin: originOf(first.class) },
-    { label: "autonomy", text: autonomies.join(", "), origin: originOf(first.autonomy) },
-    { label: "task", text: first.task.value ?? "(none)", origin: originOf(first.task) },
-    {
-      label: "grouped by",
-      text:
-        shared === null
-          ? `one class, one task, one payload shape (${payloadShapeKey(first.fullPayload.value?.value)})`
-          : `one tool call: one task, one payload, ${String(classes.length)} class(es) of the same command`,
-      origin: "grouping",
-    },
-    {
-      label: "payloads",
-      text:
-        shared === null
-          ? `${members.length} full payloads, one per request, in the ${members.length} prompts above this message`
-          : `one payload, shared by all ${members.length} requests, in the prompt above this message`,
-      origin: originOf(first.fullPayload),
-    },
-  ];
+  if (first === undefined) return "";
+  const count = String(members.length);
+  if (sharedPayload(members) !== null) {
+    return `All ${count} are about one action, shown once in full above.`;
+  }
+  const task = first.task.value;
+  return task === null || task.length === 0
+    ? `All ${count} are the same kind of request. Each one is shown in full above.`
+    : `All ${count} come from the same task. Each one is shown in full above.`;
 }
 
 /**
@@ -1705,14 +1782,22 @@ function sharedPayload(members: ChannelRequest[]): ChannelRequest | null {
 
 /**
  * The collapsed re-delivery's own message: what is waiting, and one way to
- * clear it (APRV-287).
+ * clear it (APRV-287), in a resident's words (P-9).
  *
- * Everything above the buttons is computed by the runtime from the verified log
- * — the count, the ages, the classes — and the per-member lines carry the
- * agent's own summaries under a heading that says so, exactly as an ordinary
- * digest does. What it does NOT carry is any payload, and the message says so
- * in the same breath as it explains why the only button rejects: a decision is
- * bound to the bytes the approver was shown, and nothing here shows them.
+ * Everything above the claimed label is computed by the runtime from the
+ * verified log (the reminder's count, why nobody is waiting, each member's
+ * age), and the per-member lines carry the agent's own summaries under a label
+ * that says they are the agent's and were not checked, exactly as an ordinary
+ * digest does (SPEC.md §9: computed and claimed stay visibly separate). What it
+ * does NOT carry is any payload, and the footer says so in the same breath as
+ * it explains why the only button rejects: a decision is bound to the bytes the
+ * approver was shown, and nothing here shows them.
+ *
+ * Before P-9 each member line led with its action key, and the text explained
+ * the hook's wait, log events and `approval grant <action key>`. None of that
+ * helps the person holding the phone, so a member is now its summary and its
+ * age, and the footer says what they can do: use the earlier message if its
+ * buttons still work (`staleCopy`), or let the agent ask again.
  */
 function renderStaleSummary(
   digest: DigestState,
@@ -1720,26 +1805,29 @@ function renderStaleSummary(
   open: number,
   total: number,
 ): { text: string; keyboard: { inline_keyboard: InlineButton[][] } | null } {
+  // P-9: the restart's one reminder, while every member is still open. Its
+  // first line is the headline; any further line (what follows this message)
+  // goes after the computed lines, which say what this message lists.
+  const reminder = open === total ? (stale.reminder ?? []) : [];
+  const headline =
+    reminder[0] ??
+    (open === 0
+      ? `All ${String(total)} older requests decided`
+      : open === total
+        ? `${String(open)} older request${open === 1 ? " is" : "s are"} still open`
+        : `${String(open)} of ${String(total)} older requests still open`);
   const lines: string[] = [
-    `<b>${escapeHtml(
-      open === 0
-        ? `ALL ${total} STALE REQUESTS DECIDED`
-        : `${open} STALE REQUEST${open === 1 ? "" : "S"} — NOBODY IS WAITING ON ${open === 1 ? "IT" : "THEM"}`,
-    )}</b>`,
+    `<b>${escapeHtml(headline)}</b>`,
+    ...stale.lines.map((line) => escapeHtml(line)),
+    ...reminder.slice(1).map((line) => escapeHtml(line)),
     "",
-    "<b>COMPUTED — derived by the runtime from the log and the policy</b>",
-    ...stale.lines.map((line) => `• ${escapeHtml(line)}`),
-    ...digest.facts.map(
-      (fact) =>
-        `• <b>${escapeHtml(fact.label)}:</b> ${escapeHtml(fact.text)} <i>(${escapeHtml(fact.origin)})</i>`,
-    ),
-    "",
-    `<b>CLAIMED — authored by ${escapeHtml(digest.author)}, NOT verified by the runtime</b>`,
+    `<b>${escapeHtml(claimedLabelFor(digest.author))}</b>`,
   ];
 
   for (const [index, member] of digest.members.entries()) {
+    const age = stale.ages?.[index];
     lines.push(
-      `${index + 1}. <code>${escapeHtml(member.actionKey)}</code> — ${escapeHtml(member.summary)}`,
+      `${index + 1}. ${escapeHtml(member.summary)}${age === undefined ? "" : ` · ${escapeHtml(age)}`}`,
     );
     if (member.settled !== null) {
       lines.push(`   <b>${escapeHtml(member.settled.headline)}</b>`);
@@ -1747,12 +1835,18 @@ function renderStaleSummary(
     }
   }
 
-  lines.push(
-    "",
-    escapeHtml(
-      "These asked while a hook waited, and the wait is long over: no tool call is holding the answer. This message carries NO payload, so it offers no approve button — a decision is bound to the bytes you were shown, and nothing here shows them. Rejecting is one log event per request and authorizes nothing. To approve one instead, decide it on its own card or run `approval grant <action key>`; the requests stay listed by /queue either way.",
-    ),
-  );
+  if (open > 0) {
+    const approve =
+      stale.staleCopy === false
+        ? "To approve one, ask your agent to try again."
+        : "To approve one, use its earlier message if you still have it, or ask your agent to try again.";
+    lines.push(
+      "",
+      escapeHtml(
+        `This message does not show what they would send, so it has no approve button. ${approve} Reject all turns down only ${open === 1 ? "this one" : `these ${String(open)}`}.`,
+      ),
+    );
+  }
 
   const rows: InlineButton[][] =
     open === 0
@@ -1774,9 +1868,9 @@ function renderStaleSummary(
 
 /** The digest's headline, given how much of it is still open. */
 function digestHeadline(open: number, total: number): string {
-  if (open === 0) return `ALL ${total} REQUESTS DECIDED`;
-  if (open === total) return `${total} REQUESTS AWAITING APPROVAL`;
-  return `${open} OF ${total} REQUESTS STILL AWAITING APPROVAL`;
+  if (open === 0) return `All ${total} requests decided`;
+  if (open === total) return `${total} requests are waiting for you`;
+  return `${open} of ${total} requests still waiting for you`;
 }
 
 /**
@@ -1803,21 +1897,19 @@ export function renderDigest(digest: DigestState): {
 
   if (stale !== null) return renderStaleSummary(digest, stale, open.length, total);
 
+  // P-9: a headline, one computed line, then the agent's own words under a
+  // label that says they are the agent's and unchecked. No action key: the
+  // members are told apart by number, and the numbers are on the buttons.
   const lines: string[] = [
     `<b>${escapeHtml(digestHeadline(open.length, total))}</b>`,
+    escapeHtml(digest.line),
     "",
-    "<b>COMPUTED — derived by the runtime from the log and the policy</b>",
-    ...digest.facts.map(
-      (fact) =>
-        `• <b>${escapeHtml(fact.label)}:</b> ${escapeHtml(fact.text)} <i>(${escapeHtml(fact.origin)})</i>`,
-    ),
-    "",
-    `<b>CLAIMED — authored by ${escapeHtml(digest.author)}, NOT verified by the runtime</b>`,
+    `<b>${escapeHtml(claimedLabelFor(digest.author))}</b>`,
   ];
 
   for (const [index, member] of digest.members.entries()) {
     lines.push(
-      `${index + 1}. <code>${escapeHtml(member.actionKey)}</code> — ${escapeHtml(member.summary)} · ${escapeHtml(member.cost)}`,
+      `${index + 1}. ${member.kind === undefined ? "" : `${escapeHtml(member.kind)} — `}${escapeHtml(member.summary)} · agent's estimate ${escapeHtml(member.cost)}`,
     );
     if (member.settled !== null) {
       lines.push(`   <b>${escapeHtml(member.settled.headline)}</b>`);
@@ -1825,12 +1917,16 @@ export function renderDigest(digest: DigestState): {
     }
   }
 
-  lines.push(
-    "",
-    escapeHtml(
-      `Each button decides ONE request, numbered as above. "all" is ${open.length} separate decisions, one log event each; the full payload of every request is in the messages above this one.`,
-    ),
-  );
+  if (open.length > 0) {
+    lines.push(
+      "",
+      escapeHtml(
+        open.length > 1
+          ? `Each button answers one request, by number. "All" answers every request still open.`
+          : "Each button answers one request, by number.",
+      ),
+    );
+  }
 
   const rows: InlineButton[][] = [];
   for (const [index, member] of digest.members.entries()) {
@@ -3584,7 +3680,10 @@ export class TelegramChannel implements TestableChannel {
     stale: StaleSummary,
   ): Promise<TelegramBatchDelivery | null> {
     if (members.length === 0) return null;
-    return this.deliverDigest(members, `tg-batch-${this.makeNonce()}`, stale);
+    return this.deliverDigest(members, `tg-batch-${this.makeNonce()}`, {
+      ...stale,
+      staleCopy: stale.staleCopy ?? this.staleCopy,
+    });
   }
 
   /**
@@ -3611,6 +3710,7 @@ export class TelegramChannel implements TestableChannel {
     const windowMs = windows.includes(null)
       ? null
       : Math.max(...windows.filter((window): window is number => window !== null));
+    const mixedClasses = new Set(members.map((member) => member.class.value)).size > 1;
     const state: DigestState = {
       deliveredAtMs,
       windowMs,
@@ -3619,13 +3719,14 @@ export class TelegramChannel implements TestableChannel {
       batchDeliveryId,
       allNonce,
       stale,
-      facts: stale === null ? digestFacts(members) : [],
+      line: stale === null ? digestLine(members) : "",
       author: originOf((members[0] as ChannelRequest).summary),
       members: members.map((member) => ({
         actionKey: member.action_key.value,
         nonce: this.makeNonce(),
         summary: member.summary.value ?? "(none given)",
         cost: `$${member.est_cost_usd.value.toFixed(2)}`,
+        ...(mixedClasses ? { kind: member.class.value } : {}),
         settled: null,
       })),
     };
@@ -3650,7 +3751,7 @@ export class TelegramChannel implements TestableChannel {
       for (const [index, member] of members.entries()) {
         const one = await this.sendPrompt(
           member,
-          `REQUEST ${index + 1} OF ${members.length} — decide it on the digest below`,
+          `Request ${index + 1} of ${members.length} — answer it on the summary below`,
           null,
         );
         rendered.push({ ...one.rendered, batchDeliveryId });
@@ -3658,7 +3759,7 @@ export class TelegramChannel implements TestableChannel {
     } else {
       const one = await this.sendPrompt(
         shared,
-        `THE COMMAND ALL ${members.length} REQUESTS ARE ABOUT — decide it on the digest below`,
+        `What all ${members.length} requests are about — answer them on the summary below`,
         null,
       );
       for (const member of members) {
@@ -3739,7 +3840,7 @@ export class TelegramChannel implements TestableChannel {
         const label =
           chunks.length === 1
             ? `<b>${PAYLOAD_CHUNK_LABEL}</b>`
-            : `<b>PAYLOAD ${index + 1}/${chunks.length} — ${PAYLOAD_CHUNK_LABEL_TAIL}</b>`;
+            : `<b>${PAYLOAD_CHUNK_LABEL} (part ${index + 1} of ${chunks.length})</b>`;
         segments.push(`${label}\n<pre>${escapeHtml(chunk)}</pre>`);
       }
     }

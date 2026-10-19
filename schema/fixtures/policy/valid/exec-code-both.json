@@ -1,0 +1,17 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual"
+  },
+  "exec": {
+    "code": {
+      "custody": "attested",
+      "execute_code": "hooked"
+    }
+  },
+  "classes": {
+    "exec.code": {
+      "autonomy": "autonomous"
+    }
+  }
+}

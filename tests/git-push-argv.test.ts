@@ -157,17 +157,26 @@ pin([
   ["git push origin {-d,lane}", [REWRITE, "git-push-unreadable"]],
   ["git push origin 'refs/heads/*:refs/heads/*'", [REWRITE, "git-push-unreadable"]],
   ['git push origin "$(git branch --show-current)"', [REWRITE, "git-push-unreadable"]],
-  // Environment that decides which configuration git reads.
-  ["GIT_CONFIG_PARAMETERS=x git push origin lane", [REWRITE, "git-push-unreadable"]],
-  ["GIT_CONFIG_COUNT=1 git push origin lane", [REWRITE, "git-push-unreadable"]],
-  ["HOME=/tmp/h git push origin lane", [REWRITE, "git-push-unreadable"]],
-  ["XDG_CONFIG_HOME=/tmp/h git push origin lane", [REWRITE, "git-push-unreadable"]],
+  // Environment that decides which configuration git reads. APRV-521: an
+  // assignment in front of git that is not on the classifier's closed list
+  // leaves the segment unclassified before the push grammar is reached.
+  ["GIT_CONFIG_PARAMETERS=x git push origin lane", ["refused", "unclassified"]],
+  ["GIT_CONFIG_COUNT=1 git push origin lane", ["refused", "unclassified"]],
+  ["HOME=/tmp/h git push origin lane", ["refused", "unclassified"]],
+  ["XDG_CONFIG_HOME=/tmp/h git push origin lane", ["refused", "unclassified"]],
+  ["FOO=1 git push origin lane", ["refused", "unclassified"]],
+  // A word on that list reaches the push grammar, which still reads every
+  // GIT_* assignment as steering its configuration (stricter, unchanged).
+  ["GIT_TERMINAL_PROMPT=0 git push origin lane", [REWRITE, "git-push-unreadable"]],
+  ["PAGER=cat git push origin lane", ["vcs.push.branch", "git-push-branch"]],
   // Global options that pick another repository's config, or inject config.
-  ["git --git-dir=/tmp/x/.git push origin lane", [REWRITE, "git-push-unreadable"]],
-  ["git --work-tree=/tmp/x push origin lane", [REWRITE, "git-push-unreadable"]],
-  ["git --config-env=remote.origin.push=V push origin", [REWRITE, "git-push-unreadable"]],
-  ["git --exec-path=/tmp/x push origin lane", ["refused", "opaque"]],
-  ["git --namespace=x push origin lane", ["vcs.push.branch", "git-push-branch"]],
+  // APRV-520: every value-taking git global, separate or `=`-joined, leaves
+  // the segment unclassified before the push grammar is reached.
+  ["git --git-dir=/tmp/x/.git push origin lane", ["refused", "unclassified"]],
+  ["git --work-tree=/tmp/x push origin lane", ["refused", "unclassified"]],
+  ["git --config-env=remote.origin.push=V push origin", ["refused", "unclassified"]],
+  ["git --exec-path=/tmp/x push origin lane", ["refused", "unclassified"]],
+  ["git --namespace=x push origin lane", ["refused", "unclassified"]],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -186,7 +195,6 @@ pin([
   ["git push -o ci.skip origin lane", ["vcs.push.branch", "git-push-branch"]],
   ["git push --no-verify origin lane", ["vcs.push.branch", "git-push-branch"]],
   ["git push --no-delete origin lane", ["vcs.push.branch", "git-push-branch"]],
-  ["FOO=1 git push origin lane", ["vcs.push.branch", "git-push-branch"]],
   ["git push origin main", ["vcs.push.main", "git-push-main"]],
   ["git push", ["vcs.push.main", "git-push-implicit"]],
   ["git push origin", ["vcs.push.main", "git-push-implicit"]],

@@ -115,9 +115,18 @@ test("APRV-508: a date redirected into a file is a write, as any read is", () =>
   assert.equal(classified("date -u 2>/dev/null").class, "read.shell");
 });
 
-test("APRV-508: a read-only substitution inside an ASSIGNMENT leaves the row matched", () => {
+test("APRV-508, APRV-511: a substitution inside a date ASSIGNMENT decides the value, so the row refuses", () => {
   // The substitution is classified on its own, and only a read may run there.
-  assert.equal(classified('TZ="$(cat .tz)" date').rule, "date-read");
+  // Since APRV-511 its output stands in the word as an unexpanded variable, so
+  // the value is one the row cannot read, exactly as `TZ=$X date` always was:
+  // the output could name a zone file (`/etc/x`, `:../x`). Stricter than 0.4.4,
+  // which admitted it while refusing `TZ=$X date` and `date -d "$(cat .when)"`.
+  for (const command of ['TZ="$(cat .tz)" date', "TZ=$X date", "LANG=$(cat .l) date"]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, false, command);
+    if (!result.ok) assert.equal(result.code, "unclassified", command);
+  }
+  assert.equal(classified("TZ=Asia/Kolkata date").rule, "date-read");
 });
 
 // ---------------------------------------------------------------------------
