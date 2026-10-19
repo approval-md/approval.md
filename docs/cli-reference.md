@@ -3424,9 +3424,13 @@ The checks, at length:
   **fail-closed version floor** (a build at or after `main` `118984d7` of
   2026-09-20) FAILS, because `v0.21.3` ignores `fail_closed` silently and every
   broken hook on it proceeds. That half is read from `hermes --version` rather than
-  from a record — Hermes prints its build stamp behind a non-ASCII separator the
-  write boundary refuses, so no record can carry it — and it compares the build
-  date and the upstream commit, because the two builds report the same semver.
+  from a record, because a record keeps only the printable-ASCII prefix of
+  Hermes's line (APRV-419): the build date survives and the upstream commit
+  behind the non-ASCII separator does not. It compares the build date and the
+  upstream commit, because the two builds report the same semver. Since APRV-419
+  the unverified-change half compares Hermes like any other harness: the prefix,
+  for example `Hermes Agent v0.21.3 (2026.9.14)`, on the newest hook record
+  against the prefix of what `hermes --version` prints now.
 - **live-draw** — whether a daemon is answering `supervised-live` draws for this
   log (APRV-208). SKIP when the policy declares no live class: no draw is ever
   made, and a missing socket is nothing. It FAILS in three shapes, all of them
@@ -4595,7 +4599,7 @@ to.
 
 | Command  | What it does |
 | -------- | ------------ |
-| `/queue` | Replies with the summary and a numbered list of every pending request (action key, task, class, age), marking the one this listener has selected. Derived from the verified log at reply time, and it works while a request is selected. |
+| `/queue` | Replies with the count line and a numbered list of every pending request (the agent's summary and its age, no action key or task id), marking the one this listener has selected. Derived from the verified log at reply time, and it works while a request is selected. |
 | `/skip`  | Selects the next request; the skipped one goes to the BACK of this process's order and comes round again after the rest, with a fresh card when it does. |
 | `/next`  | Selects the next request; this process does not offer the passed-over one again, and sends no further card for it. |
 
@@ -4609,7 +4613,7 @@ it away from you.
 **`/queue` is a list, and it says so** (APRV-256). The reply carries no decision
 buttons of its own, and it names no position for the ones it points at: a
 request is decided on its own approval card, wherever that card has ended up in
-the chat. The marker on the selected line reads `selected — card sent earlier`,
+the chat. The marker on the selected line reads `sent to you earlier`,
 because that is the whole of what the listener knows. Delivery bookkeeping
 records that a send returned success; the Bot API never reports that a message
 is still there, and a card can be deleted, buried, or lost with the chat
@@ -5652,7 +5656,11 @@ semantic-version-shaped tag, `tag <name>`, `--tags`, or `--follow-tags` is
 that DELETES a remote ref — `--delete`, `-d`, or a colon refspec such as
 `:refs/heads/x` — is `vcs.ref.delete` with the ref names bound (APRV-352), and a
 tag deletion keeps `release.publish`; ordinary branch pushes retain their branch
-or trunk class.
+or trunk class. Flags are read the way git's option parser reads them, short
+bundles (`-ud`) and unique-prefix abbreviations (`--del`, `--m`) included, and
+`--prune` is a deletion too (APRV-517); a push git would refuse, or one naming
+a far-side program (`--exec`, `--receive-pack`), is `opaque`, and a word the
+shell may expand is `vcs.history.rewrite`.
 
 `git tag` splits on its flags since APRV-397: a LISTING (`-l`, `--list`, `-n`,
 `-n<num>`, `--contains`, `--points-at`, `--merged`, `--sort`, `--format`,
@@ -5715,7 +5723,12 @@ its own flags are not parsed as this verb's.
   ONE inline script is classified by that script since APRV-380, so
   `zsh -lc 'git push origin main'` is `vcs.push.main`; a script file, an extra
   word, a redirection on the wrapper, an assignment prefix and a nested shell
-  all stay opaque.
+  all stay opaque. So does a shell that is not the system's, named as written
+  (APRV-523): one spelled by a path outside `/bin`, `/usr/bin`,
+  `/usr/local/bin`, `/sbin` and `/usr/sbin` (a relative path, a Homebrew
+  shell under `/opt`), or by a word with an expansion or a backslash in it.
+  An assignment-shaped shell word with a quoted or escaped name is
+  `hook-unclassified`.
 - `hook-unparseable` — the command line could not be tokenized.
 - `hook-rejected` — a human said no.
 - `hook-revoked` — a granted approval was withdrawn.

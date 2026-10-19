@@ -70,7 +70,9 @@ const FIXTURES: readonly Fixture[] = [
   { command: "git push origin refs/heads/main", class: "vcs.push.main", rule: "git-push-main", row: "git-push" },
   { command: "git push", class: "vcs.push.main", rule: "git-push-implicit", row: "git-push" },
   { command: "git push origin", class: "vcs.push.main", rule: "git-push-implicit", row: "git-push" },
-  { command: "git push origin $BRANCH", class: "vcs.push.main", rule: "git-push-main", row: "git-push" },
+  // APRV-517: `$BRANCH` may hold `+main`, `:main` or `-d`, so it is read as the
+  // strictest push this row emits rather than as an unknown destination.
+  { command: "git push origin $BRANCH", class: "vcs.history.rewrite", rule: "git-push-unreadable", row: "git-push" },
   // APRV-352 moved these two off `vcs.push.main`: a deletion is not a push at
   // the trunk, and a policy that sampled trunk pushes was sampling irreversible
   // removals. `tests/command-class-ref-delete.test.ts` holds the rest.
@@ -288,6 +290,9 @@ const FIXTURES: readonly Fixture[] = [
   { command: "bun skills/agent-profile/scripts/profile.ts", class: "exec.local", rule: "skill-script" },
   { command: "python3 skills/agent-commons/scripts/search_forum.py --q x", class: "exec.local", rule: "skill-script" },
   { command: "node skills/x/scripts/f.ts", class: "exec.local", rule: "node-skill-script", row: "node" },
+  // APRV-510: only with the class opened; tests/command-class-exec-code.test.ts holds the rest.
+  { command: "python3 -c 'print(1)'", class: "exec.code", rule: "exec-code-inline", row: "exec-code", context: { execCode: true } },
+  { command: "python3 tools/x.py", class: "exec.code", rule: "exec-code-file", row: "exec-code", context: { execCode: true } },
   { command: "node dist/src/cli/main.js log verify", class: GATE_SELF_CLASS, rule: "node-approval-cli", row: "node" },
   { command: "node ./cli.js status", class: GATE_SELF_CLASS, rule: "node-approval-cli", row: "node" },
   { command: "approval queue --json", class: GATE_SELF_CLASS, rule: "approval" },
@@ -658,7 +663,8 @@ const FIXTURES: readonly Fixture[] = [
   { command: "curl -X POST https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
   { command: "curl -XPOST https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
   { command: "curl --request DELETE https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
-  { command: "curl --method PUT https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
+  // APRV-511 review: curl has no `--method`, so its outputs cannot be known.
+  { command: "curl --method PUT https://example.com", class: "policy.core", rule: "fetch-output-unknown", row: "web-fetch" },
   { command: "curl -d a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
   { command: "curl --data a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
   { command: "curl --data-raw a=b https://example.com", class: "network.call", rule: "web-write", row: "web-fetch" },
@@ -780,8 +786,6 @@ for (const fixture of FIXTURES) {
 const AMBIGUOUS_FETCHES: readonly string[] = [
   // A method the environment supplies, in each spelling of the flag.
   'curl -X "$METHOD" https://example.com',
-  "curl --request $METHOD https://example.com",
-  "curl --request=$METHOD https://example.com",
   "gh api -X $METHOD repos/x/y",
   // A method flag with nothing after it.
   "curl -X",
@@ -789,13 +793,10 @@ const AMBIGUOUS_FETCHES: readonly string[] = [
   // A short-flag bundle we decline to unbundle: the method is in the next word.
   "curl -sSX POST https://example.com",
   "gh api -sX POST repos/x/y",
-  // A config file can carry any option, including a method and a body.
-  "curl -K request.conf https://example.com",
-  "curl --config request.conf https://example.com",
-  "wget --config=wgetrc https://example.com",
+  // A config file can carry any option, including a method and a body: since
+  // APRV-511 an output path too, so those are pinned below as policy.core.
   // A bare expansion is not a URL; it is whatever the environment puts there.
-  "curl $ENDPOINT",
-  "curl $CURL_OPTS https://example.com",
+  // (For curl it may also be an option naming an output: pinned below.)
   "gh api $ROUTE",
   // Flags written after `--`. Real curl reads them as URLs, so this is stricter
   // than curl itself, which is the direction this classifier errs in.
@@ -811,13 +812,36 @@ for (const command of AMBIGUOUS_FETCHES) {
   });
 }
 
-test("a fetch whose argument is a read-only substitution is still network.call", () => {
-  // The substitution itself is inert, so the segment classifies; the word it
-  // produces is not a URL this file can read, so the fetch is not a read.
-  const result = classifyCommand("curl $(cat url.txt)");
-  assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
-  if (!result.ok) return;
-  assert.deepEqual(result.classes, ["network.call"]);
+test("a fetch whose config file or string can name its output is a write to an unknown target (APRV-511)", () => {
+  for (const command of [
+    "curl -K request.conf https://example.com",
+    "curl --config request.conf https://example.com",
+    "wget --config=wgetrc https://example.com",
+    "wget -e robots=off https://example.com",
+  ]) {
+    const result = classifyCommand(command);
+    assert.ok(result.ok, command);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, ["policy.core"], command);
+  }
+});
+
+test("a fetch whose argv an unquoted expansion may split into options is a write to an unknown target (APRV-511 fix round 3)", () => {
+  // Until fix round 3 these were network.call. An unquoted variable or
+  // substitution may split into `-o FILE`, so the output is unknown:
+  // policy.core, the stricter class. The substitution itself is still inert.
+  for (const command of [
+    "curl --request $METHOD https://example.com",
+    "curl --request=$METHOD https://example.com",
+    "curl $ENDPOINT",
+    "curl $CURL_OPTS https://example.com",
+    "curl $(cat url.txt)",
+  ]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
+    if (!result.ok) return;
+    assert.deepEqual(result.classes, ["policy.core"], command);
+  }
 });
 
 test("a fetch built by a write substitution is opaque", () => {
@@ -915,6 +939,21 @@ test("a GET-shaped fetch redirected into a file is a workspace write, not a read
 // ---------------------------------------------------------------------------
 // Coverage: no row of the table is unexercised
 // ---------------------------------------------------------------------------
+
+test("APRV-510: opening exec.code changes no fixture outside the exec-code row", () => {
+  // Security review finding 3c: the row sits above `node`, so every argv the
+  // table already classified from its arguments must answer byte for byte the
+  // same with the class closed and opened.
+  for (const fixture of FIXTURES) {
+    if ((fixture.row ?? fixture.rule) === "exec-code") continue;
+    const base = fixture.context ?? {};
+    assert.deepEqual(
+      classifyCommand(fixture.command, [], { ...base, execCode: true }),
+      classifyCommand(fixture.command, [], { ...base, execCode: false }),
+      fixture.command,
+    );
+  }
+});
 
 test("every rule in COMMAND_RULES has at least one positive fixture", () => {
   const covered = new Set(FIXTURES.map((fixture) => fixture.row ?? fixture.rule));

@@ -1,0 +1,11 @@
+{
+  "version": "0.1",
+  "defaults": {
+    "autonomy": "manual"
+  },
+  "exec": {
+    "code": {
+      "custody": true
+    }
+  }
+}
