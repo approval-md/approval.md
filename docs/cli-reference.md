@@ -4599,7 +4599,7 @@ to.
 
 | Command  | What it does |
 | -------- | ------------ |
-| `/queue` | Replies with the summary and a numbered list of every pending request (action key, task, class, age), marking the one this listener has selected. Derived from the verified log at reply time, and it works while a request is selected. |
+| `/queue` | Replies with the count line and a numbered list of every pending request (the agent's summary and its age, no action key or task id), marking the one this listener has selected. Derived from the verified log at reply time, and it works while a request is selected. |
 | `/skip`  | Selects the next request; the skipped one goes to the BACK of this process's order and comes round again after the rest, with a fresh card when it does. |
 | `/next`  | Selects the next request; this process does not offer the passed-over one again, and sends no further card for it. |
 
@@ -4613,7 +4613,7 @@ it away from you.
 **`/queue` is a list, and it says so** (APRV-256). The reply carries no decision
 buttons of its own, and it names no position for the ones it points at: a
 request is decided on its own approval card, wherever that card has ended up in
-the chat. The marker on the selected line reads `selected — card sent earlier`,
+the chat. The marker on the selected line reads `sent to you earlier`,
 because that is the whole of what the listener knows. Delivery bookkeeping
 records that a send returned success; the Bot API never reports that a message
 is still there, and a card can be deleted, buried, or lost with the chat

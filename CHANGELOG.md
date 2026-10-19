@@ -15,10 +15,82 @@ before a tag.
 
 ## Unreleased
 
+### Security
+
+- A force push spelled as a short bundle (`git push -fu`, `-uf`) or as an
+  abbreviated long option (`--force-w`, `--m` for `--mirror`) classified as a
+  plain push (`vcs.push.branch` or `vcs.push.main`). Three more spellings were
+  read loosely the same way: `git commit --am` was a plain commit,
+  `git reset --h` a non-hard reset and `git pull --reb` a merging pull.
+  git's option parser accepts every one of them, and the classifier now reads
+  them as git does (APRV-433).
+
+### Changed
+
+- `vcs.history.rewrite` is split into `vcs.history.rewrite.local` and
+  `vcs.history.rewrite.shared` by the hook, from the checkout's own refs
+  (amended SPEC.md §7 and §8, APRV-433, pending sign-off). It replaces
+  APRV-108's quiet downgrade of an unpublished rewrite to `vcs.commit.branch`.
+  A policy with no `vcs.history.rewrite.local`, `.shared` or `.*` line gets
+  the verdicts it got before, except for the spellings under Security above:
+  a force push spelled as a short bundle (`git push -fu`, `-uf`, `-vf`) or
+  as an abbreviation of `--force-with-lease`, `--force-if-includes` or
+  `--mirror` (`--force-w`, `--force-if`, `--m`), an abbreviated amend
+  (`git commit --am`) and an abbreviated hard reset (`git reset --h`) now
+  resolve as the rewrite class APRV-108 answered, not as a plain push,
+  remote ref deletion, commit or reset. That is stricter wherever
+  `vcs.history.rewrite` is at least as strict as the class it replaces, as
+  in the default classes and in this repository's policy, where
+  `git push -fu origin lane` goes from autonomous to human-only.
+  Every refined start and request now carries `payload.history_rewrite`.
+  A step that resumes a rebase in progress (`git rebase --continue`,
+  `--skip`, `--abort`, `--quit`) is always shared: git reads what it does
+  from files under the git directory that anything able to write the
+  checkout can forge, so the hook reads no rebase state at all (APRV-648,
+  a deliberate departure from the split as first decided). The text
+  classifier's rebase row is split into rule ids by spelling, and
+  `git pull --rebase` is now `vcs.history.rewrite` from the text (it was
+  `vcs.commit.branch`).
+  Every judge that can answer `.local` reads its argv under one closed
+  rule (APRV-648 fix round 3): each option word must be, exactly, on that
+  verb's list of options that take no value. An option that takes a value
+  (`git rebase --onto`, `-s`, `-X`; `git commit --amend -m`; `git reset
+  --hard --pathspec-from-file`; `git pull -o`), `--root`, an abbreviation,
+  `--` and any positional the judge does not model (a pathspec, a pull's
+  `<repository>`) are shared. `git rebase --root <branch>` was judged on
+  HEAD's branch while git rewrites `<branch>`; `git reset --hard
+  --pathspec-from-file <f> <rev>` took `<f>` as the target; and
+  `git pull -r -o --no-rebase` read the server option's value as a merge.
+  The text classifier now skips `git pull`'s option values the way git
+  does, never answering milder than before, and only the bare word `git`
+  counts as git for the earlier-segment list and the judges (`./git
+  status && …` is shared).
+- Conformance: `command-class` 1.10.0, thirty-seven new `rewrite-*` vectors
+  (1.9.0 went to APRV-511 at merge), and `schema-validation` 3.5.0, seven new
+  `payload.history_rewrite` fixtures (3.4.0 went to APRV-510 at merge); no
+  existing expectation moved.
+
+## 0.4.6 — 2026-10-18
+
+0.4.6 carries everything merged since 0.4.5. It closes the classifier holes
+listed under "Holes in 0.4.5" below (git push delete spellings, git globals
+that take a value, environment assignments in front of git, credential reads
+in six spellings, quoted assignment names, and writes into the Hermes home's
+other organs), and every verdict those changes move, moves stricter. It adds
+`exec.code`, a custody-gated class for opaque agent code. `exec.code` is opt-in
+and off by default: a policy that never names `exec.code` keeps every refusal
+byte for byte, and nothing new blocks an agent's code runs. And it puts the
+Telegram reminder, stale summary, digest, `/queue` and card headings in plain
+words. Upgrade every install that relies on the hook for enforcement, in the
+order under "Upgrade order" at the end of this section. **Rollout note:** a
+core older than 0.4.6 refuses the `exec` key and fails the whole policy closed,
+so a policy gains an `exec` block only after every core that reads it runs
+0.4.6.
+
 ### Added
 
-- **`exec.code`, a custody-gated class for opaque agent code (APRV-510; 0.4.5
-  candidate).** `python3 -c`, `python -c`, `node -e`/`--eval`, `bun -e`/`--eval`,
+- **`exec.code`, a custody-gated class for opaque agent code (APRV-510).**
+  `python3 -c`, `python -c`, `node -e`/`--eval`, `bun -e`/`--eval`,
   `deno eval`, `perl -e`/`-E`, `ruby -e`, and `python`/`python3`/`bun` running a
   file that is not a skill script were refused before policy on every harness, and
   Hermes `execute_code` with them. A new policy block opens them key by key:
@@ -42,12 +114,31 @@ subshell stay refused, the open
 
 ### Security
 
-**A hole in 0.4.5 that this closes.** A `git push` that deleted a remote
-branch classified as a plain push when the delete flag was bundled or
-abbreviated, so `vcs.ref.delete` was never asked. Under this repository's
-policy that made `git push -ud origin lane` autonomous and `git push --del
-origin main` supervised-retro (it proceeds). Upgrade every install that relies
-on the hook for enforcement.
+**Holes in 0.4.5 that this release closes.** Each one let a command run below
+the class it should have had. Upgrade every install that relies on the hook
+for enforcement.
+
+- A `git push` that deleted a remote branch classified as a plain push when
+  the delete flag was bundled or abbreviated, so `vcs.ref.delete` was never
+  asked. Under this repository's policy that made `git push -ud origin lane`
+  autonomous and `git push --del origin main` supervised-retro (it proceeds)
+  (APRV-517).
+- A git global option that takes a value made its value the subcommand, so
+  `git -C status push --force origin main` was `read.shell` (APRV-520).
+- An environment assignment in front of git hid the program git runs, so
+  `GIT_PAGER=<cmd> git log` ran `<cmd>` as `read.shell` (APRV-521).
+- Six classes of spelling read a credential file below `account.credential`,
+  git's reading verbs among them (APRV-522).
+- An assignment-shaped word with a quoted or escaped name was read past as an
+  assignment, so the classifier judged a different program from the one bash
+  runs (APRV-523).
+- On an Agent Village box a write into `$HERMES_HOME/hermes-agent/`,
+  `$HERMES_HOME/plugins/` or onto `$HERMES_HOME/.op.env` was
+  `files.write.workspace`, autonomous under the village template (APRV-511,
+  under "The Hermes home's other organs" below).
+
+APRV-524 closes a gap that APRV-511's substitution sentinel opened on main
+after 0.4.5; no release carried it. The entries below give the detail.
 
 - **A credential read whose last path component is a command substitution is
   `account.credential` on every adapter (APRV-524).** Since APRV-511 a
@@ -200,13 +291,6 @@ on the hook for enforcement.
   answer to `unclassified` and loosened or reclassified none. Cost: `git
   --git-dir=.git status` and the other `=`-joined spellings, which used to
   classify as their subcommand, now need `cd` or a person.
-- A force push spelled as a short bundle (`git push -fu`, `-uf`) or as an
-  abbreviated long option (`--force-w`, `--m` for `--mirror`) classified as a
-  plain push (`vcs.push.branch` or `vcs.push.main`). Three more spellings were
-  read loosely the same way: `git commit --am` was a plain commit,
-  `git reset --h` a non-hard reset and `git pull --reb` a merging pull.
-  git's option parser accepts every one of them, and the classifier now reads
-  them as git does (APRV-433).
 - **An environment assignment in front of git no longer hides what git runs
   (APRV-521).** The classifier skipped every `NAME=value` word in front of the
   binary and classified `git` by its subcommand alone. Most of git(1)'s
@@ -297,48 +381,24 @@ on the hook for enforcement.
 
 ### Changed
 
-- `vcs.history.rewrite` is split into `vcs.history.rewrite.local` and
-  `vcs.history.rewrite.shared` by the hook, from the checkout's own refs
-  (amended SPEC.md §7 and §8, APRV-433, pending sign-off). It replaces
-  APRV-108's quiet downgrade of an unpublished rewrite to `vcs.commit.branch`.
-  A policy with no `vcs.history.rewrite.local`, `.shared` or `.*` line gets
-  the verdicts it got before, except for the spellings under Security above:
-  a force push spelled as a short bundle (`git push -fu`, `-uf`, `-vf`) or
-  as an abbreviation of `--force-with-lease`, `--force-if-includes` or
-  `--mirror` (`--force-w`, `--force-if`, `--m`), an abbreviated amend
-  (`git commit --am`) and an abbreviated hard reset (`git reset --h`) now
-  resolve as the rewrite class APRV-108 answered, not as a plain push,
-  remote ref deletion, commit or reset. That is stricter wherever
-  `vcs.history.rewrite` is at least as strict as the class it replaces, as
-  in the default classes and in this repository's policy, where
-  `git push -fu origin lane` goes from autonomous to human-only.
-  Every refined start and request now carries `payload.history_rewrite`.
-  A step that resumes a rebase in progress (`git rebase --continue`,
-  `--skip`, `--abort`, `--quit`) is always shared: git reads what it does
-  from files under the git directory that anything able to write the
-  checkout can forge, so the hook reads no rebase state at all (APRV-648,
-  a deliberate departure from the split as first decided). The text
-  classifier's rebase row is split into rule ids by spelling, and
-  `git pull --rebase` is now `vcs.history.rewrite` from the text (it was
-  `vcs.commit.branch`).
-  Every judge that can answer `.local` reads its argv under one closed
-  rule (APRV-648 fix round 3): each option word must be, exactly, on that
-  verb's list of options that take no value. An option that takes a value
-  (`git rebase --onto`, `-s`, `-X`; `git commit --amend -m`; `git reset
-  --hard --pathspec-from-file`; `git pull -o`), `--root`, an abbreviation,
-  `--` and any positional the judge does not model (a pathspec, a pull's
-  `<repository>`) are shared. `git rebase --root <branch>` was judged on
-  HEAD's branch while git rewrites `<branch>`; `git reset --hard
-  --pathspec-from-file <f> <rev>` took `<f>` as the target; and
-  `git pull -r -o --no-rebase` read the server option's value as a merge.
-  The text classifier now skips `git pull`'s option values the way git
-  does, never answering milder than before, and only the bare word `git`
-  counts as git for the earlier-segment list and the judges (`./git
-  status && …` is shared).
-- Conformance: `command-class` 1.10.0, thirty-seven new `rewrite-*` vectors
-  (1.9.0 went to APRV-511 at merge), and `schema-validation` 3.5.0, seven new
-  `payload.history_rewrite` fixtures (3.4.0 went to APRV-510 at merge); no
-  existing expectation moved.
+- **Telegram reminders, summaries, digests and `/queue` speak plainly (P-9).**
+  A restart with stale requests now sends one reminder instead of two: the stale
+  summary opens with the count of everything the restart re-sends and says
+  whether older buttons still work, and the separate banner is skipped. The
+  stale summary, the digest and `/queue` name each request by the agent's own
+  summary and its age (or the agent's cost estimate), under "What your agent
+  says (not checked)", and no longer show action keys, task ids, class tallies,
+  grouping keys or text about hooks, retry grace and log events. The paced
+  opening is a reminder that says whether older buttons still work, which
+  matters behind a relay where they do not. The request card's headings read
+  "Checked by approval.md", "Exactly what you are approving" and "What your
+  agent says (not checked)", and the author id in that label (and in each
+  claimed row's tag) is one line of at most 80 characters, so an id with a line
+  break cannot draw a second heading. The card's action-key row and its canonical payload
+  block are unchanged, the first because it is a required row and the second
+  because `display_hash` binds it (SPEC.md §10.3), and so are decisions,
+  buttons, grouping, pacing and retries. `/queue`'s header now names the oldest
+  request correctly when the list is shown newest first.
 
 ### Channels and identity
 
@@ -380,7 +440,7 @@ on the hook for enforcement.
   `docs/README-extended.md`, which ships in the package, drops judgy from its
   directory table.
 
-### The Hermes home's other organs (APRV-511; 0.4.6 candidate)
+### The Hermes home's other organs (APRV-511)
 
 - **Security: `hermes-agent/`, `plugins/` and `.op.env` are organs.** On an
   Agent Village box the agent's uid owns the whole Hermes home, and a write
@@ -564,6 +624,15 @@ on the hook for enforcement.
   included; one 0.4.4 test row, `TZ="$(cat .tz)" date`, tightened, see the
   rebase bullet). Totals 896/896.
   SPEC.md §5.2's organ list amended, pending sign-off.
+
+### Upgrade order
+
+- **Agent Village:** publish 0.4.6 and read its integrity back, then the
+  control plane pins `APPROVAL_MD_VERSION=0.4.6` and its
+  `APPROVAL_MD_INTEGRITY`, then one update per box. A box still on 0.4.5 keeps
+  the 0.4.5 holes and the old Telegram copy. Only after every box is on 0.4.6
+  may a policy there carry an `exec` block; without one, `exec.code` stays
+  closed. The checkpoint rebake follows later and is not on the critical path.
 
 ## 0.4.5 — 2026-10-17
 

@@ -146,8 +146,10 @@ import {
   newDispatchState,
   collapsibleStale,
   orderPending,
+  pacedReminderLines,
   queueLines,
   reviewHandlerFor,
+  staleReminderLines,
   summaryLines,
   REVIEW_OFFER_ATTEMPTS,
   REVIEW_OFFER_MAX_WAIT_MS,
@@ -544,8 +546,8 @@ test("computed and claimed are separated, and the payload is sent verbatim", asy
 
   const texts = mock.sentTexts().slice(before);
   const whole = texts.join("\n");
-  assert.match(whole, /COMPUTED — derived by the runtime/u);
-  assert.match(whole, /WHAT THIS DOES — CLAIMED by agent:drafter, NOT verified by the runtime/u);
+  assert.match(whole, /<b>Checked by approval\.md<\/b>/u);
+  assert.match(whole, /<b>What your agent says \(not checked\) — agent:drafter<\/b>/u);
   assert.ok(whole.includes(PAYLOAD_CHUNK_LABEL_TAIL), whole);
   assert.match(whole, new RegExp(`<code>${key}</code>`, "u"), "the action key is shown verbatim");
 
@@ -778,7 +780,7 @@ test("a policy layout reaches the messages the bot actually sends (APRV-218)", a
   assert.equal(recordsOf(world.unit.logPath).length, 3);
 });
 
-const CLAIMED_HEADING_ANYWHERE = /<b>WHAT THIS DOES — CLAIMED by [^<]+, NOT verified by the runtime<\/b>/u;
+const CLAIMED_HEADING_ANYWHERE = /<b>What your agent says \(not checked\) — [^<]+<\/b>/u;
 
 // ---------------------------------------------------------------------------
 // The claimed block beside the buttons (APRV-165)
@@ -794,7 +796,7 @@ function sends(): { text: string; replyMarkup: unknown }[] {
     }));
 }
 
-const CLAIMED_HEADING = /^<b>WHAT THIS DOES — CLAIMED by [^<]+, NOT verified by the runtime<\/b>/u;
+const CLAIMED_HEADING = /^<b>What your agent says \(not checked\) — [^<]+<\/b>/u;
 
 test("the claimed block is the last message of a prompt, and carries the buttons", async () => {
   const world = live(2);
@@ -813,8 +815,8 @@ test("the claimed block is the last message of a prompt, and carries the buttons
   // what the act means — which is the message the thumb is next to.
   const first = messages[0]?.text ?? "";
   assert.ok(first.startsWith(`<b>${TELEGRAM_PROMPT_HEADING}</b>`), first);
-  assert.ok(first.includes("COMPUTED — derived by the runtime"), first);
-  assert.equal(first.includes("WHAT THIS DOES"), false, "the claimed block is still in the header");
+  assert.ok(first.includes("<b>Checked by approval.md</b>"), first);
+  assert.equal(first.includes("What your agent says"), false, "the claimed block is still in the header");
 
   const middle = messages.slice(1, -1).map((message) => message.text).join("\n");
   assert.ok(middle.includes(PAYLOAD_CHUNK_LABEL_TAIL), "the payload is not between the two blocks");
@@ -827,6 +829,18 @@ test("the claimed block is the last message of a prompt, and carries the buttons
   // AC1: the keyboard is on that message and on no other, and the delivery id
   // the channel reports (which the callback arming keys on) is its id.
   assert.ok(last.replyMarkup !== undefined, "the claimed message carries no buttons");
+  // Fold round 1, S2: each button's LABEL is paired with its data. The mock's
+  // `callbackDataFor` finds buttons by data alone, so this is where a label
+  // that says Approve on `r:` data, or names another request, fails.
+  const cardRows = (last.replyMarkup as { inline_keyboard: { text: string; callback_data: string }[][] })
+    .inline_keyboard;
+  const ref = actionRefOf(request_.action_key.value);
+  assert.equal(cardRows.length, 1, JSON.stringify(cardRows));
+  const [approve, reject] = cardRows[0] ?? [];
+  assert.equal(approve?.text, "✅ Approve");
+  assert.match(approve?.callback_data ?? "", new RegExp(`^g:[^:]+:${ref}$`, "u"), "Approve does not carry g: data for this request");
+  assert.equal(reject?.text, "🛑 Reject");
+  assert.match(reject?.callback_data ?? "", new RegExp(`^r:[^:]+:${ref}$`, "u"), "Reject does not carry r: data for this request");
   for (const message of messages.slice(0, -1)) {
     assert.equal(message.replyMarkup, undefined, "a message above the claimed block was buttoned");
   }
@@ -911,20 +925,20 @@ test("an unbounded rationale becomes more claimed messages, buttons on the last"
   await channel.notify(request_);
 
   const messages = sends().slice(before);
-  const claimedChunks = messages.filter((message) => message.text.includes("WHAT THIS DOES"));
+  const claimedChunks = messages.filter((message) => message.text.includes("What your agent says"));
   assert.ok(claimedChunks.length >= 2, `the oversized rationale did not chunk: ${claimedChunks.length}`);
   for (const message of messages) {
     assert.ok(message.text.length <= 4096, "a claimed chunk exceeded Telegram's limit");
   }
   // Every chunk says whose words these are and that nobody checked them.
   for (const chunk of claimedChunks.slice(1)) {
-    assert.ok(chunk.text.startsWith("<b>WHAT THIS DOES (continued)"), chunk.text);
+    assert.ok(chunk.text.startsWith("<b>What your agent says (continued, not checked)</b>"), chunk.text);
   }
   // Complete, and escaped: the whole rationale arrived, as text. The
   // continuation headings are dropped first, because they are the only thing
   // the chunking ADDS to what was rendered.
   const whole = claimedChunks
-    .map((chunk) => chunk.text.replace(/^<b>WHAT THIS DOES \(continued\)[^\n]*\n/u, ""))
+    .map((chunk) => chunk.text.replace(/^<b>What your agent says \(continued, not checked\)<\/b>\n/u, ""))
     .join("");
   assert.equal(
     whole.split("the vendor &amp; &lt;counsel&gt; both asked.").length - 1,
@@ -939,7 +953,7 @@ test("an unbounded rationale becomes more claimed messages, buttons on the last"
   }
 
   const last = messages[messages.length - 1] as { text: string; replyMarkup: unknown };
-  assert.ok(last.text.includes("WHAT THIS DOES"), "the keyboard left the claimed block");
+  assert.ok(last.text.includes("What your agent says"), "the keyboard left the claimed block");
   assert.ok(last.replyMarkup !== undefined, "the keyboard is not on the final chunk");
   assert.equal(
     claimedChunks[claimedChunks.length - 2]?.replyMarkup,
@@ -1001,7 +1015,7 @@ test("a payload-less request is two messages: computed, then claimed with the bu
 
   const messages = sends().slice(before);
   assert.equal(messages.length, 2, JSON.stringify(messages.map((message) => message.text)));
-  assert.ok((messages[0] as { text: string }).text.includes("COMPUTED — derived by the runtime"));
+  assert.ok((messages[0] as { text: string }).text.includes("<b>Checked by approval.md</b>"));
   assert.match((messages[1] as { text: string }).text, CLAIMED_HEADING);
   assert.ok((messages[1] as { replyMarkup: unknown }).replyMarkup !== undefined);
 });
@@ -1021,8 +1035,30 @@ test("a digest member keeps the same order and no buttons at all", async () => {
 
   const messages = sends().slice(before);
   const digest = messages[messages.length - 1] as { text: string; replyMarkup: unknown };
-  assert.match(digest.text, /3 REQUESTS AWAITING APPROVAL/u);
+  assert.match(digest.text, /3 requests are waiting for you/u);
   assert.ok(digest.replyMarkup !== undefined, "the digest lost its keyboard");
+  // Fold round 1, S2: the button labelled "Approve N" / "Reject N" carries g: /
+  // r: data for member N's action ref, member N being the Nth line of the digest
+  // (the same order as the prompts above, asserted below), and "all" carries no ref.
+  const digestRows = (digest.replyMarkup as { inline_keyboard: { text: string; callback_data: string }[][] })
+    .inline_keyboard;
+  for (const [index, key] of world.keys.entries()) {
+    const ref = actionRefOf(key);
+    const row = digestRows[index] ?? [];
+    assert.equal(row[0]?.text, `✅ Approve ${index + 1}`);
+    assert.match(row[0]?.callback_data ?? "", new RegExp(`^g:[^:]+:${ref}$`, "u"), `Approve ${index + 1} is not member ${index + 1}'s grant`);
+    assert.equal(row[1]?.text, `🛑 Reject ${index + 1}`);
+    assert.match(row[1]?.callback_data ?? "", new RegExp(`^r:[^:]+:${ref}$`, "u"), `Reject ${index + 1} is not member ${index + 1}'s reject`);
+  }
+  const allRow = digestRows[world.keys.length] ?? [];
+  assert.deepEqual(
+    allRow.map((button) => [button.text, /^[GR]:[^:]+$/u.test(button.callback_data)]),
+    [
+      [`✅ Approve all (${world.keys.length})`, true],
+      [`🛑 Reject all (${world.keys.length})`, true],
+    ],
+  );
+  assert.ok(allRow[0]?.callback_data.startsWith("G:") && allRow[1]?.callback_data.startsWith("R:"));
 
   const members = messages.slice(0, -1);
   for (const message of members) {
@@ -1030,13 +1066,13 @@ test("a digest member keeps the same order and no buttons at all", async () => {
   }
   // Each member: its own header, its payload, then its claimed block last.
   for (const [index, key] of world.keys.entries()) {
-    const start = members.findIndex((message) => message.text.includes(`REQUEST ${index + 1} OF 3`));
+    const start = members.findIndex((message) => message.text.includes(`Request ${index + 1} of 3`));
     assert.ok(start >= 0, `${key} was never prompted`);
     const end = members.findIndex(
-      (message, position) => position > start && message.text.includes("REQUEST "),
+      (message, position) => position > start && message.text.includes("<b>Request "),
     );
     const own = members.slice(start, end < 0 ? undefined : end);
-    assert.ok((own[0] as { text: string }).text.includes("COMPUTED — derived by the runtime"));
+    assert.ok((own[0] as { text: string }).text.includes("<b>Checked by approval.md</b>"));
     assert.match((own[own.length - 1] as { text: string }).text, CLAIMED_HEADING);
     assert.ok(
       own.slice(1, -1).some((message) => message.text.includes(PAYLOAD_CHUNK_LABEL_TAIL)),
@@ -1748,9 +1784,14 @@ test("a digest annotates member by member: one decided, the rest still armed", a
   const afterFirst = mock.edits().slice(editedBefore);
   assert.equal(afterFirst.length, 1, "one member decided is one redraw of the digest");
   const mixed = String(afterFirst[0]?.text);
-  assert.match(mixed, /1 OF 2 REQUESTS STILL AWAITING APPROVAL/u);
+  assert.match(mixed, /1 of 2 requests still waiting for you/u);
   assert.match(mixed, /✓ APPROVED/u);
-  assert.ok(mixed.includes(firstKey) && mixed.includes(secondKey), "a member left the digest");
+  // P-9: members are named by number and summary, not by action key.
+  assert.ok(
+    mixed.includes("1. chase invoice 41") && mixed.includes("2. chase invoice 42"),
+    "a member left the digest",
+  );
+  assert.ok(!mixed.includes(firstKey) && !mixed.includes(secondKey), "the digest named an action key");
 
   // The still-open member keeps its buttons; the decided one has lost them, and
   // with one left there is no "all" row to press by accident.
@@ -1766,7 +1807,7 @@ test("a digest annotates member by member: one decided, the rest still armed", a
   assert.equal((await press(channel, secondKey, "reject"))?.ok, true);
   const afterSecond = mock.edits().slice(editedBefore + 1);
   assert.equal(afterSecond.length, 1);
-  assert.match(String(afterSecond[0]?.text), /ALL 2 REQUESTS DECIDED/u);
+  assert.match(String(afterSecond[0]?.text), /All 2 requests decided/u);
   assert.match(String(afterSecond[0]?.text), /✗ REJECTED/u);
   assert.equal(afterSecond[0]?.replyMarkup, undefined, "a fully decided digest keeps no buttons");
   assertNoTokenInEdits();
@@ -1894,17 +1935,23 @@ test("a burst of similar requests yields one digest, and mixed decisions land pe
 
   // AC3, structurally: the buttons are on the LAST message, and every member's
   // payload arrived in a message above it.
-  assert.match(digestText, /3 REQUESTS AWAITING APPROVAL/u);
+  assert.match(digestText, /3 requests are waiting for you/u);
   const above = texts.slice(0, -1).join("\n");
   for (const [index, key] of world.keys.entries()) {
-    assert.ok(digestText.includes(key), `${key} has no line on the digest`);
+    // P-9: a member's line on the digest is its number and the agent's
+    // summary, never its action key; the key stays on its own card above.
+    assert.ok(
+      digestText.includes(`${index + 1}. chase invoice ${41 + index} · agent's estimate $0.02`),
+      `${key} has no line on the digest`,
+    );
+    assert.equal(digestText.includes(key), false, `${key} is named on the digest`);
     assert.ok(above.includes(key), `${key} was never prompted above the digest`);
     assert.ok(
       above.includes(`Invoice ${41 + index} chaser`),
       `the payload of ${key} was not on screen before the buttons`,
     );
     assert.ok(
-      above.includes(`REQUEST ${index + 1} OF 3`),
+      above.includes(`Request ${index + 1} of 3 — answer it on the summary below`),
       "a digest member's prompt must say which request it is",
     );
   }
@@ -1991,7 +2038,7 @@ test("Approve all is N decisions: one event per member, each bound to its own ac
   // The digest now says so, and offers nothing further.
   const edits = editsFor(delivered.digestId as string);
   assert.equal(edits.length, 1, "one tap over the set is one redraw");
-  assert.match(String(edits[0]?.text), /ALL 3 REQUESTS DECIDED/u);
+  assert.match(String(edits[0]?.text), /All 3 requests decided/u);
   assert.equal(edits[0]?.replyMarkup, undefined);
   // APRV-206: the tap's one answer is the early ack, sent before any of the
   // three decisions ran. The tally the toast used to carry is on the operator's
@@ -2120,10 +2167,11 @@ test("a withdrawn digest member is annotated on its own line; the rest stay arme
   const edits = editsFor(digestId);
   assert.equal(edits.length, 1, "one member settling is one redraw");
   const text = String(edits[0]?.text);
-  assert.match(text, /1 OF 2 REQUESTS STILL AWAITING APPROVAL/u);
+  assert.match(text, /1 of 2 requests still waiting for you/u);
   assert.match(text, /WITHDRAWN — no decision is needed/u);
   assert.match(text, /withdrawn by the requester at 10:11 UTC \(timeout\) · nothing to do/u);
-  assert.ok(text.includes(second), "the surviving member left the digest");
+  assert.ok(text.includes("2. chase invoice 42"), "the surviving member left the digest");
+  assert.equal(text.includes(second), false, "the digest named an action key");
 
   // Mixed state, and the survivor keeps exactly its own buttons.
   const keyboard = edits[0]?.replyMarkup as
@@ -4777,8 +4825,18 @@ test("paced delivery opens with one summary and the oldest request alone (APRV-2
   );
 
   const sent = sentSince(from);
-  assert.equal(sent[0]?.includes("3 pending"), true, `summary missing the count: ${String(sent[0])}`);
-  assert.equal(sent[0]?.includes("communicate.email.external"), true, "summary named no class");
+  // P-9: the paced opening is the restart's reminder, in a resident's words:
+  // the count, that one is below, and that older buttons still work. No class
+  // name, no action key.
+  assert.equal(
+    sent[0],
+    "<b>Reminder: 3 requests are waiting for you.</b>\nOne is below. Only its buttons work right now; the others come next, with new buttons, after you answer it.",
+    `not the paced reminder: ${String(sent[0])}`,
+  );
+  assert.equal(sent[0]?.includes("communicate.email.external"), false, "the reminder named a class");
+  for (const key of [a, b, c]) {
+    assert.equal(sent[0]?.includes(key), false, `the reminder named ${key}`);
+  }
   for (const key of [b, c]) {
     assert.equal(
       sent.filter((text) => text.includes(key)).length,
@@ -4943,18 +5001,23 @@ test("/queue lists every pending request while one is being shown (APRV-216)", a
   assert.equal(recordCount(world), before, "/queue appended to the log");
 
   const reply = sentSince(from).join("\n");
-  assert.equal(reply.includes("3 pending"), true, `no summary in the reply: ${reply}`);
-  for (const key of [a, b, c]) {
-    assert.equal(reply.includes(key), true, `${key} is pending and absent from /queue`);
+  assert.equal(reply.includes("3 requests are waiting for you (oldest "), true, `no summary in the reply: ${reply}`);
+  // P-9: each pending request is listed by the agent's own summary, and no
+  // line names an action key or a task id.
+  for (const summary of ["chase invoice 41", "chase invoice 42", "chase invoice 43"]) {
+    assert.equal(reply.includes(`. ${summary} · `), true, `${summary} is pending and absent from /queue`);
   }
-  assert.equal(reply.includes(`${a} `), true, "the list is not keyed by action key");
-  assert.equal(reply.includes("selected"), true, "/queue did not mark the selected request");
+  for (const key of [a, b, c]) {
+    assert.equal(reply.includes(key), false, `/queue named the action key ${key}`);
+  }
+  assert.equal(reply.includes(TASK), false, "/queue named the task id");
+  assert.equal(reply.includes("· sent to you earlier"), true, "/queue did not mark the selected request");
 
   // APRV-256, over the real wire: the reply an approver actually receives says
   // it has no buttons and how to recover a card they cannot find, and it still
   // appends nothing while saying so (asserted against `before` above).
-  assert.equal(reply.includes("no decision buttons"), true, `not self-identified: ${reply}`);
-  assert.equal(reply.includes("/skip is the recovery"), true, `no recovery offered: ${reply}`);
+  assert.equal(reply.includes("This list has no buttons."), true, `not self-identified: ${reply}`);
+  assert.equal(reply.includes("/skip sends the next one instead"), true, `no recovery offered: ${reply}`);
   assert.equal(reply.includes("shown now"), false, `the old marker reached the chat: ${reply}`);
   assert.equal(reply.includes("message above"), false, `the old pointer reached the chat: ${reply}`);
 
@@ -4966,8 +5029,8 @@ test("/queue lists every pending request while one is being shown (APRV-216)", a
   mock.queueUpdate(messageUpdate({ chatId: CHAT, text: "/queue" }));
   await channel.pollOnce();
   const secondReply = sentSince(secondFrom).join("\n");
-  assert.equal(secondReply.includes("2 pending"), true, `stale count: ${secondReply}`);
-  assert.equal(secondReply.includes(a), false, "a decided request is still listed as pending");
+  assert.equal(secondReply.includes("2 requests are waiting for you"), true, `stale count: ${secondReply}`);
+  assert.equal(secondReply.includes("chase invoice 41"), false, "a decided request is still listed as pending");
 
   assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
   assertClean(world.unit);
@@ -4978,7 +5041,7 @@ test("/queue lists every pending request while one is being shown (APRV-216)", a
  * here rather than imported so that a change to the shipped wording has to be
  * made twice, deliberately (APRV-256).
  */
-const SELECTED_LINE_MARKER = " — selected — card sent earlier";
+const SELECTED_LINE_MARKER = " · sent to you earlier";
 
 /**
  * APRV-256, at the command level rather than the renderer's. Two states an
@@ -5001,11 +5064,12 @@ test("the commands answer a queue with nothing selected without naming a card (A
   const from = mock.sentTexts().length;
   await commands("queue");
   const listing = sentSince(from).join("\n");
-  assert.equal(listing.includes("1 pending"), true, `no summary: ${listing}`);
-  assert.equal(listing.includes(only), true, "the pending request is not listed");
-  assert.equal(listing.includes("no decision buttons"), true, "the reply is not self-identified");
+  assert.equal(listing.includes("1 request is waiting for you (asked "), true, `no summary: ${listing}`);
+  assert.equal(listing.includes("1. chase invoice 41 · "), true, "the pending request is not listed");
+  assert.equal(listing.includes(only), false, "the listing named the action key");
+  assert.equal(listing.includes("This list has no buttons."), true, "the reply is not self-identified");
   assert.equal(
-    listing.includes("no approval card has been sent for any of these"),
+    listing.includes("None of these has been sent to you yet."),
     true,
     `a card was implied with nothing selected: ${listing}`,
   );
@@ -5044,7 +5108,7 @@ test("the commands answer a queue with nothing selected without naming a card (A
   // The announce path bolds the first line, so this is `includes` against a
   // reply whose only content is that line.
   assert.equal(
-    empty.includes("Nothing pending — the queue is empty."),
+    empty.includes("Nothing is waiting for you right now."),
     true,
     `not the empty reply: ${empty}`,
   );
@@ -5159,6 +5223,67 @@ test("digest grouping still applies to the request being shown (APRV-216)", asyn
   assertClean(world.unit);
 });
 
+test("P-9: a paced restart behind a relay says the older buttons no longer work", async () => {
+  // Paced is the product default, and before P-9 its opening line was a count
+  // and a class tally that never said whether the earlier copies still decide.
+  const world = staged(3, distinctPayloadFor);
+  const setup = setupFor(world, channelFor({ staleCopy: false }), undefined, "paced");
+  const { streams, err } = capture();
+  requestAt(world, 0, at(1));
+  requestAt(world, 1, at(2));
+
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(setup, streams, newDispatchState(), at(63));
+  assert.equal(cycle.summary?.pending, 2);
+  assert.equal(
+    sentSince(from)[0],
+    "<b>Reminder: 2 requests are waiting for you.</b>\nOne is below; the next comes after you answer it. Buttons on older messages above no longer work; use the one below.",
+  );
+  assert.deepEqual(pacedReminderLines(3, 3, false), [
+    "Reminder: 3 requests are waiting for you.",
+    "They are below. Buttons on older messages above no longer work; use the ones below.",
+  ]);
+  assert.deepEqual(pacedReminderLines(5, 2, true), [
+    "Reminder: 5 requests are waiting for you.",
+    "2 are below. Only their buttons work right now; the others come next, with new buttons, after you answer them.",
+  ]);
+  assert.deepEqual(pacedReminderLines(5, 2, false), [
+    "Reminder: 5 requests are waiting for you.",
+    "2 are below; the next come after you answer them. Buttons on older messages above no longer work; use the ones below.",
+  ]);
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("fold round 1, S1: a paced restart with 3 pending and 1 shown never claims older buttons work", async () => {
+  // Paced shows one unit. A tap on an older copy of either of the other two
+  // pending requests finds no live delivery here and is answered "Still
+  // pending — this copy's buttons are not live here", so the opening must not
+  // promise that older buttons work.
+  const world = staged(3, distinctPayloadFor);
+  const { streams, err } = capture();
+  const keys = [0, 1, 2].map((index) => requestAt(world, index, at(index + 1)));
+
+  // A first process puts the oldest in front of the approver, then "restarts".
+  await dispatchPending(setupFor(world, channelFor(), undefined, "paced"), streams, newDispatchState(), at(63));
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(
+    setupFor(world, channelFor(), undefined, "paced"),
+    streams,
+    newDispatchState(),
+    at(64),
+  );
+  assert.equal(cycle.summary?.pending, 3);
+  assert.equal(cycle.delivered.length, 1, JSON.stringify(cycle.delivered));
+  const reminder = sentSince(from)[0] as string;
+  assert.match(reminder, /^<b>Reminder: 3 requests are waiting for you\.<\/b>\n/u);
+  assert.doesNotMatch(reminder, /still work/u, `the reminder over-claims: ${reminder}`);
+  assert.match(reminder, /Only its buttons work right now/u);
+  for (const key of keys) assert.equal(reminder.includes(key), false, `the reminder named ${key}`);
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
 test("a pending set that grows while nothing is shown announces itself again (APRV-216)", async () => {
   const world = staged(3, distinctPayloadFor);
   const channel = channelFor();
@@ -5167,8 +5292,13 @@ test("a pending set that grows while nothing is shown announces itself again (AP
   const { streams, err } = capture();
 
   const a = requestAt(world, 0, at(1));
+  const openFrom = mock.sentTexts().length;
   const opening = await dispatchPending(setup, streams, state, at(63));
   assert.equal(opening.summary?.pending, 1);
+  assert.equal(
+    sentSince(openFrom)[0],
+    "<b>Reminder: 1 request is waiting for you.</b>\nIt is below. Buttons on older messages above still work.",
+  );
 
   channel.onDecision(handlerFor(world, at(64)));
   assert.equal((await press(channel, a, "grant"))?.ok, true);
@@ -5176,8 +5306,11 @@ test("a pending set that grows while nothing is shown announces itself again (AP
   // Two arrive while the approver has nothing in front of them.
   requestAt(world, 1, at(65));
   requestAt(world, 2, at(66));
+  const grownFrom = mock.sentTexts().length;
   const grown = await dispatchPending(setup, streams, state, at(67));
   assert.equal(grown.summary?.pending, 2, "a queue that grew said nothing about it");
+  // P-9: a growth re-send is the count line, not a second reminder.
+  assert.equal(sentSince(grownFrom)[0], "<b>2 requests are waiting for you (oldest 2 min ago).</b>");
 
   assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
   assertClean(world.unit);
@@ -5287,17 +5420,27 @@ test("the summary and the queue listing are arithmetic on the log alone (APRV-21
 
   const summary = summaryLines(requests, at(180));
   assert.equal(summary.length, 1, "the summary is one line");
-  assert.equal(summary[0]?.includes("2 pending"), true);
-  assert.equal(summary[0]?.includes("2h 59m ago"), true, `oldest age wrong: ${String(summary[0])}`);
+  assert.equal(summary[0], "2 requests are waiting for you (oldest 2h 59m ago).");
+  // The oldest is the oldest whatever the order: /queue passes the set newest
+  // first (orderPending), and the header must not call the newest the oldest.
+  assert.deepEqual(summaryLines([...requests].reverse(), at(180)), summary);
+  assert.deepEqual(summaryLines(requests.slice(1), at(180)), [
+    "1 request is waiting for you (asked 1h 00m ago).",
+  ]);
 
-  // [0] summary, [1] the "this is a list" line (APRV-256), then the items.
+  // [0] summary, [1] the "this is a list" line (APRV-256), [2] the claimed
+  // label (P-9), then the items: the agent's summary and the age, no ids.
   const listed = queueLines(requests, at(180), [world.keys[1] as string]);
-  assert.equal(listed[2]?.startsWith("1. "), true, "the list is not numbered from one");
-  assert.equal(listed[2]?.includes(TASK), true, "the list names no task");
-  assert.equal(listed[3]?.includes("selected"), true, "the selected request is not marked");
+  assert.equal(listed[2], "What your agent says (not checked):");
+  assert.equal(listed[3], "1. chase invoice 41 · 2h 59m ago", "the list is not numbered from one");
+  assert.equal(listed[4], "2. chase invoice 42 · 1h 00m ago · sent to you earlier");
+  for (const line of listed) {
+    assert.equal(line.includes(TASK), false, `the list names the task: ${line}`);
+    for (const key of world.keys) assert.equal(line.includes(key), false, `the list names ${key}`);
+  }
 
-  assert.deepEqual(summaryLines([], at(180)), ["Nothing pending — the queue is empty."]);
-  assert.deepEqual(queueLines([], at(180), []), ["Nothing pending — the queue is empty."]);
+  assert.deepEqual(summaryLines([], at(180)), ["Nothing is waiting for you right now."]);
+  assert.deepEqual(queueLines([], at(180), []), ["Nothing is waiting for you right now."]);
 });
 
 /**
@@ -5323,14 +5466,13 @@ test("/queue calls itself a list and never claims a card is visible (APRV-256)",
   // --- Selected item -------------------------------------------------------
   const selected = queueLines(requests, at(180), [world.keys[0] as string]).join("\n");
 
-  // AC #1: the reply identifies itself as a list without decision buttons, and
-  // points at the card without placing it.
-  assert.equal(selected.includes("no decision buttons"), true, `not self-identified: ${selected}`);
-  assert.equal(selected.includes("its own approval card"), true, "decisions are not directed");
+  // AC #1: the reply identifies itself as a list without buttons, and points at
+  // the request's own message without placing it.
+  assert.equal(selected.includes("This list has no buttons."), true, `not self-identified: ${selected}`);
   assert.equal(
-    selected.includes("wherever that card sits"),
+    selected.includes("Each request is answered on its own message, wherever it is in this chat."),
     true,
-    "the card's position is asserted or omitted",
+    "decisions are not directed, or the message's position is asserted",
   );
 
   // AC #2: the two reported phrases are gone, and no synonym takes their place.
@@ -5341,36 +5483,38 @@ test("/queue calls itself a list and never claims a card is visible (APRV-256)",
     "above to decide",
     "being shown",
     "in front of you",
+    "on screen",
   ]) {
     assert.equal(selected.includes(banned), false, `${banned} survived in: ${selected}`);
   }
   assert.equal(
-    selected.includes("card sent earlier"),
+    selected.includes("sent to you earlier"),
     true,
     "the marker does not describe prior delivery",
   );
   assert.equal(
-    selected.includes("cannot tell whether that card is still here"),
+    selected.includes("Can't find its message?"),
     true,
-    "the reply vouches for a card it cannot see",
+    "the reply vouches for a message it cannot see",
   );
 
-  // AC #3: recovery, and what recovery does not do.
-  assert.equal(selected.includes("/skip is the recovery"), true, "no /skip recovery is offered");
-  assert.equal(selected.includes("Nothing is decided by typing it"), true, "no decision disclaimer");
-  assert.equal(selected.includes("stays pending in the log"), true, "pendingness is not stated");
+  // AC #3: recovery, and what recovery does not do, in two short lines (P-9).
   assert.equal(
-    selected.includes("a fresh card is sent on a later listener cycle"),
+    selected.includes("/skip sends the next one instead; this one comes back later."),
     true,
-    "the fresh card is not promised to a later cycle",
+    "no /skip recovery is offered",
   );
-  assert.equal(selected.includes("gloss is being written"), true, "the gloss delay is unmentioned");
+  assert.equal(selected.includes("/next stops showing you this one"), true, "/next is not explained");
+  // Fold round 1, N8: the two guards the shortened copy had dropped. /skip's
+  // request comes round again later (a later cycle sends it fresh), and /next
+  // is not a way to ask for the card again.
+  assert.equal(selected.includes("this one comes back later"), true, "the later re-send is not promised");
   assert.equal(
-    selected.includes("It is not a way to ask for the card again."),
+    selected.includes("/next stops showing you this one and does not send it again."),
     true,
     "/next is left readable as a resend",
   );
-  assert.equal(selected.includes("no new card is sent for it"), true, "/next is not disambiguated");
+  assert.equal(selected.includes("Neither command answers anything."), true, "no decision disclaimer");
 
   // Only the selected key is marked, and it is marked once.
   assert.equal(
@@ -5381,7 +5525,7 @@ test("/queue calls itself a list and never claims a card is visible (APRV-256)",
   const markedLine = selected
     .split("\n")
     .find((line) => line.includes(SELECTED_LINE_MARKER)) as string;
-  assert.equal(markedLine.includes(world.keys[0] as string), true, "the wrong request is marked");
+  assert.equal(markedLine.includes("chase invoice 41"), true, "the wrong request is marked");
 
   // --- A digest selection is still ONE card --------------------------------
   // `state.paced.current` carries every key of a digest group, and the group
@@ -5393,36 +5537,31 @@ test("/queue calls itself a list and never claims a card is visible (APRV-256)",
   ]).join("\n");
   assert.equal(grouped.split(SELECTED_LINE_MARKER).length - 1, 2, "both keys were not marked");
   assert.equal(
-    grouped.includes("a single approval card for them was sent to this chat earlier"),
+    grouped.includes("Can't find their message?"),
     true,
-    `a digest selection implied several cards: ${grouped}`,
+    `a digest selection implied several messages: ${grouped}`,
   );
-  assert.equal(grouped.includes("/skip is the recovery"), true, "recovery is singular-only");
+  assert.equal(grouped.includes("/skip sends the next ones instead"), true, "recovery is singular-only");
 
   // --- No selected item ----------------------------------------------------
   const none = queueLines(requests, at(180), []).join("\n");
-  assert.equal(none.includes("no decision buttons"), true, "the list line is selection-dependent");
+  assert.equal(none.includes("This list has no buttons."), true, "the list line is selection-dependent");
   assert.equal(none.includes(SELECTED_LINE_MARKER), false, "an unselected request was marked");
   assert.equal(
-    none.includes("Nothing is selected right now"),
+    none.includes("None of these has been sent to you yet."),
     true,
-    `the empty selection is not stated: ${none}`,
+    `the empty selection is not stated, or a message is implied: ${none}`,
   );
-  assert.equal(
-    none.includes("no approval card has been sent for any of these"),
-    true,
-    "a card is implied with nothing selected",
-  );
-  // With nothing selected there is no lost card to recover, so the recovery
-  // paragraph stays off rather than inviting a /skip that has nothing to skip.
-  assert.equal(none.includes("/skip is the recovery"), false, "recovery offered with no selection");
+  // With nothing selected there is no lost message to recover, so the recovery
+  // lines stay off rather than inviting a /skip that has nothing to skip.
+  assert.equal(none.includes("/skip"), false, "recovery offered with no selection");
   for (const banned of ["shown now", "message above", "in front of you"]) {
     assert.equal(none.includes(banned), false, `${banned} survived in: ${none}`);
   }
 
   // --- Empty queue ---------------------------------------------------------
   const empty = queueLines([], at(180), []).join("\n");
-  assert.equal(empty, "Nothing pending — the queue is empty.");
+  assert.equal(empty, "Nothing is waiting for you right now.");
   for (const banned of ["card", "button", "shown now", "message above", "/skip", "/next"]) {
     assert.equal(empty.includes(banned), false, `an empty queue mentioned ${banned}: ${empty}`);
   }
@@ -5557,27 +5696,32 @@ test("APRV-287: the five classes of one command are one card with one approve", 
 
   const sent = mock.sentTexts().slice(from);
   assert.equal(
-    sent.filter((text) => text.includes("THE COMMAND ALL 5 REQUESTS ARE ABOUT")).length,
+    sent.filter((text) => text.includes("What all 5 requests are about — answer them on the summary below")).length,
     1,
     "the shared payload was not sent once",
   );
   assert.equal(
-    sent.filter((text) => text.includes("REQUEST 1 OF 5")).length,
+    sent.filter((text) => text.includes("Request 1 of 5")).length,
     0,
     "the members were prompted one by one",
   );
   const digest = sent[sent.length - 1] as string;
   // ONE gesture decides the command: the all-row is on the one card.
-  const buttons = buttonsOnMessageContaining("REQUESTS AWAITING APPROVAL");
+  const buttons = buttonsOnMessageContaining("5 requests are waiting for you");
   assert.equal(
     buttons.some((label) => label.includes("Approve all (5)")),
     true,
     `no approve-all on the card: ${buttons.join(", ")}`,
   );
-  assert.match(digest, /one payload, shared by all 5 requests/u);
-  assert.match(digest, /one tool call: one task, one payload, 5 class\(es\)/u);
+  assert.match(digest, /All 5 are about one action, shown once in full above\./u);
   for (const cls of classes) {
     assert.equal(digest.includes(cls), true, `the digest hid the class ${cls}`);
+  }
+  // P-9: one command's summary repeated five times, so each member line leads
+  // with its class, and none names its action key.
+  assert.match(digest, new RegExp(`\\n1\\. ${(classes[0] as string).replace(/\./gu, "\\.")} — git add`, "u"));
+  for (const key of world.keys) {
+    assert.equal(digest.includes(key), false, `the digest named the action key ${key}`);
   }
   // The whole command reached the approver before any button did: five classes,
   // one set of bytes, sent above the card that decides them.
@@ -5618,24 +5762,50 @@ test("APRV-287: a restarted listener collapses the stale queue into one message"
   );
 
   const sent = mock.sentTexts().slice(from);
-  const summary = sent.find((text) => text.includes("STALE REQUEST")) as string;
+  const summary = sent.find((text) => text.includes("older ones are listed here")) as string;
   assert.ok(summary !== undefined, `no collapsed message: ${sent.join(" | ")}`);
-  assert.match(summary, /2 STALE REQUESTS/u);
+  assert.match(summary, /2 older ones are listed here; nobody is waiting on them any more\./u);
   // One action, and it is a rejection: nothing here shows the payloads, so
   // nothing here may collect an approval.
-  const buttons = buttonsOnMessageContaining("STALE REQUEST");
+  const buttons = buttonsOnMessageContaining("older ones are listed here");
   assert.deepEqual(
     buttons.map((label) => label.replace(/^\S+\s/u, "")),
     ["Reject all (2)"],
     `the collapsed message offered ${buttons.join(", ")}`,
   );
-  for (const key of old) assert.equal(summary.includes(key), true, `${key} is not named`);
-  assert.equal(summary.includes(fresh), false, "the fresh request was collapsed too");
+  // P-9: members are named by the agent's own summary and their age, under a
+  // label saying the summary is the agent's and unchecked. No action key: the
+  // person holding the phone cannot read one.
+  assert.match(summary, /<b>What your agent says \(not checked\) — agent:drafter<\/b>/u);
+  assert.match(summary, /\n1\. chase invoice 41 · 1h 00m ago\n2\. chase invoice 42 · 59 min ago\n/u);
+  for (const key of [...old, fresh]) {
+    assert.equal(summary.includes(key), false, `${key} is named in the stale summary`);
+  }
+  assert.doesNotMatch(summary, /chase invoice 43/u, "the fresh request was collapsed too");
   // It carries no payload, and says so where it says why there is no approve.
-  assert.match(summary, /carries NO payload/u);
+  assert.match(summary, /This message does not show what they would send, so it has no approve button\./u);
+  assert.match(
+    summary,
+    /To approve one, use its earlier message if you still have it, or ask your agent to try again\. Reject all turns down only these 2\./u,
+  );
+  assert.doesNotMatch(summary, /COMPUTED|CLAIMED|hook|log event|approval grant|<code>|retry grace/u);
+  // P-9: the summary is the restart's ONE reminder. It counts everything this
+  // cycle re-sends (two collapsed plus one card), and no banner follows it.
+  assert.match(summary, /^<b>Reminder: 3 requests are still waiting for you\.<\/b>\n/u);
+  assert.match(
+    summary,
+    /The other one is repeated below; buttons on older messages above still work\./u,
+  );
+  assert.equal(cycle.banner, undefined, "a banner went out behind the stale summary");
+  assert.equal(
+    sent.filter((text) => text.includes("still waiting for you")).length,
+    1,
+    "more than one reminder for one restart",
+  );
+  assert.equal(sent.length, 4, `the summary and one 3-message card: ${sent.join(" | ")}`);
   // One message for the two of them, not two.
   assert.equal(
-    sent.filter((text) => text.includes("STALE REQUEST")).length,
+    sent.filter((text) => text.includes("older ones are listed here")).length,
     1,
     "more than one collapsed message",
   );
@@ -5656,6 +5826,44 @@ test("APRV-287: a restarted listener collapses the stale queue into one message"
     [...old].sort(),
   );
 
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(world.unit);
+});
+
+test("P-9: the stale summary's reminder counts every re-send and tells a relay approver to use the new buttons", async () => {
+  // The village shape: burst delivery behind a relay, so the earlier copies'
+  // buttons no longer decide (APRV-456). Two stale requests and one live one
+  // used to be the summary, then a banner counting "1 request" under it.
+  const world = staged(3, distinctPayloadFor);
+  const setup = setupFor(world, channelFor({ staleCopy: false }));
+  const { streams, err } = capture();
+  requestAt(world, 0, at(1));
+  requestAt(world, 1, at(2));
+  requestAt(world, 2, at(60));
+
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(setup, streams, newDispatchState(), at(61));
+  const sent = mock.sentTexts().slice(from);
+
+  assert.equal(cycle.banner, undefined, "a banner went out behind the stale summary");
+  const reminders = sent.filter((text) => text.includes("still waiting for you"));
+  assert.equal(reminders.length, 1, `reminders: ${reminders.join(" | ")}`);
+  assert.match(reminders[0] as string, /^<b>Reminder: 3 requests are still waiting for you\.<\/b>\n/u);
+  assert.match(
+    reminders[0] as string,
+    /The other one is repeated below; use its buttons, as buttons on older messages above no longer work\./u,
+  );
+  assert.doesNotMatch(reminders[0] as string, /still work/u);
+  // The earlier copies do not decide here, so the footer does not send the
+  // approver to them.
+  assert.match(reminders[0] as string, /To approve one, ask your agent to try again\. Reject all turns down only these 2\./u);
+  assert.doesNotMatch(reminders[0] as string, /earlier message/u);
+
+  assert.deepEqual(staleReminderLines(4, 0, false), ["Reminder: 4 requests are still waiting for you."]);
+  assert.deepEqual(staleReminderLines(5, 2, true), [
+    "Reminder: 5 requests are still waiting for you.",
+    "The other 2 are repeated below; buttons on older messages above still work.",
+  ]);
   assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
   assertClean(world.unit);
 });
@@ -5824,7 +6032,11 @@ test("APRV-425: a restart with every pending request stale sends ONE message and
   const sent = mock.sentTexts().slice(from);
 
   assert.equal(sent.length, 1, `${String(sent.length)} messages: ${sent.join(" | ")}`);
-  assert.match(sent[0] as string, /4 STALE REQUESTS/u);
+  assert.match(sent[0] as string, /4 older ones are listed here; nobody is waiting on them any more\./u);
+  // P-9: the one message is the reminder too, and with nothing after it, it
+  // says nothing about messages below.
+  assert.match(sent[0] as string, /^<b>Reminder: 4 requests are still waiting for you\.<\/b>\n/u);
+  assert.doesNotMatch(sent[0] as string, /repeated below/u);
   assert.equal(cycle.banner, undefined, "a banner went out in front of nothing");
   assert.deepEqual(cycle.digests, [], "a prompt digest was sent");
   assert.deepEqual(
@@ -5885,10 +6097,13 @@ test("APRV-425: a superseded duplicate is collapsed while its newer twin is prom
   // nothing here: the summary says exactly that rather than claiming they are
   // old, because a message that overstates what it collapsed is read by the
   // person deciding.
-  const summary = sent.find((text) => text.includes("STALE REQUEST")) as string;
+  const summary = sent.find((text) => text.includes("older ones are listed here")) as string;
   assert.ok(summary !== undefined, `no collapsed message: ${sent.join(" | ")}`);
-  assert.match(summary, /all superseded by a newer pending request for the same bytes and class/u);
-  assert.doesNotMatch(summary, /older than the hook's/u);
+  assert.match(
+    summary,
+    /2 older ones are listed here; your agent has asked the same thing again since, so answer the newer one instead\./u,
+  );
+  assert.doesNotMatch(summary, /nobody is waiting/u);
 
   // The live asking keeps its own card, with its payload and its buttons.
   assert.equal(
@@ -5912,6 +6127,103 @@ test("APRV-425: a superseded duplicate is collapsed while its newer twin is prom
   }
   assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
   assertClean(world.unit);
+});
+
+/**
+ * P-9. The resident-facing texts of a restart carry no ids: not in the stale
+ * summary, not in the digest's member lines, not in the paced reminder, not in
+ * `/queue`. The technical card's own action-key row and its canonical payload
+ * block are the only places ids remain (a required row, and a block bound by
+ * display_hash), and this test does not look at them.
+ */
+const P9_JARGON = [
+  /sha256/u,
+  /\.approval\//u,
+  /wysiwys/u,
+  /display_hash/u,
+  /COMPUTED/u,
+  /CLAIMED/u,
+  /NOT verified/u,
+  /<code>/u,
+  /retry grace/u,
+  /hook/u,
+  /log event/u,
+  /approval grant/u,
+  /keys:/u,
+];
+
+function assertPlainWords(text: string, ids: readonly string[], where: string): void {
+  for (const id of ids) assert.equal(text.includes(id), false, `${where} names ${id}: ${text}`);
+  for (const pattern of P9_JARGON) assert.doesNotMatch(text, pattern, `${where}: ${text}`);
+}
+
+test("P-9: no action key or task id in the stale summary, the digest, the paced reminder or /queue", async () => {
+  // Burst: two stale requests and two similar live ones, so one restart sends
+  // the stale summary and a digest.
+  const burst = staged(4);
+  const { streams, err } = capture();
+  const keys = [
+    requestAt(burst, 0, at(1)),
+    requestAt(burst, 1, at(2)),
+    requestAt(burst, 2, at(60)),
+    requestAt(burst, 3, at(60)),
+  ];
+  const from = mock.sentTexts().length;
+  const cycle = await dispatchPending(
+    setupFor(burst, channelFor({ staleCopy: false })),
+    streams,
+    newDispatchState(),
+    at(61),
+  );
+  assert.notEqual(cycle.collapsed, undefined, "nothing was collapsed");
+  assert.equal(cycle.digests.length, 1, JSON.stringify(cycle.digests));
+  const sent = mock.sentTexts().slice(from);
+  const ids = [...keys, TASK];
+
+  const summary = sent[0] as string;
+  assert.match(summary, /^<b>Reminder: 4 requests are still waiting for you\.<\/b>\n/u);
+  assertPlainWords(summary, ids, "the stale summary");
+
+  const digest = sent[sent.length - 1] as string;
+  assert.match(digest, /^<b>2 requests are waiting for you<\/b>\n/u);
+  assertPlainWords(digest, ids, "the digest");
+  // A member prompt is a technical card and keeps its action-key row; its
+  // heading line is the resident's, and it names nothing.
+  const headings = sent
+    .filter((text) => text.startsWith("<b>Request "))
+    .map((text) => text.split("\n")[0] as string);
+  assert.deepEqual(headings, [
+    "<b>Request 1 of 2 — answer it on the summary below</b>",
+    "<b>Request 2 of 2 — answer it on the summary below</b>",
+  ]);
+
+  // Paced: the reminder.
+  const paced = staged(3, distinctPayloadFor);
+  const pacedKeys = [0, 1, 2].map((index) => requestAt(paced, index, at(index + 1)));
+  const pacedState = newDispatchState();
+  const pacedSetup = setupFor(paced, channelFor({ staleCopy: false }), undefined, "paced");
+  const pacedFrom = mock.sentTexts().length;
+  await dispatchPending(pacedSetup, streams, pacedState, at(63));
+  const reminder = mock.sentTexts()[pacedFrom] as string;
+  assert.match(reminder, /^<b>Reminder: 3 requests are waiting for you\.<\/b>/u);
+  assertPlainWords(reminder, [...pacedKeys, TASK], "the paced reminder");
+  assert.doesNotMatch(reminder, /communicate\.email/u, "the paced reminder named a class");
+
+  // /queue, with one request selected.
+  const queue = buildPendingQueue(paced.unit.logPath, paced.tagOptions, at(70));
+  assert.equal(queue.ok, true);
+  const listing = queueLines(
+    orderPending(queue.ok ? queue.requests : [], at(70)),
+    at(70),
+    pacedState.paced.current ?? [],
+  ).join("\n");
+  assert.match(listing, /· sent to you earlier/u);
+  assertPlainWords(listing, [...pacedKeys, TASK], "/queue");
+  assert.doesNotMatch(listing, /communicate\.email/u, "/queue named a class");
+
+  assert.deepEqual(err, [], `unexpected stderr: ${err.join("")}`);
+  assertClean(burst.unit);
+  assertClean(paced.unit);
 });
 
 // ===========================================================================
