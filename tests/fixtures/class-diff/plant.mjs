@@ -74,6 +74,9 @@ edit("dist/src/cli/hook.js", "`hook:${input.sessionId}:${input.toolUseId ?? rand
           return __id; })(\`hook:\${input.sessionId}:\${input.toolUseId ?? randomBytes(8).toString("hex")}\`);`);
 // env ${P}DENYKEY changes the request keys a hook-timeout deny names, not the
 // log: "suffix:<s>" names keys the store does not hold, "none" names no key.
+// Fold 5 (review-b N-9, after its plant-f3.mjs "xsame"): "xsame" names the
+// latest earlier request in the store whose summary equals this call's own
+// (the same command at another workdir), so the deny points at another call.
 {
   const p = join(root, "dist/src/cli/hook.js");
   const from = "${waitKeys.join(\", \")}";
@@ -82,11 +85,52 @@ edit("dist/src/cli/hook.js", "`hook:${input.sessionId}:${input.toolUseId ?? rand
   writeFileSync(p, t.replaceAll(from, "${__plantDenyKeys(waitKeys).join(\", \")}") +
 `
 // PLANTED (refuter scratch): env ${P}DENYKEY
+import { readFileSync as __plantRead } from "node:fs";
 function __plantDenyKeys(keys) {
   const spec = process.env["${P}DENYKEY"] ?? "";
   if (spec.startsWith("suffix:")) return keys.map((k) => k + spec.slice(7));
   if (spec === "none") return [];
+  if (spec === "xsame") {
+    let rows = [];
+    try {
+      for (const line of __plantRead(".approval/log/events.jsonl", "utf8").split("\\n")) {
+        if (line.trim() === "") continue;
+        const e = JSON.parse(line);
+        if (e.event === "approval.requested") rows.push({ key: e.action_key, summary: e.payload?.summary });
+      }
+    } catch { rows = []; }
+    const own = rows.find((r) => keys.includes(r.key));
+    const others = rows.filter((r) => own !== undefined && !keys.includes(r.key) && r.summary === own.summary);
+    return others.length > 0 ? [others[others.length - 1].key] : keys;
+  }
   return keys;
+}
+`);
+}
+// Fold 5 (review-b N-10, after its plant-f3.mjs "CLS"): env ${P}CLS="other:<cls>"
+// rewrites every class field of task.registered and approval.requested to
+// <cls> as the core appends them, so the log names a class other than the one
+// the hook carded on.
+edit("dist/src/core/log.js", "export function appendEvent(logPath, input, options = {}) {\n",
+`export function appendEvent(logPath, input, options = {}) {
+    input = __plantCls(input); /* PLANTED (refuter scratch): env ${P}CLS */
+`);
+{
+  const p = join(root, "dist/src/core/log.js");
+  writeFileSync(p, readFileSync(p, "utf8") + `
+// PLANTED (refuter scratch): env ${P}CLS
+function __plantCls(input) {
+  const spec = process.env["${P}CLS"] ?? "";
+  if (!spec.startsWith("other:") || input === null || typeof input !== "object") return input;
+  if (input.event !== "task.registered" && input.event !== "approval.requested") return input;
+  const walk = (v) => {
+    if (Array.isArray(v)) return v.map(walk);
+    if (v === null || typeof v !== "object") return v;
+    const o = {};
+    for (const [k, x] of Object.entries(v)) o[k] = k === "class" && typeof x === "string" ? spec.slice(6) : walk(x);
+    return o;
+  };
+  return { ...input, payload: walk(input.payload) };
 }
 `);
 }

@@ -222,6 +222,20 @@ export function rankOf(side) {
 }
 
 /**
+ * Fold 5 (review-b N-10): a `hook-timeout` card whose bound request names no
+ * class that needs a human (every one autonomous or supervised-retro, rank 3 or
+ * more) contradicts the hook that carded it: the core logged a class other
+ * than the one it carded on. Read as is, the card would rank at the logged
+ * class and hide a real move, so decideInBox makes it a verdict error and the
+ * gate exits 2. A card that bound to no class at all is an error too.
+ */
+export function cardWithoutHumanClass(core, load, call) {
+  if (call.verdict !== "deny" || call.code !== "hook-timeout") return false;
+  const bound = Array.isArray(call.requested) ? call.requested : [];
+  return !bound.some((cls) => levelOf(core, load, cls).rank < 3);
+}
+
+/**
  * Turn one hook verdict from the box into a decided call: decision, autonomy
  * level (strictest over the classes the hook named), card style.
  */
@@ -293,6 +307,18 @@ export function leftMinimal(was = {}, now = {}) {
 }
 
 /**
+ * Fold 5 (owner N1, review-b N-11): when every class the old card carried was
+ * minimal, the classes on the new card with another style. Each class is its own
+ * card in core, so a class newly carded at technical on a call that read in plain
+ * words is one more technical card. leftMinimal only sees classes on both sides.
+ */
+export function newlyNotMinimal(was = {}, now = {}) {
+  const old = Object.values(was ?? {});
+  if (old.length === 0 || old.some((s) => s !== "minimal")) return [];
+  return Object.keys(now ?? {}).filter((cls) => typeof now[cls] === "string" && now[cls] !== "minimal");
+}
+
+/**
  * Join the baseline side and this side into the diff. Pure. Each call carries
  * `key` (column + kind + file + command + occurrence), `decision`, and
  * optionally `classes`, `code`, `level`, `rank`, `style`, `column`.
@@ -324,6 +350,8 @@ export function diffCalls(baselineCalls, calls, allowlist = { entries: [] }) {
     // Fold 3 (N-8): per class, so a two-class card whose second class leaves
     // minimal ("minimal" -> "minimal+technical (undeclared)") blocks too.
     else if (!DENIES.has(now.decision) && leftMinimal(was.styles, now.styles).length > 0) status = "blocking";
+    // Fold 5 (N-11): a class new to an all-minimal card, at another style.
+    else if (!DENIES.has(now.decision) && newlyNotMinimal(was.styles, now.styles).length > 0) status = "blocking";
     else if (moved) status = "changed";
     const row = { status, column, kind: now.kind, where: now.where, command: now.command, old: pick(was), new: pick(now) };
     if (status === "blocking") {
@@ -507,6 +535,15 @@ export async function decideInBox({ core, corpus, overlayTree, boxRoot, toolsLin
   const extraEnv = typeof secretEnv === "string" && secretEnv.length > 0 ? { [secretEnv]: "class-diff-fixed-sampling-value-not-a-secret" } : {};
   const ran = await runBox({ coreRoot: core.root, corpus, policyText: policyTextOf(corpus), overlayTree, boxRoot, toolsLines, concurrency, harnessOnly, extraEnv });
   if ("error" in ran) return ran;
+  for (const c of ran.calls) {
+    if (!cardWithoutHumanClass(core, load, c)) continue;
+    const named = (c.requested ?? []).join(", ") || "no class";
+    Object.assign(c, {
+      verdict: "error",
+      code: "card-request-no-human-class",
+      detail: `the hook carded this call, but the request it bound to names ${named}, none of which needs a human at core ${core.version}; ${c.detail ?? ""}`.slice(0, 400),
+    });
+  }
   const bad = ran.calls.filter((c) => c.verdict === "error");
   if (bad.length > 0) return { error: `${String(bad.length)} hook run(s) ended in neither allow nor deny at core ${core.version}, e.g. ${bad[0].code}: ${bad[0].detail}` };
   return { calls: ran.calls.map((c) => decideBoxCall(core, load, c)), load };

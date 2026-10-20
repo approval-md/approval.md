@@ -162,22 +162,37 @@ export function summaryFits(summary, tool, input) {
 /**
  * Bind one call to the request it opened (fold 3, review-b S-5), never by a
  * task id this runner guesses:
- * - a `hook-timeout` deny names its request keys; each must be in the call's own
- *   store (a retry of the same bytes adopts an earlier request, and the deny
- *   names that one);
+ * - a `hook-timeout` deny names its request keys; each must be among the rows
+ *   the call appended to its store, or, when it appended none, in that store (a
+ *   retry of the same bytes adopts an earlier request, and the deny names that
+ *   one);
  * - a deny that names none: the requests appended to the call's store while the
  *   call ran (each worker runs its calls one at a time in its own store) whose
  *   summary is this call's tool and command;
  * then exactly one task, and every action of it this call's. Anything else is
  * `{ error }`. Returns `{ task, classes }`.
+ *
+ * Fold 5 (review-b N-9): a call that wrote a request of its own binds only to
+ * rows it wrote. Another call with the same command (or the same harness tool)
+ * fits the summary check, so without this a deny naming that call's key bound
+ * to it. An adoption appends nothing, so it still binds by the named key.
  */
 export function bindRequest({ text, tool, input, span }, requests) {
   const keys = timeoutKeys(text);
   let mine;
   if (keys.length > 0) {
-    mine = requests.filter((r) => r.key !== null && keys.includes(r.key));
+    const appended = requests.filter((r) => r.at >= span[0] && r.at < span[1]);
+    const pool = appended.length > 0 ? appended : requests;
+    mine = pool.filter((r) => r.key !== null && keys.includes(r.key));
     const missing = keys.filter((k) => !mine.some((r) => r.key === k));
-    if (missing.length > 0) return { error: `the hook names request ${missing.join(", ")}, which this call's store does not hold` };
+    if (missing.length > 0) {
+      const elsewhere = appended.length > 0 && missing.some((k) => requests.some((r) => r.key === k));
+      return {
+        error: elsewhere
+          ? `the hook names request ${missing.join(", ")}, another call's, though this call wrote its own request`
+          : `the hook names request ${missing.join(", ")}, which this call's store does not hold`,
+      };
+    }
   } else {
     mine = requests.filter((r) => r.at >= span[0] && r.at < span[1] && summaryFits(r.summary, tool, input));
   }

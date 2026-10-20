@@ -25,6 +25,11 @@
  * task ids read right; a card whose request is not found exits 2); a sampling
  * secret name that is a layout or runtime variable exits 2 (N-7); the minimal
  * rule compares per class (N-8).
+ *
+ * Fold 5 (review-b recheck of 6f752ab8): a call that wrote its own request
+ * binds only its own rows (N-9); a card bound to no class that needs a human
+ * exits 2 (N-10); a class new to an all-minimal card at another style blocks
+ * (N-11, owner N1); and pure tests for the fold-3 checks no test held (N-13).
  */
 
 import assert from "node:assert/strict";
@@ -39,10 +44,12 @@ import { parse } from "yaml";
 
 import {
   acceptanceErrors,
+  cardWithoutHumanClass,
   diffCalls,
   entryMatches,
   gateLine,
   leftMinimal,
+  newlyNotMinimal,
   shadowedTools,
   // @ts-expect-error no declaration file for the standalone check script
 } from "../../scripts/overlay-recipes-check.mjs";
@@ -200,9 +207,9 @@ test("S-5: a terminal summary is the command with whitespace collapsed, cut with
 
 test("S-5: a card binds to the request its deny names, or by tool and command to what it appended; else an error", () => {
   const call = { tool: "terminal", input: { command: CMD }, span: [10, 20] };
-  // The deny names the key: bound, wherever in the store it sits (an adopted request is an earlier call's).
+  // The deny names the key: bound. A call that appended nothing (an adoption) binds an earlier call's request.
   const store = [...req(0, "hook:s:cd-1", "network.call"), ...req(10, "hook:s:cd-2-renamed", "network.call")];
-  assert.deepEqual(bindRequest({ ...call, text: DENY("hook:s:cd-1:network.call") }, store), { task: "hook:s:cd-1", classes: ["network.call"] });
+  assert.deepEqual(bindRequest({ ...call, span: [20, 20], text: DENY("hook:s:cd-1:network.call") }, store), { task: "hook:s:cd-1", classes: ["network.call"] });
   assert.deepEqual(bindRequest({ ...call, text: DENY("hook:s:cd-2-renamed:network.call") }, store).task, "hook:s:cd-2-renamed");
   // A key the store does not hold: error.
   assert.match(bindRequest({ ...call, text: DENY("hook:s:cd-9:network.call") }, store).error, /does not hold/u);
@@ -210,11 +217,82 @@ test("S-5: a card binds to the request its deny names, or by tool and command to
   assert.equal(bindRequest({ ...call, text: "" }, store).task, "hook:s:cd-2-renamed");
   assert.match(bindRequest({ ...call, text: "", span: [30, 40] }, store).error, /no request/u);
   assert.match(bindRequest({ ...call, text: "", span: [0, 20] }, store).error, /2 requests/u);
-  // Keys of two tasks for one call: error.
-  assert.match(bindRequest({ ...call, text: DENY("hook:s:cd-1:network.call, hook:s:cd-2-renamed:network.call") }, store).error, /2 requests/u);
+  // Keys of two tasks for one call: error (fold 5, N-9: the one outside what the call wrote errors first).
+  assert.match(bindRequest({ ...call, span: [20, 20], text: DENY("hook:s:cd-1:network.call, hook:s:cd-2-renamed:network.call") }, store).error, /2 requests/u);
+  assert.match(bindRequest({ ...call, text: DENY("hook:s:cd-1:network.call, hook:s:cd-2-renamed:network.call") }, store).error, /another call's/u);
   // The named request is another call's (another command): error.
   const other = req(0, "hook:s:cd-1", "network.call", "curl -s https://other");
   assert.match(bindRequest({ ...call, text: DENY("hook:s:cd-1:network.call") }, other).error, /another call/u);
+});
+
+test("N-9: a call that wrote its own request binds only its own rows, never another call's with the same command", () => {
+  // Two calls, the same command (another workdir): cd-1 wrote rows 0-1, cd-2 wrote rows 10-11.
+  const store = [...req(0, "hook:s:cd-1", "network.call"), ...req(10, "hook:s:cd-2", "network.call")];
+  const second = { tool: "terminal", input: { command: CMD }, span: [10, 20] };
+  assert.match(bindRequest({ ...second, text: DENY("hook:s:cd-1:network.call") }, store).error, /another call's, though this call wrote its own request/u);
+  assert.equal(bindRequest({ ...second, text: DENY("hook:s:cd-2:network.call") }, store).task, "hook:s:cd-2");
+  // A harness tool: the same name prefix is not enough either.
+  const tool = (at: number, task: string) => [
+    { at, event: "task.registered", task, key: `${task}:read.file.out_of_scope`, cls: "read.file.out_of_scope", summary: "read_file /a" },
+  ];
+  const reads = [...tool(0, "hook:s:cd-3"), ...tool(10, "hook:s:cd-4")];
+  const readCall = { tool: "read_file", input: { path: "/b" }, span: [10, 20] };
+  assert.match(bindRequest({ ...readCall, text: DENY("hook:s:cd-3:read.file.out_of_scope") }, reads).error, /another call's/u);
+  // The adoption (nothing appended) still binds by the named key.
+  assert.equal(bindRequest({ ...second, span: [20, 20], text: DENY("hook:s:cd-1:network.call") }, store).task, "hook:s:cd-1");
+});
+
+test("N-13 (MU9): with no key named, only the appended requests that fit the call's command count", () => {
+  // The span holds this call's request and one whose summary is another command's.
+  const store = [...req(10, "hook:s:cd-5", "network.call"), ...req(12, "hook:s:cd-6", "network.call", "curl -s https://other")];
+  assert.deepEqual(bindRequest({ tool: "terminal", input: { command: CMD }, span: [10, 20], text: "" }, store), { task: "hook:s:cd-5", classes: ["network.call"] });
+});
+
+test("N-13 (MU11): a bound request that names no class is an error", () => {
+  const store = req(10, "hook:s:cd-7", "network.call").map((r) => ({ ...r, cls: null }));
+  assert.match(bindRequest({ tool: "terminal", input: { command: CMD }, span: [10, 20], text: DENY("hook:s:cd-7:network.call") }, store).error, /names no class/u);
+  assert.match(bindRequest({ tool: "terminal", input: { command: CMD }, span: [10, 20], text: "" }, store).error, /names no class/u);
+});
+
+test("N-10: a card whose bound request names no class that needs a human is flagged (it would rank as autonomous)", () => {
+  const levels: Record<string, { autonomy: string; supervision?: string; liveRate?: number }> = {
+    "read.web": { autonomy: "autonomous" },
+    "net.retro": { autonomy: "supervised", supervision: "retro" },
+    "net.live": { autonomy: "supervised", supervision: "live", liveRate: 0.1 },
+    "network.call": { autonomy: "manual" },
+  };
+  const core = { resolve: (_load: unknown, cls: string) => levels[cls] ?? { autonomy: "autonomous" } };
+  const card = (requested: string[] | undefined) => ({ verdict: "deny", code: "hook-timeout", classes: requested ?? [], requested });
+  assert.equal(cardWithoutHumanClass(core, {}, card(["read.web"])), true);
+  assert.equal(cardWithoutHumanClass(core, {}, card(["net.retro", "read.web"])), true);
+  assert.equal(cardWithoutHumanClass(core, {}, card(undefined)), true, "a card bound to no class");
+  assert.equal(cardWithoutHumanClass(core, {}, card(["network.call"])), false);
+  assert.equal(cardWithoutHumanClass(core, {}, card(["read.web", "net.live"])), false);
+  // Not a card: an allow or another deny is never flagged.
+  assert.equal(cardWithoutHumanClass(core, {}, { verdict: "allow", code: null, classes: ["read.web"], requested: ["read.web"] }), false);
+  assert.equal(cardWithoutHumanClass(core, {}, { verdict: "deny", code: "hook-class-human-only", classes: ["read.web"] }), false);
+});
+
+test("N-11 (owner N1): a class new to an all-minimal card, at another style, blocks", () => {
+  const was = { decision: "card", level: "manual", rank: 1, classes: ["a.x"], style: "minimal", styles: { "a.x": "minimal" } };
+  const now = { ...was, classes: ["a.x", "b.y"], style: "minimal+technical (undeclared)", styles: { "a.x": "minimal", "b.y": "technical (undeclared)" } };
+  assert.deepEqual(leftMinimal(was.styles, now.styles), [], "leftMinimal alone misses it");
+  assert.deepEqual(newlyNotMinimal(was.styles, now.styles), ["b.y"]);
+  assert.equal((diffCalls([call("added", was)], [call("added", now)]) as Diff).rows[0]?.status, "blocking");
+  // The new class at minimal: changed, not blocking.
+  const plain = { ...now, style: "minimal", styles: { "a.x": "minimal", "b.y": "minimal" } };
+  assert.equal((diffCalls([call("plain", was)], [call("plain", plain)]) as Diff).rows[0]?.status, "changed");
+  // An old card that was not all minimal: the rule is silent (stricter only where the resident read plain words).
+  const mixed = { ...was, classes: ["a.x", "c.z"], style: "minimal+technical", styles: { "a.x": "minimal", "c.z": "technical" } };
+  assert.deepEqual(newlyNotMinimal(mixed.styles, now.styles), []);
+  assert.deepEqual(newlyNotMinimal({}, now.styles), [], "no old card");
+});
+
+test("N-13 (MU8): a move in per-class styles alone (joined style the same, nothing leaves minimal) is 'changed'", () => {
+  const was = { decision: "card", level: "manual", rank: 1, classes: ["a.x", "b.y"], style: "technical+technical (undeclared)", styles: { "a.x": "technical", "b.y": "technical (undeclared)" } };
+  const now = { ...was, styles: { "a.x": "technical (undeclared)", "b.y": "technical" } };
+  assert.equal((diffCalls([call("st", was)], [call("st", now)]) as Diff).rows[0]?.status, "changed");
+  assert.equal((diffCalls([call("st", was)], [call("st", was)]) as Diff).rows[0]?.status, "unchanged");
 });
 
 test("N-7: a sampling secret name never replaces the box layout or the runtime", () => {
@@ -489,6 +567,21 @@ test("S-5 (b): a deny that names no request key binds by tool and command to wha
   const run = gate({ PLANT_DENYKEY: "none" }, { ...both(), corpus: corpusWith([STAY, CURL], MANUAL_NO_SAY), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
   assert.equal(run.status, 1, run.err);
   assert.match(run.out, /minimal card .*technical \(undeclared\) card/u);
+});
+
+// --- fold 5: review-b recheck of 6f752ab8 (N-9, N-10) ----------------------------------------
+
+test("N-9: both cores' denies name another call's request with the same command (review-b X2h): exit 2, never none", BOX_TIMEOUT, () => {
+  // The curl cards at several workdirs, one worker, one store: the second card's deny names the first's key.
+  const run = gate({ PLANT_DENYKEY: "xsame" }, { ...both(), corpus: corpusWith([STAY, CURL], MANUAL), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
+  assert.equal(run.status, 2, `${run.err}\n${run.out.slice(0, 400)}`);
+  assert.match(run.err, /card-request-unbound: the hook names request hook:class-diff:cd-\d+:network\.call, another call's, though this call wrote its own request/u);
+});
+
+test("N-10: both cores log a class other than the one they carded on (review-b C3) with a real minimal -> technical move: exit 2, never none", BOX_TIMEOUT, () => {
+  const run = gate({ PLANT_CLS: "other:read.web" }, { ...both(), corpus: corpusWith([STAY, CURL], MANUAL_NO_SAY), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
+  assert.equal(run.status, 2, `${run.err}\n${run.out.slice(0, 400)}`);
+  assert.match(run.err, /card-request-no-human-class: the hook carded this call, but the request it bound to names read\.web, none of which needs a human/u);
 });
 
 const withSecret = (block: string, name: string): string => {
