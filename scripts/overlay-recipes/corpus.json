@@ -1,0 +1,281 @@
+{
+  "about": "Pinned overlay recipe corpus for the release check (approval.md 0.4.7, EDGEOS-BLOCK). Written by scripts/overlay-recipes-extract.mjs; read by scripts/overlay-recipes-check.mjs. Do not hand-edit: refresh at a new overlay sha instead.",
+  "overlay": {
+    "repo": "Edge-City/agentvillage",
+    "sha": "fd30cd7bc57ed38304059dcb2a8522e8c944e7f4",
+    "extracted_at": "2026-10-20T09:06:13Z",
+    "method": "agentFacingRecipes() of scripts/tests/fetch-url-shape.test.ts (agentvillage #427): skills/** and workspace/** .md/.txt, shell fences (lang '', sh, bash, shell, zsh, console) plus inline `curl`/`wget` spans, and DIGEST_CRON_SPECS[].promptBody as plain text"
+  },
+  "policy": {
+    "source": "skills/approval/templates/APPROVAL.md",
+    "substitute": {
+      "<telegram_user_id>": "1"
+    },
+    "block": "version: \"0.1\"\n\ndefaults:\n  autonomy: autonomous          # the recorder: record everything, block nothing\n  channel: telegram\n  approval_ttl: 72h             # the proposal window; hook-opened requests still clamp to 240 s\n  on_expiry: reject\n  token_delivery: sealed\n  unmapped_tool: record         # a hooked tool no tools line names is recorded (harness.tool.unmapped); ask would hold it for a tap\n\napprovers:\n  resident:\n    channels: [telegram]\n    senders:\n      telegram: \"<telegram_user_id>\"   # written at provisioning from the pairing\n      # edgeos: \"<edgeos_human_id>\"    # once APRV-455 admits the channel: the onboarding review attests\n\nchannels:\n  telegram:\n    token_env: APPROVAL_RELAY_TOKEN      # the relay credential, approvald-only env\n    chat_id_env: APPROVAL_RESIDENT_CHAT  # the paired id; the control plane writes this variable\n    delivery: burst                      # every unsent proposal goes out at once; paced (the default) sends the next only after the current one is answered, and the relay passes no /skip, so one ignored 72 h card would hold back every later one\n    prompt:\n      always: [ttl_remaining_ms]         # show the time left; the relay holds a prompt overnight only when it outlasts the night\n      style: minimal            # card layout: minimal (default) | technical; the app's Approvals setting rewrites this line\n      say:\n        # The minimal card (approval.md 0.4.1+, APRV-489): one message, \"Your agent wants to <does>\", the\n        # request's own words in a box under the labels below, the time left, Approve/Deny, and the whole\n        # technical card folded under \"Full details\". `quote` names EVERY field the request may carry:\n        # a label shows the field, ~ keeps it off the card (the card then says \"Not shown here\"), and a\n        # request with a field not named here gets the technical card instead. The agent's one-line summary\n        # shows under the box, marked \"not checked\", unless the entry says `note: none`. A class with no\n        # entry here gets the technical card. Core words the eight Hermes tool classes itself, so their\n        # entries carry no `does`. Every key here must be a class row below (tests/approval-template-say).\n        intent.publish.inferred.index:\n          does: \"post this on Index for others to see, as something it thinks you want\"\n          quote: { text: \"\" }         # the intention's words, alone in the box\n          note: none                  # the summary only repeats the class and an id\n        intent.publish.stated.index:  # asked only if the resident sets \"Intents you state\" to ask\n          does: \"post or update this on Index as something you said you want\"\n          quote: { text: \"Post\", tool: \"Tool\", input: \"Details\" }   # text from record_intention; tool and input from an Index tool call the hook routes here\n          note: none\n        digest.share:\n          does: \"share a note about you with the village or a village service\"\n          quote: { text: \"Note\", scope: \"Shared with\", expires_at: \"Until\", digest_id: ~ }\n          note: none                  # the summary repeats scope, expiry and id\n        village.vote:                 # the summary (shown) leads with the option's label, then the question\n          does: \"vote for you on a village question or treasury ballot\"\n          quote: { answer: \"Answer\", question_id: ~ }\n        opportunity.accept:           # asked only if the resident sets its row to ask; only an Index tool call the hook routes here reaches it\n          does: \"accept or decline a connection or meeting on Index for you\"\n          quote: { tool: \"Tool\", input: \"Details\" }\n          note: none\n        message.send:   { quote: { tool: \"Tool\", input: \"Details\" }, note: none }   # these eight ask only if the resident sets their row to ask\n        network.call:   { quote: { tool: \"Tool\", input: \"Details\" }, note: none }   # a terminal command is quoted by core itself, not by this map\n        read.web:       { quote: { tool: \"Tool\", input: \"Details\" }, note: none }\n        browser.exec:   { quote: { tool: \"Tool\", input: \"Details\" }, note: none }\n        cron.manage:    { quote: { tool: \"Tool\", input: \"Details\" }, note: none }\n        process.write:  { quote: { tool: \"Tool\", input: \"Details\" }, note: none }\n        skill.manage:   { quote: { tool: \"Tool\", input: \"Details\" }, note: none }\n        agent.delegate: { quote: { tool: \"Tool\", input: \"Details\" }, note: none }\n\nclasses:\n  # The live gate, propose path only: the resident taps before these happen.\n  intent.publish.*:              { autonomy: manual, agent_may_request: true }\n  intent.publish.inferred.index: { autonomy: manual, agent_may_request: true }\n  intent.publish.stated.index:   { autonomy: autonomous, agent_may_request: true }\n  digest.share:                  { autonomy: manual, agent_may_request: true }   # DATA-96 section 5, if digests ship\n  village.vote:                  { autonomy: manual, agent_may_request: true }   # the weekly question and the daily treasury ballot, DATA-99, DATA-292\n  # Reserved now, built later: no tool proposes these yet, so nothing after Oct 11 is a policy amendment.\n  treasury.propose:              { autonomy: manual, agent_may_request: true }   # DATA-292, reserved, live from Oct 18\n  treasury.withdraw:             { autonomy: manual, agent_may_request: true }   # DATA-292, a resident's own proposal withdrawn by their agent's suggestion\n  edgeos.event.write:            { autonomy: manual, agent_may_request: true }   # reserved; no tool uses this class before Oct 18; DATA-322\n  edgeos.venue.write:            { autonomy: manual, agent_may_request: true }   # reserved; no tool uses this class before Oct 18; DATA-322\n  # The village marketplace (reserved namespace marketplace.*) and the model reviewer: reserved, R2.\n  marketplace.app.install:       { autonomy: manual, agent_may_request: true }   # reserved; installing an agentic app or MCP server from the village marketplace\n  marketplace.app.action:        { autonomy: manual, agent_may_request: true }   # reserved; an installed app acting for the agent; the request payload names the app and the verb\n  marketplace.app.action.gold-stars.send: { autonomy: autonomous, agent_may_request: true }   # Gold Stars: a star your agent sends after you confirm the exact preview in chat (B-133, Carter 18 Oct); the parent class stays manual for any other installed app\n  marketplace.app.read:          { autonomy: autonomous, agent_may_request: true }   # reserved; the village tool (Rolodex search, a reviewed mini-app's public reads, Gold Star previews and status) reaches it through the hook; a star send needs its own marketplace.app.action grant; recorded\n  review.delegate.model:         { autonomy: manual }   # reserved; the resident may choose later to let a model reviewer act first; nothing acts on it today; no agent request\n  resource.allocate:             { autonomy: manual, agent_may_request: true }   # reserved; the treasury/ODS allocation class: an allocation of village resources proposed for the resident\n  opportunity.accept:            { autonomy: autonomous, agent_may_request: true }   # reserved; accepting or declining an Index opportunity (a connection or meeting) on the resident's behalf; Index's tools for it reach it through the hook; R3\n  # odin.* (the allocator producer, DATA-255): a reserved namespace for the allocator's own classes; a comment only, no row here.\n  # MoralMod, the research advisor: reserved before Oct 11, wired to the bridge in week 1.\n  moralmod.assess:               { autonomy: manual, agent_may_request: true }   # reserved; MoralMod advisor, wired in week 1 after Oct 11\n  moralmod.share_context:        { autonomy: human-only }   # reserved; never in October unless the resident chooses to be asked; the resident's context in a group assessment others see in aggregate\n  # The gate's own organs and the resident's credentials: never the agent.\n  policy.core:                   { autonomy: human-only }\n  log.mutate:                    { autonomy: human-only }\n  account.credential:            { autonomy: human-only }\n  # A village coordinator agent messaging the resident: no coordinator sends anything in October.\n  coordinator.contact:           { autonomy: human-only }   # reserved; locked in October, a resident choice later\n  # Hermes tool classes (PR #569 rules): recorded, not gated, on day one.\n  cron.manage:                   { autonomy: autonomous }\n  process.write:                 { autonomy: autonomous }\n  browser.exec:                  { autonomy: autonomous }\n  skill.manage:                  { autonomy: autonomous }\n  agent.delegate:                { autonomy: autonomous }\n  message.send:                  { autonomy: autonomous }\n  network.call:                  { autonomy: autonomous }\n  read.web:                      { autonomy: autonomous }\n  # Housekeeping inside the sandbox runs and is recorded.\n  files.delete.scratch:          { autonomy: autonomous }\n\n# The agent's tool names (approval.md 0.4.2, APRV-499): the class a hooked tool call is judged\n# under when core's Hermes adapter does not class it itself. First match wins; a tool no line\n# names is recorded under harness.tool.unmapped (defaults.unmapped_tool). Every class is a row\n# above, so the settings page prices these calls with no row of its own. The hook sees only the\n# tools the overlay routes to it (its gated list), so a line for a tool outside that list waits\n# for the list to grow. A daemon before 0.4.2 refuses this key and fails every class closed.\ntools:\n  # Hermes's own tools that core already classes from the call's arguments (cronjob_manage list\n  # and the process reads are reads there): core's table wins over these lines, and each says\n  # the class that table gives, so the file reads as what happens.\n  - { match: cronjob_manage,                   class: cron.manage }\n  - { match: cronjob,                          class: cron.manage }\n  - { match: process_manage,                   class: process.write }\n  - { match: process,                          class: process.write }\n  - { match: \"browser_*\",                      class: browser.exec }\n  - { match: skill_manage,                     class: skill.manage }\n  - { match: delegate_task,                    class: agent.delegate }\n  - { match: send_message,                     class: message.send }\n  # Reading the web.\n  - { match: web_search,                       class: read.web }\n  - { match: web_extract,                      class: read.web }\n  - { match: x_search,                         class: read.web }\n  # Index's MCP server (Hermes names its tools mcp__index__<tool>): a read is read.web; a new or\n  # reworded intention in the resident's words is intent.publish.stated.index; accepting or\n  # declining an opportunity is opportunity.accept; every other Index tool reaches Index as\n  # network.call.\n  - { match: mcp__index__get_my_profile,       class: read.web }\n  - { match: mcp__index__list_intents,         class: read.web }\n  - { match: mcp__index__get_intent,           class: read.web }\n  - { match: mcp__index__list_opportunities,   class: read.web }\n  - { match: mcp__index__get_opportunity,      class: read.web }\n  - { match: mcp__index__create_intent,        class: intent.publish.stated.index }\n  - { match: mcp__index__update_intent,        class: intent.publish.stated.index }\n  - { match: mcp__index__accept_opportunity,   class: opportunity.accept }\n  - { match: mcp__index__reject_opportunity,   class: opportunity.accept }\n  - { match: \"mcp__index__*\",                  class: network.call }\n  # Index's Hermes plugin, where installed (bare index_* names): the same split. Its\n  # index_update_opportunity sets an opportunity's status (PATCH /opportunities/{id}/status): its\n  # accept or decline.\n  - { match: index_read_intents,               class: read.web }\n  - { match: index_list_intent_networks,       class: read.web }\n  - { match: index_read_networks,              class: read.web }\n  - { match: index_read_network_memberships,   class: read.web }\n  - { match: index_list_opportunities,         class: read.web }\n  - { match: index_read_docs,                  class: read.web }\n  - { match: index_agent_me,                   class: read.web }\n  - { match: index_create_intent,              class: intent.publish.stated.index }\n  - { match: index_update_intent,              class: intent.publish.stated.index }\n  - { match: index_update_opportunity,         class: opportunity.accept }\n  - { match: \"index_*\",                        class: network.call }\n  # record_intention is left out on purpose: it is not routed to the hook, and an ask on\n  # intent.publish must never block capturing an intention.\n  # Tools that send content to a model provider.\n  - { match: image_generate,                   class: network.call }\n  - { match: video_generate,                   class: network.call }\n  - { match: text_to_speech,                   class: network.call }\n  - { match: vision_analyze,                   class: network.call }\n  - { match: video_analyze,                    class: network.call }\n  # The village-bridge plugin's entry tool, exactly `village` (no wildcard). A star send also\n  # needs its own marketplace.app.action grant; an install or enable is never reached through this line.\n  - { match: village,                          class: marketplace.app.read }"
+  },
+  "fill": [
+    {
+      "pattern": "\\{(current_iso_timestamp|start_iso|end_iso|occurrence_iso)\\}",
+      "value": "2026-10-21T10:00:00Z"
+    },
+    {
+      "pattern": "\\{(event_id|popup_id)\\}",
+      "value": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+    }
+  ],
+  "cwd": "/tmp",
+  "recipes": [
+    {
+      "where": "skills/README.md:85",
+      "command": "claude plugin marketplace add Edge-City/agentvillage-skills"
+    },
+    {
+      "where": "skills/README.md:86",
+      "command": "claude plugin install agentvillage@agentvillage-skills --config indexApiKey=<YOUR_API_KEY> --config edgeosToken=<YOUR_TOKEN> --config edgeosApiKey=<YOUR_KEY>"
+    },
+    {
+      "where": "skills/README.md:94",
+      "command": "openclaw plugins install agentvillage --marketplace Edge-City/agentvillage-skills"
+    },
+    {
+      "where": "skills/README.md:95",
+      "command": "openclaw config set mcp.servers.index '{\"url\":\"https://protocol.index.network/mcp\",\"transport\":\"streamable-http\",\"headers\":{\"x-api-key\":\"<YOUR_API_KEY>\"}}'"
+    },
+    {
+      "where": "skills/README.md:96",
+      "command": "openclaw config set env.vars.EDGEOS_BEARER_TOKEN '<YOUR_TOKEN>'  # Human session JWT for EdgeOS directory and own profile"
+    },
+    {
+      "where": "skills/README.md:97",
+      "command": "openclaw config set env.vars.EDGEOS_API_KEY '<YOUR_KEY>'         # Long-lived automation key for events, RSVPs, venues"
+    },
+    {
+      "where": "skills/README.md:98",
+      "command": "openclaw gateway restart"
+    },
+    {
+      "where": "skills/README.md:106",
+      "command": "hermes skills install Edge-City/agentvillage/skills/edge-india --force"
+    },
+    {
+      "where": "skills/README.md:107",
+      "command": "hermes skills install Edge-City/agentvillage/skills/edge-esmeralda --force"
+    },
+    {
+      "where": "skills/README.md:108",
+      "command": "hermes skills install Edge-City/agentvillage/skills/edgeos --force"
+    },
+    {
+      "where": "skills/README.md:109",
+      "command": "hermes skills install Edge-City/agentvillage/skills/index-network --force"
+    },
+    {
+      "where": "skills/README.md:110",
+      "command": "hermes skills install Edge-City/agentvillage/skills/agent-plaza --force"
+    },
+    {
+      "where": "skills/README.md:111",
+      "command": "hermes skills install Edge-City/agentvillage/skills/simocracy --force"
+    },
+    {
+      "where": "skills/README.md:112",
+      "command": "hermes skills install Edge-City/agentvillage/skills/agent-commons --force"
+    },
+    {
+      "where": "skills/README.md:113",
+      "command": "hermes skills install Edge-City/agentvillage/skills/token-usage-audit --force"
+    },
+    {
+      "where": "skills/README.md:119",
+      "command": "INDEX_API_KEY=<YOUR_API_KEY>"
+    },
+    {
+      "where": "skills/README.md:120",
+      "command": "EDGEOS_BEARER_TOKEN=<YOUR_TOKEN>   # Human session JWT for EdgeOS directory and own profile"
+    },
+    {
+      "where": "skills/README.md:121",
+      "command": "EDGEOS_API_KEY=<YOUR_KEY>          # Long-lived automation key for events, RSVPs, venues"
+    },
+    {
+      "where": "skills/README.md:122",
+      "command": "TELEGRAM_BOT_TOKEN=<YOUR_BOT_TOKEN>        # optional, required for Agent Plaza selfie photo delivery"
+    },
+    {
+      "where": "skills/README.md:123",
+      "command": "TELEGRAM_HOME_CHANNEL=<numeric_chat_id>   # optional, for cron delivery"
+    },
+    {
+      "where": "skills/README.md:141",
+      "command": "bun install/install.ts --index-api-key <KEY>"
+    },
+    {
+      "where": "skills/agent-commons/SKILL.md:33",
+      "command": "python3 skills/agent-commons/scripts/search_forum.py    --surface agent_commons    --query \"memory should know when to forget\""
+    },
+    {
+      "where": "skills/agent-plaza/SKILL.md:25",
+      "command": "python3 skills/agent-plaza/scripts/agent_plaza_selfie.py    --root \"$HERMES_HOME\"    --cooldown-hours 0"
+    },
+    {
+      "where": "skills/agent-profile/SKILL.md:20",
+      "command": "bun skills/agent-profile/scripts/profile.ts"
+    },
+    {
+      "where": "skills/edge-esmeralda/README.md:20",
+      "command": "export EDGEOS_API_KEY=\"eos_live_...\"      # Long-lived automation key for events, RSVPs, venues"
+    },
+    {
+      "where": "skills/edge-esmeralda/README.md:21",
+      "command": "export EDGEOS_BEARER_TOKEN=\"...\"          # Human session JWT for directory, own profile"
+    },
+    {
+      "where": "skills/edge-esmeralda/README.md:30",
+      "command": "bun install"
+    },
+    {
+      "where": "skills/edge-esmeralda/README.md:35",
+      "command": "bun run scripts/index.ts"
+    },
+    {
+      "where": "skills/edge-india/README.md:64",
+      "command": "bun scripts/sync-india-references.ts --source ../edge-agent-skill --source-commit \"$(git -C ../edge-agent-skill rev-parse HEAD)\""
+    },
+    {
+      "where": "skills/edge-india/README.md:66",
+      "command": "bun skills/edge-india/scripts/refs.ts status"
+    },
+    {
+      "where": "skills/edge-india/README.md:67",
+      "command": "bun skills/edge-india/scripts/refs.ts search housing riva"
+    },
+    {
+      "where": "skills/edge-india/README.md:68",
+      "command": "bun skills/edge-india/scripts/refs.ts read newsletter/housing-for-edge-city-india.md --section riva"
+    },
+    {
+      "where": "skills/edge-india/SKILL.md:89",
+      "command": "bun skills/edge-india/scripts/refs.ts search <topic words>"
+    },
+    {
+      "where": "skills/edge-india/SKILL.md:90",
+      "command": "bun skills/edge-india/scripts/refs.ts read <path> --section <heading words>"
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:65",
+      "command": "bun skills/edgeos/scripts/events.ts --when today"
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:66",
+      "command": "bun skills/edgeos/scripts/events.ts --when weekend"
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:67",
+      "command": "bun skills/edgeos/scripts/events.ts --when 2026-10-20 --days 3 --search yoga"
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:68",
+      "command": "bun skills/edgeos/scripts/events.ts --when today --days 7 --rsvped"
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:87",
+      "command": "curl -s -H \"Authorization: Bearer $EDGEOS_API_KEY\"    --url \"${EDGEOS_API_BASE:-https://api.edgeos.world/api/v1}/events/portal/events?popup_id={popup_id}&event_status=published&start_after={current_iso_timestamp}&start_before={end_iso}\""
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:94",
+      "command": "curl -s -H \"Authorization: Bearer $EDGEOS_API_KEY\"    --url \"${EDGEOS_API_BASE:-https://api.edgeos.world/api/v1}/events/portal/events?popup_id={popup_id}&event_status=published&start_after={start_iso}&start_before={end_iso}\""
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:100",
+      "command": "curl -s -H \"Authorization: Bearer $EDGEOS_API_KEY\"    --url \"${EDGEOS_API_BASE:-https://api.edgeos.world/api/v1}/events/portal/events?popup_id={popup_id}&event_status=published&search=KEYWORD&start_after={start_iso}\""
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:106",
+      "command": "curl -s -H \"Authorization: Bearer $EDGEOS_API_KEY\"    --url \"${EDGEOS_API_BASE:-https://api.edgeos.world/api/v1}/events/portal/events?popup_id={popup_id}&event_status=published&tags=AI&tags=Privacy&start_after={start_iso}&start_before={end_iso}\""
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:113",
+      "command": "curl -s -H \"Authorization: Bearer $EDGEOS_API_KEY\"    --url \"${EDGEOS_API_BASE:-https://api.edgeos.world/api/v1}/events/portal/events?popup_id={popup_id}&event_status=published&rsvped_only=true&start_after={current_iso_timestamp}\""
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:119",
+      "command": "curl -s -H \"Authorization: Bearer $EDGEOS_API_KEY\"    --url \"${EDGEOS_API_BASE:-https://api.edgeos.world/api/v1}/events/portal/events/{event_id}\""
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:145",
+      "command": "curl -s -X POST -H \"Authorization: Bearer $EDGEOS_API_KEY\"    -H \"Content-Type: application/json\"    --url \"${EDGEOS_API_BASE:-https://api.edgeos.world/api/v1}/event-participants/portal/register/{event_id}\"    -d '{}'"
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:153",
+      "command": "curl -s -X POST -H \"Authorization: Bearer $EDGEOS_API_KEY\"    -H \"Content-Type: application/json\"    --url \"${EDGEOS_API_BASE:-https://api.edgeos.world/api/v1}/event-participants/portal/register/{event_id}\"    -d '{\"occurrence_start\":\"{occurrence_iso}\"}'"
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:161",
+      "command": "curl -s -X POST -H \"Authorization: Bearer $EDGEOS_API_KEY\"    -H \"Content-Type: application/json\"    --url \"${EDGEOS_API_BASE:-https://api.edgeos.world/api/v1}/event-participants/portal/cancel-registration/{event_id}\"    -d '{}'"
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:169",
+      "command": "curl -s -H \"Authorization: Bearer $EDGEOS_API_KEY\"    --url \"${EDGEOS_API_BASE:-https://api.edgeos.world/api/v1}/event-participants/portal/participants?event_id={event_id}&skip=0&limit=100\""
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:179",
+      "command": "curl -s -H \"Authorization: Bearer $EDGEOS_API_KEY\"    --url \"${EDGEOS_API_BASE:-https://api.edgeos.world/api/v1}/event-venues/portal/venues?popup_id={popup_id}&limit=100\""
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:190",
+      "command": "bun skills/edgeos/scripts/profile.ts"
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:191",
+      "command": "bun skills/edgeos/scripts/profile.ts --json"
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:209",
+      "command": "bun skills/edgeos/scripts/directory.ts --search \"Priya\""
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:210",
+      "command": "bun skills/edgeos/scripts/directory.ts --search \"priya@example.com\" --json"
+    },
+    {
+      "where": "skills/edgeos/SKILL.md:211",
+      "command": "bun skills/edgeos/scripts/directory.ts --limit 100 --skip 100"
+    },
+    {
+      "where": "skills/recall/README.md:165",
+      "command": "[recall]"
+    },
+    {
+      "where": "skills/recall/README.md:166",
+      "command": "{\"status\": \"ok\", \"match\": \"all\", \"since\": null, \"hit_count\": 2, \"top_score\": 2.35, \"partial\": false,"
+    },
+    {
+      "where": "skills/recall/README.md:167",
+      "command": "\"hits\": [{\"date\": \"2026-09-20\", \"date_source\": \"filename\", \"kind\": \"daily_note\","
+    },
+    {
+      "where": "skills/recall/README.md:168",
+      "command": "\"ref\": \"memory/2026-09-20.md:3-4\", \"snippet\": \"…\", \"score\": 2.35}, …]}"
+    },
+    {
+      "where": "skills/recall/README.md:239",
+      "command": "bun test skills/recall install/tests/install_recall.test.ts"
+    },
+    {
+      "where": "skills/recall/README.md:240",
+      "command": "python3 -m pytest plugins/recall plugins/av-events"
+    },
+    {
+      "where": "skills/simocracy/SKILL.md:22",
+      "command": "python3 skills/agent-commons/scripts/search_forum.py    --surface simocracy_proposals    --query \"group gathered around whiteboard and grant budget\""
+    },
+    {
+      "where": "skills/simocracy/SKILL.md:26",
+      "command": "python3 skills/agent-commons/scripts/search_forum.py    --surface simocracy_deliberations    --query \"agents arguing about grant budget and implementation\""
+    },
+    {
+      "where": "skills/token-usage-audit/SKILL.md:62",
+      "command": "python3 skills/token-usage-audit/scripts/audit_token_usage.py --json-only"
+    }
+  ]
+}
