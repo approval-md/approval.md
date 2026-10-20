@@ -251,6 +251,7 @@ import {
   type PromptSay,
   type PromptStyle,
 } from "../core/prompt-layout.js";
+import { isAttestationActionKey } from "../core/policy-proposal.js";
 import { commandPayloadView, payloadRegionText } from "./payload-view.js";
 import { MINIMAL_DENY_LABEL, renderTelegramMinimal } from "./telegram-minimal.js";
 
@@ -3967,9 +3968,18 @@ export class TelegramChannel implements TestableChannel {
    * "Looks wrong" button on a row of its own, so the Approve/Reject row keeps
    * its bytes and layout. Empty when study mode is off, which leaves the
    * keyboard exactly as it was before study mode existed.
+   *
+   * Empty on a policy attestation prompt too (APRV-528). Such a prompt is
+   * answered by attesting or declining, and `channels/contract.ts` routes its
+   * gesture to the attestation path, which records no study reason: a flag
+   * drawn there would be counted by the detection line yet held by no log
+   * record. The prompt is known by its `policy_diff` and, as the contract
+   * routes it, by its `policy.attest:` key.
    */
-  private studyRows(nonce: string, actionKey: string): InlineButton[][] {
+  private studyRows(nonce: string, request: ChannelRequest): InlineButton[][] {
     if (!this.study) return [];
+    const actionKey = request.action_key.value;
+    if (request.policy_diff !== undefined || isAttestationActionKey(actionKey)) return [];
     return [[{ text: TELEGRAM_LOOKS_WRONG_LABEL, callback_data: callbackData("w", nonce, actionKey) }]];
   }
 
@@ -3985,7 +3995,7 @@ export class TelegramChannel implements TestableChannel {
           { text: "✅ Approve", callback_data: callbackData("g", nonce, actionKey) },
           { text: "🛑 Reject", callback_data: callbackData("r", nonce, actionKey) },
         ],
-        ...this.studyRows(nonce, actionKey),
+        ...this.studyRows(nonce, request),
       ],
     };
 
@@ -4098,7 +4108,7 @@ export class TelegramChannel implements TestableChannel {
               { text: "✅ Approve", callback_data: callbackData("g", nonce, actionKey) },
               { text: MINIMAL_DENY_LABEL, callback_data: callbackData("r", nonce, actionKey) },
             ],
-            ...this.studyRows(nonce, actionKey),
+            ...this.studyRows(nonce, request),
           ],
         },
       });

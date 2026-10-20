@@ -1,5 +1,5 @@
 /**
- * The "Looks wrong" button (LOKI-GATE G2, amended SPEC.md §8 the study record).
+ * The "Looks wrong" button (APRV-528, amended SPEC.md §8 the study record).
  *
  * Off is the regression guard, so it comes first: with study mode off every
  * Bot API call a card flow makes is byte-identical to golden files captured at
@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { recordChannelDecision, type ChannelDecision, type ChannelRequest } from "../src/channels/contract.js";
+import { computed, recordChannelDecision, type ChannelDecision, type ChannelRequest } from "../src/channels/contract.js";
 import { buildPendingQueue, type TagOptions } from "../src/channels/tagging.js";
 import {
   actionRefOf,
@@ -35,6 +35,7 @@ import {
 } from "../src/channels/telegram.js";
 import { prepareListen, STUDY_MODE_ENV, studyModeFor } from "../src/cli/channel-telegram.js";
 import { canonicalize } from "../src/core/jcs.js";
+import { attestationActionKey } from "../src/core/policy-proposal.js";
 import { payloadHash } from "../src/core/payload.js";
 import { readVerifiedRecords, requestState } from "../src/core/state.js";
 import { decide, register, request } from "./clock-adapters.js";
@@ -152,6 +153,36 @@ test("G2-3 flag on: both card styles carry a second row with exactly one Looks w
   }
   // The label, as the spec writes it: U+1F6A9, a space, "Looks wrong".
   assert.deepEqual([...TELEGRAM_LOOKS_WRONG_LABEL].map((ch) => ch.codePointAt(0)), [0x1f6a9, ...[..." Looks wrong"].map((ch) => ch.codePointAt(0))]);
+});
+
+test("G2-3c flag on: a policy attestation prompt carries no Looks wrong button, by its policy_diff or by its policy.attest: key; an ordinary card still does (APRV-528)", async () => {
+  const diff = "-autonomy: manual\n+autonomy: autonomous";
+  const attestKey = attestationActionKey("ef".repeat(32));
+  const base = studyRequest("policy.edit", attestKey, { policy: "APPROVAL.md" }, "policy proposal");
+  const prompts: [string, ChannelRequest][] = [
+    ["a proposal (policy_diff and a policy.attest: key)", { ...base, policy_diff: computed(diff, "policy") }],
+    ["a policy.attest: key alone", base],
+    ["a policy_diff alone", { ...studyRequest("policy.edit", "task-g2:proposal", { policy: "APPROVAL.md" }, "policy proposal"), policy_diff: computed(diff, "policy") }],
+  ];
+  for (const style of [{}, { promptStyle: "minimal", say: STUDY_SAY }] as const) {
+    for (const [name, request_] of prompts) {
+      const on = studyRecordingChannel({ ...style, study: true });
+      await on.channel.notify(request_);
+      const rows = keyboardOf(armed(on.calls));
+      assert.equal(rows.length, 1, `${name} (${JSON.stringify(style)}) drew a study row`);
+      assert.ok(
+        rows.flat().every((button) => !button.callback_data.startsWith("w:") && button.text !== TELEGRAM_LOOKS_WRONG_LABEL),
+        `${name} (${JSON.stringify(style)}) carries a Looks wrong button`,
+      );
+    }
+    // The control: an ordinary action card on the same study channel keeps the row.
+    const ordinary = studyRequest("network.call", TECH_KEY, { command: "curl https://example.org", cwd: "/home/hermes" }, "Terminal: curl example.org");
+    const on = studyRecordingChannel({ ...style, study: true });
+    await on.channel.notify(ordinary);
+    assert.deepEqual(keyboardOf(armed(on.calls))[1], [
+      { text: TELEGRAM_LOOKS_WRONG_LABEL, callback_data: callbackData("w", "n1", TECH_KEY) },
+    ]);
+  }
 });
 
 test("G2-3b flag on: a digest card carries no Looks wrong button (v1, spec Q3)", async () => {

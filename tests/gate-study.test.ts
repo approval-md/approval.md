@@ -1,5 +1,5 @@
 /**
- * The study record on a reject (LOKI-GATE shared piece S0, amended SPEC.md §8).
+ * The study record on a reject (APRV-528, amended SPEC.md §8).
  *
  * `DecideOptions.study` reaches a record as `payload.study` on
  * `approval.rejected` alone, in a fixed shape; `ChannelDecision.study` reaches
