@@ -2991,7 +2991,7 @@ function curlValuesNotRead(
     const next = args[at + 1];
     if ((curl ? arg === "-H" || arg === "--header" : arg === "--header") && next !== undefined) {
       kept.push(arg);
-      if (curlValueSentAsWritten(next, curl)) at += 1;
+      if (curlValueSentAsWritten(next, true)) at += 1;
       continue;
     }
     if (curl && arg.startsWith("-H") && arg.length > 2) {
@@ -2999,7 +2999,7 @@ function curlValuesNotRead(
       continue;
     }
     if (!curl && arg.startsWith("--header=")) {
-      if (!curlValueSentAsWritten(arg.slice("--header=".length), false)) kept.push(arg);
+      if (!curlValueSentAsWritten(arg.slice("--header=".length), true)) kept.push(arg);
       continue;
     }
     if (curl && arg === "--url" && next !== undefined) {
