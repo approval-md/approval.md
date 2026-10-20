@@ -299,7 +299,13 @@ not, an unquoted glob at its head, a brace group making a word that begins
 with `-`, or an unquoted expansion in an option's value) makes the write
 target unknown, so the command is `policy.core` (`fetch-output-unknown`,
 `copy-target-unknown`) unless the word follows `--` (`cp -- "$f" bak/`,
-`cp ./*.md docs/`, `curl -o out.json -- "$URL"` stay ordinary).
+`cp ./*.md docs/`, `curl -o out.json -- "$URL"` stay ordinary). Since 0.4.7
+(EDGEOS-BLOCK), when a policy reserves `policy.core` and the cause is a curl or
+wget word that starts with `$` (`curl "${BASE:-https://h}/x"`), the human-only
+refusal ends with one fixed remedy line: pass the URL as the value of `--url`
+(`curl --url "$VAR/..."`), which sits in a value slot and classes by its method;
+wget has no `--url`, so the line names curl for both. Every other cause of the
+rule keeps its refusal text unchanged.
 
 **The `hermes` CLI and `skill_manage`.** The CLI writes the same files, so the
 verbs that rewrite an organ take the organ's class, `policy.core`, under rule

@@ -15,6 +15,47 @@ before a tag.
 
 ## Unreleased
 
+### Changed
+
+- **The `fetch-output-unknown` refusal names its remedy (EDGEOS-BLOCK).** Core
+  0.4.6 (APRV-511) classes a curl or wget word that starts with `$` in an option
+  slot `policy.core` by rule `fetch-output-unknown`: a quoted
+  `"${EDGEOS_API_BASE:-https://…}/events"` is one argv word, but the variable
+  could hold `-o <organ path>`, so the download's output cannot be known. The
+  overlay's template reserves `policy.core` to humans, so from the 19 October
+  rolls every EdgeOS skill recipe was denied outright with
+  `hook-class-human-only` and Hermes reported `plugin_block` (EDGEOS-BLOCK).
+  The rule stays exactly as it was. When it fires for that cause, the
+  human-only refusal now ends with one fixed line telling the agent to pass the
+  URL as the value of `--url` (`curl --url "$VAR/..."`), and to use
+  `curl --url` in place of wget, which has no equivalent. The class, the rule,
+  the refusal code and every other cause's text (an unknown option, `-K` or
+  another config source, an ambiguous prefix, an output a variable decides)
+  are byte for byte 0.4.6's, and `argvWordUnknowable` and `fetchOutputs` are
+  unchanged. **Convention for agent-facing recipes:** a curl recipe whose URL
+  starts with a variable passes it with `--url` (the overlay's EdgeOS skill
+  does since agentvillage #427), and a wget recipe of that shape is written as
+  curl.
+
+### Added
+
+- **A consumer-corpus release check: the overlay's shipped recipes through this
+  core (EDGEOS-BLOCK).** The 0.4.6 rule was right, and nobody had run the
+  fleet's own recipes through it before the tag. `scripts/overlay-recipes/
+  corpus.json` is a pinned snapshot of every shell recipe the overlay
+  (Edge-City/agentvillage) ships to agents, extracted the way the overlay's own
+  EDGEOS-BLOCK test extracts them, with the overlay sha it came from and the
+  overlay's template policy block. `scripts/overlay-recipes-check.mjs` runs
+  each through `classifyForHook` as built and fails when one resolves to a
+  human-only class under that template, unless
+  `scripts/overlay-recipes/allowlist.json` lists it with a reason; a stale
+  allowlist entry fails too. The new CI job `overlay-recipes` runs it on every
+  change and the `ci` aggregator requires it. `scripts/overlay-recipes-extract.mjs`
+  refreshes the snapshot at a new overlay sha. Against the pre-#427 overlay the
+  check fails on all eleven EdgeOS recipes; at the pinned sha it passes with
+  one allowlisted recipe (`skills/agent-plaza/SKILL.md`, `--root "$HERMES_HOME"`,
+  an open decision).
+
 ## 0.4.6 — 2026-10-18
 
 0.4.6 carries everything merged since 0.4.5. It closes the classifier holes

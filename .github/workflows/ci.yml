@@ -222,6 +222,36 @@ jobs:
           # the verdict, and a missing line must not turn a required check red.
           grep '^log from ' "$RUNNER_TEMP/guard.txt" >> "$GITHUB_STEP_SUMMARY" || true
 
+  overlay-recipes:
+    # The consumer corpus (0.4.7, EDGEOS-BLOCK). Core 0.4.6's
+    # `fetch-output-unknown` rule was right, and it classed every EdgeOS curl
+    # recipe the overlay ships `policy.core`, which the overlay's template
+    # reserves to humans: from the morning the boxes took 0.4.6 every EdgeOS
+    # call was denied outright, and nobody had run the fleet's own recipes
+    # through the new classifier. This job does, on every change: the pinned
+    # snapshot of the overlay's shipped recipes (scripts/overlay-recipes/
+    # corpus.json, with the overlay sha it came from) goes through
+    # `classifyForHook` as built here, and any recipe that resolves to a
+    # human-only class under the overlay's template policy fails the job unless
+    # scripts/overlay-recipes/allowlist.json lists it with a reason.
+    #
+    # Every event and every tier, as protected-paths runs: it is cheap, and the
+    # tag is cut from a main this job has passed on. It reads only files in the
+    # checkout; it fetches nothing from the overlay.
+    name: overlay recipes (consumer corpus)
+    needs: classify
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/overlay-recipes-check.mjs
+
   full:
     # The full gate's bulk, sharded (APRV-149). Three jobs run a third of the
     # suite each, so the tier's wall clock is the slowest shard rather than one
@@ -313,7 +343,7 @@ jobs:
     # so this job decides which events owe a floor result rather than letting a
     # skipped job read as a pass on the events that must prove the floor.
     name: ci
-    needs: [classify, doc-guard, records, full, full-floor, protected-paths]
+    needs: [classify, doc-guard, records, full, full-floor, protected-paths, overlay-recipes]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -326,16 +356,21 @@ jobs:
           FULL_RESULT: ${{ needs.full.result }}
           FULL_FLOOR_RESULT: ${{ needs['full-floor'].result }}
           PROTECTED_RESULT: ${{ needs['protected-paths'].result }}
+          OVERLAY_RESULT: ${{ needs['overlay-recipes'].result }}
           FLOOR_REQUIRED: ${{ github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         run: |
           set -euo pipefail
-          echo "classify=$CLASSIFY_RESULT tier=$TIER doc-guard=$DOC_RESULT records=$RECORDS_RESULT full=$FULL_RESULT full-floor=$FULL_FLOOR_RESULT floor-required=$FLOOR_REQUIRED protected-paths=$PROTECTED_RESULT"
+          echo "classify=$CLASSIFY_RESULT tier=$TIER doc-guard=$DOC_RESULT records=$RECORDS_RESULT full=$FULL_RESULT full-floor=$FULL_FLOOR_RESULT floor-required=$FLOOR_REQUIRED protected-paths=$PROTECTED_RESULT overlay-recipes=$OVERLAY_RESULT"
           if [ "$CLASSIFY_RESULT" != "success" ]; then
             echo "classify did not succeed; nothing downstream is trustworthy"
             exit 1
           fi
           if [ "$PROTECTED_RESULT" != "success" ]; then
             echo "the protected-path grant cross-check did not succeed ($PROTECTED_RESULT); a protected path changed with no evidence in the committed log that a human decided it"
+            exit 1
+          fi
+          if [ "$OVERLAY_RESULT" != "success" ]; then
+            echo "the overlay recipe corpus check did not succeed ($OVERLAY_RESULT); an overlay recipe resolves to a human-only class under this core and is not allowlisted (EDGEOS-BLOCK)"
             exit 1
           fi
           case "$TIER" in
