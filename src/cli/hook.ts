@@ -8802,6 +8802,47 @@ function landingPaths(
 export const REQUIRE_SANDBOX_ENV = "APPROVAL_HOOK_REQUIRE_SANDBOX";
 
 /**
+ * The fixed remedy a `fetch-output-unknown` refusal carries when a `$`-first
+ * word in curl's or wget's option slot caused it (0.4.7, EDGEOS-BLOCK).
+ *
+ * Core 0.4.6 (APRV-511) holds `curl "${BASE:-https://h}/x"`: the expansion
+ * could be `-o <organ path>`, so the download's output is unknown, the class is
+ * `policy.core`, and a policy that reserves that class denies outright. The
+ * refusal said why and nothing about the shape that runs. The same word as
+ * `--url`'s value sits in a value slot, where curl reads it as the URL whatever
+ * it starts with, and classifies by its method. wget has no `--url`, so the
+ * line names curl for both.
+ *
+ * Text only: the class, the rule and the code are unchanged, and nothing here
+ * widens a verdict.
+ */
+export const FETCH_DOLLAR_WORD_REMEDY =
+  'Remedy: a word that starts with `$` stands where curl and wget read options, so its value could turn it into `-o <path>` and the download\'s output cannot be known. If that word is the URL, pass it as the value of `--url` (`curl --url "$VAR/..."`), which keeps the output known; wget has no `--url`, so use `curl --url` instead.';
+
+/**
+ * {@link FETCH_DOLLAR_WORD_REMEDY}, prefixed with a space, when a segment that
+ * earned `reserved` did so by rule `fetch-output-unknown` on a word that
+ * starts with `$`; otherwise the empty string, so every other cause of the rule
+ * (an unknown option, a config source, an ambiguous prefix, an unplaceable
+ * output value) keeps its refusal byte for byte.
+ *
+ * `fetchOutputs` reports the first unknowable word verbatim, and only its
+ * option-slot test reports a positional word; every other cause reports the
+ * option as spelled, which starts with `-`. So a bound path starting with `$`
+ * is exactly the `$`-first option-slot cause.
+ */
+export function fetchOutputRemedy(segments: readonly ClassifiedSegment[] | undefined, reserved: string): string {
+  const fired = (segments ?? []).some(
+    (segment) =>
+      segment.class === reserved &&
+      segment.rule === "fetch-output-unknown" &&
+      segment.path !== undefined &&
+      segment.path.startsWith("$"),
+  );
+  return fired ? ` ${FETCH_DOLLAR_WORD_REMEDY}` : "";
+}
+
+/**
  * Must this command have been written `approval sandbox -- …`? (APRV-193.)
  *
  * Returns the deny detail, or `null` to proceed. Four conditions, and every one
@@ -9057,7 +9098,7 @@ function* runBypass(
       return deny(
         streams,
         "hook-class-human-only",
-        `${humanOnlyRefusal(reserved, "this command may not run under an agent")} An open window does not reach it: the window suspends what the policy DECIDES, and a human-only class is one the policy reserves to human hands, which a window opened by a human does not lend to an agent (SPEC.md §11.1 invariant 9).`,
+        `${humanOnlyRefusal(reserved, "this command may not run under an agent")} An open window does not reach it: the window suspends what the policy DECIDES, and a human-only class is one the policy reserves to human hands, which a window opened by a human does not lend to an agent (SPEC.md §11.1 invariant 9).${fetchOutputRemedy(described.segments, reserved)}`,
         adapter.kind,
       );
     }
@@ -9849,7 +9890,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     return {
       permission: "deny",
       code: "hook-class-human-only",
-      detail: `${humanOnlyRefusal(reserved, "this command may not run under an agent")} The gate's own code for this fact is \`class-human-only\`.`,
+      detail: `${humanOnlyRefusal(reserved, "this command may not run under an agent")} The gate's own code for this fact is \`class-human-only\`.${fetchOutputRemedy(described.segments, reserved)}`,
     };
   }
 
