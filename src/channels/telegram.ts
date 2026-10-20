@@ -474,6 +474,22 @@ export const TELEGRAM_TERMINAL_HEADLINES = {
   withdrawn: "WITHDRAWN — no decision is needed",
 } as const;
 
+/**
+ * The headline a "Looks wrong" tap settles its card on (amended SPEC.md §8,
+ * the study record). The record underneath is an ordinary `approval.rejected`;
+ * this says, in the resident's words, that the card was skipped because they
+ * flagged it. Emoji-free like every other headline here.
+ */
+export const TELEGRAM_LOOKS_WRONG_HEADLINE = "SKIPPED — you flagged this as looks wrong";
+
+/**
+ * The label of the study-mode button (amended SPEC.md §8, the study record).
+ * Drawn only while the listener was launched with `APPROVAL_STUDY_MODE=1`, on a
+ * row of its own under Approve and Reject. Its verb is `w`, a reject with the
+ * `looks_wrong` flag.
+ */
+export const TELEGRAM_LOOKS_WRONG_LABEL = "🚩 Looks wrong";
+
 /** A state {@link TELEGRAM_TERMINAL_HEADLINES} has a word for. */
 export type TelegramTerminalState = keyof typeof TELEGRAM_TERMINAL_HEADLINES;
 
@@ -659,6 +675,21 @@ export interface TelegramConfig {
    * nothing else: no policy key and nothing in an update can set it.
    */
   staleCopy?: boolean;
+  /**
+   * Study mode (amended SPEC.md §8, the study record). Off unless exactly
+   * `true`.
+   *
+   * On, every per-request card (technical and minimal) carries a second row
+   * with one "Looks wrong" button, and the `w` callback it carries is parsed as
+   * a reject flagged `looks_wrong`. Off, the cards and the callback parser are
+   * exactly what they were before the key existed: no second row, and `w:` is
+   * a malformed callback. Digest cards never carry the button.
+   *
+   * Launch configuration and nothing else, for {@link staleCopy}'s reason: the
+   * verb sets it from `APPROVAL_STUDY_MODE` once, at prepare. No policy key and
+   * nothing in an update can set it.
+   */
+  study?: boolean;
   /**
    * Which layout a prompt is drawn in (APRV-489), from
    * `channels.telegram.prompt.style`. Passed in by the verb, which has already
@@ -1991,6 +2022,19 @@ export function actionRefOf(actionKey: string): string {
   return createHash("sha256").update(actionKey, "utf8").digest("hex").slice(0, ACTION_REF_HEX);
 }
 
+/** How many hex characters of the key's sha256 a study log line carries. */
+export const STUDY_LOG_REF_HEX = 12;
+
+/**
+ * The short reference a "Looks wrong" detection line names (amended SPEC.md
+ * §8): the first {@link STUDY_LOG_REF_HEX} hex of the key's sha256, a prefix of
+ * {@link actionRefOf}, so an operator holding the key can match the line and a
+ * reader holding the line cannot recover the key.
+ */
+export function studyLogRefOf(actionKey: string): string {
+  return actionRefOf(actionKey).slice(0, STUDY_LOG_REF_HEX);
+}
+
 /**
  * `callback_data` for one button: `<g|r>:<nonce>:<action ref>`.
  *
@@ -2001,7 +2045,7 @@ export function actionRefOf(actionKey: string): string {
  * for the copy whose nonce this process never issued, and {@link actionRefOf}
  * states the bound on what that fallback may reach.
  */
-export function callbackData(verb: "g" | "r", nonce: string, actionKey: string): string {
+export function callbackData(verb: "g" | "r" | "w", nonce: string, actionKey: string): string {
   const withRef = `${verb}:${nonce}:${actionRefOf(actionKey)}`;
   // Unreachable with the nonces this class issues, and kept because the failure
   // it guards is the worst one available here: `callback_data` over the cap is
@@ -2103,6 +2147,11 @@ interface ParsedCallback {
   nonce: string;
   /** {@link actionRefOf} of the action this button was drawn for, when present. */
   actionRef: string | null;
+  /**
+   * Set by the study-mode `w` verb alone (amended SPEC.md §8): the resident
+   * tapped "Looks wrong", which is a reject with this flag recorded.
+   */
+  flag?: "looks_wrong";
 }
 
 const CALLBACK_VERBS: Record<string, { decision: "grant" | "reject"; scope: "one" | "all" }> = {
@@ -2112,11 +2161,22 @@ const CALLBACK_VERBS: Record<string, { decision: "grant" | "reject"; scope: "one
   R: { decision: "reject", scope: "all" },
 };
 
-export function parseCallbackData(data: unknown): ParsedCallback | null {
+/**
+ * The study-mode verb (amended SPEC.md §8), in a table of its own so that the
+ * base vocabulary above is untouched. Consulted only when the caller passes
+ * `study`, which a listener does only when it was launched with
+ * `APPROVAL_STUDY_MODE=1`; otherwise `w:` is no verb at all and the callback is
+ * malformed, exactly as before the verb existed.
+ */
+const STUDY_CALLBACK_VERB = { decision: "reject", scope: "one", flag: "looks_wrong" } as const;
+
+export function parseCallbackData(data: unknown, study = false): ParsedCallback | null {
   if (typeof data !== "string") return null;
   const first = data.indexOf(":");
   if (first === -1) return null;
-  const verb = CALLBACK_VERBS[data.slice(0, first)];
+  const head = data.slice(0, first);
+  const studyVerb = study && head === "w";
+  const verb = studyVerb ? STUDY_CALLBACK_VERB : CALLBACK_VERBS[head];
   if (verb === undefined) return null;
   const rest = data.slice(first + 1);
   const second = rest.indexOf(":");
@@ -2127,6 +2187,7 @@ export function parseCallbackData(data: unknown): ParsedCallback | null {
     scope: verb.scope,
     nonce,
     actionRef: second === -1 ? null : rest.slice(second + 1),
+    ...(studyVerb ? { flag: STUDY_CALLBACK_VERB.flag } : {}),
   };
 }
 
@@ -3239,6 +3300,11 @@ export class TelegramChannel implements TestableChannel {
    */
   private readonly staleCopy: boolean;
   /**
+   * Study mode (amended SPEC.md §8). Fixed at construction from
+   * {@link TelegramConfig.study}; nothing an update carries can change it.
+   */
+  private readonly study: boolean;
+  /**
    * Where a `nonce-not-issued` refusal is recorded (APRV-456). The runtime's,
    * like every other handler here; absent, the refusal still happens and only
    * the record is missing.
@@ -3401,6 +3467,8 @@ export class TelegramChannel implements TestableChannel {
     // APRV-456. Only an explicit `true` or an absent key leaves the fallback on;
     // anything else a caller passes turns it off, the stricter direction.
     this.staleCopy = config.staleCopy === undefined || config.staleCopy === true;
+    // Only an explicit `true` turns study mode on; anything else is off.
+    this.study = config.study === true;
     this.makeNonce =
       config.nonce ??
       (() => {
@@ -3441,6 +3509,11 @@ export class TelegramChannel implements TestableChannel {
    */
   staleCopyEnabled(): boolean {
     return this.staleCopy;
+  }
+
+  /** Whether study mode is on (amended SPEC.md §8): fixed at construction. */
+  studyModeEnabled(): boolean {
+    return this.study;
   }
 
   /**
@@ -3879,6 +3952,17 @@ export class TelegramChannel implements TestableChannel {
     };
   }
 
+  /**
+   * The study-mode row under a per-request card (amended SPEC.md §8): one
+   * "Looks wrong" button on a row of its own, so the Approve/Reject row keeps
+   * its bytes and layout. Empty when study mode is off, which leaves the
+   * keyboard exactly as it was before study mode existed.
+   */
+  private studyRows(nonce: string, actionKey: string): InlineButton[][] {
+    if (!this.study) return [];
+    return [[{ text: TELEGRAM_LOOKS_WRONG_LABEL, callback_data: callbackData("w", nonce, actionKey) }]];
+  }
+
   private async deliverOne(
     request: ChannelRequest,
     batchDeliveryId: DeliveryId | undefined,
@@ -3891,6 +3975,7 @@ export class TelegramChannel implements TestableChannel {
           { text: "✅ Approve", callback_data: callbackData("g", nonce, actionKey) },
           { text: "🛑 Reject", callback_data: callbackData("r", nonce, actionKey) },
         ],
+        ...this.studyRows(nonce, actionKey),
       ],
     };
 
@@ -4003,6 +4088,7 @@ export class TelegramChannel implements TestableChannel {
               { text: "✅ Approve", callback_data: callbackData("g", nonce, actionKey) },
               { text: MINIMAL_DENY_LABEL, callback_data: callbackData("r", nonce, actionKey) },
             ],
+            ...this.studyRows(nonce, actionKey),
           ],
         },
       });
@@ -4928,7 +5014,9 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
-    const parsed = parseCallbackData(query["data"]);
+    // The study verb `w` parses only when this listener was launched in study
+    // mode; otherwise it is malformed below, exactly as before it existed.
+    const parsed = parseCallbackData(query["data"], this.study);
     if (parsed === null) {
       await this.ignore(
         result,
@@ -5036,6 +5124,9 @@ export class TelegramChannel implements TestableChannel {
       ...(parsed.decision === "reject"
         ? { note: `${TELEGRAM_REJECT_NOTE} (callback ${callbackId})` }
         : {}),
+      // Amended SPEC.md §8. A "Looks wrong" tap is this same reject with the
+      // flag recorded; every check above and below is a Deny's.
+      ...(parsed.flag === "looks_wrong" ? { study: { reason: "looks_wrong" as const } } : {}),
     };
 
     if (this.handler === null) {
@@ -5117,8 +5208,15 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
     const record = outcome.record;
-    const headline =
-      outcome.decision === "grant"
+    const lookedWrong = parsed.flag === "looks_wrong" && outcome.decision === "reject";
+    if (lookedWrong) {
+      // The detection line: the 12-hex reference and nothing else. Never the
+      // key text, a chat id, a sender id or any card text.
+      this.complain(`approval: telegram looks_wrong ref=${studyLogRefOf(delivery.actionKey)}`);
+    }
+    const headline = lookedWrong
+      ? TELEGRAM_LOOKS_WRONG_HEADLINE
+      : outcome.decision === "grant"
         ? TELEGRAM_TERMINAL_HEADLINES.granted
         : TELEGRAM_TERMINAL_HEADLINES.rejected;
     try {

@@ -990,6 +990,11 @@ export function prepareListen(request: ListenRequest): ListenPreparation {
     // off. The policy loaded above is deliberately not consulted, so nothing
     // an agent can propose into a policy file can turn it back on.
     staleCopy: staleCopyFor(request.apiBase, request.noStaleCopy === true),
+    // Amended SPEC.md §8 (the study record). Read from this process's launch
+    // environment ONCE, here, and never from the policy: nothing an agent can
+    // propose into a policy file may switch it. Off leaves the key out, so the
+    // channel is configured exactly as it was before study mode existed.
+    ...(studyModeFor(process.env) ? { study: true } : {}),
   };
 
   return {
@@ -1297,6 +1302,24 @@ export function staleCopyFor(apiBase: string | null, noStaleCopy: boolean): bool
   if (noStaleCopy) return false;
   if (apiBase === null) return true;
   return apiBase.replace(/\/+$/u, "") === TELEGRAM_DEFAULT_API_BASE;
+}
+
+/**
+ * The launch variable that turns study mode on (amended SPEC.md §8, the study
+ * record). Generic on purpose: the core is a public spec and names no study.
+ * A hosted deployment writes it into the listener's environment for the
+ * tenants a study covers; nothing else sets it.
+ */
+export const STUDY_MODE_ENV = "APPROVAL_STUDY_MODE";
+
+/**
+ * Whether `env` turns study mode on: the value is exactly `1`, and anything
+ * else (unset, blank, `true`, ` 1`, `0`) is off. Called once, by
+ * {@link prepareListen}; the channel keeps the answer for its lifetime, so a
+ * change takes effect only when the listener restarts.
+ */
+export function studyModeFor(env: NodeJS.ProcessEnv): boolean {
+  return env[STUDY_MODE_ENV] === "1";
 }
 
 // ---------------------------------------------------------------------------
