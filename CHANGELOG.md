@@ -77,6 +77,26 @@ before a tag.
   (`-H "Authorization: Bearer $EDGEOS_API_KEY"` gains `account.credential`,
   human-only under the template), and the diff reports those eleven as
   blocking in that column.
+- **The class-diff runs the real hook in a box (B-167 fold 1, review-b's
+  refute).** Every shipped call now goes through each core's own `approval
+  hook hermes` (scripts/overlay-recipes-box.mjs), in a box layout:
+  HOME/.hermes with a dummy `.env`, `config.yaml`, the overlay's skills and
+  workspace, APPROVAL_HERMES_HOME set, and an attested store. Recipes run as
+  terminal calls at $HERMES_HOME, $HOME, workspace and unset; harness calls
+  run as Hermes tool envelopes (core's own tools plus every `tools:` line).
+  - **Blocking moves:** an existing call that loses autonomy (autonomous ->
+    supervised-retro, a higher live rate, auto -> card) or stops running.
+  - **Shadowed tools line:** a tools line newly shadowed by an earlier one
+    blocks.
+  - **The box check:** a shipped recipe the hook denies in the box fails
+    unless the allowlist lists it.
+  - **Acceptance by name:** every allowlist entry needs Carter's acceptance
+    (`accepted_by`, `accepted_at`), and a trivial reason is refused.
+  - **Pinned in CI:** ci.yml pins the gate's own files by sha256 and the
+    corpus by its count, and re-extracts the corpus with the base branch's
+    extractor.
+  - **Fail closed:** a hook run that exits 0 without an allow line is an
+    error, never an allow.
 
 ## 0.4.6 — 2026-10-18
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
  * Release check: the overlay's shipped recipes against this core
- * (0.4.7, EDGEOS-BLOCK, brief item D), and the CLASS-DIFF of those calls
- * against a baseline core (B-167, lead ruling CLAIMS L15681 (1)).
+ * (0.4.7, EDGEOS-BLOCK, brief item D), and the CLASS-DIFF of the overlay's
+ * shipped calls against a baseline core (B-167, lead ruling CLAIMS L15681 (1);
+ * fold 1 after review-b's refute).
  *
  * The lesson of EDGEOS-BLOCK: 0.4.6's `fetch-output-unknown` rule was right,
  * and every `skills/edgeos/SKILL.md` curl recipe the fleet shipped landed in
@@ -10,83 +11,79 @@
  * every EdgeOS call was denied outright from the morning the boxes took 0.4.6.
  * Nobody had run the fleet's own recipes through the new classifier.
  *
- * This runs the pinned corpus (`scripts/overlay-recipes/corpus.json`, written
- * by `overlay-recipes-extract.mjs` at a recorded overlay sha) through
- * `classifyForHook` as BUILT here (`dist/`, so `npm run build` first), resolves
- * each class against the overlay's template policy with this repository's own
- * resolver, and fails when any recipe resolves to a `human-only` class unless
- * `scripts/overlay-recipes/allowlist.json` lists it with a reason. A recipe the
- * classifier refuses outright (`ok: false`, `hook-unclassified` and kin) is
- * reported and does not fail the check: the corpus extraction is the overlay's
- * own, and it reads operator READMEs, placeholder lines and sample output that
- * no core has ever classified, so a refusal is the long-standing answer for
- * them rather than a move. Whether refusals should gate too is the owner's call.
+ * Three checks, one script:
  *
- * An allowlist entry that no longer matches a held recipe also fails, so the
- * list cannot quietly outlive the reason it was written for and then cover a
- * new regression of the same recipe.
+ * 1. The corpus check (#663, neutral cwd, in process): the pinned corpus
+ *    (`scripts/overlay-recipes/corpus.json`) through `classifyForHook` as BUILT
+ *    here, each class resolved against the overlay's template policy; any
+ *    recipe resolving to `human-only` fails unless the allowlist lists it.
+ *    Refusals are reported and not gated here.
  *
- * `--diff <baseline core>` (B-167) adds the release question the incident
- * turned on: which shipped calls CHANGE how they are decided between the core
- * the boxes run today and this one. 0.4.6 passed every test of its own; what
- * nobody produced was the list of fleet calls whose answer moved. The same
- * corpus is classified at both cores; the calls are every recipe plus the box
- * harness calls, read from the template's `tools:` lines (each Hermes or MCP
- * tool the policy names, at the class its line gives: core's own Hermes tool
- * table, `describeToolCall` in src/cli/hook.ts, is not exported, and the
- * template states the two agree). Each call reduces to one decision, the
- * strictest over its classes: auto (autonomous, supervised-retro), sampled
- * (supervised-live), card (manual), human-only, refused (the classifier
- * refuses it, or an unruled harness.launch.*). A card also carries its style
- * (the template's `style`, and `technical (undeclared)` for a class with no
- * `say` entry under minimal). Calls match by file + exact command text +
- * occurrence, so a moved line is not a change.
+ * 2. The box check (`--overlay-tree`, fold 1 S-1): the same corpus through the
+ *    REAL `approval hook hermes` of the core under test, in a box layout
+ *    (scripts/overlay-recipes-box.mjs: HOME/.hermes with `.env`, `config.yaml`,
+ *    the overlay's skills and workspace, APPROVAL_HERMES_HOME set as the
+ *    control plane sets it, an attested store), as a Hermes `terminal` call at
+ *    $HERMES_HOME, $HOME and $HERMES_HOME/workspace. Any recipe the hook
+ *    denies there (human-only OR refused) fails unless the allowlist lists it.
  *
- * - BLOCKING: an existing call moving from auto, sampled or card to human-only
- *   or refused (auto -> human-only, card -> deny). Fails, unless the allowlist
- *   names that call with a reason (and, when the entry has `flip`, that exact
- *   from -> to); it is then reported as allowlisted.
- * - TIGHTER: a stricter decision that still runs (auto -> card). Reported.
- * - CHANGED: the class set, refusal code or card style moves and the decision
- *   gets no stricter. Reported.
- * - NEW / REMOVED (with `--baseline-corpus`): calls only in this / the
- *   baseline corpus. Reported, not gated: a new recipe that is human-only is
- *   the check's own finding above.
+ * 3. The CLASS-DIFF (`--diff <baseline core>`, with `--overlay-tree`): every
+ *    shipped call, recipes at the three workdirs and unset plus the harness
+ *    calls (core's own Hermes tools and one envelope per `tools:` line of
+ *    either template), through each core's real hook in its own box. Each call
+ *    is reduced to a decision (auto, sampled, card, human-only, refused) and an
+ *    autonomy level (the strictest `resolve` over the classes the hook named:
+ *    autonomous, supervised-retro, supervised-live:<rate>, manual,
+ *    human-only). BLOCKING: an existing call that ran (auto, sampled, card)
+ *    and now runs with less autonomy or not at all (fold 1 S-4: autonomous ->
+ *    supervised-retro, a higher live rate, auto -> card, and every move into
+ *    a deny). Other moves are reported. New and removed calls are reported; a
+ *    new recipe that the hook denies is the box check's finding. A tools line
+ *    shadowed by an earlier line (first match wins in core) that was not
+ *    shadowed in the baseline template is also BLOCKING.
+ *
+ * The allowlist (fold 1 M-3): every entry names `file`, `command` (or "*" for
+ * a whole operator README), a `reason` that says something, `scope`
+ * ("neutral", "box" or "any", default "any"), and Carter's acceptance by name:
+ * `accepted_by` ("human:<id>") and `accepted_at` (YYYY-MM-DD). An entry
+ * without them fails the run ("awaiting acceptance"), so a PR cannot quiet the
+ * gate with `reason: "ok"`. An entry nothing matches fails as stale. Entries
+ * may carry `columns` (box columns it covers; default all) and
+ * `flip: {from, to}` (only that decision move in the diff). A whole-file entry
+ * ("*") covers the box check only and never a call that moves in the diff.
  *
  * Usage:
- *   node scripts/overlay-recipes-check.mjs            the check (exit 1 on a hit)
- *   node scripts/overlay-recipes-check.mjs --json     the per-recipe table as JSON
- *   ... --corpus <path>                              another snapshot (a candidate refresh)
- *   ... --core <dir>                                 judge another build than this checkout's
- *                                                    (a package root holding dist/src, e.g.
- *                                                    node_modules/approval-md of an npm install)
- *   ... --allowlist <path>                           another allowlist (the overlay keeps its own)
- *   ... --diff <dir>                                 the CLASS-DIFF against the baseline core at <dir>
- *       [--baseline-corpus <path>] [--md <out.md>] [--diff-json <out.json>]
- *       [--core-label <text>] [--baseline-label <text>]
+ *   node scripts/overlay-recipes-check.mjs [--json] [--corpus <path>] [--core <dir>] [--allowlist <path>]
+ *        [--overlay-tree <dir>] [--box-root <dir>] [--box-concurrency <n>, default 1] [--harness-only <tool,...> (tests)]
+ *        [--diff <baseline core dir> [--baseline-corpus <path>] [--baseline-overlay-tree <dir>]
+ *         [--md <out.md>] [--diff-json <out.json>] [--core-label <t>] [--baseline-label <t>]]
  *
- * In --diff mode the markdown report goes to stdout (and --md) after the check;
- * its first line is the GATE line.
- *
- * Exit codes: 0 clean, 1 an unlisted human-only recipe, a stale allowlist
- * entry or a blocking flip, 2 the corpus, the allowlist, the policy or a build
- * could not be read.
+ * A core dir is a package root holding `dist/src` (a build, or
+ * node_modules/approval-md of an npm install). `--diff` requires
+ * `--overlay-tree`. Exit codes: 0 clean, 1 a finding (unlisted human-only, an
+ * unlisted box deny, a blocking move, a new shadowed tools line, a stale or
+ * unaccepted allowlist entry), 2 an input could not be read.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { probeName, runBox } from "./overlay-recipes-box.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 
 function arg(name) {
   const at = process.argv.indexOf(name);
-  return at === -1 ? undefined : process.argv[at + 1];
+  if (at === -1) return undefined;
+  const value = process.argv[at + 1];
+  if (value === undefined || value.startsWith("--")) fail(`${name} needs a value`);
+  return value;
 }
 
-const CORPUS = arg("--corpus") ?? join(REPO_ROOT, "scripts", "overlay-recipes", "corpus.json");
-const ALLOWLIST = arg("--allowlist") ?? join(REPO_ROOT, "scripts", "overlay-recipes", "allowlist.json");
+const CORPUS = () => arg("--corpus") ?? join(REPO_ROOT, "scripts", "overlay-recipes", "corpus.json");
+const ALLOWLIST = () => arg("--allowlist") ?? join(REPO_ROOT, "scripts", "overlay-recipes", "allowlist.json");
 
 function fail(message) {
   process.stderr.write(`overlay-recipes-check: ${message}\n`);
@@ -105,16 +102,32 @@ export function filled(command, fill) {
   return out;
 }
 
-/** Load a corpus's vendored template policy with a core's own loader. */
-export function loadCorpusPolicy(loadPolicyText, corpus) {
+/** The corpus's template policy block with its provisioning substitutions applied. */
+export function policyTextOf(corpus) {
   let text = corpus.policy.block;
   for (const [from, to] of Object.entries(corpus.policy.substitute ?? {})) text = text.split(from).join(to);
-  return loadPolicyText(corpus.policy.source, `\`\`\`yaml approval-policy\n${text}\n\`\`\`\n`);
+  return text;
+}
+
+/** Load a corpus's vendored template policy with a core's own loader. */
+export function loadCorpusPolicy(loadPolicyText, corpus) {
+  return loadPolicyText(corpus.policy.source, `\`\`\`yaml approval-policy\n${policyTextOf(corpus)}\n\`\`\`\n`);
+}
+
+const scopeOf = (entry) => entry.scope ?? "any";
+/**
+ * Does an allowlist entry name this call: its file, its command (or "*"), and,
+ * when the entry lists `columns`, the box column the call ran in?
+ */
+export function entryMatches(entry, file, command, column) {
+  if (entry.file !== file || (entry.command !== command && entry.command !== "*")) return false;
+  if (column !== undefined && Array.isArray(entry.columns) && !entry.columns.includes(column)) return false;
+  return true;
 }
 
 /**
- * Classify every recipe and judge it. Pure over its inputs, so a test can run
- * it against a doctored corpus without spawning anything.
+ * Classify every recipe and judge it (#663, neutral cwd). Pure over its
+ * inputs. Entries scoped "box" are the box check's and are not read here.
  */
 export function judge({ corpus, allowlist, classifyForHook, loadPolicyText, resolve }) {
   const load = loadCorpusPolicy(loadPolicyText, corpus);
@@ -132,27 +145,50 @@ export function judge({ corpus, allowlist, classifyForHook, loadPolicyText, reso
     const rules = [...new Set(result.segments.filter((s) => humanOnly.includes(s.class)).map((s) => s.rule))];
     rows.push({ where: recipe.where, command: recipe.command, ok: true, classes: result.classes, humanOnly, rules });
   }
+  const entries = allowlist.entries.filter((entry) => scopeOf(entry) !== "box");
   const held = rows.filter((row) => row.ok && row.humanOnly.length > 0);
   const refused = rows.filter((row) => !row.ok);
-  const listed = (row) =>
-    allowlist.entries.find((entry) => entry.file === fileOf(row.where) && entry.command === row.command);
+  const listed = (row) => entries.find((entry) => entryMatches(entry, fileOf(row.where), row.command));
   const unlisted = held.filter((row) => listed(row) === undefined);
-  const stale = allowlist.entries.filter(
-    (entry) => !held.some((row) => entry.file === fileOf(row.where) && entry.command === row.command),
+  // Only a neutral-scoped entry can go stale here; "any" entries are judged
+  // against every check at the end of the run.
+  const stale = entries.filter(
+    (entry) => scopeOf(entry) === "neutral" && !held.some((row) => entryMatches(entry, fileOf(row.where), row.command)),
   );
   const unreasoned = allowlist.entries.filter((entry) => typeof entry.reason !== "string" || entry.reason.trim() === "");
   return { rows, held, refused, unlisted, stale, unreasoned };
 }
 
+const TRIVIAL_REASON = /^(ok|okay|fine|yes|n\/?a|todo|tbd|accepted|allow(ed)?|-+|\.+)$/iu;
+/**
+ * What keeps an allowlist entry from counting (fold 1 M-3 (b)): a reason that
+ * says nothing, or no acceptance by name. An empty list is an accepted entry.
+ */
+export function acceptanceErrors(entry) {
+  const errors = [];
+  const reason = typeof entry.reason === "string" ? entry.reason.trim() : "";
+  if (reason.length < 12 || TRIVIAL_REASON.test(reason)) errors.push(`its reason says nothing ("${reason}")`);
+  if (typeof entry.accepted_by !== "string" || entry.accepted_by.trim() === "") {
+    errors.push("awaiting acceptance: accepted_by is empty (Carter accepts by name)");
+  } else if (!/^human:[a-z][a-z0-9._-]*$/u.test(entry.accepted_by)) {
+    errors.push(`accepted_by "${entry.accepted_by}" is not a human:<id>`);
+  }
+  if (typeof entry.accepted_at !== "string" || !/^\d{4}-\d{2}-\d{2}$/u.test(entry.accepted_at)) {
+    errors.push("accepted_at is not a YYYY-MM-DD date");
+  }
+  if (!["neutral", "box", "any"].includes(scopeOf(entry))) errors.push(`scope "${entry.scope}" is not neutral, box or any`);
+  if (entry.columns !== undefined && (!Array.isArray(entry.columns) || entry.columns.some((c) => !["hermes-home", "home", "workspace", "harness"].includes(c)))) {
+    errors.push("columns names a column other than hermes-home, home, workspace or harness");
+  }
+  return errors;
+}
+
 // ---------------------------------------------------------------------------
-// CLASS-DIFF (B-167)
+// Decisions and autonomy
 // ---------------------------------------------------------------------------
 
-/** Strictest first: a lower index is stricter. */
 export const DECISIONS = ["refused", "human-only", "card", "sampled", "auto"];
 const DENIES = new Set(["refused", "human-only"]);
-const RUNS = new Set(["card", "sampled", "auto"]);
-const strictness = (decision) => DECISIONS.indexOf(decision);
 
 /** The card style a carded class gets on the resident's Telegram (template `style` + `say` coverage). */
 function cardStyle(core, load, cls) {
@@ -162,110 +198,92 @@ function cardStyle(core, load, cls) {
   return Object.prototype.hasOwnProperty.call(say, cls) ? "minimal" : "technical (undeclared)";
 }
 
-/** One class's decision under a loaded policy, through the core's own resolver. */
-function classDecision(core, load, cls) {
+/** A class's autonomy level under a loaded policy, as `resolve` gives it, and its rank (lower is less autonomy). */
+export function levelOf(core, load, cls) {
   const res = core.resolve(load, cls);
-  if (typeof core.harnessLaunchNeedsRule === "function" && core.harnessLaunchNeedsRule(cls, res)) {
-    return { decision: "refused", code: "hook-harness-launch-unruled" };
-  }
-  if (res.autonomy === "human-only") return { decision: "human-only", code: "hook-class-human-only" };
-  if (res.autonomy === "manual") return { decision: "card", style: cardStyle(core, load, cls) };
+  const declared = res.declaredAutonomy ?? res.autonomy;
+  if (res.autonomy === "human-only") return { level: "human-only", rank: 0 };
+  if (res.autonomy === "manual") return { level: "manual", rank: 1 };
   if (res.autonomy === "supervised" && res.supervision === "live") {
-    return { decision: "sampled", style: cardStyle(core, load, cls) };
+    const rate = typeof res.liveRate === "number" ? res.liveRate : 1;
+    return { level: `supervised-live:${String(rate)}`, rank: 2 - rate };
   }
-  return { decision: "auto" };
+  if (res.autonomy === "supervised") return { level: "supervised-retro", rank: 3 };
+  return { level: declared === "autonomous" ? "autonomous" : String(declared), rank: 4 };
+}
+
+/** A side's rank: a deny is 0, a running call its autonomy rank (a card without a known class, 1). */
+export function rankOf(side) {
+  if (DENIES.has(side.decision)) return -1;
+  if (typeof side.rank === "number") return side.rank;
+  return { card: 1, sampled: 1.5, auto: 4 }[side.decision] ?? 4;
 }
 
 /**
- * Every call of a corpus (recipes + the template's tools lines), classified and
- * decided at one core. Pure over its inputs: `core` is the core's functions
- * (classifyForHook, loadPolicyText, resolve, and optionally
- * harnessLaunchNeedsRule, promptStyleFor, promptSayFor), so a test can hand it
- * stand-ins.
+ * Turn one hook verdict from the box into a decided call: decision, autonomy
+ * level (strictest over the classes the hook named), card style.
  */
-export function decideCorpus(core, corpus, where = {}) {
-  // Two working directories (B-167 steer 2). The credential pass (APRV-522,
-  // refineCredentialReads) judges a reader's unexpanded `$` word against the
-  // directory it starts in and the configured Hermes home, so a call can be
-  // decided differently from the box's Hermes home than from a neutral
-  // directory. HERMES_HOME is pinned for the duration (set to `hermesHome`, or
-  // unset for the neutral column, so the runner's own environment never
-  // decides anything) and restored after.
-  const saved = { HERMES_HOME: process.env.HERMES_HOME, APPROVAL_HERMES_HOME: process.env.APPROVAL_HERMES_HOME };
-  delete process.env.APPROVAL_HERMES_HOME;
-  if (where.hermesHome !== undefined) process.env.HERMES_HOME = where.hermesHome;
-  else delete process.env.HERMES_HOME;
-  try {
-    return decideAt(core, corpus, where.cwd ?? where.hermesHome ?? corpus.cwd ?? "/tmp");
-  } finally {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-  }
+export function decideBoxCall(core, load, call) {
+  const levels = call.classes.map((cls) => ({ cls, ...levelOf(core, load, cls) }));
+  const strictest = levels.reduce((a, b) => (b.rank < a.rank ? b : a), { cls: null, level: "autonomous", rank: 4 });
+  let decision;
+  if (call.verdict === "allow") decision = strictest.level.startsWith("supervised-live") ? "sampled" : "auto";
+  else if (call.code === "hook-class-human-only") decision = "human-only";
+  else if (call.code === "hook-timeout") decision = strictest.level.startsWith("supervised-live") ? "sampled" : "card";
+  else decision = "refused";
+  const style =
+    decision === "card" || decision === "sampled"
+      ? [...new Set(levels.filter((l) => l.rank < 3).map((l) => cardStyle(core, load, l.cls)))].sort().join("+") || null
+      : null;
+  return {
+    key: call.key,
+    column: call.column,
+    kind: call.kind,
+    where: call.where,
+    command: call.command,
+    classes: [...new Set(call.classes)].sort(),
+    rules: [],
+    decision,
+    code: DENIES.has(decision) || decision === "card" ? call.code : null,
+    level: DENIES.has(decision) ? null : strictest.level,
+    rank: DENIES.has(decision) ? -1 : decision === "card" && call.classes.length === 0 ? 1 : strictest.rank,
+    style,
+    detail: call.detail,
+  };
 }
 
-function decideAt(core, corpus, cwd) {
-  const load = loadCorpusPolicy(core.loadPolicyText, corpus);
-  if (!load.ok) return { error: `the template policy did not load at core ${core.version}: ${load.code}: ${load.message}` };
-  const protectedPaths = load.policy.protected_paths ?? [];
-  const calls = [];
-  const seen = new Map();
-  const keyed = (kind, file, command) => {
-    const base = `${kind}\u0000${file}\u0000${command}`;
-    const n = (seen.get(base) ?? 0) + 1;
-    seen.set(base, n);
-    return `${base}\u0000${n}`;
-  };
-  const verdictOf = (classes) => {
-    let worst = { decision: "auto" };
-    const styles = new Set();
-    for (const cls of classes) {
-      const d = classDecision(core, load, cls);
-      if (d.style !== undefined) styles.add(d.style);
-      if (strictness(d.decision) < strictness(worst.decision)) worst = d;
-    }
-    const style = worst.decision === "card" || worst.decision === "sampled" ? [...styles].sort().join("+") : null;
-    return { decision: worst.decision, code: worst.code ?? null, style };
-  };
-  for (const recipe of corpus.recipes) {
-    const command = filled(recipe.command, corpus.fill ?? []);
-    const result = core.classifyForHook(command, protectedPaths, cwd, []).result;
-    const key = keyed("recipe", fileOf(recipe.where), recipe.command);
-    if (!result.ok) {
-      calls.push({ key, kind: "recipe", where: recipe.where, command: recipe.command, classes: [], rules: [], decision: "refused", code: result.code, style: null });
-      continue;
-    }
-    const classes = [...new Set(result.classes)].sort();
-    const rules = [...new Set(result.segments.map((s) => s.rule).filter((r) => typeof r === "string"))].sort();
-    calls.push({ key, kind: "recipe", where: recipe.where, command: recipe.command, classes, rules, ...verdictOf(classes) });
-  }
-  for (const line of load.policy.tools ?? []) {
-    const match = String(line.match);
-    const key = keyed("harness", "tools:", match);
-    const classes = typeof line.class === "string" ? [line.class] : [];
-    const verdict = classes.length === 0 ? { decision: "refused", code: "tools-line-without-class", style: null } : verdictOf(classes);
-    calls.push({ key, kind: "harness", where: "tools:", command: match, classes, rules: ["tools-line"], ...verdict });
-  }
-  return { calls };
-}
+// ---------------------------------------------------------------------------
+// The diff
+// ---------------------------------------------------------------------------
 
-function allowlisted(allowlist, row) {
+function allowlistedFlip(allowlist, row) {
   return (allowlist?.entries ?? []).find(
     (e) =>
-      e.file === fileOf(row.where) &&
-      e.command === row.command &&
-      typeof e.reason === "string" &&
-      e.reason.trim() !== "" &&
+      scopeOf(e) !== "neutral" &&
+      // A whole-file entry ("*") covers the absolute box check only: it never
+      // silences a call that moves, so a README line that ran and now denies blocks.
+      e.command !== "*" &&
+      entryMatches(e, fileOf(row.where), row.command, row.column) &&
+      acceptanceErrors(e).length === 0 &&
       (e.flip === undefined || (e.flip?.from === row.old.decision && e.flip?.to === row.new.decision)),
   );
 }
 
-const pick = (c) => ({ classes: c.classes, rules: c.rules, decision: c.decision, code: c.code ?? null, style: c.style ?? null, where: c.where });
+const pick = (c) => ({
+  classes: c.classes,
+  rules: c.rules ?? [],
+  decision: c.decision,
+  code: c.code ?? null,
+  level: c.level ?? null,
+  rank: c.rank,
+  style: c.style ?? null,
+  where: c.where,
+});
 
 /**
- * Join the baseline side and this side into the diff. Pure. `baselineCalls`
- * and `calls` come from {@link decideCorpus}.
+ * Join the baseline side and this side into the diff. Pure. Each call carries
+ * `key` (column + kind + file + command + occurrence), `decision`, and
+ * optionally `classes`, `code`, `level`, `rank`, `style`, `column`.
  */
 export function diffCalls(baselineCalls, calls, allowlist = { entries: [] }) {
   const before = new Map(baselineCalls.map((c) => [c.key, c]));
@@ -273,113 +291,107 @@ export function diffCalls(baselineCalls, calls, allowlist = { entries: [] }) {
   const rows = [];
   for (const now of calls) {
     const was = before.get(now.key);
+    const column = now.column ?? "neutral";
     if (was === undefined) {
-      rows.push({ status: "new", kind: now.kind, where: now.where, command: now.command, old: null, new: pick(now) });
+      rows.push({ status: "new", column, kind: now.kind, where: now.where, command: now.command, old: null, new: pick(now) });
       continue;
     }
     const moved =
-      was.classes.join("+") !== now.classes.join("+") ||
+      (was.classes ?? []).join("+") !== (now.classes ?? []).join("+") ||
       was.decision !== now.decision ||
       (was.code ?? null) !== (now.code ?? null) ||
+      (was.level ?? null) !== (now.level ?? null) ||
       (was.style ?? null) !== (now.style ?? null);
     let status = "unchanged";
-    if (RUNS.has(was.decision) && DENIES.has(now.decision)) status = "blocking";
-    else if (strictness(now.decision) < strictness(was.decision) && RUNS.has(now.decision)) status = "tighter";
+    if (!DENIES.has(was.decision) && rankOf(now) < rankOf(was)) status = "blocking";
     else if (moved) status = "changed";
-    const row = { status, kind: now.kind, where: now.where, command: now.command, old: pick(was), new: pick(now) };
+    const row = { status, column, kind: now.kind, where: now.where, command: now.command, old: pick(was), new: pick(now) };
     if (status === "blocking") {
-      const entry = allowlisted(allowlist, row);
+      const entry = allowlistedFlip(allowlist, row);
       if (entry !== undefined) {
         row.status = "allowlisted";
         row.reason = entry.reason;
+        row.accepted_by = entry.accepted_by;
       }
     }
     rows.push(row);
   }
   for (const was of baselineCalls) {
-    if (!keys.has(was.key)) rows.push({ status: "removed", kind: was.kind, where: was.where, command: was.command, old: pick(was), new: null });
+    if (!keys.has(was.key)) {
+      rows.push({ status: "removed", column: was.column ?? "neutral", kind: was.kind, where: was.where, command: was.command, old: pick(was), new: null });
+    }
   }
+  return { rows, summary: summarize(rows, calls) };
+}
+
+function summarize(rows, calls) {
   const count = (s) => rows.filter((r) => r.status === s).length;
-  const summary = {
+  const columns = {};
+  for (const r of rows) if (r.status === "blocking") columns[r.column] = (columns[r.column] ?? 0) + 1;
+  return {
     calls: calls.length,
     recipes: calls.filter((c) => c.kind === "recipe").length,
     harness: calls.filter((c) => c.kind === "harness").length,
     blocking: count("blocking"),
     allowlisted: count("allowlisted"),
-    tighter: count("tighter"),
     changed: count("changed"),
     new: count("new"),
     removed: count("removed"),
     unchanged: count("unchanged"),
+    columns,
   };
-  return { rows, summary };
 }
 
-/**
- * A throwaway directory shaped like a box's Hermes home: named `.hermes`, with
- * a `.env` holding one dummy key name and no secret. The caller removes it.
- */
-export function makeHermesHome() {
-  const root = mkdtempSync(join(tmpdir(), "class-diff-home-"));
-  const home = join(root, ".hermes");
-  mkdirSync(home);
-  writeFileSync(join(home, ".env"), "EDGEOS_API_KEY=dummy-not-a-secret\n", "utf8");
-  return { root, home };
+/** A glob match as core's tools list reads it: `*` is any run of characters. */
+export function globMatches(pattern, name) {
+  const re = new RegExp(`^${String(pattern).split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/gu, "\\$&")).join(".*")}$`, "u");
+  return re.test(name);
 }
 
-/**
- * The diff in both working directories a box call can start in (B-167 steer
- * 2): `neutral` (the corpus's cwd, as the overlay's own test classifies) and
- * `hermes-home` (a `.hermes` home with a `.env`, HERMES_HOME set to it). A flip
- * in either column is a finding; the summary sums the two.
- */
-export function diffColumns({ baselineCore, baselineCorpus, core, corpus, allowlist, hermesHome }) {
-  const columns = [];
-  for (const [name, where] of [["neutral", {}], ["hermes-home", { hermesHome }]]) {
-    const before = decideCorpus(baselineCore, baselineCorpus, where);
-    if ("error" in before) return before;
-    const after = decideCorpus(core, corpus, where);
-    if ("error" in after) return after;
-    columns.push({ name, cwd: name === "neutral" ? corpus.cwd ?? "/tmp" : "<tmp>/.hermes (HERMES_HOME, .env with a dummy key)", ...diffCalls(before.calls, after.calls, allowlist) });
-  }
-  const summary = { ...columns[0].summary };
-  // A moved call counts once per column it moves in; new and removed are facts
-  // of the two corpora, the same in both columns, so they count once.
-  for (const key of ["blocking", "allowlisted", "tighter", "changed"]) {
-    summary[key] = columns.reduce((n, c) => n + c.summary[key], 0);
-  }
-  summary.unchanged = columns.reduce((n, c) => n + c.summary.unchanged, 0);
-  summary.columns = Object.fromEntries(columns.map((c) => [c.name, c.summary.blocking]));
-  return { columns, summary };
+/** Tools lines that an earlier line shadows (first match wins in core), by index and match. */
+export function shadowedTools(toolsLines) {
+  const out = [];
+  toolsLines.forEach((line, i) => {
+    const name = probeName(line.match);
+    const by = toolsLines.slice(0, i).findIndex((earlier) => globMatches(earlier.match, name));
+    if (by !== -1 && String(toolsLines[by].class) !== String(line.class)) {
+      out.push({ index: i, match: String(line.match), class: String(line.class), by: String(toolsLines[by].match), byClass: String(toolsLines[by].class) });
+    }
+  });
+  return out;
 }
 
 /** The GATE line: the one line the release GATE carries verbatim. */
-export function gateLine(meta, summary) {
-  const verdict = summary.blocking > 0 ? `FAIL ${summary.blocking} BLOCKING` : "PASS";
-  const moved = summary.blocking + summary.allowlisted + summary.tighter + summary.changed;
+export function gateLine(meta, summary, extra = {}) {
+  const findings = summary.blocking + (extra.shadowed ?? 0);
+  const verdict = findings > 0 ? `FAIL ${String(findings)} BLOCKING` : "PASS";
+  const moved = summary.blocking + summary.allowlisted + summary.changed;
   const overlay =
     meta.baselineOverlay === meta.overlay
       ? `overlay ${meta.overlay.slice(0, 12)}`
       : `overlay ${meta.baselineOverlay.slice(0, 12)} -> ${meta.overlay.slice(0, 12)}`;
+  const byColumn = Object.entries(summary.columns ?? {})
+    .map(([k, v]) => `${k} ${String(v)}`)
+    .join(", ");
   return (
-    `CLASS-DIFF ${verdict}: core ${meta.baselineCore} -> ${meta.core}, ${overlay}; ` +
-    `${summary.calls} calls (${summary.recipes} recipes + ${summary.harness} harness tools); ` +
+    `CLASS-DIFF ${verdict}: core ${meta.baselineCore} (${meta.baselineLabel}) -> ${meta.core} (${meta.coreLabel}), ${overlay}; ` +
+    `${String(summary.calls)} calls (${String(summary.recipes)} recipe runs + ${String(summary.harness)} harness calls); ` +
     (moved === 0
       ? "class-diff: none"
-      : `${moved} moved (${summary.blocking} blocking, ${summary.allowlisted} allowlisted, ${summary.tighter} tighter, ${summary.changed} changed)`) +
-    `; ${summary.new} new, ${summary.removed} removed` +
-    (summary.columns === undefined
-      ? ""
-      : ` (2 cwds; blocking by cwd: ${Object.entries(summary.columns).map(([k, v]) => `${k} ${v}`).join(", ")})`)
+      : `${String(moved)} moved (${String(summary.blocking)} blocking, ${String(summary.allowlisted)} allowlisted, ${String(summary.changed)} changed)`) +
+    `; ${String(summary.new)} new, ${String(summary.removed)} removed` +
+    (byColumn === "" ? "" : `; blocking by column: ${byColumn}`) +
+    ((extra.shadowed ?? 0) > 0 ? `; ${String(extra.shadowed)} newly shadowed tools line(s)` : "")
   );
 }
 
 function sideText(s) {
   if (s === null) return "-";
-  const classes = s.classes.length > 0 ? s.classes.join("+") : `refused:${s.code}`;
+  const classes = s.classes.length > 0 ? s.classes.join("+") : s.code ?? "(no class)";
+  const level = s.level && s.level !== "autonomous" ? ` [${s.level}]` : "";
   const style = s.style ? `, ${s.style} card` : "";
-  const code = s.classes.length > 0 && s.code ? ` (${s.code}${s.rules.length > 0 ? `; ${s.rules.join(",")}` : ""})` : "";
-  return `${classes}: ${s.decision}${style}${code}`;
+  const code = s.classes.length > 0 && s.code ? ` (${s.code})` : "";
+  return `${classes}: ${s.decision}${level}${style}${code}`;
 }
 
 function cell(text) {
@@ -387,55 +399,60 @@ function cell(text) {
   return t.length > 160 ? `${t.slice(0, 157)}...` : t;
 }
 
-export function renderDiff(meta, diff) {
-  const out = [gateLine(meta, diff.summary), ""];
+export function renderDiff(meta, diff, extra = {}) {
+  const out = [gateLine(meta, diff.summary, { shadowed: (extra.shadowed ?? []).length }), ""];
   out.push(`## Class-diff: approval.md core ${meta.baselineCore} -> ${meta.core}`, "");
   out.push(`- baseline: core ${meta.baselineCore} (${meta.baselineLabel}), overlay ${meta.overlayRepo}@${meta.baselineOverlay}`);
   out.push(`- candidate: core ${meta.core} (${meta.coreLabel}), overlay ${meta.overlayRepo}@${meta.overlay}`);
-  out.push("- BLOCKING (CLAIMS L15681 (1)): an existing call moving from auto, sampled or card to human-only or refused", "");
-  if (diff.columns !== undefined) {
-    for (const column of diff.columns) {
-      out.push(`## Working directory: ${column.name} (${column.cwd})`, "");
-      out.push(...renderRows(column));
-    }
-    return out.join("\n");
+  out.push(
+    "- every call through each core's real `approval hook hermes` in a box layout; recipes as terminal calls at $HERMES_HOME, $HOME, $HERMES_HOME/workspace and unset; harness calls as Hermes tool envelopes",
+    "- BLOCKING: an existing call that ran and now runs with less autonomy or not at all (CLAIMS L15681 (1); fold 1 S-4)",
+    "",
+  );
+  for (const s of extra.shadowed ?? []) {
+    out.push(`- BLOCKING: tools line ${String(s.index + 1)} (\`${s.match}\` -> ${s.class}) is shadowed by \`${s.by}\` -> ${s.byClass} (first match wins), newly in this template`);
   }
-  out.push(...renderRows(diff));
+  if ((extra.shadowed ?? []).length > 0) out.push("");
+  const moved = diff.rows.filter((r) => ["blocking", "allowlisted", "changed"].includes(r.status));
+  if (moved.length === 0) out.push("class-diff: none (no existing call changes class, code, decision, autonomy or card style)", "");
+  const columns = [...new Set(diff.rows.map((r) => r.column))];
+  for (const column of columns) {
+    const mine = diff.rows.filter((r) => r.column === column);
+    const sections = [
+      ["blocking", "BLOCKING (fails the job)"],
+      ["allowlisted", "Would block, allowlisted with Carter's acceptance"],
+      ["changed", "Changed, not less autonomy (reported)"],
+    ];
+    const shown = mine.filter((r) => r.status !== "unchanged");
+    if (shown.length === 0) continue;
+    out.push(`## Column: ${column}`, "");
+    for (const [status, title] of sections) {
+      const rows = mine.filter((r) => r.status === status);
+      if (rows.length === 0) continue;
+      out.push(`### ${title}: ${String(rows.length)}`, "", "| call | where | old | new |", "|---|---|---|---|");
+      for (const r of rows) out.push(`| \`${cell(r.command)}\` | ${cell(r.new.where)} | ${cell(sideText(r.old))} | ${cell(sideText(r.new))} |`);
+      out.push("");
+    }
+    for (const [status, title, side] of [["new", "New calls (reported; a denied new recipe is the box check's)", "new"], ["removed", "Removed calls", "old"]]) {
+      const rows = mine.filter((r) => r.status === status);
+      if (rows.length === 0) continue;
+      out.push(`### ${title}: ${String(rows.length)}`, "", "| call | where | at this side's core |", "|---|---|---|");
+      for (const r of rows) out.push(`| \`${cell(r.command)}\` | ${cell(r[side].where)} | ${cell(sideText(r[side]))} |`);
+      out.push("");
+    }
+  }
+  out.push(`Unchanged: ${String(diff.summary.unchanged)} of ${String(diff.summary.calls)} calls.`, "");
   return out.join("\n");
 }
 
-function renderRows(diff) {
-  const out = [];
-  const moved = diff.rows.filter((r) => ["blocking", "allowlisted", "tighter", "changed"].includes(r.status));
-  if (moved.length === 0) out.push("class-diff: none (no existing call changes class, code, decision or card style)", "");
-  const sections = [
-    ["blocking", "BLOCKING (fails the job)"],
-    ["allowlisted", "Would block, allowlisted with a reason"],
-    ["tighter", "Tighter, still runs (reported)"],
-    ["changed", "Class, code or card style changed, not stricter (reported)"],
-  ];
-  for (const [status, title] of sections) {
-    const rows = diff.rows.filter((r) => r.status === status);
-    if (rows.length === 0) continue;
-    out.push(`### ${title}: ${rows.length}`, "", "| call | where | old | new |", "|---|---|---|---|");
-    for (const r of rows) out.push(`| \`${cell(r.command)}\` | ${cell(r.new.where)} | ${cell(sideText(r.old))} | ${cell(sideText(r.new))} |`);
-    out.push("");
-  }
-  for (const [status, title, side] of [["new", "New calls (reported, not gated)", "new"], ["removed", "Removed calls", "old"]]) {
-    const rows = diff.rows.filter((r) => r.status === status);
-    if (rows.length === 0) continue;
-    out.push(`### ${title}: ${rows.length}`, "", "| call | where | at this side's core |", "|---|---|---|");
-    for (const r of rows) out.push(`| \`${cell(r.command)}\` | ${cell(r[side].where)} | ${cell(sideText(r[side]))} |`);
-    out.push("");
-  }
-  out.push(`Unchanged: ${diff.summary.unchanged} of ${diff.summary.calls} calls.`, "");
-  return out;
-}
+// ---------------------------------------------------------------------------
+// Loading and running
+// ---------------------------------------------------------------------------
 
 /** A core's functions from a package root that holds `dist/src`. */
 export async function loadCore(root) {
   const dist = join(root, "dist", "src");
-  for (const f of ["cli/hook.js", "core/policy-load.js", "core/policy-match.js"]) {
+  for (const f of ["cli/hook.js", "cli/main.js", "core/policy-load.js", "core/policy-match.js"]) {
     if (!existsSync(join(dist, f))) throw new Error(`no build at ${join(dist, f)}; run \`npm run build\` there first`);
   }
   const hook = await import(pathToFileURL(join(dist, "cli", "hook.js")).href);
@@ -444,6 +461,7 @@ export async function loadCore(root) {
   const layoutPath = join(dist, "core", "prompt-layout.js");
   const layout = existsSync(layoutPath) ? await import(pathToFileURL(layoutPath).href) : {};
   return {
+    root,
     version: JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version,
     classifyForHook: hook.classifyForHook,
     loadPolicyText: load.loadPolicyText,
@@ -452,6 +470,25 @@ export async function loadCore(root) {
     promptStyleFor: layout.promptStyleFor,
     promptSayFor: layout.promptSayFor,
   };
+}
+
+/** Every call of a corpus through one core's real hook in a box, decided. */
+export async function decideInBox({ core, corpus, overlayTree, boxRoot, toolsLines, concurrency = 1, harnessOnly = null }) {
+  const load = loadCorpusPolicy(core.loadPolicyText, corpus);
+  if (!load.ok) return { error: `the template policy did not load at core ${core.version}: ${load.code}: ${load.message}` };
+  const ran = await runBox({ coreRoot: core.root, corpus, policyText: policyTextOf(corpus), overlayTree, boxRoot, toolsLines, concurrency, harnessOnly });
+  if ("error" in ran) return ran;
+  const bad = ran.calls.filter((c) => c.verdict === "error");
+  if (bad.length > 0) return { error: `${String(bad.length)} hook run(s) ended in neither allow nor deny at core ${core.version}, e.g. ${bad[0].code}: ${bad[0].detail}` };
+  return { calls: ran.calls.map((c) => decideBoxCall(core, load, c)), load };
+}
+
+/** The box check (S-1): recipes the hook denies at a real workdir, against the allowlist. */
+export function boxHeld(calls, allowlist) {
+  const entries = allowlist.entries.filter((e) => scopeOf(e) !== "neutral");
+  const held = calls.filter((c) => c.kind === "recipe" && c.column !== "unset" && DENIES.has(c.decision));
+  const listed = (c) => entries.find((e) => entryMatches(e, fileOf(c.where), c.command, c.column));
+  return { held, unlisted: held.filter((c) => listed(c) === undefined), listedBy: listed };
 }
 
 function readJson(path, what) {
@@ -469,23 +506,36 @@ function checkCorpusShape(corpus, path) {
 
 async function main() {
   const json = process.argv.includes("--json");
-  if (!existsSync(CORPUS)) fail(`no corpus at ${CORPUS}`);
-  const corpus = readJson(CORPUS, "the corpus");
-  const allowlist = existsSync(ALLOWLIST) ? readJson(ALLOWLIST, "the allowlist") : { entries: [] };
-  checkCorpusShape(corpus, CORPUS);
+  const corpusPath = CORPUS();
+  const allowlistPath = ALLOWLIST();
+  if (!existsSync(corpusPath)) fail(`no corpus at ${corpusPath}`);
+  const corpus = readJson(corpusPath, "the corpus");
+  const allowlist = existsSync(allowlistPath) ? readJson(allowlistPath, "the allowlist") : { entries: [] };
+  checkCorpusShape(corpus, corpusPath);
   const coreDir = resolvePath(arg("--core") ?? REPO_ROOT);
+  const overlayTree = arg("--overlay-tree");
+  const baselineDir = arg("--diff");
+  const boxRoot = resolvePath(arg("--box-root") ?? tmpdir());
+  // Hook runs at once per box; 1 (sequential) unless asked, so a loaded machine is not swamped.
+  const concurrency = Number.parseInt(arg("--box-concurrency") ?? "1", 10);
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16) fail("--box-concurrency must be 1-16");
+  // Tests only: limit the harness envelopes to these tool names (CI never passes it;
+  // ci.yml pins this script and its own invocation).
+  const harnessOnlyArg = arg("--harness-only");
+  const harnessOnly = harnessOnlyArg === undefined ? null : harnessOnlyArg.split(",").filter(Boolean);
+  if (baselineDir !== undefined && overlayTree === undefined) fail("--diff needs --overlay-tree: the diff runs in a box layout");
   let core;
   try {
     core = await loadCore(coreDir);
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
+
+  // 1. The corpus check (#663).
   const verdict = judge({ corpus, allowlist, classifyForHook: core.classifyForHook, loadPolicyText: core.loadPolicyText, resolve: core.resolve });
   if ("error" in verdict) fail(verdict.error);
-  const version = core.version;
-
   if (json) {
-    process.stdout.write(`${JSON.stringify({ core: version, overlay: corpus.overlay.sha, ...verdict }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ core: core.version, overlay: corpus.overlay.sha, ...verdict }, null, 2)}\n`);
   } else {
     const counts = new Map();
     for (const row of verdict.rows) {
@@ -493,78 +543,124 @@ async function main() {
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
     process.stdout.write(
-      `core ${version} vs overlay ${corpus.overlay.repo}@${corpus.overlay.sha.slice(0, 12)}: ${verdict.rows.length} recipes, ${verdict.held.length} human-only (${verdict.held.length - verdict.unlisted.length} allowlisted), ${verdict.refused.length} refused (reported, not gated)\n`,
+      `core ${core.version} vs overlay ${corpus.overlay.repo}@${corpus.overlay.sha.slice(0, 12)}: ${String(verdict.rows.length)} recipes, ${String(verdict.held.length)} human-only (${String(verdict.held.length - verdict.unlisted.length)} allowlisted), ${String(verdict.refused.length)} refused (reported, not gated)\n`,
     );
     for (const [key, n] of [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
       process.stdout.write(`  ${String(n).padStart(4)}  ${key}\n`);
     }
     for (const row of verdict.held) {
-      const entry = allowlist.entries.find((e) => e.file === fileOf(row.where) && e.command === row.command);
-      const why = `${row.humanOnly.join(",")} (${row.rules.join(",")})`;
-      process.stdout.write(`${entry === undefined ? "HELD" : "listed"}  ${row.where}  ${why}\n        ${row.command}\n`);
-      if (entry !== undefined) process.stdout.write(`        reason: ${entry.reason}\n`);
+      const listedIn = verdict.unlisted.includes(row) ? "HELD" : "listed";
+      process.stdout.write(`${listedIn}  ${row.where}  ${row.humanOnly.join(",")} (${row.rules.join(",")})\n        ${row.command}\n`);
     }
     for (const row of verdict.refused) process.stdout.write(`refused (info)  ${row.where}  ${row.code}\n`);
   }
   let bad = false;
-  for (const entry of verdict.stale) {
+  const complain = (message) => {
     bad = true;
-    process.stderr.write(`stale allowlist entry (no held recipe matches it any more; delete it): ${entry.file}: ${entry.command}\n`);
-  }
-  for (const entry of verdict.unreasoned) {
-    bad = true;
-    process.stderr.write(`allowlist entry without a reason: ${entry.file}: ${entry.command}\n`);
+    process.stderr.write(`${message}\n`);
+  };
+  for (const entry of verdict.stale) complain(`stale allowlist entry (no held recipe matches it any more; delete it): ${entry.file}: ${entry.command}`);
+  for (const entry of allowlist.entries) {
+    for (const e of acceptanceErrors(entry)) complain(`allowlist entry ${entry.file}: ${entry.command}: ${e}`);
   }
   if (verdict.unlisted.length > 0) {
-    bad = true;
-    process.stderr.write(
-      `${verdict.unlisted.length} overlay recipe(s) resolve to a human-only class under this core and are not allowlisted. ` +
+    complain(
+      `${String(verdict.unlisted.length)} overlay recipe(s) resolve to a human-only class under this core and are not allowlisted. ` +
         "An agent following them would be denied outright (EDGEOS-BLOCK). Fix the classifier, get the overlay recipe changed, " +
-        "or list the recipe in scripts/overlay-recipes/allowlist.json with the reason it is right.\n",
+        "or list the recipe in the allowlist with its reason and Carter's acceptance.",
     );
   }
+  const used = new Set();
+  for (const row of verdict.held) {
+    const entry = allowlist.entries.find((e) => scopeOf(e) !== "box" && entryMatches(e, fileOf(row.where), row.command));
+    if (entry !== undefined) used.add(entry);
+  }
 
-  const baselineDir = arg("--diff");
-  if (baselineDir !== undefined) {
-    const baselinePath = arg("--baseline-corpus") ?? CORPUS;
-    if (!existsSync(baselinePath)) fail(`no baseline corpus at ${baselinePath}`);
-    const baselineCorpus = readJson(baselinePath, "the baseline corpus");
-    checkCorpusShape(baselineCorpus, baselinePath);
+  // 2. The box check, and 3. the diff.
+  if (overlayTree !== undefined) {
+    const toolsBaseline = [];
     let baselineCore;
-    try {
-      baselineCore = await loadCore(resolvePath(baselineDir));
-    } catch (error) {
-      fail(error instanceof Error ? error.message : String(error));
+    let baselineCorpus;
+    if (baselineDir !== undefined) {
+      const baselinePath = arg("--baseline-corpus") ?? corpusPath;
+      if (!existsSync(baselinePath)) fail(`no baseline corpus at ${baselinePath}`);
+      baselineCorpus = readJson(baselinePath, "the baseline corpus");
+      checkCorpusShape(baselineCorpus, baselinePath);
+      try {
+        baselineCore = await loadCore(resolvePath(baselineDir));
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error));
+      }
+      const bl = loadCorpusPolicy(baselineCore.loadPolicyText, baselineCorpus);
+      if (!bl.ok) fail(`the baseline template policy did not load: ${bl.code}: ${bl.message}`);
+      toolsBaseline.push(...(bl.policy.tools ?? []));
     }
-    const { root: homeRoot, home } = makeHermesHome();
-    let diff;
-    try {
-      diff = diffColumns({ baselineCore, baselineCorpus, core, corpus, allowlist, hermesHome: home });
-    } finally {
-      rmSync(homeRoot, { recursive: true, force: true });
+    const cl = loadCorpusPolicy(core.loadPolicyText, corpus);
+    if (!cl.ok) fail(`the template policy did not load: ${cl.code}: ${cl.message}`);
+    const toolsCandidate = cl.policy.tools ?? [];
+    const toolsLines = [...toolsCandidate, ...toolsBaseline];
+    const after = await decideInBox({ core, corpus, overlayTree: resolvePath(overlayTree), boxRoot, toolsLines, concurrency, harnessOnly });
+    if ("error" in after) fail(after.error);
+
+    const box = boxHeld(after.calls, allowlist);
+    for (const c of box.held) {
+      const entry = box.listedBy(c);
+      if (entry !== undefined) used.add(entry);
     }
-    if ("error" in diff) fail(diff.error);
-    const meta = {
-      core: core.version,
-      baselineCore: baselineCore.version,
-      coreLabel: arg("--core-label") ?? coreDir,
-      baselineLabel: arg("--baseline-label") ?? resolvePath(baselineDir),
-      overlay: corpus.overlay.sha,
-      baselineOverlay: baselineCorpus.overlay.sha,
-      overlayRepo: corpus.overlay.repo,
-    };
-    const md = renderDiff(meta, diff);
-    if (!json) process.stdout.write(`\n${md}`);
-    const mdOut = arg("--md");
-    if (mdOut !== undefined) writeFileSync(mdOut, md, "utf8");
-    const jsonOut = arg("--diff-json");
-    if (jsonOut !== undefined) writeFileSync(jsonOut, `${JSON.stringify({ gate: gateLine(meta, diff.summary), meta, ...diff }, null, 2)}\n`, "utf8");
-    if (diff.summary.blocking > 0) {
-      bad = true;
-      process.stderr.write(
-        `${diff.summary.blocking} shipped call(s) move from running to a deny between core ${meta.baselineCore} and ${meta.core} (EDGEOS-BLOCK). ` +
-          "Fix the classifier, change the overlay recipe first, or have Carter accept the move by name: an allowlist entry for the call with its reason (and `flip`).\n",
+    if (!json) {
+      process.stdout.write(
+        `box check (real hook, box layout) at core ${core.version}: ${String(box.held.length)} recipe run(s) denied at $HERMES_HOME, $HOME or workspace, ${String(box.unlisted.length)} not allowlisted\n`,
       );
+      for (const c of box.unlisted) process.stdout.write(`BOX-HELD  ${c.column}  ${c.where}  ${c.decision} (${c.code})\n        ${c.command}\n`);
+    }
+    if (box.unlisted.length > 0) {
+      complain(
+        `${String(box.unlisted.length)} shipped recipe run(s) are denied by the real hook in the box layout (human-only or refused) and are not allowlisted (B-167 S-1). ` +
+          "Fix the classifier or the recipe, or list it with its reason and Carter's acceptance.",
+      );
+    }
+
+    if (baselineDir !== undefined) {
+      const baselineTree = resolvePath(arg("--baseline-overlay-tree") ?? overlayTree);
+      const before = await decideInBox({ core: baselineCore, corpus: baselineCorpus, overlayTree: baselineTree, boxRoot, toolsLines, concurrency, harnessOnly });
+      if ("error" in before) fail(before.error);
+      const diff = diffCalls(before.calls, after.calls, allowlist);
+      for (const row of diff.rows) {
+        if (row.status !== "allowlisted") continue;
+        const entry = allowlistedFlip(allowlist, row);
+        if (entry !== undefined) used.add(entry);
+      }
+      const shadowedBefore = new Set(shadowedTools(toolsBaseline).map((s) => `${s.match}\u0000${s.class}`));
+      const shadowed = shadowedTools(toolsCandidate).filter((s) => !shadowedBefore.has(`${s.match}\u0000${s.class}`));
+      const meta = {
+        core: core.version,
+        baselineCore: baselineCore.version,
+        coreLabel: arg("--core-label") ?? coreDir,
+        baselineLabel: arg("--baseline-label") ?? resolvePath(baselineDir),
+        overlay: corpus.overlay.sha,
+        baselineOverlay: baselineCorpus.overlay.sha,
+        overlayRepo: corpus.overlay.repo,
+      };
+      const md = renderDiff(meta, diff, { shadowed });
+      if (!json) process.stdout.write(`\n${md}`);
+      const mdOut = arg("--md");
+      if (mdOut !== undefined) writeFileSync(mdOut, md, "utf8");
+      const jsonOut = arg("--diff-json");
+      if (jsonOut !== undefined) {
+        writeFileSync(jsonOut, `${JSON.stringify({ gate: gateLine(meta, diff.summary, { shadowed: shadowed.length }), meta, shadowed, boxHeld: box.held, ...diff }, null, 2)}\n`, "utf8");
+      }
+      if (diff.summary.blocking > 0) {
+        complain(
+          `${String(diff.summary.blocking)} shipped call run(s) lose autonomy or stop running between core ${meta.baselineCore} and ${meta.core} (EDGEOS-BLOCK, S-4). ` +
+            "Fix the classifier, change the overlay first, or have Carter accept the move by name in the allowlist.",
+        );
+      }
+      if (shadowed.length > 0) complain(`${String(shadowed.length)} tools line(s) are newly shadowed by an earlier line (first match wins): the later line never decides anything`);
+    }
+    // An entry nothing used is stale (box and any scopes; neutral ones above).
+    for (const entry of allowlist.entries) {
+      if (scopeOf(entry) === "neutral" || used.has(entry)) continue;
+      complain(`stale allowlist entry (nothing held or blocked matches it; delete it): ${entry.file}: ${entry.command}`);
     }
   }
   process.exit(bad ? 1 : 0);

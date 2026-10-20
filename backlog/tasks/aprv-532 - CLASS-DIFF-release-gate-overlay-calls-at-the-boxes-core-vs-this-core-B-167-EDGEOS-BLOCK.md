@@ -6,6 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-20 11:10'
+updated_date: '2026-10-20 13:33'
 labels:
   - release
   - ci
@@ -31,3 +32,9 @@ Lead ruling CLAIMS L15681 (1), Carter P0: a core version reaches boxes only afte
 - [ ] #4 The overlay-recipes job re-extracts the corpus at its pinned overlay sha and fails on drift, installs the boxes' core from npm at pinned integrity, and publishes markdown + JSON report
 - [ ] #5 Fixture tests: a flip fails, a stay passes, a new recipe is reported; 0.4.5 -> 0.4.6 on overlay 99d33417 shows the eleven EdgeOS flips
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fold 1 (review-b refute 3M/4S/4N): the diff and a new absolute box check run every call through each core's real approval hook hermes in a box layout (scripts/overlay-recipes-box.mjs): recipes at HERMES_HOME, HOME, workspace, unset; harness calls as Hermes envelopes (core tools + every tools line); shadowed tools lines block. S-4: any loss of autonomy on an existing call blocks. M-3: allowlist entries need accepted_by/accepted_at (Carter), trivial reasons refused, ci.yml pins the gate files by sha256 and the corpus count, base-branch extractor. Proposed for Carter (not done: agents may not edit APPROVAL.md): protected_paths entries for scripts/overlay-recipes*. A hook run exiting 0 without an allow line is an error (found: a symlinked tmpdir made the CLI skip main). Allowlist entries ship unaccepted, so the job is red until Carter accepts them.
+<!-- SECTION:NOTES:END -->

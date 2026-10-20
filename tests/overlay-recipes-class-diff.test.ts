@@ -1,289 +1,317 @@
 /**
- * The CLASS-DIFF release gate (B-167, lead ruling CLAIMS L15681 (1)).
+ * The CLASS-DIFF release gate (B-167, lead ruling CLAIMS L15681 (1)), after
+ * fold 1 of review-b's refute.
  *
- * `scripts/overlay-recipes-check.mjs --diff <baseline core>` classifies the
- * overlay's shipped calls at a baseline core and at this one, and fails when
- * an existing call moves from running (auto, sampled, card) to a deny
- * (human-only, refused). Three fixtures, as the ruling asks:
+ * Pure half: the allowlist's acceptance rule (M-3 (b): `reason: "ok"` and an
+ * entry nobody accepted by name both fail), the diff's autonomy ranking (S-4:
+ * autonomous -> supervised-retro, a higher live rate and auto -> card block),
+ * column-scoped entries, the shadowed-tools reader (M-2 (c)), the hook verdict
+ * reader, and the corpus and gate-file pins in ci.yml (M-3 (c): a pruned
+ * corpus fails).
  *
- * - a recipe that FLIPS (auto -> human-only) must fail;
- * - a recipe that STAYS must pass, with "class-diff: none";
- * - a NEW recipe is reported as new and does not fail.
- *
- * The pure half runs `decideCorpus` and `diffCalls` with a stand-in baseline
- * core that answers as 0.4.5 did for the pre-#427 EdgeOS shape (network.call),
- * against this checkout's real core (policy.core by fetch-output-unknown): the
- * EDGEOS-BLOCK move itself. The CLI half spawns the script with fixture
- * corpora and reads its exit code alone; there the flip comes from the
- * template side (a corpus whose policy reserves network.call), since CI has
- * one built core.
+ * Box half: the real `approval hook hermes` of this build against a planted
+ * copy of it (tests/fixtures/class-diff/plant.mjs, review-b's one-condition
+ * plants), in the box layout, through the script's CLI with exit codes read
+ * alone. Each plant must FAIL the gate: P20 (core's Hermes table sends
+ * send_message to policy.core), P22 (the credential pass fires from $HOME),
+ * P23 (a rule keyed on APPROVAL_HERMES_HOME), P24 (a rule keyed on skills on
+ * disk), P25 (a rule keyed on non-empty readRoots), P27 (read_file's class
+ * goes human-only), P17 (network.call autonomous -> supervised-retro), T5 (a
+ * template tools line that shadows an existing tool), and S-1 (a shipped
+ * recipe the hook denies in the box, with no diff move).
  */
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { cpSync as copyTree, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { parse } from "yaml";
 
-import { classifyForHook } from "../src/cli/hook.js";
-import { loadPolicyText } from "../src/core/policy-load.js";
-import { harnessLaunchNeedsRule, resolve } from "../src/core/policy-match.js";
-import { promptSayFor, promptStyleFor } from "../src/core/prompt-layout.js";
-// @ts-expect-error no declaration file for the standalone check script
-import { decideCorpus, diffCalls, diffColumns, gateLine, makeHermesHome } from "../../scripts/overlay-recipes-check.mjs";
+import {
+  acceptanceErrors,
+  diffCalls,
+  entryMatches,
+  gateLine,
+  shadowedTools,
+  // @ts-expect-error no declaration file for the standalone check script
+} from "../../scripts/overlay-recipes-check.mjs";
+// @ts-expect-error no declaration file for the standalone box runner
+import { readVerdict } from "../../scripts/overlay-recipes-box.mjs";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const SCRIPT = join(ROOT, "scripts", "overlay-recipes-check.mjs");
 
-interface Recipe {
-  where: string;
-  command: string;
-}
-interface Corpus {
-  overlay: { repo: string; sha: string; extracted_at: string; method: string };
-  policy: { source: string; substitute: Record<string, string>; block: string };
-  fill: { pattern: string; value: string }[];
-  cwd: string;
-  recipes: Recipe[];
-}
 interface Side {
-  classes: string[];
   decision: string;
-  code: string | null;
-  style: string | null;
+  classes?: string[];
+  level?: string | null;
+  rank?: number;
+  code?: string | null;
 }
 interface Row {
   status: string;
-  kind: string;
-  where: string;
+  column: string;
   command: string;
-  old: Side | null;
-  new: Side | null;
 }
 interface Diff {
   rows: Row[];
-  summary: { calls: number; harness: number; blocking: number; unchanged: number; new: number };
+  summary: { blocking: number; allowlisted: number; changed: number; new: number; removed: number; columns: Record<string, number> };
 }
 
-const corpus = JSON.parse(readFileSync(join(ROOT, "scripts", "overlay-recipes", "corpus.json"), "utf8")) as Corpus;
+const ACCEPTED = { accepted_by: "human:test", accepted_at: "2026-10-20" };
 
-const FIXED_URL = 'curl -s -H "Authorization: Bearer $EDGEOS_API_KEY" --url "${EDGEOS_API_BASE:-https://api.edgeos.world/api/v1}/events/portal/events/{event_id}"';
-const PRE_FIX_URL = 'curl -s -H "Authorization: Bearer $EDGEOS_API_KEY" "${EDGEOS_API_BASE:-https://api.edgeos.world/api/v1}/events/portal/events/{event_id}"';
-const NEW_RECIPE = "bun skills/edgeos/scripts/events.ts --when tomorrow";
+// --- pure half -------------------------------------------------------------------
 
-const STAYS: Recipe = { where: "skills/edgeos/SKILL.md:10", command: FIXED_URL };
-const FLIPS: Recipe = { where: "skills/edgeos/SKILL.md:20", command: PRE_FIX_URL };
-const NEW: Recipe = { where: "skills/edgeos/SKILL.md:30", command: NEW_RECIPE };
-
-function fixture(recipes: Recipe[], block = corpus.policy.block, sha = "a".repeat(40)): Corpus {
-  return { ...corpus, overlay: { ...corpus.overlay, sha }, policy: { ...corpus.policy, block }, recipes };
-}
-
-const thisCore = {
-  version: "this",
-  classifyForHook,
-  loadPolicyText,
-  resolve,
-  harnessLaunchNeedsRule,
-  promptStyleFor,
-  promptSayFor,
-};
-
-/** 0.4.5's answer for the pre-#427 shape: no fetch-output-unknown rule, so the curl is network.call. */
-const baselineCore = {
-  ...thisCore,
-  version: "0.4.5-standin",
-  classifyForHook: (command: string, ...rest: unknown[]) => {
-    const real = (classifyForHook as (...a: unknown[]) => { result: Record<string, unknown> })(command, ...rest);
-    if (command.startsWith("curl ") && !command.includes("--url")) {
-      return { ...real, result: { ok: true, classes: ["network.call"], segments: [{ class: "network.call", rule: "fetch" }] } };
-    }
-    return real;
-  },
-};
-
-function diff(before: Corpus, now: Corpus, allowlist = { entries: [] as unknown[] }): Diff {
-  const a = decideCorpus(baselineCore, before) as { calls: unknown[] } | { error: string };
-  const b = decideCorpus(thisCore, now) as { calls: unknown[] } | { error: string };
-  assert.ok(!("error" in a), JSON.stringify(a));
-  assert.ok(!("error" in b), JSON.stringify(b));
-  return diffCalls(a.calls, b.calls, allowlist) as Diff;
-}
-
-const recipeRow = (d: Diff, command: string): Row | undefined => d.rows.find((r) => r.kind === "recipe" && r.command === command);
-
-test("FLIP: the pre-#427 EdgeOS recipe moves network.call auto -> policy.core human-only and is BLOCKING", () => {
-  const d = diff(fixture([STAYS, FLIPS]), fixture([STAYS, FLIPS]));
-  const row = recipeRow(d, PRE_FIX_URL);
-  assert.equal(row?.status, "blocking");
-  assert.deepEqual(row?.old?.classes, ["network.call"]);
-  assert.equal(row?.old?.decision, "auto");
-  assert.deepEqual(row?.new?.classes, ["policy.core"]);
-  assert.equal(row?.new?.decision, "human-only");
-  assert.equal(d.summary.blocking, 1);
+test("M-3 (b): a reason that says nothing, or no acceptance by name, keeps an entry from counting", () => {
+  assert.deepEqual(acceptanceErrors({ file: "f", command: "c", reason: "a real reason, long enough", ...ACCEPTED }), []);
+  assert.match(acceptanceErrors({ file: "f", command: "c", reason: "ok", ...ACCEPTED }).join(";"), /says nothing/u);
+  assert.match(acceptanceErrors({ file: "f", command: "c", reason: "a real reason, long enough" }).join(";"), /awaiting acceptance/u);
+  assert.match(
+    acceptanceErrors({ file: "f", command: "c", reason: "a real reason, long enough", accepted_by: "carter", accepted_at: "2026-10-20" }).join(";"),
+    /not a human:<id>/u,
+  );
+  assert.match(
+    acceptanceErrors({ file: "f", command: "c", reason: "a real reason, long enough", ...ACCEPTED, columns: ["nowhere"] }).join(";"),
+    /columns/u,
+  );
 });
 
-test("STAYS: the --url recipe classes network.call auto at both cores and is unchanged", () => {
-  const d = diff(fixture([STAYS]), fixture([STAYS]));
-  const row = recipeRow(d, FIXED_URL);
-  assert.equal(row?.status, "unchanged");
-  assert.equal(row?.new?.decision, "auto");
-  assert.equal(d.summary.blocking, 0);
-  // The harness tools lines are part of every diff, and none moves here.
-  assert.ok(d.summary.harness > 0);
-  assert.equal(d.summary.unchanged, d.summary.calls);
+test("entries scoped to columns match only there; '*' matches a whole file", () => {
+  const e = { file: "a.md", command: "x", columns: ["hermes-home"] };
+  assert.equal(entryMatches(e, "a.md", "x", "hermes-home"), true);
+  assert.equal(entryMatches(e, "a.md", "x", "home"), false);
+  assert.equal(entryMatches({ file: "a.md", command: "*" }, "a.md", "anything", "home"), true);
 });
 
-test("NEW: a recipe only in the candidate corpus is reported new and never blocks", () => {
-  const d = diff(fixture([STAYS]), fixture([STAYS, NEW]));
-  const row = recipeRow(d, NEW_RECIPE);
-  assert.equal(row?.status, "new");
-  assert.equal(row?.old, null);
-  assert.equal(d.summary.new, 1);
-  assert.equal(d.summary.blocking, 0);
+const call = (key: string, side: Side, column = "hermes-home") => ({
+  key,
+  column,
+  kind: "recipe",
+  where: "skills/x/SKILL.md:1",
+  command: key,
+  classes: side.classes ?? ["network.call"],
+  ...side,
 });
 
-test("REMOVED, moved lines, and an allowlisted flip", () => {
-  const moved = { ...STAYS, where: "skills/edgeos/SKILL.md:99" };
-  const d = diff(fixture([STAYS, FLIPS]), fixture([moved, FLIPS]), {
-    entries: [{ file: "skills/edgeos/SKILL.md", command: PRE_FIX_URL, flip: { from: "auto", to: "human-only" }, reason: "accepted by Carter (test)" }],
-  });
-  assert.equal(recipeRow(d, FIXED_URL)?.status, "unchanged", "a line move is not a change");
-  assert.equal(recipeRow(d, PRE_FIX_URL)?.status, "allowlisted");
-  assert.equal(d.summary.blocking, 0);
-  // An entry whose flip names another move does not cover this one.
-  const wrong = diff(fixture([FLIPS]), fixture([FLIPS]), {
-    entries: [{ file: "skills/edgeos/SKILL.md", command: PRE_FIX_URL, flip: { from: "card", to: "refused" }, reason: "x" }],
-  });
-  assert.equal(recipeRow(wrong, PRE_FIX_URL)?.status, "blocking");
-  const gone = diff(fixture([STAYS, NEW]), fixture([STAYS]));
-  assert.equal(recipeRow(gone, NEW_RECIPE)?.status, "removed");
-});
-
-test("the GATE line states class-diff: none when nothing moved, and FAIL with the count when something did", () => {
-  const meta = { core: "b", baselineCore: "a", overlay: "f".repeat(40), baselineOverlay: "f".repeat(40) };
-  const none = diff(fixture([STAYS]), fixture([STAYS]));
-  assert.match(gateLine(meta, none.summary), /^CLASS-DIFF PASS: .*class-diff: none/u);
-  const flip = diff(fixture([FLIPS]), fixture([FLIPS]));
-  assert.match(gateLine(meta, flip.summary), /^CLASS-DIFF FAIL 1 BLOCKING: /u);
-});
-
-// --- the Hermes-home working directory (B-167 steer 2) ------------------------
-//
-// 0.4.6's credential pass (APRV-522, refineCredentialReads) adds an
-// account.credential segment to a reader whose word holds an unexpanded `$`
-// when the command starts in the Hermes home, so the --url EdgeOS recipe with
-// `$EDGEOS_API_KEY` in a header, fine from a neutral directory, is a
-// human-only deny from the box's home. The stand-in baseline has no such pass,
-// as 0.4.5 had none.
-
-const noCredentialPass = {
-  ...thisCore,
-  version: "0.4.5-standin-credential",
-  classifyForHook: (...a: unknown[]) => {
-    const real = (classifyForHook as (...b: unknown[]) => { result: { ok: boolean; classes: string[]; segments: { class: string; rule: string }[] } })(...a);
-    if (!real.result.ok) return real;
-    const segments = real.result.segments.filter((x) => x.rule !== "credential-path-resolved");
-    return { ...real, result: { ok: true, segments, classes: [...new Set(segments.map((x) => x.class))] } };
-  },
-};
-
-test("HOME: the --url EdgeOS recipe with $EDGEOS_API_KEY flips auto -> human-only only from the Hermes home", () => {
-  const { root, home } = makeHermesHome();
-  try {
-    const d = diffColumns({
-      baselineCore: noCredentialPass,
-      baselineCorpus: fixture([STAYS, NEW]),
-      core: thisCore,
-      corpus: fixture([STAYS, NEW]),
-      allowlist: { entries: [] },
-      hermesHome: home,
-    }) as { columns: (Diff & { name: string })[]; summary: Diff["summary"] & { columns: Record<string, number> } };
-    const [neutral, atHome] = d.columns;
-    assert.equal(neutral?.name, "neutral");
-    assert.equal(recipeRow(neutral as Diff, FIXED_URL)?.status, "unchanged");
-    assert.equal(atHome?.name, "hermes-home");
-    const row = recipeRow(atHome as Diff, FIXED_URL);
-    assert.equal(row?.status, "blocking");
-    assert.equal(row?.old?.decision, "auto");
-    assert.deepEqual(row?.new?.classes, ["account.credential", "network.call"]);
-    assert.equal(row?.new?.decision, "human-only");
-    assert.equal(recipeRow(atHome as Diff, NEW_RECIPE)?.status, "unchanged", "a command with no $ word stays");
-    assert.deepEqual(d.summary.columns, { neutral: 0, "hermes-home": 1 });
-    assert.equal(d.summary.blocking, 1);
-    const meta = { core: "b", baselineCore: "a", overlay: "f".repeat(40), baselineOverlay: "f".repeat(40) };
-    assert.match(gateLine(meta, d.summary), /^CLASS-DIFF FAIL 1 BLOCKING: .*blocking by cwd: neutral 0, hermes-home 1\)$/u);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
+test("S-4: less autonomy on an existing call blocks; more autonomy is reported", () => {
+  const cases: [string, Side, Side, string][] = [
+    ["retro", { decision: "auto", level: "autonomous", rank: 4 }, { decision: "auto", level: "supervised-retro", rank: 3 }, "blocking"],
+    ["live-up", { decision: "sampled", level: "supervised-live:0.1", rank: 1.9 }, { decision: "sampled", level: "supervised-live:1", rank: 1 }, "blocking"],
+    ["card", { decision: "auto", level: "autonomous", rank: 4 }, { decision: "card", level: "manual", rank: 1 }, "blocking"],
+    ["deny", { decision: "card", level: "manual", rank: 1 }, { decision: "refused", rank: -1, code: "hook-unparseable" }, "blocking"],
+    ["looser", { decision: "card", level: "manual", rank: 1 }, { decision: "auto", level: "autonomous", rank: 4 }, "changed"],
+    ["deny-to-deny", { decision: "human-only", rank: -1, code: "hook-class-human-only" }, { decision: "refused", rank: -1, code: "hook-unparseable" }, "changed"],
+    ["same", { decision: "auto", level: "autonomous", rank: 4 }, { decision: "auto", level: "autonomous", rank: 4 }, "unchanged"],
+  ];
+  for (const [key, was, now, want] of cases) {
+    const d = diffCalls([call(key, was)], [call(key, now)]) as Diff;
+    assert.equal(d.rows[0]?.status, want, key);
   }
 });
 
-test("HOME: the column pins HERMES_HOME and restores the caller's environment", () => {
-  const { root, home } = makeHermesHome();
-  const before = process.env.HERMES_HOME;
-  try {
-    process.env.HERMES_HOME = "/nonexistent/caller-home";
-    const neutral = decideCorpus(thisCore, fixture([STAYS])) as { calls: { command: string; classes: string[] }[] };
-    assert.deepEqual(neutral.calls.find((c) => c.command === FIXED_URL)?.classes, ["network.call"]);
-    const atHome = decideCorpus(thisCore, fixture([STAYS]), { hermesHome: home }) as { calls: { command: string; classes: string[] }[] };
-    assert.deepEqual(atHome.calls.find((c) => c.command === FIXED_URL)?.classes, ["account.credential", "network.call"]);
-    assert.equal(process.env.HERMES_HOME, "/nonexistent/caller-home");
-  } finally {
-    if (before === undefined) delete process.env.HERMES_HOME;
-    else process.env.HERMES_HOME = before;
-    rmSync(root, { recursive: true, force: true });
-  }
+test("a blocking move is allowlisted only by an accepted entry for that call, column and (if given) flip; never by '*'", () => {
+  const was = call("c", { decision: "auto", level: "autonomous", rank: 4 });
+  const now = call("c", { decision: "human-only", rank: -1, code: "hook-class-human-only" });
+  const entry = { file: "skills/x/SKILL.md", command: "c", reason: "accepted for a stated reason", scope: "box", ...ACCEPTED };
+  const status = (entries: unknown[]) => (diffCalls([was], [now], { entries }) as Diff).rows[0]?.status;
+  assert.equal(status([entry]), "allowlisted");
+  assert.equal(status([{ ...entry, accepted_by: "" }]), "blocking", "unaccepted");
+  assert.equal(status([{ ...entry, reason: "ok" }]), "blocking", "B1: reason ok");
+  assert.equal(status([{ ...entry, columns: ["home"] }]), "blocking", "another column");
+  assert.equal(status([{ ...entry, flip: { from: "card", to: "refused" } }]), "blocking", "another flip");
+  assert.equal(status([{ ...entry, command: "*" }]), "blocking", "a whole-file entry never covers a move");
 });
 
-// --- the CLI, exit codes read alone -------------------------------------------
+test("new and removed calls are reported, never blocking", () => {
+  const a = call("a", { decision: "auto", rank: 4 });
+  const b = call("b", { decision: "human-only", rank: -1 });
+  const d = diffCalls([a], [b]) as Diff;
+  assert.deepEqual(d.rows.map((r) => r.status).sort(), ["new", "removed"]);
+  assert.equal(d.summary.blocking, 0);
+});
 
-const dir = mkdtempSync(join(tmpdir(), "class-diff-"));
-after(() => rmSync(dir, { recursive: true, force: true }));
+test("M-2 (c): a tools line shadowed by an earlier one is found (first match wins)", () => {
+  const lines = [
+    { match: "mcp__*", class: "account.credential" },
+    { match: "mcp__index__list_intents", class: "read.web" },
+    { match: "web_search", class: "read.web" },
+  ];
+  assert.deepEqual(
+    shadowedTools(lines).map((s: { match: string; by: string }) => `${s.match}<${s.by}`),
+    ["mcp__index__list_intents<mcp__*"],
+  );
+  assert.deepEqual(shadowedTools(lines.slice(1)), []);
+});
 
-function write(name: string, value: unknown): string {
-  const path = join(dir, name);
-  writeFileSync(path, JSON.stringify(value), "utf8");
+test("the hook verdict reader names the classes of every allow line the hook writes", () => {
+  assert.deepEqual(readVerdict(0, "{}", "approval hook hermes: allow — autonomous: read.web (tools entry 8)\n").classes, ["read.web"]);
+  assert.deepEqual(
+    readVerdict(0, "{}", "approval hook hermes: allow — granted: network.call, exec.local needs no approval under this policy\n").classes,
+    ["network.call", "exec.local"],
+  );
+  const deny = readVerdict(2, "", "hook-class-human-only: class policy.core resolves to human-only");
+  assert.equal(deny.code, "hook-class-human-only");
+  assert.equal(deny.verdict, "deny");
+  // An exit 0 with no allow line is the CLI not running the hook at all: an error, never an allow.
+  assert.equal(readVerdict(0, "", "").verdict, "error");
+});
+
+test("the GATE line names both cores by label, and FAIL with the count", () => {
+  const meta = { core: "0.4.6", baselineCore: "0.4.6", coreLabel: "this build abc", baselineLabel: "npm 0.4.6", overlay: "f".repeat(40), baselineOverlay: "f".repeat(40) };
+  const summary = { calls: 2, recipes: 1, harness: 1, blocking: 1, allowlisted: 0, changed: 0, new: 0, removed: 0, unchanged: 1, columns: { home: 1 } };
+  assert.match(gateLine(meta, summary), /^CLASS-DIFF FAIL 1 BLOCKING: core 0\.4\.6 \(npm 0\.4\.6\) -> 0\.4\.6 \(this build abc\).*blocking by column: home 1$/u);
+});
+
+test("M-3 (c): ci.yml pins the gate's own files by sha256 and the corpus by its count, so a pruned corpus fails", () => {
+  const wf = parse(readFileSync(join(ROOT, ".github", "workflows", "ci.yml"), "utf8")) as {
+    jobs: Record<string, { env?: Record<string, string> }>;
+  };
+  const env = wf.jobs["overlay-recipes"]?.env ?? {};
+  const sha = (p: string) => createHash("sha256").update(readFileSync(join(ROOT, p))).digest("hex");
+  const pins: [string, string][] = [
+    ["PIN_CORPUS", "scripts/overlay-recipes/corpus.json"],
+    ["PIN_ALLOWLIST", "scripts/overlay-recipes/allowlist.json"],
+    ["PIN_CHECK", "scripts/overlay-recipes-check.mjs"],
+    ["PIN_BOX", "scripts/overlay-recipes-box.mjs"],
+    ["PIN_EXTRACT", "scripts/overlay-recipes-extract.mjs"],
+  ];
+  for (const [name, path] of pins) assert.equal(env[name], sha(path), `${name} pins ${path}`);
+  const corpus = JSON.parse(readFileSync(join(ROOT, "scripts", "overlay-recipes", "corpus.json"), "utf8")) as { recipes: unknown[] };
+  assert.equal(env["CORPUS_RECIPES"], String(corpus.recipes.length));
+  // B2: review-b's pruned corpus (63 -> 37) matches neither pin.
+  const pruned = JSON.stringify({ ...corpus, recipes: corpus.recipes.slice(0, 37) }, null, 2) + "\n";
+  assert.notEqual(createHash("sha256").update(pruned).digest("hex"), env["PIN_CORPUS"]);
+  assert.notEqual(String(37), env["CORPUS_RECIPES"]);
+});
+
+// --- box half: the real hook, a planted copy of this build --------------------------
+
+const scratch = mkdtempSync(join(tmpdir(), "class-diff-test-"));
+// The planted core and the boxes each get a directory of their own.
+const plantedRoot = mkdtempSync(join(tmpdir(), "class-diff-core-"));
+const planted = join(plantedRoot, "planted");
+const boxes = mkdtempSync(join(tmpdir(), "class-diff-boxes-"));
+const overlay = join(scratch, "overlay");
+after(() => {
+  for (const dir of [scratch, plantedRoot, boxes]) rmSync(dir, { recursive: true, force: true });
+});
+
+const baseCorpus = JSON.parse(readFileSync(join(ROOT, "scripts", "overlay-recipes", "corpus.json"), "utf8")) as {
+  overlay: Record<string, string>;
+  policy: { source: string; block: string; substitute: Record<string, string> };
+  recipes: { where: string; command: string }[];
+};
+const STAY = { where: "skills/edgeos/SKILL.md:65", command: "bun skills/edgeos/scripts/events.ts --when today" };
+const CURL = baseCorpus.recipes.find((r) => r.where.startsWith("skills/edgeos/SKILL.md") && r.command.startsWith("curl "))!;
+const PRE_FIX = { where: "skills/edgeos/SKILL.md:300", command: CURL.command.replace('--url "${EDGEOS_API_BASE', '"${EDGEOS_API_BASE') };
+
+before(() => {
+  mkdirSync(planted);
+  copyTree(join(ROOT, "dist"), join(planted, "dist"), { recursive: true });
+  copyTree(join(ROOT, "schema"), join(planted, "schema"), { recursive: true });
+  copyTree(join(ROOT, "package.json"), join(planted, "package.json"));
+  symlinkSync(join(ROOT, "node_modules"), join(planted, "node_modules"));
+  const plant = spawnSync(process.execPath, [join(ROOT, "tests", "fixtures", "class-diff", "plant.mjs"), planted, "PLANT_"], { encoding: "utf8" });
+  assert.equal(plant.status, 0, plant.stderr);
+  mkdirSync(join(overlay, "skills", "edgeos", "scripts"), { recursive: true });
+  mkdirSync(join(overlay, "workspace"), { recursive: true });
+  writeFileSync(join(overlay, "skills", "edgeos", "SKILL.md"), "# EdgeOS\n");
+  writeFileSync(join(overlay, "skills", "edgeos", "scripts", "events.ts"), "console.log(1);\n");
+  writeFileSync(join(overlay, "workspace", "README.md"), "# workspace\n");
+});
+
+function corpusWith(recipes: { where: string; command: string }[], block = baseCorpus.policy.block): string {
+  const path = join(scratch, `corpus-${String(Math.random()).slice(2)}.json`);
+  writeFileSync(path, JSON.stringify({ ...baseCorpus, policy: { ...baseCorpus.policy, block }, recipes }));
   return path;
 }
 
-const EMPTY_ALLOWLIST = write("allowlist.json", { entries: [] });
-const RESERVED_BLOCK = corpus.policy.block.replace(
-  /^(\s*)network\.call:(\s*)\{ autonomy: autonomous \}/mu,
-  "$1network.call:$2{ autonomy: human-only }",
-);
-
-function cli(baseline: Corpus, candidate: Corpus): { status: number | null; stdout: string; stderr: string } {
-  const out = spawnSync(
-    process.execPath,
-    [SCRIPT, "--core", ROOT, "--diff", ROOT, "--allowlist", EMPTY_ALLOWLIST, "--baseline-corpus", write("base.json", baseline), "--corpus", write("cand.json", candidate)],
-    { encoding: "utf8" },
+/** The --url curl is denied from the Hermes home at 0.4.6 (B-162): listed there only, accepted. */
+const allowlist = join(scratch, "allowlist.json");
+function writeAllowlist(): void {
+  writeFileSync(
+    allowlist,
+    JSON.stringify({
+      entries: [
+        { file: "skills/edgeos/SKILL.md", command: CURL.command, scope: "box", columns: ["hermes-home"], reason: "B-162 test entry: denied from the Hermes home", ...ACCEPTED },
+      ],
+    }),
   );
-  return { status: out.status, stdout: out.stdout, stderr: out.stderr };
 }
 
-test("CLI: the template fixture really reserves network.call", () => {
-  assert.notEqual(RESERVED_BLOCK, corpus.policy.block);
+function gate(env: Record<string, string>, opts: { corpus?: string; baselineCorpus?: string; core?: string } = {}): { status: number | null; out: string; err: string } {
+  writeAllowlist();
+  const corpus = opts.corpus ?? corpusWith([STAY, CURL]);
+  const box = mkdtempSync(join(boxes, "box-"));
+  const md = join(box, "report.md");
+  const run = spawnSync(
+    process.execPath,
+    [
+      SCRIPT,
+      "--core", opts.core ?? planted,
+      "--diff", ROOT,
+      "--corpus", corpus,
+      "--baseline-corpus", opts.baselineCorpus ?? corpus,
+      "--allowlist", allowlist,
+      "--overlay-tree", overlay,
+      "--box-root", box,
+      "--md", md,
+      // Sequential hook runs (the lead's load rule) over the harness tools the plants touch.
+      "--harness-only", "terminal,read_file,search_files,send_message,web_search,mcp__index__list_intents",
+    ],
+    { encoding: "utf8", env: { ...process.env, ...env } },
+  );
+  let report = "";
+  try {
+    report = readFileSync(md, "utf8");
+  } catch {
+    report = "(no report)";
+  }
+  return { status: run.status, out: report, err: run.stderr };
+}
+
+const BOX_TIMEOUT = { timeout: 600_000 };
+
+test("box control: the planted copy with every plant off passes, class-diff: none", BOX_TIMEOUT, () => {
+  const run = gate({});
+  assert.equal(run.status, 0, run.err);
+  assert.match(run.out, /^CLASS-DIFF PASS: .*class-diff: none/u);
 });
 
-test("CLI FLIP: a recipe moving auto -> human-only exits 1 with the BLOCKING row", () => {
-  const run = cli(fixture([STAYS]), fixture([STAYS], RESERVED_BLOCK));
-  assert.equal(run.status, 1, run.stderr);
-  assert.match(run.stdout, /CLASS-DIFF FAIL \d+ BLOCKING/u);
-  assert.match(run.stdout, /network\.call: auto \| network\.call: human-only/u);
-  assert.match(run.stderr, /move from running to a deny/u);
+const plants: [string, Record<string, string>, RegExp][] = [
+  ["P20 core's Hermes table: send_message -> policy.core", { PLANT_TOOL: "send_message=policy.core" }, /blocking by column: harness \d/u],
+  ["P22 the credential pass also fires from $HOME", { PLANT_CLASSIFY: "home-parent" }, /blocking by column: .*home \d/u],
+  ["P23 a rule keyed on APPROVAL_HERMES_HOME", { PLANT_CLASSIFY: "hosted" }, /blocking by column: .*home \d/u],
+  ["P24 a rule keyed on skills present on disk", { PLANT_CLASSIFY: "skills-present" }, /blocking by column: hermes-home \d/u],
+  ["P25 a rule keyed on non-empty readRoots", { PLANT_CLASSIFY: "readroots" }, /blocking by column: .*home \d/u],
+  ["P27 read_file's class goes human-only", { PLANT_RESOLVE: "read.file.out_of_scope=human-only" }, /blocking by column: harness \d/u],
+  ["P17 (S-4) network.call autonomous -> supervised-retro", { PLANT_RESOLVE: "network.call=supervised:retro" }, /CLASS-DIFF FAIL \d+ BLOCKING/u],
+];
+for (const [name, env, shape] of plants) {
+  test(`plant ${name}: the gate fails (exit 1)`, BOX_TIMEOUT, () => {
+    const run = gate(env);
+    assert.equal(run.status, 1, `${run.err}\n${run.out.slice(0, 400)}`);
+    assert.match(run.out, /^CLASS-DIFF FAIL \d+ BLOCKING/u);
+    assert.match(run.out.split("\n")[0] ?? "", shape);
+  });
+}
+
+test("T5 (M-2): a template line inserted first that shadows existing tools fails the gate", BOX_TIMEOUT, () => {
+  const shadowing = baseCorpus.policy.block.replace(/^tools:\n/mu, 'tools:\n  - { match: "mcp__*", class: account.credential }\n');
+  assert.notEqual(shadowing, baseCorpus.policy.block);
+  const run = gate({}, { core: ROOT, corpus: corpusWith([STAY, CURL], shadowing), baselineCorpus: corpusWith([STAY, CURL]) });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.out, /newly shadowed tools line/u);
+  assert.match(run.out, /mcp__index__list_intents/u);
 });
 
-test("CLI STAYS: the same corpus at the same core exits 0 and says class-diff: none", () => {
-  const run = cli(fixture([STAYS]), fixture([STAYS]));
-  assert.equal(run.status, 0, run.stderr);
-  assert.match(run.stdout, /CLASS-DIFF PASS: .*class-diff: none.*blocking by cwd: neutral 0, hermes-home 0/u);
-});
-
-test("CLI NEW: a new recipe exits 0 and is listed under New calls", () => {
-  const run = cli(fixture([STAYS]), fixture([STAYS, NEW]));
-  assert.equal(run.status, 0, run.stderr);
-  assert.match(run.stdout, /; 1 new, 0 removed/u);
-  assert.match(run.stdout, /### New calls \(reported, not gated\): 1/u);
+test("S-1: a shipped recipe the hook denies in the box fails with no diff move, unless listed", BOX_TIMEOUT, () => {
+  const run = gate({}, { core: ROOT, corpus: corpusWith([STAY, PRE_FIX]) });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.out, /class-diff: none/u);
+  assert.match(run.err, /denied by the real hook in the box layout/u);
 });
