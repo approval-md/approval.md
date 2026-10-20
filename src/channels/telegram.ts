@@ -253,7 +253,13 @@ import {
 } from "../core/prompt-layout.js";
 import { isAttestationActionKey } from "../core/policy-proposal.js";
 import { commandPayloadView, payloadRegionText } from "./payload-view.js";
-import { MINIMAL_DENY_LABEL, renderTelegramMinimal } from "./telegram-minimal.js";
+import {
+  detailsReplies,
+  renderTelegramMinimal,
+  MINIMAL_DENY_LABEL,
+  MINIMAL_DETAILS_ALREADY,
+  MINIMAL_DETAILS_LABEL,
+} from "./telegram-minimal.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -1385,16 +1391,19 @@ export function minimalSettleText(
   card: { headline: string; details: string },
 ): string {
   const head = [`<b>${escapeHtml(outcome)}</b>`, card.headline];
+  // APRV-531: a card whose rendering went on tap holds no collapsed block, so
+  // its settle edit is the outcome, the headline and the detail lines.
+  const tail = card.details.length === 0 ? [] : [card.details];
   // One unit throughout (fix round 2, S3): UTF-16 code units of the HTML,
   // which is what `.length` counts and never less than the parsed text
   // Telegram limits. The cut is taken between grapheme clusters of the
   // UNESCAPED text, so it never splits a surrogate pair, a cluster or an entity.
-  const fixed = [...head, card.details].join("\n").length + 1;
+  const fixed = [...head, ...tail].join("\n").length + 1;
   const room = Math.max(0, TELEGRAM_SETTLE_BUDGET - fixed);
   const raw = detail.join("\n");
   let lines = escapeHtml(raw);
   if (lines.length > room) lines = shortenHtml(raw, room, SETTLE_SHORTENED_MARK);
-  return [...head, ...(lines.length === 0 ? [] : [lines]), card.details].join("\n");
+  return [...head, ...(lines.length === 0 ? [] : [lines]), ...tail].join("\n");
 }
 
 /** What a shortened run of detail lines ends with. */
@@ -2100,6 +2109,36 @@ export function digestCallbackData(verb: "G" | "R", nonce: string): string {
 export function checkpointCallbackData(verb: "k" | "x", nonce: string): string {
   return `${verb}:${nonce}`;
 }
+
+/**
+ * `callback_data` for a minimal card's Full details button (APRV-531):
+ * `d:<nonce>`.
+ *
+ * A verb of its own, parsed by its own parser ahead of the decision
+ * vocabulary, for the reason the checkpoint verbs are: {@link CALLBACK_VERBS}
+ * has no `d`, so these bytes can never reach the decision path, and an unknown
+ * nonce here falls back to nothing (no action-reference lookup, no log probe).
+ * No action key and no reference: the tap names a card this process issued,
+ * and it decides nothing.
+ */
+export function detailsCallbackData(nonce: string): string {
+  return `d:${nonce}`;
+}
+
+/** `d:<nonce>`, or `null` for anything else. Never throws (APRV-531). */
+export function parseDetailsCallback(data: unknown): { nonce: string } | null {
+  if (typeof data !== "string" || !data.startsWith("d:")) return null;
+  const nonce = data.slice(2);
+  if (nonce.length === 0 || nonce.includes(":")) return null;
+  return { nonce };
+}
+
+/**
+ * What a Full details tap on a card this process is not holding answers
+ * (APRV-531): the card was settled, or the listener restarted. Nothing is sent.
+ */
+export const TELEGRAM_DETAILS_GONE =
+  "This card is no longer open here, so its full details cannot be sent from it.";
 
 /** `k:<nonce>` / `x:<nonce>`, or `null` for anything else. Never throws. */
 export function parseCheckpointCallback(
@@ -3250,6 +3289,12 @@ interface Delivery {
    * the settle edit can keep them. Absent on every technical card.
    */
   card?: { headline: string; details: string };
+  /**
+   * A minimal card drawn without its collapsed block (APRV-531): the canonical
+   * rendering its Full details tap sends, and whether it has been sent. Process
+   * memory only; nothing in it is ever read as an answer or reaches the log.
+   */
+  detailsOnTap?: { rendering: string; sent: boolean };
 }
 
 /**
@@ -4006,6 +4051,7 @@ export class TelegramChannel implements TestableChannel {
     let sent: { deliveryId: DeliveryId; rendered: RenderedRequest };
     let rendering: PromptRendering | undefined;
     let card: { headline: string; details: string } | undefined;
+    let detailsOnTap: { rendering: string; sent: boolean } | undefined;
     const prompt = this.currentPrompt();
     // Fix round 2, B2: a request delivered as part of a batch is always the
     // technical card, as SPEC §10.3 (amended) says of a grouped delivery.
@@ -4022,6 +4068,7 @@ export class TelegramChannel implements TestableChannel {
       // R3-S1: the record notes a `say` phrase the runtime overrode with its own.
       rendering = minimal.sayDoesIgnored ? { style: "minimal", say_does_ignored: true } : { style: "minimal" };
       card = minimal.card;
+      if (minimal.onTap !== undefined) detailsOnTap = { rendering: minimal.onTap.rendering, sent: false };
       if (minimal.sayDoesIgnored) {
         this.complain(
           `approval: telegram drew its own phrase for ${actionKey}, not the say entry's does: the runtime reads this payload itself`,
@@ -4047,6 +4094,7 @@ export class TelegramChannel implements TestableChannel {
       ...(batchDeliveryId === undefined ? {} : { batchDeliveryId }),
       ...(rendering === undefined ? {} : { rendering }),
       ...(card === undefined ? {} : { card }),
+      ...(detailsOnTap === undefined ? {} : { detailsOnTap }),
     });
 
     return {
@@ -4077,6 +4125,7 @@ export class TelegramChannel implements TestableChannel {
         sent: { deliveryId: DeliveryId; rendered: RenderedRequest };
         card: { headline: string; details: string };
         sayDoesIgnored: boolean;
+        onTap?: { rendering: string };
       }
     | { ok: false; reason: string }
   > {
@@ -4107,6 +4156,11 @@ export class TelegramChannel implements TestableChannel {
             [
               { text: "✅ Approve", callback_data: callbackData("g", nonce, actionKey) },
               { text: MINIMAL_DENY_LABEL, callback_data: callbackData("r", nonce, actionKey) },
+              // APRV-531: the third control, on a card that does not hold the
+              // rendering. It sends nothing to the gate.
+              ...(drawn.onTap === undefined
+                ? []
+                : [{ text: MINIMAL_DETAILS_LABEL, callback_data: detailsCallbackData(nonce) }]),
             ],
             ...this.studyRows(nonce, request),
           ],
@@ -4134,6 +4188,7 @@ export class TelegramChannel implements TestableChannel {
       },
       card: { headline: drawn.headline, details: drawn.details },
       sayDoesIgnored: drawn.sayDoesIgnored === true,
+      ...(drawn.onTap === undefined ? {} : { onTap: drawn.onTap }),
     };
   }
 
@@ -5034,6 +5089,15 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
+    // APRV-531, before the decision vocabulary and in a parser of its own: a
+    // Full details tap decides nothing, so it must never reach the ladder
+    // below, and it never reaches any handler.
+    const details = parseDetailsCallback(query["data"]);
+    if (details !== null) {
+      await this.handleDetailsTap(details.nonce, callbackId, result);
+      return;
+    }
+
     // The study verb `w` parses only when this listener was launched in study
     // mode; otherwise it is malformed below, exactly as before it existed.
     const parsed = parseCallbackData(query["data"], this.study);
@@ -5423,6 +5487,51 @@ export class TelegramChannel implements TestableChannel {
    */
   private answerFor(outcome: { code: string }): string {
     return refusedDecisionLine(outcome.code);
+  }
+
+  /**
+   * A Full details tap (APRV-531, SPEC.md §10.3 amended): send the canonical
+   * rendering of the card's request whole, byte for byte, as replies threaded
+   * to the card, or say it is already above.
+   *
+   * Nothing here reaches a handler or the log: no decision, no gate call, no
+   * append. The replies carry no `reply_markup`, so a decision is collected
+   * only on the card. The tap is answered first, so the spinner stops while
+   * the replies go out; `sent` is set only once every reply has gone, so a
+   * send that failed halfway is sent again whole on the next tap.
+   */
+  private async handleDetailsTap(
+    nonce: string,
+    callbackId: string,
+    result: TelegramPollResult,
+  ): Promise<void> {
+    const delivery = this.deliveries.get(nonce);
+    const details = delivery?.detailsOnTap;
+    if (delivery === undefined || details === undefined) {
+      await this.ignore(
+        result,
+        callbackId,
+        "unknown-callback",
+        `details nonce ${JSON.stringify(nonce)} names no open card holding its details on tap`,
+        TELEGRAM_DETAILS_GONE,
+      );
+      return;
+    }
+    if (details.sent) {
+      await this.safeAnswer(callbackId, MINIMAL_DETAILS_ALREADY);
+      return;
+    }
+    await this.safeAnswer(callbackId, "");
+    for (const text of detailsReplies(details.rendering)) {
+      await this.call("sendMessage", {
+        chat_id: this.chatId,
+        text,
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+        reply_parameters: { message_id: Number(delivery.deliveryId) },
+      });
+    }
+    details.sent = true;
   }
 
   /**

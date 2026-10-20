@@ -4348,11 +4348,34 @@ so on stderr:
 - a request delivered as part of a batch: a digest, its members, the collapsed
   stale-request summary, and a batch whose digest did not fit or has one member;
 - a card over 3800 characters (Telegram's limit is 4096, and a relay's
-  `Agent: <name>` line needs room): the canonical rendering is never cut to fit;
+  `Agent: <name>` line needs room): the canonical rendering is never cut to fit.
+  One exception, below: a declared class keeps the simple card;
 - a policy file that does not match its attestation (`policy-unattested`);
 - a minimal card the Bot API or a relay refuses (any 4xx but 429): the
   technical card is sent once instead (`send-refused`); a 429, a 5xx or a
   network failure is retried by the next cycle as before.
+
+**Full details on tap (APRV-531, SPEC.md §10.3 amended, pending attestation).**
+A request whose class is declared (an opaque payload whose every top-level key
+the class's `say.quote` names) and that is too long ONLY for size keeps the
+simple card. The card has the same headline, quotations, claimed lines and
+deadline; in place of the collapsed block it says "This request is too long to
+show here. Tap Full details to read all of it before you decide.", and it
+carries three buttons: ✅ Approve, ✋ Deny and 📄 Full details. Approve and Deny
+are the usual buttons. Full details decides nothing and appends nothing to the
+log: its tap sends the canonical rendering whole, byte for byte, as replies to
+the card (Telegram's `reply_parameters`), split into as many messages as
+Telegram needs, each under the limit and cut between characters, never inside
+one. The first reply opens with "Full details of the request above:" and the
+last closes with "End of full details. Approve or Deny on the card above.". The
+replies carry no buttons. A second tap sends nothing and answers "Already sent
+above.". The decision is bound to the same `display_hash` as from the technical
+card, and the record says `{"style": "minimal"}`. The settle edit turns the card
+into its outcome and headline with the detail lines, and removes all three
+buttons; the replies stay as sent. A command, a file change or an email that is
+too long, and any request under the other cases above, still get the technical
+card. A relay must forward `reply_parameters` for the replies to be threaded
+under the card.
 
 When the edit that settles a minimal card is refused (it replaces the only
 message holding the request), a short settle text with the outcome, the
