@@ -4815,7 +4815,14 @@ const SUITES = [
     // for the same reason as every bump here: the vector pins the whole array
     // in definition order. If another lane's major merges first, the collision
     // rule above applies and this takes the next major on regeneration.
-    vectors_version: "29.0.0",
+    //
+    // 30.0.0 (amended SPEC.md §8, the study record): `channel_decision_refusal_codes`
+    // gains `study-reason-not-channel`, the refusal a channel gets for a
+    // gesture carrying a study reason other than `looks_wrong`. A surface code:
+    // `decide` is never called for it and nothing is appended. Major for the
+    // reason 28.0.0 was. If another lane's major merges first, the collision
+    // rule above applies and this takes the next major on regeneration.
+    vectors_version: "30.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -5056,7 +5063,17 @@ const SUITES = [
     // boolean custody, an unknown key under `exec.code`, an `execute_code`
     // value outside its enum). No existing expectation moves: the key is
     // OPTIONAL, and its absence is the closed answer.
-    vectors_version: "3.4.0",
+    // 3.5.0 (amended SPEC.md §8, the study record): a MINOR bump. Thirteen new
+    // fixtures for `payload.study`: two accepted `approval.rejected` records
+    // (a `study_withdrawn` under `human:study-team` on channel `study`, and a
+    // resident's `looks_wrong` on `telegram`) and eleven refused (the field on
+    // `approval.granted` and on `approval.revoked`, an unknown reason, an
+    // extra key, a withdrawal with no operator, with no ref, with an email for
+    // an operator, under another actor and on another channel, and a
+    // `looks_wrong` naming an operator or arriving on `cli`). No existing
+    // expectation moves: the field is OPTIONAL, and every record written
+    // before it validates exactly as it did.
+    vectors_version: "3.5.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",
