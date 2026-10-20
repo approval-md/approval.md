@@ -19,6 +19,12 @@
  * goes human-only), P17 (network.call autonomous -> supervised-retro), T5 (a
  * template tools line that shadows an existing tool), and S-1 (a shipped
  * recipe the hook denies in the box, with no diff move).
+ *
+ * Fold 3 (review-b recheck of bd75c4a6): a card's request is bound to its call
+ * by the key the deny names, else by tool and command (S-5: renamed or swapped
+ * task ids read right; a card whose request is not found exits 2); a sampling
+ * secret name that is a layout or runtime variable exits 2 (N-7); the minimal
+ * rule compares per class (N-8).
  */
 
 import assert from "node:assert/strict";
@@ -36,11 +42,19 @@ import {
   diffCalls,
   entryMatches,
   gateLine,
+  leftMinimal,
   shadowedTools,
   // @ts-expect-error no declaration file for the standalone check script
 } from "../../scripts/overlay-recipes-check.mjs";
-// @ts-expect-error no declaration file for the standalone box runner
-import { readVerdict } from "../../scripts/overlay-recipes-box.mjs";
+import {
+  bindRequest,
+  boxEnv,
+  readVerdict,
+  reservedEnvName,
+  summaryFits,
+  timeoutKeys,
+  // @ts-expect-error no declaration file for the standalone box runner
+} from "../../scripts/overlay-recipes-box.mjs";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const SCRIPT = join(ROOT, "scripts", "overlay-recipes-check.mjs");
@@ -160,6 +174,72 @@ test("the hook verdict reader names the classes of every allow line the hook wri
   assert.equal(readVerdict(0, "", "").verdict, "error");
 });
 
+// --- fold 3: a card's request is bound to its call (S-5); the secret name (N-7); per-class style (N-8)
+
+const DENY = (keys: string) =>
+  `{"action":"block","message":"hook-timeout: no decision on ${keys} within the hook's 200ms wait. This tool call is denied"}\napproval: x (network.call) is waiting for a human`;
+const CMD = 'curl -s -H "A: b"    --url "https://example.com/x"';
+const req = (at: number, task: string, cls: string, summary = 'curl -s -H "A: b" --url "https://example.com/x"') => [
+  { at, event: "task.registered", task, key: `${task}:${cls}`, cls, summary },
+  { at: at + 1, event: "approval.requested", task, key: `${task}:${cls}`, cls, summary },
+];
+
+test("S-5: the request keys are read off the hook-timeout deny sentence only", () => {
+  assert.deepEqual(timeoutKeys(DENY("hook:s:cd-4:read.web, hook:s:cd-4:read.file.out_of_scope")), ["hook:s:cd-4:read.web", "hook:s:cd-4:read.file.out_of_scope"]);
+  assert.deepEqual(timeoutKeys("approval: hook:s:cd-1:network.call (network.call) is waiting for a human"), []);
+  assert.deepEqual(timeoutKeys("hook-timeout: no decision on  within the hook's 200ms wait"), []);
+});
+
+test("S-5: a terminal summary is the command with whitespace collapsed, cut with an ellipsis; other tools by name", () => {
+  assert.equal(summaryFits('curl -s -H "A: b" --url "https://example.com/x"', "terminal", { command: CMD }), true);
+  assert.equal(summaryFits('curl -s -H "A: b" --url "https://exa…', "terminal", { command: CMD }), true);
+  assert.equal(summaryFits("curl -s https://other", "terminal", { command: CMD }), false);
+  assert.equal(summaryFits("send_message (message.send)", "send_message", {}), true);
+  assert.equal(summaryFits("send_message (message.send)", "read_file", {}), false);
+});
+
+test("S-5: a card binds to the request its deny names, or by tool and command to what it appended; else an error", () => {
+  const call = { tool: "terminal", input: { command: CMD }, span: [10, 20] };
+  // The deny names the key: bound, wherever in the store it sits (an adopted request is an earlier call's).
+  const store = [...req(0, "hook:s:cd-1", "network.call"), ...req(10, "hook:s:cd-2-renamed", "network.call")];
+  assert.deepEqual(bindRequest({ ...call, text: DENY("hook:s:cd-1:network.call") }, store), { task: "hook:s:cd-1", classes: ["network.call"] });
+  assert.deepEqual(bindRequest({ ...call, text: DENY("hook:s:cd-2-renamed:network.call") }, store).task, "hook:s:cd-2-renamed");
+  // A key the store does not hold: error.
+  assert.match(bindRequest({ ...call, text: DENY("hook:s:cd-9:network.call") }, store).error, /does not hold/u);
+  // No key in the deny: only what this call appended (span), by tool and command.
+  assert.equal(bindRequest({ ...call, text: "" }, store).task, "hook:s:cd-2-renamed");
+  assert.match(bindRequest({ ...call, text: "", span: [30, 40] }, store).error, /no request/u);
+  assert.match(bindRequest({ ...call, text: "", span: [0, 20] }, store).error, /2 requests/u);
+  // Keys of two tasks for one call: error.
+  assert.match(bindRequest({ ...call, text: DENY("hook:s:cd-1:network.call, hook:s:cd-2-renamed:network.call") }, store).error, /2 requests/u);
+  // The named request is another call's (another command): error.
+  const other = req(0, "hook:s:cd-1", "network.call", "curl -s https://other");
+  assert.match(bindRequest({ ...call, text: DENY("hook:s:cd-1:network.call") }, other).error, /another call/u);
+});
+
+test("N-7: a sampling secret name never replaces the box layout or the runtime", () => {
+  for (const name of ["HOME", "HERMES_HOME", "APPROVAL_HERMES_HOME", "APPROVAL_ANYTHING", "PATH", "NODE_OPTIONS", "A-B", ""]) assert.equal(reservedEnvName(name), true, name);
+  assert.equal(reservedEnvName("CLASS_DIFF_SAMPLING_SECRET"), false);
+  const env = boxEnv("/box/home", "/box/home/.hermes", { HOME: "/elsewhere", HERMES_HOME: "/x", APPROVAL_HERMES_HOME: "/y", SAMPLING: "fixed" }) as Record<string, string>;
+  assert.equal(env["HOME"], "/box/home");
+  assert.equal(env["HERMES_HOME"], "/box/home/.hermes");
+  assert.equal(env["APPROVAL_HERMES_HOME"], "/box/home/.hermes");
+  assert.equal(env["SAMPLING"], "fixed");
+});
+
+test("N-8: a class whose card leaves minimal blocks, even when another class keeps the joined style minimal", () => {
+  const was = { decision: "card", level: "manual", rank: 1, classes: ["a.x", "b.y"], style: "minimal", styles: { "a.x": "minimal", "b.y": "minimal" } };
+  const now = { ...was, style: "minimal+technical (undeclared)", styles: { "a.x": "minimal", "b.y": "technical (undeclared)" } };
+  assert.deepEqual(leftMinimal(was.styles, now.styles), ["b.y"]);
+  assert.equal((diffCalls([call("two", was)], [call("two", now)]) as Diff).rows[0]?.status, "blocking");
+  // A swap of styles between classes leaves the joined string as it was: still blocking.
+  const mixed = { ...was, style: "minimal+technical (undeclared)", styles: { "a.x": "minimal", "b.y": "technical (undeclared)" } };
+  const swapped = { ...mixed, styles: { "a.x": "technical (undeclared)", "b.y": "minimal" } };
+  assert.equal((diffCalls([call("sw", mixed)], [call("sw", swapped)]) as Diff).rows[0]?.status, "blocking");
+  // Unchanged per class: unchanged.
+  assert.equal((diffCalls([call("same", now)], [call("same", now)]) as Diff).rows[0]?.status, "unchanged");
+});
+
 test("the GATE line names both cores by label, and FAIL with the count", () => {
   const meta = { core: "0.4.6", baselineCore: "0.4.6", coreLabel: "this build abc", baselineLabel: "npm 0.4.6", overlay: "f".repeat(40), baselineOverlay: "f".repeat(40) };
   const summary = { calls: 2, recipes: 1, harness: 1, blocking: 1, allowlisted: 0, changed: 0, new: 0, removed: 0, unchanged: 1, columns: { home: 1 } };
@@ -245,7 +325,7 @@ function writeAllowlist(): void {
 
 function gate(
   env: Record<string, string>,
-  opts: { corpus?: string; baselineCorpus?: string; core?: string; concurrency?: number } = {},
+  opts: { corpus?: string; baselineCorpus?: string; core?: string; baseline?: string; concurrency?: number } = {},
 ): { status: number | null; out: string; err: string } {
   writeAllowlist();
   const corpus = opts.corpus ?? corpusWith([STAY, CURL]);
@@ -256,7 +336,7 @@ function gate(
     [
       SCRIPT,
       "--core", opts.core ?? planted,
-      "--diff", ROOT,
+      "--diff", opts.baseline ?? ROOT,
       "--corpus", corpus,
       "--baseline-corpus", opts.baselineCorpus ?? corpus,
       "--allowlist", allowlist,
@@ -364,4 +444,70 @@ test("N-6: carded calls at box concurrency 4 read no false refusal (one store pe
   const run = gate({}, { core: ROOT, corpus: corpusWith([STAY, CURL], MANUAL), baselineCorpus: corpusWith([STAY, CURL], MANUAL), concurrency: 4 });
   assert.equal(run.status, 0, run.err);
   assert.doesNotMatch(`${run.out}${run.err}`, /append-failed/u);
+});
+
+// --- fold 3: a card's request bound to its call (review-b S-5), the secret name (N-7) ---------
+
+// Both sides on the planted copy (the plant's env reaches both cores' hooks), or head only.
+const both = () => ({ core: planted, baseline: planted });
+
+test("S-5: both cores rename their tasks (review-b K2) and the card falls minimal -> technical: the move blocks (fold 2: rc 0, none)", BOX_TIMEOUT, () => {
+  const run = gate({ PLANT_TASK: "suffix:-v2" }, { ...both(), corpus: corpusWith([STAY, CURL], MANUAL_NO_SAY), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.out, /minimal card .*technical \(undeclared\) card/u);
+});
+
+test("S-5: the head core alone renames its tasks, no template move: class-diff none (fold 2: every card read 'changed')", BOX_TIMEOUT, () => {
+  const run = gate({ PLANT_TASK: "suffix:-v2" }, { core: planted, corpus: corpusWith([STAY, CURL], MANUAL), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
+  assert.equal(run.status, 0, run.err);
+  assert.match(run.out, /^CLASS-DIFF PASS: .*class-diff: none/u);
+});
+
+test("S-5 (a): both cores log the card's request under a key their deny does not name: the gate errors, exit 2 (never none)", BOX_TIMEOUT, () => {
+  const run = gate({ PLANT_DENYKEY: "suffix:-renamed" }, { ...both(), corpus: corpusWith([STAY, CURL], MANUAL_NO_SAY), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
+  assert.equal(run.status, 2, `${run.err}\n${run.out.slice(0, 400)}`);
+  assert.match(run.err, /card-request-unbound: the hook names request hook:class-diff:cd-\d+:network\.call-renamed, which this call's store does not hold/u);
+});
+
+test("S-5 (a): the head core alone names a request its store does not hold: exit 2", BOX_TIMEOUT, () => {
+  const run = gate({ PLANT_DENYKEY: "suffix:-renamed" }, { core: planted, corpus: corpusWith([STAY, CURL], MANUAL), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
+  assert.equal(run.status, 2, `${run.err}\n${run.out.slice(0, 400)}`);
+  assert.match(run.err, /card-request-unbound/u);
+});
+
+test("S-5 (b): both cores swap task ids between calls (review-b K6): each card binds to its own request, the same moves block", BOX_TIMEOUT, () => {
+  const plain = gate({}, { core: ROOT, corpus: corpusWith([STAY, CURL], MANUAL_NO_SAY), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
+  const run = gate({ PLANT_TASK: "swap" }, { ...both(), corpus: corpusWith([STAY, CURL], MANUAL_NO_SAY), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
+  assert.equal(plain.status, 1, plain.err);
+  assert.equal(run.status, 1, run.err);
+  const blocking = (out: string) => (out.split("\n")[0] ?? "").match(/FAIL (\d+) BLOCKING/u)?.[1];
+  assert.equal(blocking(run.out), blocking(plain.out));
+  assert.doesNotMatch(run.out, /Changed, not less autonomy/u);
+});
+
+test("S-5 (b): a deny that names no request key binds by tool and command to what the call appended", BOX_TIMEOUT, () => {
+  const run = gate({ PLANT_DENYKEY: "none" }, { ...both(), corpus: corpusWith([STAY, CURL], MANUAL_NO_SAY), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.out, /minimal card .*technical \(undeclared\) card/u);
+});
+
+const withSecret = (block: string, name: string): string => {
+  assert.doesNotMatch(block, /^audit:/mu);
+  return `${block.trimEnd()}\naudit:\n  sampling_secret_env: ${name}\n`;
+};
+
+test("N-7: a template naming a box layout or runtime variable as its sampling secret: exit 2", BOX_TIMEOUT, () => {
+  for (const name of ["HOME", "APPROVAL_HERMES_HOME", "PATH"]) {
+    const corpus = corpusWith([STAY, CURL], withSecret(MANUAL, name));
+    const run = gate({}, { core: ROOT, corpus, baselineCorpus: corpus });
+    assert.equal(run.status, 2, `${name}: ${run.err}`);
+    assert.match(run.err, /sampling_secret_env .*a box layout or runtime variable/u, name);
+  }
+});
+
+test("N-7 control: a plain sampling secret name passes, class-diff: none", BOX_TIMEOUT, () => {
+  const corpus = corpusWith([STAY, CURL], withSecret(MANUAL, "CLASS_DIFF_SAMPLING_SECRET"));
+  const run = gate({}, { core: ROOT, corpus, baselineCorpus: corpus });
+  assert.equal(run.status, 0, run.err);
+  assert.match(run.out, /^CLASS-DIFF PASS: .*class-diff: none/u);
 });

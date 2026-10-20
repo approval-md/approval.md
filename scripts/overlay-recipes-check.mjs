@@ -233,10 +233,13 @@ export function decideBoxCall(core, load, call) {
   else if (call.code === "hook-class-human-only") decision = "human-only";
   else if (call.code === "hook-timeout") decision = strictest.level.startsWith("supervised-live") ? "sampled" : "card";
   else decision = "refused";
-  const style =
+  // Each carded class's style (fold 3, N-8: the minimal rule compares per class),
+  // and the card's joined style for the report.
+  const styles =
     decision === "card" || decision === "sampled"
-      ? [...new Set(levels.filter((l) => l.rank < 3).map((l) => cardStyle(core, load, l.cls)))].sort().join("+") || null
-      : null;
+      ? Object.fromEntries(levels.filter((l) => l.rank < 3).map((l) => [l.cls, cardStyle(core, load, l.cls)]).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : {};
+  const style = [...new Set(Object.values(styles))].sort().join("+") || null;
   return {
     key: call.key,
     column: call.column,
@@ -250,6 +253,7 @@ export function decideBoxCall(core, load, call) {
     level: DENIES.has(decision) ? null : strictest.level,
     rank: DENIES.has(decision) ? -1 : decision === "card" && call.classes.length === 0 ? 1 : strictest.rank,
     style,
+    styles,
     detail: call.detail,
   };
 }
@@ -279,8 +283,14 @@ const pick = (c) => ({
   level: c.level ?? null,
   rank: c.rank,
   style: c.style ?? null,
+  styles: c.styles ?? {},
   where: c.where,
 });
+
+/** Classes whose card was minimal and now carries another style (both sides carded). */
+export function leftMinimal(was = {}, now = {}) {
+  return Object.keys(was ?? {}).filter((cls) => was[cls] === "minimal" && typeof now?.[cls] === "string" && now[cls] !== "minimal");
+}
 
 /**
  * Join the baseline side and this side into the diff. Pure. Each call carries
@@ -303,13 +313,17 @@ export function diffCalls(baselineCalls, calls, allowlist = { entries: [] }) {
       was.decision !== now.decision ||
       (was.code ?? null) !== (now.code ?? null) ||
       (was.level ?? null) !== (now.level ?? null) ||
-      (was.style ?? null) !== (now.style ?? null);
+      (was.style ?? null) !== (now.style ?? null) ||
+      JSON.stringify(was.styles ?? {}) !== JSON.stringify(now.styles ?? {});
     let status = "unchanged";
     if (!DENIES.has(was.decision) && rankOf(now) < rankOf(was)) status = "blocking";
     // Fold 2 (S-4): a card the resident read in plain words that now arrives as
     // the technical card is a resident-visible regression too (the APPROVAL-UX
     // undeclared-class fallback): blocking, unless accepted.
     else if (!DENIES.has(now.decision) && /minimal/u.test(was.style ?? "") && !/minimal/u.test(now.style ?? "") && now.style !== null) status = "blocking";
+    // Fold 3 (N-8): per class, so a two-class card whose second class leaves
+    // minimal ("minimal" -> "minimal+technical (undeclared)") blocks too.
+    else if (!DENIES.has(now.decision) && leftMinimal(was.styles, now.styles).length > 0) status = "blocking";
     else if (moved) status = "changed";
     const row = { status, column, kind: now.kind, where: now.where, command: now.command, old: pick(was), new: pick(now) };
     if (status === "blocking") {
@@ -488,6 +502,8 @@ export async function decideInBox({ core, corpus, overlayTree, boxRoot, toolsLin
   // secret. When it names none (the overlay template today), live selection
   // fails closed and every live call cards, exactly as on a real box.
   const secretEnv = load.policy.audit?.sampling_secret_env;
+  // A name that would replace the box layout or the runtime is refused by
+  // runBox (fold 3, N-7), and the gate exits 2.
   const extraEnv = typeof secretEnv === "string" && secretEnv.length > 0 ? { [secretEnv]: "class-diff-fixed-sampling-value-not-a-secret" } : {};
   const ran = await runBox({ coreRoot: core.root, corpus, policyText: policyTextOf(corpus), overlayTree, boxRoot, toolsLines, concurrency, harnessOnly, extraEnv });
   if ("error" in ran) return ran;

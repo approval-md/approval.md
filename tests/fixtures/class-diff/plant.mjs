@@ -61,4 +61,33 @@ function hermesToolRule(toolName, toolInput) {
   return hermesToolRule__orig(toolName, toolInput);
 }
 function hermesToolRule__orig(toolName, toolInput) {`);
+// Fold 3 (S-5), after review-b's recheck tool plant-task.mjs: env ${P}TASK changes
+// the task id the Hermes hook mints ("suffix:<s>" renames every task; "swap"
+// trades cd-N with cd-(N+-4) in blocks of 8; "const:<id>" puts every call under
+// one task), so the request lands where a runner guessing the id would miss it.
+edit("dist/src/cli/hook.js", "`hook:${input.sessionId}:${input.toolUseId ?? randomBytes(8).toString(\"hex\")}`;",
+`((__id) => { /* PLANTED (refuter scratch): env ${P}TASK */
+          const spec = process.env["${P}TASK"] ?? "";
+          if (spec.startsWith("suffix:")) return __id + spec.slice(7);
+          if (spec === "swap") { const m = /^(hook:[^:]*:cd-)(\\d+)$/u.exec(__id); if (m) { const n = Number(m[2]); return m[1] + String((n - 1) % 8 < 4 ? n + 4 : n - 4); } }
+          if (spec.startsWith("const:")) return "hook:" + input.sessionId + ":" + spec.slice(6);
+          return __id; })(\`hook:\${input.sessionId}:\${input.toolUseId ?? randomBytes(8).toString("hex")}\`);`);
+// env ${P}DENYKEY changes the request keys a hook-timeout deny names, not the
+// log: "suffix:<s>" names keys the store does not hold, "none" names no key.
+{
+  const p = join(root, "dist/src/cli/hook.js");
+  const from = "${waitKeys.join(\", \")}";
+  const t = readFileSync(p, "utf8");
+  if (t.split(from).length < 3) throw new Error("anchor missing in dist/src/cli/hook.js: waitKeys");
+  writeFileSync(p, t.replaceAll(from, "${__plantDenyKeys(waitKeys).join(\", \")}") +
+`
+// PLANTED (refuter scratch): env ${P}DENYKEY
+function __plantDenyKeys(keys) {
+  const spec = process.env["${P}DENYKEY"] ?? "";
+  if (spec.startsWith("suffix:")) return keys.map((k) => k + spec.slice(7));
+  if (spec === "none") return [];
+  return keys;
+}
+`);
+}
 console.log("planted", root, P);

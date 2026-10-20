@@ -273,8 +273,8 @@ jobs:
       CORPUS_RECIPES: "63"
       PIN_CORPUS: "069cae876367a6c65613a645bbece0212583dde3d6e186454d5d4a9f287cb1c4"
       PIN_ALLOWLIST: "4900f8812ad273f6dffde7ade0cec2c2303b7a1b0633ab3608d8dcdc7f9bc862"
-      PIN_CHECK: "573dab3f5a8336a4ba43d3e8699a0fcb4c28aa1317e001c2bf792a9b67105caf"
-      PIN_BOX: "7cbe500feabbaac534ee132fd8fe572c8df004014e78e13ad38eb1dbc79c52d2"
+      PIN_CHECK: "d7a4ceefc53a9a12041b1e5faada7aa82bbc07526df32a7ad995d270d7355814"
+      PIN_BOX: "7cafbdff0cecc2bd7ebdede2bd3e8e6247e3d0e710fd8c909eff79335507bc05"
       PIN_EXTRACT: "d20bad05e8a81408fa3ee2a69bd14212f01170553a8a27c3e992908df9accfa6"
     steps:
       # Depth 2: HEAD^1 is the base the change is measured against (a pull

@@ -107,6 +107,18 @@ before a tag.
   The box exports a fixed sampling value when the template names
   `audit.sampling_secret_env`. Each concurrent worker has its own store, so
   a lost log race can no longer read as a refusal.
+- **A card's request is bound to its call (B-167 fold 3).**
+  - The runner takes the request key from the hook's own `hook-timeout` deny,
+    looks it up in that call's store, and checks it against the call's tool and
+    command. It no longer guesses the task id.
+  - When the deny names no key, it matches by tool and command among what the
+    call appended.
+  - A card whose request cannot be bound is an error, and the gate exits 2.
+    A renamed or swapped task id is read correctly, and a card can no longer
+    fall to "class-diff: none".
+  - The sampling secret name may not be a box layout or runtime variable
+    (HOME, HERMES_HOME, PATH, `APPROVAL_*`, `NODE_*`); naming one exits 2.
+  - The minimal -> technical card rule compares per class.
 
 ## 0.4.6 — 2026-10-18
 

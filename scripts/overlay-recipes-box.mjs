@@ -22,11 +22,13 @@
  *
  * Each call's verdict is read off the hook: exit 0 is an allow (its stderr
  * names the classes), exit 2 a deny with its code. A deny with `hook-timeout`
- * is a card (the hook opened a request and nobody tapped in 200 ms).
+ * is a card (the hook opened a request and nobody tapped in 200 ms); its
+ * classes come from that request, bound to the call by the key the deny names
+ * (fold 3, S-5), and a card whose request cannot be bound is an error.
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** Envelopes for core's own Hermes tools, with inputs a box sees. `$HH` and `$WS` are filled per box. */
@@ -95,37 +97,116 @@ export function readVerdict(status, stdout, stderr) {
   return { verdict: status === 2 ? "deny" : "error", code, classes: cls === undefined ? [] : [cls], reason: "" };
 }
 
-/** task -> the classes its request registered, read from each store's log. */
-export function requestedClasses(stores) {
-  const out = new Map();
-  for (const store of stores) {
-    const log = join(store, ".approval", "log", "events.jsonl");
-    if (!existsSync(log)) continue;
-    for (const line of readFileSync(log, "utf8").split("\n")) {
-      if (line.trim() === "") continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (typeof event.task !== "string") continue;
-      const add = (cls) => {
-        if (typeof cls !== "string") return;
-        if (!out.has(event.task)) out.set(event.task, new Set());
-        out.get(event.task).add(cls);
-      };
-      if (event.event === "task.registered") for (const action of event.payload?.actions ?? []) add(action.class);
-      if (event.event === "approval.requested") add(event.payload?.class);
+const logPath = (store) => join(store, ".approval", "log", "events.jsonl");
+
+/**
+ * Every request a store's log holds, one row per action: the byte offset of its
+ * line, its event, task, action key, class and summary. `task.registered` rows
+ * come from its actions (key = `idempotency_key`), `approval.requested` rows
+ * from the event (key = `action_key`).
+ */
+export function readRequests(store) {
+  const log = logPath(store);
+  if (!existsSync(log)) return [];
+  const buf = readFileSync(log);
+  const out = [];
+  let at = 0;
+  while (at < buf.length) {
+    const nl = buf.indexOf(10, at);
+    const end = nl === -1 ? buf.length : nl;
+    const line = buf.subarray(at, end).toString("utf8");
+    let event = null;
+    try {
+      event = line.trim() === "" ? null : JSON.parse(line);
+    } catch {
+      event = null;
     }
+    if (event !== null && typeof event.task === "string") {
+      if (event.event === "task.registered") {
+        for (const a of event.payload?.actions ?? []) out.push({ at, event: event.event, task: event.task, key: a?.idempotency_key ?? null, cls: a?.class ?? null, summary: a?.summary ?? null });
+      }
+      if (event.event === "approval.requested") {
+        out.push({ at, event: event.event, task: event.task, key: event.action_key ?? null, cls: event.payload?.class ?? null, summary: event.payload?.summary ?? null });
+      }
+    }
+    at = end + 1;
   }
   return out;
 }
 
-function boxEnv(home, hh, extra) {
+/**
+ * The request keys a `hook-timeout` deny names ("no decision on K1, K2 within
+ * ..."), read from the deny sentence only: the hook never echoes the command
+ * there, so a recipe cannot plant a key.
+ */
+export function timeoutKeys(text) {
+  const m = text.match(/hook-timeout: (?:no decision on|the caller that asked went away before) ([^\s,"]+(?:, [^\s,"]+)*)/u);
+  return m === null ? [] : m[1].split(", ");
+}
+
+/**
+ * Whether a request's summary is this call's: a terminal call's summary is its
+ * command with whitespace runs collapsed and trimmed (core's `truncate`), cut
+ * with "…" when long; any other tool's starts with the tool name.
+ */
+export function summaryFits(summary, tool, input) {
+  if (typeof summary !== "string") return false;
+  if (tool === "terminal") {
+    if (typeof input?.command !== "string") return false;
+    const command = input.command.replace(/\s+/gu, " ").trim();
+    return summary === command || (summary.endsWith("…") && summary.length > 1 && command.startsWith(summary.slice(0, -1)));
+  }
+  return summary === tool || summary.startsWith(`${tool} `);
+}
+
+/**
+ * Bind one call to the request it opened (fold 3, review-b S-5), never by a
+ * task id this runner guesses:
+ * - a `hook-timeout` deny names its request keys; each must be in the call's own
+ *   store (a retry of the same bytes adopts an earlier request, and the deny
+ *   names that one);
+ * - a deny that names none: the requests appended to the call's store while the
+ *   call ran (each worker runs its calls one at a time in its own store) whose
+ *   summary is this call's tool and command;
+ * then exactly one task, and every action of it this call's. Anything else is
+ * `{ error }`. Returns `{ task, classes }`.
+ */
+export function bindRequest({ text, tool, input, span }, requests) {
+  const keys = timeoutKeys(text);
+  let mine;
+  if (keys.length > 0) {
+    mine = requests.filter((r) => r.key !== null && keys.includes(r.key));
+    const missing = keys.filter((k) => !mine.some((r) => r.key === k));
+    if (missing.length > 0) return { error: `the hook names request ${missing.join(", ")}, which this call's store does not hold` };
+  } else {
+    mine = requests.filter((r) => r.at >= span[0] && r.at < span[1] && summaryFits(r.summary, tool, input));
+  }
+  const tasks = [...new Set(mine.map((r) => r.task))];
+  if (tasks.length === 0) return { error: `no request in this call's store matches ${tool} and its command (the deny names no request key)` };
+  if (tasks.length > 1) return { error: `${String(tasks.length)} requests (${tasks.join(", ")}) match this one call` };
+  const all = requests.filter((r) => r.task === tasks[0]);
+  const foreign = all.find((r) => !summaryFits(r.summary, tool, input));
+  if (foreign !== undefined) return { error: `request ${tasks[0]} carries an action of another call (${String(foreign.summary).slice(0, 80)})` };
+  const classes = [...new Set(all.map((r) => r.cls).filter((c) => typeof c === "string"))].sort();
+  if (classes.length === 0) return { error: `request ${tasks[0]} names no class` };
+  return { task: tasks[0], classes };
+}
+
+/**
+ * Environment names the sampling secret may never take (fold 3, review-b N-7):
+ * the box layout (HOME, HERMES_HOME, APPROVAL_*), what finds and runs node
+ * (PATH, NODE_*), and anything not a plain variable name.
+ */
+export function reservedEnvName(name) {
+  return !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) || ["HOME", "HERMES_HOME", "PATH"].includes(name) || /^(APPROVAL|NODE)_/u.test(name);
+}
+
+export function boxEnv(home, hh, extra) {
   const env = {};
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("APPROVAL_") && k !== "HERMES_HOME") env[k] = v;
-  return { ...env, HOME: home, HERMES_HOME: hh, APPROVAL_HERMES_HOME: hh, ...extra };
+  // The extra (the fixed sampling value) beats the runner's own value of that
+  // name, so a real secret is never read; the layout keys come last and win.
+  return { ...env, ...extra, HOME: home, HERMES_HOME: hh, APPROVAL_HERMES_HOME: hh };
 }
 
 /**
@@ -135,6 +216,8 @@ function boxEnv(home, hh, extra) {
 export async function runBox({ coreRoot, corpus, policyText, overlayTree, boxRoot, toolsLines, extraEnv = {}, concurrency = 1, harnessOnly = null }) {
   const cliPath = join(coreRoot, "dist", "src", "cli", "main.js");
   if (!existsSync(cliPath)) return { error: `no hook CLI at ${cliPath}` };
+  const reserved = Object.keys(extraEnv).filter(reservedEnvName);
+  if (reserved.length > 0) return { error: `the template names audit.sampling_secret_env ${reserved.map((n) => JSON.stringify(n)).join(", ")}, a box layout or runtime variable; the class-diff refuses it (N-7)` };
   // The real path: the CLI runs its main only when argv[1] is its own module
   // path, and a symlinked tmpdir (macOS /var -> /private/var) breaks that.
   const cli = realpathSync(cliPath);
@@ -229,30 +312,53 @@ export async function runBox({ coreRoot, corpus, policyText, overlayTree, boxRoo
         p.stderr.on("data", (d) => (se += d));
         p.on("close", (status) => {
           const v = readVerdict(status, so, se);
-          resolveJob({ key: job.key, column: job.column, kind: job.kind, where: job.where, command: job.command, ...v, task: `hook:class-diff:${id}`, reason: scrub(v.reason), detail: scrub(se.trim().slice(0, 240)) });
+          resolveJob({ result: { key: job.key, column: job.column, kind: job.kind, where: job.where, command: job.command, ...v, reason: scrub(v.reason), detail: scrub(se.trim().slice(0, 240)) }, text: `${so}\n${se}` });
         });
         p.stdin.end(JSON.stringify(envelope));
       });
     const calls = Array.from({ length: jobs.length });
+    const runs = Array.from({ length: jobs.length });
+    const size = (store) => {
+      try {
+        return statSync(logPath(store)).size;
+      } catch {
+        return 0;
+      }
+    };
     let next = 0;
     const worker = async (w) => {
       while (next < jobs.length) {
         const i = next++;
-        calls[i] = await one(jobs[i], stores[w]);
+        // The bytes this call appended to its worker's store: this worker runs
+        // nothing else there while the call runs.
+        const start = size(stores[w]);
+        const { result, text } = await one(jobs[i], stores[w]);
+        calls[i] = result;
+        runs[i] = { store: w, text, span: [start, size(stores[w])] };
       }
     };
     await Promise.all(Array.from({ length: workers }, (_, w) => worker(w)));
-    // A card's classes (fold 2, S-4): the hook's timeout line names none, so read
-    // them from the request the hook opened, in the store's own log: the
-    // `task.registered` actions and `approval.requested` events of that task.
-    const requested = requestedClasses(stores);
-    for (const call of calls) {
-      const fromStore = requested.get(call.task);
-      if (fromStore !== undefined && (call.verdict === "deny" || call.verdict === "allow")) {
-        call.requested = [...fromStore].sort();
-        if (call.classes.length === 0) call.classes = call.requested;
+    // A card's classes (fold 2, S-4; bound to the call in fold 3, S-5): the
+    // hook's timeout line names no class, so they come from the request the hook
+    // opened, in the store's own log, found by bindRequest. A card whose request
+    // is not found, or not this call's, is an error (the gate exits 2): read as
+    // a card of no class it would hide a real move.
+    const requests = stores.map((s) => readRequests(s));
+    calls.forEach((call, i) => {
+      const run = runs[i];
+      const job = jobs[i];
+      if (call.verdict !== "deny" && call.verdict !== "allow") return;
+      const card = call.verdict === "deny" && call.code === "hook-timeout";
+      // An allow or another deny names no request key; only what it appended counts.
+      const bound = bindRequest({ text: card ? run.text : "", tool: job.tool, input: job.input, span: run.span }, requests[run.store]);
+      if ("error" in bound) {
+        if (card) Object.assign(call, { verdict: "error", code: "card-request-unbound", detail: scrub(`${bound.error}; ${call.detail}`.slice(0, 400)) });
+        return;
       }
-    }
+      call.task = bound.task;
+      call.requested = bound.classes;
+      call.classes = card ? [...new Set([...call.classes, ...bound.classes])].sort() : call.classes.length === 0 ? bound.classes : call.classes;
+    });
     return { calls };
   } finally {
     rmSync(box, { recursive: true, force: true });
