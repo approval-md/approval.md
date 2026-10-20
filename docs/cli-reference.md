@@ -4364,12 +4364,21 @@ show here. Tap Full details to read all of it before you decide.", and it
 carries three buttons: ✅ Approve, ✋ Deny and 📄 Full details. Approve and Deny
 are the usual buttons. Full details decides nothing and appends nothing to the
 log: its tap sends the canonical rendering whole, byte for byte, as replies to
-the card (Telegram's `reply_parameters`), split into as many messages as
-Telegram needs, each under the limit and cut between characters, never inside
-one. The first reply opens with "Full details of the request above:" and the
-last closes with "End of full details. Approve or Deny on the card above.". The
-replies carry no buttons. A second tap sends nothing and answers "Already sent
-above.". The decision is bound to the same `display_hash` as from the technical
+the card (Telegram's `reply_parameters`), split into at most 6 messages, each
+under the limit and cut between characters, never inside one. Every reply
+opens with "Part k of n"; the first then says "Full details of the request
+above:" and the last closes with "End of full details. Approve or Deny on the
+card above.". The replies carry no buttons. A second tap sends nothing and
+answers "Already sent above.". When a send fails partway (a 429, a 5xx, the
+network), the card gets one line, "Full details could not be sent in full. Tap
+Full details again.", and the next tap sends the whole chain again from part 1.
+A rendering that needs more than 6 replies, or that cannot be cut so every
+reply keeps all its bytes through Telegram's trimming of white space at a
+message's edges (a run of white space longer than one message), is sent as
+the technical card instead (`too-long`), as before. After a listener restart,
+such a card's Approve answers "This card can no longer show its full details;
+use the new card" and decides nothing; its Deny still works, as on any stale
+copy. The decision is bound to the same `display_hash` as from the technical
 card, and the record says `{"style": "minimal"}`. The settle edit turns the card
 into its outcome and headline with the detail lines, and removes all three
 buttons; the replies stay as sent. A command, a file change or an email that is

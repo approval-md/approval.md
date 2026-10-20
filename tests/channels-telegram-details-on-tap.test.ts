@@ -30,6 +30,8 @@ import { claimed, computed, recordChannelDecision, type ChannelRequest } from ".
 import { buildPendingQueue } from "../src/channels/tagging.js";
 import {
   detailsCallbackData,
+  onTapNonce,
+  TELEGRAM_DETAILS_STALE_GRANT,
   minimalSettleText,
   parseCallbackData,
   parseDetailsCallback,
@@ -49,6 +51,9 @@ import {
   MINIMAL_DETAILS_CLOSER,
   MINIMAL_DETAILS_LABEL,
   MINIMAL_DETAILS_OPENER,
+  MINIMAL_DETAILS_FAILED,
+  MINIMAL_DETAILS_MAX_REPLIES,
+  detailsPartLine,
   MINIMAL_FALLBACKS,
   MINIMAL_HEADLINE_PREFIX,
   MINIMAL_MESSAGE_BUDGET,
@@ -164,7 +169,13 @@ interface Sent {
   body: Record<string, unknown>;
 }
 
-function recordingChannel(overrides: Partial<TelegramConfig> = {}): { channel: TelegramChannel; sent: Sent[] } {
+/** A failure the recorder answers instead of success, or null. */
+type Fail = (method: string, body: Record<string, unknown>, index: number) => { status: number; description: string } | null;
+
+function recordingChannel(
+  overrides: Partial<TelegramConfig> = {},
+  options: { prefix?: string; fail?: Fail } = {},
+): { channel: TelegramChannel; sent: Sent[] } {
   const sent: Sent[] = [];
   let id = 700;
   let nonce = 0;
@@ -174,13 +185,22 @@ function recordingChannel(overrides: Partial<TelegramConfig> = {}): { channel: T
     apiBase: "http://127.0.0.1:9",
     fetch: async (url, init) => {
       const body = JSON.parse(init.body) as Record<string, unknown>;
-      sent.push({ method: url.split("/").pop() ?? "", body });
+      const method = url.split("/").pop() ?? "";
+      sent.push({ method, body });
+      const failure = options.fail?.(method, body, sent.length - 1) ?? null;
+      if (failure !== null) {
+        return {
+          ok: false,
+          status: failure.status,
+          text: async () => JSON.stringify({ ok: false, error_code: failure.status, description: failure.description }),
+        };
+      }
       id += 1;
       return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true, result: { message_id: id } }) };
     },
     nonce: () => {
       nonce += 1;
-      return `n${String(nonce)}`;
+      return `${options.prefix ?? "n"}${String(nonce)}`;
     },
     log: () => {},
     ...overrides,
@@ -396,9 +416,10 @@ for (const count of [1, 2, 5]) {
       rows[0]?.map((button) => button.text),
       ["✅ Approve", MINIMAL_DENY_LABEL, MINIMAL_DETAILS_LABEL],
     );
-    assert.equal(rows[0]?.[0]?.callback_data.startsWith("g:n1:"), true, "Approve lost today's callback data");
-    assert.equal(rows[0]?.[1]?.callback_data.startsWith("r:n1:"), true, "Deny lost today's callback data");
-    assert.equal(rows[0]?.[2]?.callback_data, detailsCallbackData("n1"));
+    // Today's verbs and shape; the nonce carries the on-tap mark (fold 1, S2).
+    assert.equal(rows[0]?.[0]?.callback_data.startsWith(`g:${onTapNonce("n1")}:`), true, "Approve lost today's callback data");
+    assert.equal(rows[0]?.[1]?.callback_data.startsWith(`r:${onTapNonce("n1")}:`), true, "Deny lost today's callback data");
+    assert.equal(rows[0]?.[2]?.callback_data, detailsCallbackData(onTapNonce("n1")));
 
     await press(channel, rows[0]?.[2]?.callback_data, 701);
     const replies = sends(sent).slice(1);
@@ -409,7 +430,14 @@ for (const count of [1, 2, 5]) {
       assert.equal(reply.body["parse_mode"], "HTML");
       assert.ok(textOf(reply).length < TELEGRAM_MAX_MESSAGE_CHARS, "a reply is over Telegram's limit");
     }
-    assert.ok(textOf(replies[0]).startsWith(`${MINIMAL_DETAILS_OPENER}\n<pre>`), "the opener is missing");
+    assert.ok(
+      textOf(replies[0]).startsWith(`${detailsPartLine(1, replies.length)}\n${MINIMAL_DETAILS_OPENER}\n<pre>`),
+      "the opener is missing",
+    );
+    for (const [index, reply] of replies.entries()) {
+      assert.ok(textOf(reply).startsWith(`${detailsPartLine(index + 1, replies.length)}\n`), `part line missing on ${String(index)}`);
+    }
+    assert.ok(replies.length <= MINIMAL_DETAILS_MAX_REPLIES);
     assert.ok(textOf(replies.at(-1)).endsWith(`</pre>\n${MINIMAL_DETAILS_CLOSER}`), "the closer is missing");
     const joined = replies.map((reply) => preOf(textOf(reply))).join("");
     assert.equal(joined, canonical.text, "the replies are not the canonical rendering byte for byte");
@@ -422,16 +450,15 @@ test("a five-item order is long enough to need several replies, and each is cut 
   const payload = forKicksOrder(5);
   const canonical = canonicalRender(payload, CLASS).text;
   const replies = detailsReplies(canonical, 1200);
-  assert.ok(replies.length > 2, "the fixture did not split");
+  assert.ok(replies !== null && replies.length > 2, "the fixture did not split");
   assert.equal(replies.map(preOf).join(""), canonical);
   for (const [index, reply] of replies.entries()) {
     assert.ok(reply.length <= 1200, `reply ${String(index)} is ${String(reply.length)}`);
-    assert.equal(reply.startsWith(MINIMAL_DETAILS_OPENER), index === 0);
+    assert.ok(reply.startsWith(`${detailsPartLine(index + 1, replies.length)}\n`));
+    assert.equal(reply.includes(MINIMAL_DETAILS_OPENER), index === 0);
     assert.equal(reply.endsWith(MINIMAL_DETAILS_CLOSER), index === replies.length - 1);
-    // No chunk starts or ends on white space at a cut (Telegram trims message edges).
-    const pre = preOf(reply);
-    if (index > 0) assert.doesNotMatch(pre, /^\s/u, `reply ${String(index)} starts on white space`);
-    if (index < replies.length - 1) assert.doesNotMatch(pre, /\s$/u, `reply ${String(index)} ends on white space`);
+    // A reply that ends with its </pre> never ends on white space (Telegram trims message edges).
+    if (index < replies.length - 1) assert.doesNotMatch(preOf(reply), /\s$/u, `reply ${String(index)} ends on white space`);
   }
 });
 
@@ -440,7 +467,8 @@ test("the split never falls inside a grapheme cluster, a surrogate pair or an HT
   const accented = "é̂";
   const rendering = `${`${family}${accented}&<>`.repeat(400)}tail`;
   for (const budget of [200, 333, 1000, MINIMAL_MESSAGE_BUDGET]) {
-    const replies = detailsReplies(rendering, budget);
+    const replies = detailsReplies(rendering, budget, 1000);
+    assert.ok(replies !== null);
     assert.equal(replies.map(preOf).join(""), rendering, `budget ${String(budget)} lost bytes`);
     const segmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
     for (const reply of replies) {
@@ -459,10 +487,10 @@ test("the split never falls inside a grapheme cluster, a surrogate pair or an HT
 });
 
 test("a one-message rendering carries the opener and the closer in the same reply; an empty one still sends both", () => {
-  const [only, ...rest] = detailsReplies("{\n  \"a\": 1\n}");
+  const [only, ...rest] = detailsReplies("{\n  \"a\": 1\n}") ?? [];
   assert.equal(rest.length, 0);
-  assert.equal(only, `${MINIMAL_DETAILS_OPENER}\n<pre>{\n  "a": 1\n}</pre>\n${MINIMAL_DETAILS_CLOSER}`);
-  assert.deepEqual(detailsReplies(""), [`${MINIMAL_DETAILS_OPENER}\n<pre></pre>\n${MINIMAL_DETAILS_CLOSER}`]);
+  assert.equal(only, `Part 1 of 1\n${MINIMAL_DETAILS_OPENER}\n<pre>{\n  "a": 1\n}</pre>\n${MINIMAL_DETAILS_CLOSER}`);
+  assert.deepEqual(detailsReplies(""), [`Part 1 of 1\n${MINIMAL_DETAILS_OPENER}\n<pre></pre>\n${MINIMAL_DETAILS_CLOSER}`]);
 });
 
 // ---------------------------------------------------------------------------
@@ -682,6 +710,186 @@ test("the channel-level fallbacks keep the technical card for an oversize declar
 });
 
 // ---------------------------------------------------------------------------
+// Fold 1 (review-b M1, S1, S2): the details path never fails open
+// ---------------------------------------------------------------------------
+
+/** The renderer's verdict for a declared For Kicks-class payload: on-tap, minimal (fits) or a fallback reason. */
+function verdictOf(payload: unknown): string {
+  const request = requestOf(CLASS, "forkicks:verdict", payload);
+  const drawn = renderTelegramMinimal(request, technicalOf(request), FOR_KICKS_SAY);
+  return drawn.ok ? (drawn.onTap === undefined ? "minimal" : "on-tap") : drawn.reason;
+}
+
+test("M1: review-b's padded order (9,000 spaces inside a value) is the ordinary technical card, recorded too-long", async () => {
+  const padded = { appId: "forkicks", operation: "forkicks.order.confirm", preview: { note: `1 chai${" ".repeat(9000)}AND THE REST` } };
+  const rendering = canonicalRender(padded, CLASS).text;
+  assert.equal(detailsReplies(rendering), null, "a run of white space longer than a reply was cut");
+  assert.equal(verdictOf(padded), "too-long");
+
+  const live = world([{ key: "forkicks:padded", cls: CLASS, payload: padded }]);
+  const { channel, sent } = recordingChannel({ promptStyle: "minimal", say: FOR_KICKS_SAY });
+  channel.onDecision(live.handler);
+  await channel.notify(live.requests[0]!);
+  const all = sends(sent);
+  assert.ok(all.length > 1, "the padded order was not the technical card");
+  assert.equal(all.some((entry) => keyboardOf(entry).flat().some((button) => button.text === MINIMAL_DETAILS_LABEL)), false);
+  // The technical card carries the tail before any button exists.
+  const pre = all.map((entry) => /<pre>([\s\S]*)<\/pre>/u.exec(textOf(entry))?.[1]).filter((x): x is string => x !== undefined).map(visible).join("");
+  assert.equal(pre, rendering);
+  const card = all.find((entry) => entry.body["reply_markup"] !== undefined);
+  await press(channel, keyboardOf(card)[0]?.[0]?.callback_data);
+  const granted = records(live.unit).find((entry) => entry.event === "approval.granted");
+  assert.deepEqual(payloadOf(granted!)["rendering"], { style: "technical", fallback: "too-long" });
+});
+
+test("M1: a 200 KB declared payload is over the reply cap and falls back to the technical card", () => {
+  const huge = { appId: "forkicks", operation: "forkicks.order.confirm", preview: { note: "x".repeat(200_000) } };
+  assert.equal(detailsReplies(canonicalRender(huge, CLASS).text), null);
+  assert.equal(verdictOf(huge), "too-long");
+});
+
+test("M1: the cap boundary: a rendering that needs 6 replies is on tap, one that needs 7 is the technical card", () => {
+  const sized = (n: number) => ({ appId: "forkicks", operation: "forkicks.order.confirm", preview: { note: "x".repeat(n) } });
+  let six: number | null = null;
+  let seven: number | null = null;
+  for (let n = 15_000; n < 40_000; n += 40) {
+    const replies = detailsReplies(canonicalRender(sized(n), CLASS).text);
+    if (replies === null) {
+      seven = n;
+      break;
+    }
+    six = n;
+  }
+  assert.ok(six !== null && seven !== null, "the search did not cross the cap");
+  const atCap = detailsReplies(canonicalRender(sized(six), CLASS).text);
+  assert.equal(atCap?.length, MINIMAL_DETAILS_MAX_REPLIES, "the last size under the cap is not exactly 6 replies");
+  assert.equal(MINIMAL_DETAILS_MAX_REPLIES, 6);
+  assert.equal(detailsReplies(canonicalRender(sized(six), CLASS).text, MINIMAL_MESSAGE_BUDGET, 1000)?.length, 6);
+  assert.equal(detailsReplies(canonicalRender(sized(seven), CLASS).text, MINIMAL_MESSAGE_BUDGET, 1000)?.length, 7);
+  assert.equal(verdictOf(sized(six)), "on-tap");
+  assert.equal(verdictOf(sized(seven)), "too-long");
+  // Part lines at the cap: 1 of 6 … 6 of 6.
+  assert.deepEqual(atCap?.map((reply) => reply.split("\n")[0]), [1, 2, 3, 4, 5, 6].map((k) => detailsPartLine(k, 6)));
+});
+
+test("M1: no reply is empty or loses an edge byte to Telegram's trim; a cut that cannot avoid white space falls back", () => {
+  /** What Telegram shows of a reply: its text trimmed at the edges. */
+  const trimmed = (reply: string) => visible(reply).trim();
+  // White space that a cut can step around: kept whole, and no non-last reply ends on it.
+  const spaced = `${"a".repeat(3000)}${" ".repeat(900)}${"b".repeat(3000)}${"\n".repeat(50)}${"c".repeat(3000)}`;
+  const replies = detailsReplies(spaced);
+  assert.ok(replies !== null && replies.length > 1);
+  assert.equal(replies.map(preOf).join(""), spaced);
+  for (const [index, reply] of replies.entries()) {
+    assert.notEqual(trimmed(reply), "", `reply ${String(index)} is empty after the trim`);
+    if (index < replies.length - 1) assert.doesNotMatch(preOf(reply), /\s$/u);
+  }
+  // A last chunk that is white space only is still inside its reply, between the part line and the closer.
+  const tail = detailsReplies(`${"a".repeat(3670)}${" ".repeat(50)}`);
+  assert.ok(tail !== null && tail.length === 2, JSON.stringify(tail?.length));
+  assert.equal(preOf(tail[1] ?? ""), " ".repeat(50));
+  assert.ok(trimmed(tail[1] ?? "").startsWith("Part 2 of 2"));
+  // A run of white space wider than one reply: no honest cut, so the ordinary form.
+  assert.equal(detailsReplies(`a${" ".repeat(4000)}b`), null);
+  assert.equal(detailsReplies(`a${"\n".repeat(4000)}b`), null);
+});
+
+test("S1: a send that fails partway says so on the card, and the next tap sends the whole chain again from part 1", async () => {
+  const live = world([{ key: "forkicks:s1", cls: CLASS, payload: forKicksOrder(5) }]);
+  let failNext = true;
+  let replyCount = 0;
+  const { channel, sent } = recordingChannel(
+    { promptStyle: "minimal", say: FOR_KICKS_SAY },
+    {
+      fail: (method, body) => {
+        if (method !== "sendMessage" || body["reply_parameters"] === undefined) return null;
+        replyCount += 1;
+        if (failNext && replyCount === 2) {
+          failNext = false;
+          return { status: 429, description: "Too Many Requests: retry after 7" };
+        }
+        return null;
+      },
+    },
+  );
+  channel.onDecision(live.handler);
+  await channel.notify(live.requests[0]!);
+  const data = keyboardOf(sends(sent)[0])[0]?.[2]?.callback_data;
+  const logBefore = readFileSync(live.unit.logPath, "utf8");
+  await press(channel, data);
+  const first = sends(sent).slice(1);
+  // Part 1 delivered, part 2 refused, then the computed failure line, threaded to the card.
+  assert.equal(first.length, 3, first.map((entry) => textOf(entry).slice(0, 20)).join(" | "));
+  assert.equal(textOf(first[2]), MINIMAL_DETAILS_FAILED);
+  assert.deepEqual(first[2]?.body["reply_parameters"], { message_id: 701 });
+  assert.equal(first[2]?.body["reply_markup"], undefined);
+  // The card stays re-tappable: the next tap restarts at part 1 and completes.
+  await press(channel, data);
+  const second = sends(sent).slice(4);
+  assert.ok(textOf(second[0]).startsWith(`${detailsPartLine(1, second.length)}\n${MINIMAL_DETAILS_OPENER}`), "the retry did not restart at part 1");
+  assert.ok(textOf(second.at(-1)).endsWith(MINIMAL_DETAILS_CLOSER));
+  assert.equal(second.map((entry) => preOf(textOf(entry))).join(""), canonicalRender(forKicksOrder(5), CLASS).text);
+  // Only now is it sent: a third tap answers Already sent above.
+  await press(channel, data);
+  assert.deepEqual(answers(sent), ["", "", MINIMAL_DETAILS_ALREADY]);
+  assert.equal(readFileSync(live.unit.logPath, "utf8"), logBefore, "a details tap appended");
+  assert.equal(live.handled(), 0);
+});
+
+test("S2: after a restart, an on-tap card may Deny but not Approve; a stale technical card keeps today's stale-copy rule", async () => {
+  const live = world([
+    { key: "forkicks:s2", cls: CLASS, payload: forKicksOrder(2) },
+    { key: "forkicks:s2-deny", cls: CLASS, payload: forKicksOrder(3) },
+  ]);
+  // Process 1 sends both cards, then dies.
+  const before = recordingChannel({ promptStyle: "minimal", say: FOR_KICKS_SAY });
+  for (const request of live.requests) await before.channel.notify(request);
+  const [cardA, cardB] = sends(before.sent);
+  const rowsA = keyboardOf(cardA)[0] ?? [];
+  const rowsB = keyboardOf(cardB)[0] ?? [];
+  assert.equal(rowsA.length, 3);
+  // Process 2 re-sends the pending requests under its own nonces.
+  const after = recordingChannel({ promptStyle: "minimal", say: FOR_KICKS_SAY }, { prefix: "m" });
+  after.channel.onDecision(live.handler);
+  for (const request of live.requests) await after.channel.notify(request);
+  const logBefore = readFileSync(live.unit.logPath, "utf8");
+
+  await press(after.channel, rowsA[0]?.callback_data);
+  assert.equal(answers(after.sent).at(-1), TELEGRAM_DETAILS_STALE_GRANT);
+  assert.equal(readFileSync(live.unit.logPath, "utf8"), logBefore, "a stale on-tap Approve appended");
+  assert.equal(live.handled(), 0, "a stale on-tap Approve reached the handler");
+  // Its Full details is dead too, and says so.
+  await press(after.channel, rowsA[2]?.callback_data);
+  assert.equal(answers(after.sent).at(-1), TELEGRAM_DETAILS_GONE);
+  // Deny on the other stale on-tap card still decides, through the stale-copy ladder.
+  await press(after.channel, rowsB[1]?.callback_data);
+  assert.equal(live.handled(), 1);
+  assert.ok(records(live.unit).some((entry) => entry.event === "approval.rejected" && entry.action_key === "forkicks:s2-deny"));
+  // The live card's Approve still grants.
+  const liveRows = keyboardOf(sends(after.sent)[0])[0] ?? [];
+  await press(after.channel, liveRows[0]?.callback_data);
+  assert.ok(records(live.unit).some((entry) => entry.event === "approval.granted" && entry.action_key === "forkicks:s2"));
+
+  // A stale technical card (undeclared) keeps the stale-copy rule: its Approve grants.
+  const plain = world([{ key: "forkicks:s2-tech", cls: CLASS, payload: forKicksOrder(1) }]);
+  const old = recordingChannel({ promptStyle: "minimal", say: {} });
+  await old.channel.notify(plain.requests[0]!);
+  const oldCard = sends(old.sent).find((entry) => entry.body["reply_markup"] !== undefined);
+  const fresh = recordingChannel({ promptStyle: "minimal", say: {} }, { prefix: "m" });
+  fresh.channel.onDecision(plain.handler);
+  await fresh.channel.notify(plain.requests[0]!);
+  await press(fresh.channel, keyboardOf(oldCard)[0]?.[0]?.callback_data);
+  assert.ok(records(plain.unit).some((entry) => entry.event === "approval.granted" && entry.action_key === "forkicks:s2-tech"));
+});
+
+test("S2: the on-tap mark is outside the generated nonce alphabet and only narrows", () => {
+  assert.equal(onTapNonce("abc"), "abc.d");
+  assert.doesNotMatch("1aZ-_09", /\./u);
+  const parsed = parseCallbackData(`g:${onTapNonce("n1")}:0123456789abcdef`);
+  assert.deepEqual(parsed?.nonce, "n1.d");
+});
+
+// ---------------------------------------------------------------------------
 // 5. Mutants: each of these edits to the code must fail a test above
 // ---------------------------------------------------------------------------
 //
@@ -693,5 +901,8 @@ test("the channel-level fallbacks keep the technical card for an oversize declar
 //   (or adding `d` to the decision verbs) fails the parser test, the handler
 //   count and the byte-identical log.
 // - opener missing: dropping MINIMAL_DETAILS_OPENER fails "the opener is missing".
+// - fold 1: marking the details sent before the loop fails the S1 retry test;
+//   dropping the part line, the reply cap or the honest-cut check fails the M1
+//   tests; removing the stale on-tap grant guard fails the S2 test.
 //
 // The mutant runs that confirmed each are listed in the PR's build report.

@@ -178,6 +178,25 @@ export const MINIMAL_DETAILS_CLOSER = "End of full details. Approve or Deny on t
 /** What a second tap on Full details answers; nothing new is sent (APRV-531). */
 export const MINIMAL_DETAILS_ALREADY = "Already sent above.";
 
+/** The computed line every detail reply opens with (APRV-531 fold 1, M1a). */
+export function detailsPartLine(part: number, parts: number): string {
+  return `Part ${String(part)} of ${String(parts)}`;
+}
+
+/**
+ * The most replies a Full details tap may send (APRV-531 fold 1, M1b). A
+ * rendering that needs more is sent as the ordinary technical card, exactly as
+ * before the exception existed: Telegram's per-chat flood limit answers a long
+ * chain with 429 partway, and the tail would never arrive.
+ */
+export const MINIMAL_DETAILS_MAX_REPLIES = 6;
+
+/**
+ * The computed line sent when a reply chain fails partway (APRV-531 fold 1,
+ * S1). The card stays re-tappable, and the next tap starts again at part 1.
+ */
+export const MINIMAL_DETAILS_FAILED = "Full details could not be sent in full. Tap Full details again.";
+
 /**
  * Why a request was sent as the technical card although the policy asked for
  * minimal. Recorded on the decision as `rendering.fallback`.
@@ -242,7 +261,7 @@ export interface MinimalCard {
    * canonical rendering, plain and unescaped, that the Full details tap sends
    * whole as replies. Absent on every card that holds the rendering itself.
    */
-  onTap?: { rendering: string };
+  onTap?: { rendering: string; replies: string[] };
   /**
    * Present, and `true`, when the class's `say` entry set a `does` phrase and
    * the runtime drew its own kind phrase instead, because it reads the payload
@@ -762,6 +781,11 @@ export function renderTelegramMinimal(
   // keeps the fallback. The card drops the collapsed block for a computed
   // notice, and the rendering goes whole on the Full details tap.
   if (excerpt.kind !== "opaque" || entry === null) return { ok: false, reason: "too-long" };
+  // Fold 1 (M1): a rendering that needs more replies than the cap, or that
+  // cannot be cut so every reply keeps all its bytes through Telegram's edge
+  // trim, is the ordinary form, as before the exception.
+  const replies = detailsReplies(technical.payloadText);
+  if (replies === null) return { ok: false, reason: "too-long" };
   const onTapText = `${lines.join("\n")}\n${escapeHtml(MINIMAL_ON_TAP_NOTICE)}`;
   if (onTapText.length > MINIMAL_MESSAGE_BUDGET) return { ok: false, reason: "too-long" };
   return {
@@ -769,40 +793,52 @@ export function renderTelegramMinimal(
     text: onTapText,
     headline,
     details: "",
-    onTap: { rendering: technical.payloadText },
+    onTap: { rendering: technical.payloadText, replies },
     ...ignored,
   };
 }
 
 /**
- * The Full details replies for `rendering` (APRV-531): Telegram HTML messages
- * whose `<pre>` contents, decoded and concatenated, are `rendering` byte for
- * byte. The first opens with {@link MINIMAL_DETAILS_OPENER}, the last closes
- * with {@link MINIMAL_DETAILS_CLOSER} (one message carries both when one is
- * enough), and none is summarised or shortened.
+ * The Full details replies for `rendering` (APRV-531), or `null` when the
+ * rendering cannot be sent that way and the card must be the ordinary form.
+ *
+ * Telegram HTML messages whose `<pre>` contents, decoded and concatenated, are
+ * `rendering` byte for byte. Every reply opens with a computed
+ * {@link detailsPartLine} ("Part k of n"); the first then carries
+ * {@link MINIMAL_DETAILS_OPENER} and the last ends with
+ * {@link MINIMAL_DETAILS_CLOSER}. None is summarised or shortened.
  *
  * Each message is at most `budget` UTF-16 units of HTML (default
  * {@link MINIMAL_MESSAGE_BUDGET}, under Telegram's 4096 with room for a
  * relay's label line; the parsed text is never longer than the HTML). The
- * split is taken between grapheme clusters, by escaped length, and where it
- * can be, between two clusters that are not white space: Telegram trims white
- * space at the edges of a message, and a continuation message starts with its
- * `<pre>`, so a chunk is kept from starting or ending on white space at a cut.
- * A single cluster longer than a whole message on its own (only a pathological
- * run of combining marks) is split between code points, never inside a
- * surrogate pair.
+ * split is taken between grapheme clusters, by escaped length. Telegram trims
+ * white space at the edges of a message, and every reply but the last ends
+ * with its `</pre>`, so a cut is taken only after a cluster that is not white
+ * space: the part line protects each reply's start, and the closer the last
+ * one's end. A single cluster longer than a whole message on its own is split
+ * between code points, never inside a surrogate pair.
+ *
+ * `null` (fold 1, M1) when no such cut exists within one message (a run of
+ * white space longer than a message), or when the rendering needs more than
+ * `maxReplies` messages ({@link MINIMAL_DETAILS_MAX_REPLIES}).
  */
-export function detailsReplies(rendering: string, budget: number = MINIMAL_MESSAGE_BUDGET): string[] {
+export function detailsReplies(
+  rendering: string,
+  budget: number = MINIMAL_MESSAGE_BUDGET,
+  maxReplies: number = MINIMAL_DETAILS_MAX_REPLIES,
+): string[] | null {
   const open = `${escapeHtml(MINIMAL_DETAILS_OPENER)}\n`;
   const close = `\n${escapeHtml(MINIMAL_DETAILS_CLOSER)}`;
-  // The worst case for every message: both computed lines and the `<pre>` pair.
-  const room = Math.max(1, budget - open.length - close.length - "<pre></pre>".length);
+  const partMax = `${detailsPartLine(maxReplies, maxReplies)}\n`.length + 4;
+  // The worst case for every message: the part line, both computed lines and the `<pre>` pair.
+  const room = budget - partMax - open.length - close.length - "<pre></pre>".length;
+  if (room < 1) return null;
   const tokens: { html: string; blank: boolean }[] = [];
   for (const { segment } of GRAPHEMES.segment(rendering)) {
     const html = escapeHtml(segment);
     const blank = /\s/u.test(segment);
     if (html.length <= room) tokens.push({ html, blank });
-    else for (const point of segment) tokens.push({ html: escapeHtml(point), blank });
+    else for (const point of segment) tokens.push({ html: escapeHtml(point), blank: /\s/u.test(point) });
   }
   const chunks: string[] = [];
   let from = 0;
@@ -813,19 +849,22 @@ export function detailsReplies(rendering: string, budget: number = MINIMAL_MESSA
       used += tokens[to]?.html.length ?? 0;
       to += 1;
     }
-    if (to === from) to = from + 1;
+    if (to === from) return null;
     if (to < tokens.length) {
-      // Back off to the last cut between two clusters that are not white space.
+      // Back off to the last cut after a cluster that is not white space; with none, no honest split exists.
       let cut = to;
-      while (cut > from + 1 && (tokens[cut - 1]?.blank === true || tokens[cut]?.blank === true)) cut -= 1;
-      if (cut > from + 1 || (tokens[from]?.blank !== true && tokens[from + 1]?.blank !== true)) to = cut;
+      while (cut > from && tokens[cut - 1]?.blank === true) cut -= 1;
+      if (cut === from) return null;
+      to = cut;
     }
     chunks.push(tokens.slice(from, to).map((token) => token.html).join(""));
+    if (chunks.length > maxReplies) return null;
     from = to;
   }
   if (chunks.length === 0) chunks.push("");
+  const parts = chunks.length;
   return chunks.map(
     (chunk, index) =>
-      `${index === 0 ? open : ""}<pre>${chunk}</pre>${index === chunks.length - 1 ? close : ""}`,
+      `${escapeHtml(detailsPartLine(index + 1, parts))}\n${index === 0 ? open : ""}<pre>${chunk}</pre>${index === parts - 1 ? close : ""}`,
   );
 }

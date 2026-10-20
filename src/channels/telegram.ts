@@ -254,10 +254,10 @@ import {
 import { isAttestationActionKey } from "../core/policy-proposal.js";
 import { commandPayloadView, payloadRegionText } from "./payload-view.js";
 import {
-  detailsReplies,
   renderTelegramMinimal,
   MINIMAL_DENY_LABEL,
   MINIMAL_DETAILS_ALREADY,
+  MINIMAL_DETAILS_FAILED,
   MINIMAL_DETAILS_LABEL,
 } from "./telegram-minimal.js";
 
@@ -2134,6 +2134,31 @@ export function parseDetailsCallback(data: unknown): { nonce: string } | null {
 }
 
 /**
+ * The nonce an on-tap card's buttons carry (APRV-531 fold 1, S2): the issued
+ * nonce with a `.d` mark. `.` is outside base64url, so no ordinary nonce ends
+ * this way. A listener that restarted cannot serve such a card's details, so
+ * its Approve must not reach the gate through the stale-copy ladder; the mark
+ * is how a process that never issued the nonce knows. It only ever narrows
+ * what a tap may do: a forged mark on an ordinary card can stop a grant, never
+ * make one.
+ */
+export function onTapNonce(nonce: string): string {
+  return `${nonce}.d`;
+}
+
+/** Whether `nonce` is an on-tap card's ({@link onTapNonce}). */
+export function isOnTapNonce(nonce: string): boolean {
+  return nonce.endsWith(".d");
+}
+
+/**
+ * What Approve answers on an on-tap card whose details this process can no
+ * longer send (fold 1, S2). Nothing is decided; Deny on the same card still works.
+ */
+export const TELEGRAM_DETAILS_STALE_GRANT =
+  "This card can no longer show its full details; use the new card";
+
+/**
  * What a Full details tap on a card this process is not holding answers
  * (APRV-531): the card was settled, or the listener restarted. Nothing is sent.
  */
@@ -3294,7 +3319,7 @@ interface Delivery {
    * rendering its Full details tap sends, and whether it has been sent. Process
    * memory only; nothing in it is ever read as an answer or reaches the log.
    */
-  detailsOnTap?: { rendering: string; sent: boolean };
+  detailsOnTap?: { replies: string[]; sent: boolean };
 }
 
 /**
@@ -4051,7 +4076,10 @@ export class TelegramChannel implements TestableChannel {
     let sent: { deliveryId: DeliveryId; rendered: RenderedRequest };
     let rendering: PromptRendering | undefined;
     let card: { headline: string; details: string } | undefined;
-    let detailsOnTap: { rendering: string; sent: boolean } | undefined;
+    let detailsOnTap: { replies: string[]; sent: boolean } | undefined;
+    // Fold 1 (S2): an on-tap card's buttons carry a marked nonce, so a process
+    // that never issued it can still tell its Approve from any other.
+    let cardNonce = nonce;
     const prompt = this.currentPrompt();
     // Fix round 2, B2: a request delivered as part of a batch is always the
     // technical card, as SPEC §10.3 (amended) says of a grouped delivery.
@@ -4068,7 +4096,8 @@ export class TelegramChannel implements TestableChannel {
       // R3-S1: the record notes a `say` phrase the runtime overrode with its own.
       rendering = minimal.sayDoesIgnored ? { style: "minimal", say_does_ignored: true } : { style: "minimal" };
       card = minimal.card;
-      if (minimal.onTap !== undefined) detailsOnTap = { rendering: minimal.onTap.rendering, sent: false };
+      cardNonce = minimal.nonce;
+      if (minimal.onTap !== undefined) detailsOnTap = { replies: minimal.onTap.replies, sent: false };
       if (minimal.sayDoesIgnored) {
         this.complain(
           `approval: telegram drew its own phrase for ${actionKey}, not the say entry's does: the runtime reads this payload itself`,
@@ -4085,7 +4114,7 @@ export class TelegramChannel implements TestableChannel {
     }
 
     this.counters.notified += 1;
-    this.deliveries.set(nonce, {
+    this.deliveries.set(cardNonce, {
       actionKey,
       actionRef: actionRefOf(actionKey),
       deliveryId: sent.deliveryId,
@@ -4125,7 +4154,9 @@ export class TelegramChannel implements TestableChannel {
         sent: { deliveryId: DeliveryId; rendered: RenderedRequest };
         card: { headline: string; details: string };
         sayDoesIgnored: boolean;
-        onTap?: { rendering: string };
+        onTap?: { rendering: string; replies: string[] };
+        /** The nonce the card's buttons carry: {@link onTapNonce} of the one given, on an on-tap card. */
+        nonce: string;
       }
     | { ok: false; reason: string }
   > {
@@ -4143,6 +4174,7 @@ export class TelegramChannel implements TestableChannel {
       say,
     );
     if (!drawn.ok) return { ok: false, reason: drawn.reason };
+    const cardNonce = drawn.onTap === undefined ? nonce : onTapNonce(nonce);
 
     let result: { message_id: number };
     try {
@@ -4154,15 +4186,15 @@ export class TelegramChannel implements TestableChannel {
         reply_markup: {
           inline_keyboard: [
             [
-              { text: "✅ Approve", callback_data: callbackData("g", nonce, actionKey) },
-              { text: MINIMAL_DENY_LABEL, callback_data: callbackData("r", nonce, actionKey) },
+              { text: "✅ Approve", callback_data: callbackData("g", cardNonce, actionKey) },
+              { text: MINIMAL_DENY_LABEL, callback_data: callbackData("r", cardNonce, actionKey) },
               // APRV-531: the third control, on a card that does not hold the
               // rendering. It sends nothing to the gate.
               ...(drawn.onTap === undefined
                 ? []
-                : [{ text: MINIMAL_DETAILS_LABEL, callback_data: detailsCallbackData(nonce) }]),
+                : [{ text: MINIMAL_DETAILS_LABEL, callback_data: detailsCallbackData(cardNonce) }]),
             ],
-            ...this.studyRows(nonce, request),
+            ...this.studyRows(cardNonce, request),
           ],
         },
       });
@@ -4189,6 +4221,7 @@ export class TelegramChannel implements TestableChannel {
       card: { headline: drawn.headline, details: drawn.details },
       sayDoesIgnored: drawn.sayDoesIgnored === true,
       ...(drawn.onTap === undefined ? {} : { onTap: drawn.onTap }),
+      nonce: cardNonce,
     };
   }
 
@@ -5141,6 +5174,19 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
 
+    // APRV-531 fold 1 (S2; SPEC.md §10.3 amended: a message whose replies can
+    // no longer be sent MUST NOT collect a grant). An on-tap card this process
+    // is not holding cannot have its details sent, so its Approve decides
+    // nothing; its Deny keeps the stale-copy rule below, and so does every
+    // other card.
+    if (delivery === undefined && parsed.decision === "grant" && isOnTapNonce(parsed.nonce)) {
+      this.complain(
+        "approval: telegram refused Approve on an on-tap card this process is not holding: its details can no longer be sent",
+      );
+      await this.safeAnswer(callbackId, TELEGRAM_DETAILS_STALE_GRANT);
+      return;
+    }
+
     if (delivery === undefined && parsed.actionRef !== null && !refusedCard) {
       // The pre-restart copy. Its nonce died with the process that issued it,
       // but the request it names is one THIS process has since re-delivered, so
@@ -5522,15 +5568,38 @@ export class TelegramChannel implements TestableChannel {
       return;
     }
     await this.safeAnswer(callbackId, "");
-    for (const text of detailsReplies(details.rendering)) {
-      await this.call("sendMessage", {
-        chat_id: this.chatId,
-        text,
-        parse_mode: "HTML",
-        disable_web_page_preview: true,
-        reply_parameters: { message_id: Number(delivery.deliveryId) },
-      });
+    const thread = { message_id: Number(delivery.deliveryId) };
+    try {
+      for (const text of details.replies) {
+        await this.call("sendMessage", {
+          chat_id: this.chatId,
+          text,
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+          reply_parameters: thread,
+        });
+      }
+    } catch (cause) {
+      // Fold 1 (S1): a chain that failed partway is said so, threaded to the
+      // card, and the card stays re-tappable: `sent` is still false, so the
+      // next tap starts again at part 1. Best effort, as every toast is.
+      this.complain(
+        `approval: telegram could not send the full details of ${delivery.actionKey}: ${this.describe(cause)}; the card says so and can be tapped again`,
+      );
+      try {
+        await this.call("sendMessage", {
+          chat_id: this.chatId,
+          text: escapeHtml(MINIMAL_DETAILS_FAILED),
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+          reply_parameters: thread,
+        });
+      } catch (failed) {
+        this.complain(`approval: telegram could not say the full details failed: ${this.describe(failed)}`);
+      }
+      return;
     }
+    // Only once the last reply is delivered (fold 1, S1).
     details.sent = true;
   }
 

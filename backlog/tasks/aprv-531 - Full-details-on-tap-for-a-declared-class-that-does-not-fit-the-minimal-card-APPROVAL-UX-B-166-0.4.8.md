@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-20 10:56'
-updated_date: '2026-10-20 11:36'
+updated_date: '2026-10-20 12:35'
 labels:
   - channels
   - telegram
@@ -54,4 +54,11 @@ Decisions:
 Global invariants touched: none weakened. The new control appends nothing and reaches no handler (tests assert a byte-identical log and a zero handler count). No refusal union, vector file or schema changed.
 
 Cross-repo gap: the control plane's approval relay forwards only SEND_FIELDS (parse_mode, disable_web_page_preview, link_preview_options, disable_notification, protect_content), so behind the relay reply_parameters is dropped and the replies arrive unthreaded until the relay adds it.
+
+Fold 1 (review-b REFUTED 810bed2b 1 M / 2 S / 5 N; owner rulings CLAIMS 12:11Z):
+- M1: every reply opens with a computed 'Part k of n' line (opener on part 1, closer on the last). At most MINIMAL_DETAILS_MAX_REPLIES = 6 replies; more, or a rendering with no cut that keeps every non-last reply from ending on white space (Telegram's edge trim), makes detailsReplies return null and the card is the technical one (too-long), exactly as base.
+- S1: details.sent is set only after the last reply is delivered. A failure partway sends MINIMAL_DETAILS_FAILED threaded to the card (best effort) and leaves it re-tappable; the next tap restarts at part 1.
+- S2: an on-tap card's buttons carry onTapNonce(nonce) (nonce + '.d', '.' is outside base64url). A grant tap on such a nonce that this process is not holding answers TELEGRAM_DETAILS_STALE_GRANT and decides nothing; Deny and every other card keep the stale-copy ladder. The mark only narrows.
+- N4: SPEC §10.3 :569 names the exception; the base rule keeps 'or moved to another message' with the exception carved out; the exception text adds the part line, the reply-cap and empty-after-trim fallbacks, and that a message whose replies can no longer be sent MUST NOT collect a grant.
+- N3: PR body carries the style table. N1 (relay), N2 (record cannot tell on-tap), N5 (anomaly counter) are not changed in this fold.
 <!-- SECTION:NOTES:END -->
