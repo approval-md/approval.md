@@ -243,7 +243,9 @@ jobs:
     # control plane's APPROVAL_MD_VERSION; move this pin in the PR that
     # follows a roll), installed from npm and held to its pinned integrity.
     # The report lists every call (each recipe plus each tools: line of the
-    # template) whose class, decision or card style moves, and the job fails
+    # template) whose class, decision or card style moves, in two working
+    # directories (a neutral one, and a box-like Hermes home: a `.hermes` dir
+    # with a dummy `.env`, HERMES_HOME set to it), and the job fails
     # when an existing call moves from auto, sampled or card to human-only or
     # refused, unless the allowlist names it with a reason. The report is the
     # job summary and the `class-diff` artifact (markdown + JSON); its first
@@ -291,7 +293,7 @@ jobs:
         run: |
           set -euo pipefail
           at=$(node -p 'require("./scripts/overlay-recipes/corpus.json").overlay.extracted_at')
-          bun scripts/overlay-recipes-extract.mjs --overlay .overlay --sha "${{ steps.pin.outputs.sha }}" --extracted-at "$at" --out "$RUNNER_TEMP/corpus.json"
+          bun scripts/overlay-recipes-extract.mjs --overlay "$GITHUB_WORKSPACE/.overlay" --sha "${{ steps.pin.outputs.sha }}" --extracted-at "$at" --out "$RUNNER_TEMP/corpus.json"
           if ! cmp -s "$RUNNER_TEMP/corpus.json" scripts/overlay-recipes/corpus.json; then
             echo "::error::scripts/overlay-recipes/corpus.json differs from a fresh extraction of the overlay at ${{ steps.pin.outputs.sha }}; refresh it with the extractor, never by hand"
             diff <(node -p 'JSON.stringify(require(process.argv[1]).recipes,null,1)' "$RUNNER_TEMP/corpus.json") <(node -p 'JSON.stringify(require(process.argv[1]).recipes,null,1)' "$PWD/scripts/overlay-recipes/corpus.json") | head -40 || true

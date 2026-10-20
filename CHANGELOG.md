@@ -69,7 +69,14 @@ before a tag.
   line) as the job summary and the `class-diff` artifact. Between 0.4.5 and
   0.4.6, on the overlay the boxes ran on 19 October (`99d33417`), it reports
   the eleven EdgeOS recipes moving `network.call` auto to `policy.core`
-  human-only: EDGEOS-BLOCK, caught before a tag.
+  human-only: EDGEOS-BLOCK, caught before a tag. Every call is diffed in two
+  working directories, a neutral one and a box-like Hermes home (a `.hermes`
+  directory with a dummy `.env`, HERMES_HOME set to it), because the APRV-522
+  credential pass decides a reader's unexpanded `$` word by where it starts.
+  From the Hermes home, 0.4.6 also denies the `--url` EdgeOS recipes
+  (`-H "Authorization: Bearer $EDGEOS_API_KEY"` gains `account.credential`,
+  human-only under the template), and the diff reports those eleven as
+  blocking in that column.
 
 ## 0.4.6 — 2026-10-18
 

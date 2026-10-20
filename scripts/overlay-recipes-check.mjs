@@ -73,7 +73,8 @@
  * could not be read.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -182,7 +183,29 @@ function classDecision(core, load, cls) {
  * harnessLaunchNeedsRule, promptStyleFor, promptSayFor), so a test can hand it
  * stand-ins.
  */
-export function decideCorpus(core, corpus) {
+export function decideCorpus(core, corpus, where = {}) {
+  // Two working directories (B-167 steer 2). The credential pass (APRV-522,
+  // refineCredentialReads) judges a reader's unexpanded `$` word against the
+  // directory it starts in and the configured Hermes home, so a call can be
+  // decided differently from the box's Hermes home than from a neutral
+  // directory. HERMES_HOME is pinned for the duration (set to `hermesHome`, or
+  // unset for the neutral column, so the runner's own environment never
+  // decides anything) and restored after.
+  const saved = { HERMES_HOME: process.env.HERMES_HOME, APPROVAL_HERMES_HOME: process.env.APPROVAL_HERMES_HOME };
+  delete process.env.APPROVAL_HERMES_HOME;
+  if (where.hermesHome !== undefined) process.env.HERMES_HOME = where.hermesHome;
+  else delete process.env.HERMES_HOME;
+  try {
+    return decideAt(core, corpus, where.cwd ?? where.hermesHome ?? corpus.cwd ?? "/tmp");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+function decideAt(core, corpus, cwd) {
   const load = loadCorpusPolicy(core.loadPolicyText, corpus);
   if (!load.ok) return { error: `the template policy did not load at core ${core.version}: ${load.code}: ${load.message}` };
   const protectedPaths = load.policy.protected_paths ?? [];
@@ -207,7 +230,7 @@ export function decideCorpus(core, corpus) {
   };
   for (const recipe of corpus.recipes) {
     const command = filled(recipe.command, corpus.fill ?? []);
-    const result = core.classifyForHook(command, protectedPaths, corpus.cwd ?? "/tmp", []).result;
+    const result = core.classifyForHook(command, protectedPaths, cwd, []).result;
     const key = keyed("recipe", fileOf(recipe.where), recipe.command);
     if (!result.ok) {
       calls.push({ key, kind: "recipe", where: recipe.where, command: recipe.command, classes: [], rules: [], decision: "refused", code: result.code, style: null });
@@ -292,6 +315,44 @@ export function diffCalls(baselineCalls, calls, allowlist = { entries: [] }) {
   return { rows, summary };
 }
 
+/**
+ * A throwaway directory shaped like a box's Hermes home: named `.hermes`, with
+ * a `.env` holding one dummy key name and no secret. The caller removes it.
+ */
+export function makeHermesHome() {
+  const root = mkdtempSync(join(tmpdir(), "class-diff-home-"));
+  const home = join(root, ".hermes");
+  mkdirSync(home);
+  writeFileSync(join(home, ".env"), "EDGEOS_API_KEY=dummy-not-a-secret\n", "utf8");
+  return { root, home };
+}
+
+/**
+ * The diff in both working directories a box call can start in (B-167 steer
+ * 2): `neutral` (the corpus's cwd, as the overlay's own test classifies) and
+ * `hermes-home` (a `.hermes` home with a `.env`, HERMES_HOME set to it). A flip
+ * in either column is a finding; the summary sums the two.
+ */
+export function diffColumns({ baselineCore, baselineCorpus, core, corpus, allowlist, hermesHome }) {
+  const columns = [];
+  for (const [name, where] of [["neutral", {}], ["hermes-home", { hermesHome }]]) {
+    const before = decideCorpus(baselineCore, baselineCorpus, where);
+    if ("error" in before) return before;
+    const after = decideCorpus(core, corpus, where);
+    if ("error" in after) return after;
+    columns.push({ name, cwd: name === "neutral" ? corpus.cwd ?? "/tmp" : "<tmp>/.hermes (HERMES_HOME, .env with a dummy key)", ...diffCalls(before.calls, after.calls, allowlist) });
+  }
+  const summary = { ...columns[0].summary };
+  // A moved call counts once per column it moves in; new and removed are facts
+  // of the two corpora, the same in both columns, so they count once.
+  for (const key of ["blocking", "allowlisted", "tighter", "changed"]) {
+    summary[key] = columns.reduce((n, c) => n + c.summary[key], 0);
+  }
+  summary.unchanged = columns.reduce((n, c) => n + c.summary.unchanged, 0);
+  summary.columns = Object.fromEntries(columns.map((c) => [c.name, c.summary.blocking]));
+  return { columns, summary };
+}
+
 /** The GATE line: the one line the release GATE carries verbatim. */
 export function gateLine(meta, summary) {
   const verdict = summary.blocking > 0 ? `FAIL ${summary.blocking} BLOCKING` : "PASS";
@@ -306,7 +367,10 @@ export function gateLine(meta, summary) {
     (moved === 0
       ? "class-diff: none"
       : `${moved} moved (${summary.blocking} blocking, ${summary.allowlisted} allowlisted, ${summary.tighter} tighter, ${summary.changed} changed)`) +
-    `; ${summary.new} new, ${summary.removed} removed`
+    `; ${summary.new} new, ${summary.removed} removed` +
+    (summary.columns === undefined
+      ? ""
+      : ` (2 cwds; blocking by cwd: ${Object.entries(summary.columns).map(([k, v]) => `${k} ${v}`).join(", ")})`)
   );
 }
 
@@ -329,6 +393,19 @@ export function renderDiff(meta, diff) {
   out.push(`- baseline: core ${meta.baselineCore} (${meta.baselineLabel}), overlay ${meta.overlayRepo}@${meta.baselineOverlay}`);
   out.push(`- candidate: core ${meta.core} (${meta.coreLabel}), overlay ${meta.overlayRepo}@${meta.overlay}`);
   out.push("- BLOCKING (CLAIMS L15681 (1)): an existing call moving from auto, sampled or card to human-only or refused", "");
+  if (diff.columns !== undefined) {
+    for (const column of diff.columns) {
+      out.push(`## Working directory: ${column.name} (${column.cwd})`, "");
+      out.push(...renderRows(column));
+    }
+    return out.join("\n");
+  }
+  out.push(...renderRows(diff));
+  return out.join("\n");
+}
+
+function renderRows(diff) {
+  const out = [];
   const moved = diff.rows.filter((r) => ["blocking", "allowlisted", "tighter", "changed"].includes(r.status));
   if (moved.length === 0) out.push("class-diff: none (no existing call changes class, code, decision or card style)", "");
   const sections = [
@@ -352,7 +429,7 @@ export function renderDiff(meta, diff) {
     out.push("");
   }
   out.push(`Unchanged: ${diff.summary.unchanged} of ${diff.summary.calls} calls.`, "");
-  return out.join("\n");
+  return out;
 }
 
 /** A core's functions from a package root that holds `dist/src`. */
@@ -459,11 +536,14 @@ async function main() {
     } catch (error) {
       fail(error instanceof Error ? error.message : String(error));
     }
-    const before = decideCorpus(baselineCore, baselineCorpus);
-    if ("error" in before) fail(before.error);
-    const after = decideCorpus(core, corpus);
-    if ("error" in after) fail(after.error);
-    const diff = diffCalls(before.calls, after.calls, allowlist);
+    const { root: homeRoot, home } = makeHermesHome();
+    let diff;
+    try {
+      diff = diffColumns({ baselineCore, baselineCorpus, core, corpus, allowlist, hermesHome: home });
+    } finally {
+      rmSync(homeRoot, { recursive: true, force: true });
+    }
+    if ("error" in diff) fail(diff.error);
     const meta = {
       core: core.version,
       baselineCore: baselineCore.version,

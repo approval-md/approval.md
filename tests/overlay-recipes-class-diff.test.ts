@@ -32,7 +32,7 @@ import { loadPolicyText } from "../src/core/policy-load.js";
 import { harnessLaunchNeedsRule, resolve } from "../src/core/policy-match.js";
 import { promptSayFor, promptStyleFor } from "../src/core/prompt-layout.js";
 // @ts-expect-error no declaration file for the standalone check script
-import { decideCorpus, diffCalls, gateLine } from "../../scripts/overlay-recipes-check.mjs";
+import { decideCorpus, diffCalls, diffColumns, gateLine, makeHermesHome } from "../../scripts/overlay-recipes-check.mjs";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const SCRIPT = join(ROOT, "scripts", "overlay-recipes-check.mjs");
@@ -170,6 +170,73 @@ test("the GATE line states class-diff: none when nothing moved, and FAIL with th
   assert.match(gateLine(meta, flip.summary), /^CLASS-DIFF FAIL 1 BLOCKING: /u);
 });
 
+// --- the Hermes-home working directory (B-167 steer 2) ------------------------
+//
+// 0.4.6's credential pass (APRV-522, refineCredentialReads) adds an
+// account.credential segment to a reader whose word holds an unexpanded `$`
+// when the command starts in the Hermes home, so the --url EdgeOS recipe with
+// `$EDGEOS_API_KEY` in a header, fine from a neutral directory, is a
+// human-only deny from the box's home. The stand-in baseline has no such pass,
+// as 0.4.5 had none.
+
+const noCredentialPass = {
+  ...thisCore,
+  version: "0.4.5-standin-credential",
+  classifyForHook: (...a: unknown[]) => {
+    const real = (classifyForHook as (...b: unknown[]) => { result: { ok: boolean; classes: string[]; segments: { class: string; rule: string }[] } })(...a);
+    if (!real.result.ok) return real;
+    const segments = real.result.segments.filter((x) => x.rule !== "credential-path-resolved");
+    return { ...real, result: { ok: true, segments, classes: [...new Set(segments.map((x) => x.class))] } };
+  },
+};
+
+test("HOME: the --url EdgeOS recipe with $EDGEOS_API_KEY flips auto -> human-only only from the Hermes home", () => {
+  const { root, home } = makeHermesHome();
+  try {
+    const d = diffColumns({
+      baselineCore: noCredentialPass,
+      baselineCorpus: fixture([STAYS, NEW]),
+      core: thisCore,
+      corpus: fixture([STAYS, NEW]),
+      allowlist: { entries: [] },
+      hermesHome: home,
+    }) as { columns: (Diff & { name: string })[]; summary: Diff["summary"] & { columns: Record<string, number> } };
+    const [neutral, atHome] = d.columns;
+    assert.equal(neutral?.name, "neutral");
+    assert.equal(recipeRow(neutral as Diff, FIXED_URL)?.status, "unchanged");
+    assert.equal(atHome?.name, "hermes-home");
+    const row = recipeRow(atHome as Diff, FIXED_URL);
+    assert.equal(row?.status, "blocking");
+    assert.equal(row?.old?.decision, "auto");
+    assert.deepEqual(row?.new?.classes, ["account.credential", "network.call"]);
+    assert.equal(row?.new?.decision, "human-only");
+    assert.equal(recipeRow(atHome as Diff, NEW_RECIPE)?.status, "unchanged", "a command with no $ word stays");
+    assert.deepEqual(d.summary.columns, { neutral: 0, "hermes-home": 1 });
+    assert.equal(d.summary.blocking, 1);
+    const meta = { core: "b", baselineCore: "a", overlay: "f".repeat(40), baselineOverlay: "f".repeat(40) };
+    assert.match(gateLine(meta, d.summary), /^CLASS-DIFF FAIL 1 BLOCKING: .*blocking by cwd: neutral 0, hermes-home 1\)$/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("HOME: the column pins HERMES_HOME and restores the caller's environment", () => {
+  const { root, home } = makeHermesHome();
+  const before = process.env.HERMES_HOME;
+  try {
+    process.env.HERMES_HOME = "/nonexistent/caller-home";
+    const neutral = decideCorpus(thisCore, fixture([STAYS])) as { calls: { command: string; classes: string[] }[] };
+    assert.deepEqual(neutral.calls.find((c) => c.command === FIXED_URL)?.classes, ["network.call"]);
+    const atHome = decideCorpus(thisCore, fixture([STAYS]), { hermesHome: home }) as { calls: { command: string; classes: string[] }[] };
+    assert.deepEqual(atHome.calls.find((c) => c.command === FIXED_URL)?.classes, ["account.credential", "network.call"]);
+    assert.equal(process.env.HERMES_HOME, "/nonexistent/caller-home");
+  } finally {
+    if (before === undefined) delete process.env.HERMES_HOME;
+    else process.env.HERMES_HOME = before;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // --- the CLI, exit codes read alone -------------------------------------------
 
 const dir = mkdtempSync(join(tmpdir(), "class-diff-"));
@@ -211,7 +278,7 @@ test("CLI FLIP: a recipe moving auto -> human-only exits 1 with the BLOCKING row
 test("CLI STAYS: the same corpus at the same core exits 0 and says class-diff: none", () => {
   const run = cli(fixture([STAYS]), fixture([STAYS]));
   assert.equal(run.status, 0, run.stderr);
-  assert.match(run.stdout, /CLASS-DIFF PASS: .*class-diff: none/u);
+  assert.match(run.stdout, /CLASS-DIFF PASS: .*class-diff: none.*blocking by cwd: neutral 0, hermes-home 0/u);
 });
 
 test("CLI NEW: a new recipe exits 0 and is listed under New calls", () => {
