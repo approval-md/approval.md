@@ -1,5 +1,5 @@
 /**
- * The flag-off card flows the study-mode golden files pin (LOKI-GATE G2-1/G2-2).
+ * The flag-off card flows the study-mode golden files pin (G2-1/G2-2, APRV-528).
  *
  * Every Bot API call a channel makes for a fixed set of cards and taps, with the
  * study flag OFF, canonicalised (RFC 8785, `core/jcs.ts`) one call per line.
