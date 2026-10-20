@@ -2750,6 +2750,218 @@
           }
         }
       }
+    },
+    {
+      "$comment": "SPEC.md §8 (amended, the study record): `payload.study` says why a study denied a request, and a study may only deny. So the field is admitted on `approval.rejected` alone and refused on every other event, `approval.granted`, `approval.revoked` and `approval.withdrawn` among them: a grant carrying it would read as a study approving something, which no study surface can do.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "study": true
+            },
+            "required": [
+              "study"
+            ]
+          }
+        },
+        "required": [
+          "payload"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "approval.rejected"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      }
+    },
+    {
+      "$comment": "SPEC.md §8 (amended, the study record): the shape of `payload.study` on `approval.rejected`, and the record fields each reason binds. Closed, with two reasons. `study_withdrawn` is a hosted operator denying a still-pending request: it names the operator (`operator`, 8 hex of the SHA-256 of the lower-cased staff email, never the email) and the withdraw's replay reference (`ref`), and the record is written under `human:study-team` on channel `study`, so a reader can always tell it from a resident's answer. `looks_wrong` is the resident's own deny with a flag: it names no operator and no reference, and it arrives on `telegram`, the one channel that draws the button. No enforcement path reads this field; a reader that ignores it reads an ordinary rejection.",
+      "if": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "const": "approval.rejected"
+          },
+          "payload": {
+            "type": "object",
+            "properties": {
+              "study": true
+            },
+            "required": [
+              "study"
+            ]
+          }
+        },
+        "required": [
+          "event",
+          "payload"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "study": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "reason"
+                ],
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "study_withdrawn",
+                      "looks_wrong"
+                    ],
+                    "description": "SPEC.md §8 (amended): why the study denied. `study_withdrawn`: a hosted operator withdrew the pending request before it could run. `looks_wrong`: the resident flagged the card as a suspected study card and skipped it."
+                  },
+                  "operator": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}$",
+                    "description": "The first 8 hex of the SHA-256 of the withdrawing operator's lower-cased staff email. Derivable from the staff list and never the email itself. `study_withdrawn` only."
+                  },
+                  "ref": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{16,64}$",
+                    "description": "The withdraw's replay reference, minted once by the operator's tooling; the log is its idempotency authority. `study_withdrawn` only."
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "type": "object",
+                      "properties": {
+                        "reason": {
+                          "const": "study_withdrawn"
+                        }
+                      },
+                      "required": [
+                        "reason"
+                      ]
+                    },
+                    "then": {
+                      "type": "object",
+                      "properties": {
+                        "operator": true,
+                        "ref": true
+                      },
+                      "required": [
+                        "operator",
+                        "ref"
+                      ]
+                    }
+                  },
+                  {
+                    "if": {
+                      "type": "object",
+                      "properties": {
+                        "reason": {
+                          "const": "looks_wrong"
+                        }
+                      },
+                      "required": [
+                        "reason"
+                      ]
+                    },
+                    "then": {
+                      "type": "object",
+                      "properties": {
+                        "operator": false,
+                        "ref": false
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "type": "object",
+              "properties": {
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "study": {
+                      "type": "object",
+                      "properties": {
+                        "reason": {
+                          "const": "study_withdrawn"
+                        }
+                      },
+                      "required": [
+                        "reason"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "type": "object",
+              "properties": {
+                "actor": {
+                  "const": "human:study-team"
+                },
+                "channel": {
+                  "const": "study"
+                }
+              },
+              "required": [
+                "actor",
+                "channel"
+              ]
+            }
+          },
+          {
+            "if": {
+              "type": "object",
+              "properties": {
+                "payload": {
+                  "type": "object",
+                  "properties": {
+                    "study": {
+                      "type": "object",
+                      "properties": {
+                        "reason": {
+                          "const": "looks_wrong"
+                        }
+                      },
+                      "required": [
+                        "reason"
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "type": "object",
+              "properties": {
+                "channel": {
+                  "const": "telegram"
+                }
+              },
+              "required": [
+                "channel"
+              ]
+            }
+          }
+        ]
+      }
     }
   ]
 }

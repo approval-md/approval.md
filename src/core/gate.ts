@@ -2680,6 +2680,36 @@ function attemptRequest(
 // decide
 // ---------------------------------------------------------------------------
 
+/**
+ * Why a study denied a request (amended SPEC.md §8), the closed vocabulary of
+ * `payload.study.reason` on `approval.rejected`.
+ *
+ * - `study_withdrawn`: a hosted operator withdrew a still-pending request
+ *   before it could run. Written by the operator's withdraw verb alone, under
+ *   `human:study-team` on channel `study`; a channel may never pass it.
+ * - `looks_wrong`: the resident flagged the card as a suspected study card and
+ *   skipped it. An ordinary resident deny with the flag recorded.
+ */
+export const STUDY_REASONS = ["study_withdrawn", "looks_wrong"] as const;
+
+export type StudyReason = (typeof STUDY_REASONS)[number];
+
+/**
+ * The study record on a reject (amended SPEC.md §8), written as
+ * `payload.study` on `approval.rejected` only.
+ *
+ * `operator` is an 8-hex pseudonymous id the operator's control plane derives
+ * from the staff email under its own key (never the email), and `ref` is the withdraw's replay reference; both belong to
+ * `study_withdrawn` and the schema refuses them on `looks_wrong`. A record of
+ * why a person denied, never an input: no enforcement path reads it, and a
+ * reader that ignores it reads an ordinary rejection.
+ */
+export interface DecisionStudy {
+  reason: StudyReason;
+  operator?: string;
+  ref?: string;
+}
+
 export interface DecideOptions extends GateOptions {
   /** Free-text note recorded in the event payload (SPEC.md §8's example). */
   note?: string;
@@ -2768,6 +2798,17 @@ export interface DecideOptions extends GateOptions {
    * here or anywhere reads it back.
    */
   rendering?: PromptRendering;
+  /**
+   * Why a study denied this request (amended SPEC.md §8), recorded as
+   * `payload.study` on `approval.rejected` only.
+   *
+   * Written under the reject's own branch, the way `reaction` sits under the
+   * grant's, so a value passed with `grant` or `revoke` is structurally unable
+   * to reach a record. Copied field by field in a fixed shape, so nothing else
+   * a caller hangs on the object reaches the log. A decision surface supplies
+   * it; there is no CLI flag for it on `approval reject`.
+   */
+  study?: DecisionStudy;
 }
 
 /**
@@ -3137,6 +3178,18 @@ function attemptDecide(
       style: options.rendering.style,
       ...(options.rendering.fallback === undefined ? {} : { fallback: options.rendering.fallback }),
       ...(options.rendering.say_does_ignored === true ? { say_does_ignored: true } : {}),
+    };
+  }
+  // Amended SPEC.md §8 (the study record). Reject only: a study may DENY a
+  // pending request and never grant, alter or reopen one, so the field exists
+  // on the one decision that denies. Copied field by field, `operator` and
+  // `ref` only when present; the schema then holds each reason to its shape at
+  // the write boundary.
+  if (decision === "reject" && options.study !== undefined) {
+    payload["study"] = {
+      reason: options.study.reason,
+      ...(options.study.operator === undefined ? {} : { operator: options.study.operator }),
+      ...(options.study.ref === undefined ? {} : { ref: options.study.ref }),
     };
   }
 

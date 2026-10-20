@@ -672,6 +672,19 @@ export interface ChannelDecision {
    * channel's own screen, never an input to a decision.
    */
   rendering?: PromptRendering;
+  /**
+   * The study flag on this gesture (amended SPEC.md §8), recorded as
+   * `payload.study` on the `approval.rejected` it produces.
+   *
+   * A channel may set `looks_wrong` and nothing else: the resident flagged the
+   * card as a suspected study card and skipped it. Any other value, including
+   * `study_withdrawn`, is refused `study-reason-not-channel` before the gate is
+   * called, and nothing is appended. `study_withdrawn` is the study team's
+   * withdraw verb's, which no channel can reach. Like `rendering`, a record of
+   * what the person did and never an input: every check a Deny passes, this
+   * passes too.
+   */
+  study?: { reason: "looks_wrong" };
 }
 
 /**
@@ -955,12 +968,36 @@ export function recordChannelDecision(
   // The routing lives here rather than in each channel runner for the reason
   // this function exists at all: there is one place a reported gesture becomes a
   // log event, and adding a second would be adding a second decision path.
+  // Amended SPEC.md §8 (the study record), first and before anything is read
+  // or appended: a channel may flag a gesture `looks_wrong` and nothing else.
+  // The value arrives from a channel, so it is checked as data rather than
+  // trusted as a type; anything else, `study_withdrawn` above all, is refused
+  // with no record, because the only writer of a withdrawal is the study
+  // team's own verb.
+  if (
+    decision.study !== undefined &&
+    (decision.study as { reason?: unknown }).reason !== "looks_wrong"
+  ) {
+    return {
+      outcome: {
+        ok: false,
+        code: "study-reason-not-channel",
+        message: `decision on ${decision.action_key} refused: a channel may record only the looks_wrong study reason. A study withdrawal is written by the study team's withdraw verb alone, never by a channel. Nothing was decided and nothing was recorded.`,
+      },
+    };
+  }
+
   if (isAttestationActionKey(decision.action_key)) {
     return recordAttestationDecision(logPath, decision, actorOptions, gateOptions);
   }
 
-  const options: DecideOptions = { ...gateOptions };
+  // The study record comes from the gesture alone: a `study` the runtime's own
+  // gate options carry is dropped here, so the one value that reaches the gate
+  // is the one checked above.
+  const { study: _runtimeStudy, ...runtimeOptions } = gateOptions;
+  const options: DecideOptions = { ...runtimeOptions };
   if (decision.note !== undefined) options.note = decision.note;
+  if (decision.study !== undefined) options.study = { reason: "looks_wrong" };
   if (decision.batchDeliveryId !== undefined) {
     options.batchDeliveryId = decision.batchDeliveryId;
   }
