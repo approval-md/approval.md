@@ -2104,29 +2104,41 @@ control plane can probe whether the installed CLI has the verb.
 **Deny-only, constant identity.** There is no `--as`, no decision flag and no
 note. The record is one `approval.rejected` by `human:study-team` on channel
 `study`, with `payload.note` "withdrawn by the study team" and `payload.study`
-`{reason: "study_withdrawn", operator, ref}`. `--operator` is the first 8 hex of
-the SHA-256 of the operator's lower-cased staff email, never the email.
+`{reason: "study_withdrawn", operator, ref}`. `--operator` is 8 lowercase hex: a
+pseudonymous id the control plane derives from the operator's staff email under
+a key it alone holds (an HMAC), never the email. Core checks only its shape.
 
-**Pending-only, and a refusal writes nothing.** A request that is granted,
-rejected, revoked, expired, withdrawn or never requested is refused
+**Pending-only, and a too-late withdrawal is on the record.** A request that is
+granted, rejected, revoked, expired, withdrawn or never requested is refused
 `not-pending`. The gate's `decide` re-derives the state under its head-moved
 retry, so a resident's tap that lands between the verb's read and its append
-wins and the withdrawal becomes `not-pending` (the gate's code rides as
-`gate_code`). Unlike `approval reject`, no `audit.decision_refused` is appended
-for any refusal: an operator's too-late or repeated withdrawal is not a person
-answering the gate, and the log stays byte-identical.
+wins and the withdrawal becomes `not-pending`. The gate's own code
+(`already-decided`, `expired`, `request-withdrawn`, or what `decide` answered)
+rides as `gate_code`. As with `approval reject`, a refusal for a request that
+exists appends ONE `audit.decision_refused` by `system:gate`, naming
+`human:study-team` on channel `study` and that code, so the study's own record
+shows the attempt. It carries no operator id (the operator is in the control
+plane's log line). Nothing is appended for `study-mode-off`, a replay, an
+`action-ref-ambiguous`, a key or ref naming no request, or a log fault.
 
-**Replay-safe.** The `--ref` is matched against the verified log first. The same
-ref again for the same request answers `idempotent: true` with the earlier
-record's seq, and appends nothing.
+**Replay-safe.** The `--ref` is matched against the verified log first, and
+again when the gate refuses after a lost race, so a concurrent retry of the same
+ref (a control plane retrying after its own timeout) is not mistaken for a
+too-late one. The same ref again for the same request answers
+`idempotent: true` with the earlier record's seq, and appends nothing. A ref is
+unique per withdrawal by convention (the operator's tool mints a fresh one):
+the same ref on a different request is a new withdrawal.
 
 **Name by key or by ref.** `--action-ref` is the first 12 hex of the SHA-256 of
 the action key (the same 12 hex the Telegram listener's "Looks wrong" line
 prints), so a control plane never has to carry an action key off the box. More
-than one pending request under one ref is `action-ref-ambiguous`.
+than one pending request under one ref is `action-ref-ambiguous`. A ref that
+names no pending request but exactly one settled one is resolved to it, so a
+too-late withdrawal by ref is recorded against that request.
 
 **Not published.** The registry marks the verb human-only, so neither `approval
-serve` nor `approval mcp serve` offers it. Its caller is a root exec running as
+serve` nor `approval mcp serve` offers it, and operator-only, so the agent's
+guide (`approval instructions`, its `--json` and `--schemas`) does not list it. Its caller is a root exec running as
 the store's own uid. The Telegram listener edits the resident's card on its next
 cycle to "WITHDRAWN BY THE STUDY TEAM" with "withdrawn by the study team at
 HH:MM UTC · nothing ran", and takes the buttons away. The requester's `wait`

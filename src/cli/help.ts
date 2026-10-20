@@ -992,14 +992,15 @@ Usage:
 
 Flags:
   --action-ref <hex>  first 12 hex of sha256(action key), in place of the key
-  --operator <hex>    first 8 hex of sha256(lower-cased staff email)
+  --operator <hex>    8 hex: the control plane's keyed id of the staff email
   --ref <ref>         16-64 of [A-Za-z0-9_-]; the same ref again is idempotent
 
 OFF UNLESS APPROVAL_STUDY_MODE=1 is in this process's environment (else
 study-mode-off). DENY-ONLY and PENDING-ONLY: appends one approval.rejected by
-human:study-team on channel study with payload.study study_withdrawn. A
-request that is not pending is refused not-pending, and a refusal appends
-NOTHING (no audit.decision_refused). Never published over serve or MCP.
+human:study-team on channel study with payload.study study_withdrawn. Not
+pending is refused not-pending and recorded as ONE audit.decision_refused
+with the gate's code (gate_code); nothing else that refuses appends. Not on
+serve, MCP or approval instructions.
 
 JSON shape: docs/cli-reference.md#study-withdraw
 Refusal codes: study-mode-off, not-pending, action-ref-ambiguous (exit 1)

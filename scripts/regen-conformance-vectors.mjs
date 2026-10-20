@@ -455,7 +455,7 @@ const unionVectors = [
   ],
   [
     "study_withdraw_refusal_codes",
-    "every way `approval study withdraw` refuses on its own, in evaluation order: the process was not launched with APPROVAL_STUDY_MODE=1, the request is not pending (decided, expired, withdrawn, never requested, or answered by someone else between the read and the append), or an action ref names more than one pending request. None of them appends to the log. A log that cannot be read or written reaches the caller under the gate's own code and is not a member here",
+    "every way `approval study withdraw` refuses on its own, in evaluation order: the process was not launched with APPROVAL_STUDY_MODE=1, the request is not pending (decided, expired, withdrawn, never requested, or answered by someone else between the read and the append), or an action ref names more than one pending request. Only not-pending on a request that exists writes, and it writes one audit.decision_refused with the gate's own code. A log that cannot be read or written reaches the caller under the gate's own code, appends nothing, and is not a member here",
   ],
 ].map(([union, description]) => ({
   id: `union-${union}`,

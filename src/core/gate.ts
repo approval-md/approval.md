@@ -2698,8 +2698,8 @@ export type StudyReason = (typeof STUDY_REASONS)[number];
  * The study record on a reject (amended SPEC.md §8), written as
  * `payload.study` on `approval.rejected` only.
  *
- * `operator` is the first 8 hex of the SHA-256 of the operator's lower-cased
- * staff email, and `ref` is the withdraw's replay reference; both belong to
+ * `operator` is an 8-hex pseudonymous id the operator's control plane derives
+ * from the staff email under its own key (never the email), and `ref` is the withdraw's replay reference; both belong to
  * `study_withdrawn` and the schema refuses them on `looks_wrong`. A record of
  * why a person denied, never an input: no enforcement path reads it, and a
  * reader that ignores it reads an ordinary rejection.

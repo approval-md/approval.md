@@ -169,7 +169,7 @@ function commandStudyWithdraw(
     return usageError(
       streams,
       json,
-      "--operator expects 8 lowercase hex: the first 8 of sha256(the lower-cased staff email), never the email",
+      "--operator expects 8 lowercase hex: the control plane's keyed id of the staff email, never the email",
       STUDY_WITHDRAW_HELP,
     );
   }

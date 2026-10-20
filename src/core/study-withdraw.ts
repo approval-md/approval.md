@@ -22,16 +22,19 @@
  *    never requested) is `not-pending`. `decide` then re-derives the state under
  *    its own head-moved retry, so a resident's tap that lands between this read
  *    and the append wins and the withdraw becomes `not-pending` too.
- * 3. **A refusal appends nothing.** Unlike `approval reject`, this verb records
- *    no `audit.decision_refused` on a refused attempt: an operator's too-late or
- *    repeated withdraw is not a person answering the gate, and the log stays
- *    byte-identical. (The one record a refusal can still leave is the gate's
- *    own lazy `approval.expired`, which states a lapse a reader could already
- *    derive; see SPEC.md §11.2's preamble.)
+ * 3. **A too-late withdraw is on the record.** Like `approval reject`, a
+ *    refused attempt that names one request appends ONE `audit.decision_refused`
+ *    (`recordRefusedDecision`, under `human:study-team` on channel `study`, with
+ *    the gate's own code): the study team's attempt is a decision a person made,
+ *    and an invisible refusal would be a gap in the study's own record. Nothing
+ *    is appended when study mode is off, on a replay, on an ambiguous ref, on a
+ *    ref or key naming no request, or on a log fault. (The gate's own lazy
+ *    `approval.expired` can also land when a TTL lapses inside the read-to-append
+ *    window; see SPEC.md §11.2's preamble.)
  * 4. **Replay-safe.** The `ref` the operator supplies is matched against the
- *    verified log first. A second run with the same `ref` for the same request
- *    answers `idempotent` and appends nothing, so a control plane may retry a
- *    call whose answer it lost.
+ *    verified log first, and again after a lost race, so a concurrent retry of
+ *    the same `ref` (a control plane's retry after its own timeout) answers
+ *    `idempotent` and appends nothing rather than a false refusal.
  *
  * The verb is human-only in the verb registry, so neither `approval serve` nor
  * the MCP wrapper publishes it, and its one intended caller is a root exec on
@@ -48,6 +51,7 @@ import {
   type GateRefusalCode,
 } from "./gate.js";
 import { tick } from "./clock.js";
+import { recordRefusedDecision } from "./decision-refusal.js";
 import type { EventRecord } from "./log.js";
 import { requestState, type RequestState } from "./state.js";
 
@@ -68,7 +72,10 @@ export const STUDY_CHANNEL = "study";
 /** The record's `payload.note` for a study withdrawal. */
 export const STUDY_WITHDRAW_NOTE = "withdrawn by the study team";
 
-/** The operator id: the first 8 hex of sha256(lower-cased staff email). Never the email. */
+/**
+ * The operator id: 8 lowercase hex the control plane derives from the staff email with a key it
+ * alone holds (an HMAC, so a staff list cannot reverse it). Never the email; core checks the shape only.
+ */
 export const STUDY_OPERATOR_PATTERN = /^[0-9a-f]{8}$/u;
 
 /** The withdraw's replay reference, minted once by the operator's tool. */
@@ -93,10 +100,11 @@ export function studyActionRefOf(actionKey: string): string {
 
 /**
  * Every way the study withdraw refuses on its own (SPEC.md §11.1 invariant 6,
- * §11.2 `study_withdraw_refusal_codes`), in evaluation order. None appends to
- * the log. A log that cannot be read or written reaches the caller under the
- * gate's own code (`log-unreadable`, `log-torn-tail`, `log-corrupt`,
- * `append-failed`) and is not a member here.
+ * §11.2 `study_withdraw_refusal_codes`), in evaluation order. Only
+ * `not-pending` on a request that exists appends, and it appends one
+ * `audit.decision_refused`. A log that cannot be read or written reaches the
+ * caller under the gate's own code (`log-unreadable`, `log-torn-tail`,
+ * `log-corrupt`, `append-failed`), appends nothing, and is not a member here.
  */
 export const STUDY_WITHDRAW_REFUSAL_CODES = [
   /** The process was not launched with `APPROVAL_STUDY_MODE=1`. Nothing was read. */
@@ -151,8 +159,14 @@ export interface StudyWithdrawRefusal {
   message: string;
   /** The derived state, on `not-pending`. */
   state?: RequestState;
-  /** The gate's own refusal code, when `decide` refused (`not-pending` after a race). */
+  /**
+   * The gate's own code for the refusal, on `not-pending` for a request that
+   * exists (`already-decided`, `expired`, `request-withdrawn`, or whatever
+   * `decide` answered after a race). It is the code the audit record carries.
+   */
   gateCode?: GateRefusalCode;
+  /** The seq of the `audit.decision_refused` this refusal appended, when it appended one. */
+  auditSeq?: number;
   /** How many pending requests the ref named, on `action-ref-ambiguous`. */
   matches?: number;
 }
@@ -198,6 +212,17 @@ function replayOf(
     if (study["reason"] === "study_withdrawn" && study["ref"] === ref) return record;
   }
   return null;
+}
+
+/**
+ * The gate's own code for a request that exists and is not pending: the code
+ * `decide` would answer, derived without calling it (a call would also write the
+ * gate's lazy expiry record).
+ */
+function gateCodeOf(state: RequestState): GateRefusalCode {
+  if (state === "expired") return "expired";
+  if (state === "withdrawn") return "request-withdrawn";
+  return "already-decided";
 }
 
 /** Every key that has an `approval.requested`, in first-seen order. */
@@ -249,37 +274,26 @@ export function studyWithdraw(
   }
 
   // 4. Pending, at this instant, under the policy's TTL (the same derivation
-  // `approval queue` and the gate use). Nothing here appends: a lapsed request
-  // is `not-pending`, and the gate's lazy expiry record is not written for it.
+  // `approval queue` and the gate use). A lapsed request is `not-pending` with
+  // the gate's code `expired`; the gate's lazy expiry record is not written for
+  // it here (only the audit record is).
   const ts = tick(options);
   const load = readGatePolicy(options);
   const ttlMs = load.ok ? load.durations.approvalTtlMs : null;
 
+  // The one key the target names. A ref is resolved over every requested key:
+  // the pending ones first (so a decided card that shares a ref never shadows a
+  // pending one), then all of them, so a too-late withdraw by ref still learns
+  // which request it was too late for and can be put on the record.
   let actionKey: string;
   if ("actionKey" in input.target) {
     actionKey = input.target.actionKey;
-    const derivation = requestState(read.records, actionKey, ts, ttlMs);
-    if (derivation.state !== "requested") {
-      return refusal(
-        "not-pending",
-        `the request is not pending (state ${derivation.state}); a study withdrawal reaches only a request still awaiting a decision. ${NOTHING}`,
-        { state: derivation.state },
-      );
-    }
   } else {
     const target = input.target;
-    const pending = requestedKeys(read.records).filter(
-      (key) =>
-        studyActionRefOf(key) === target.actionRef &&
-        requestState(read.records, key, ts, ttlMs).state === "requested",
+    const named = requestedKeys(read.records).filter((key) => studyActionRefOf(key) === target.actionRef);
+    const pending = named.filter(
+      (key) => requestState(read.records, key, ts, ttlMs).state === "requested",
     );
-    if (pending.length === 0) {
-      return refusal(
-        "not-pending",
-        `no pending request carries this action ref; a study withdrawal reaches only a request still awaiting a decision. ${NOTHING}`,
-        { state: "none" },
-      );
-    }
     if (pending.length > 1) {
       return refusal(
         "action-ref-ambiguous",
@@ -287,7 +301,39 @@ export function studyWithdraw(
         { matches: pending.length },
       );
     }
-    actionKey = pending[0] as string;
+    if (pending.length === 1) {
+      actionKey = pending[0] as string;
+    } else if (named.length === 1) {
+      actionKey = named[0] as string;
+    } else {
+      // No request, or several settled ones (a 48-bit collision among decided
+      // cards): there is no one request to account the attempt to.
+      return refusal(
+        "not-pending",
+        `no pending request carries this action ref; a study withdrawal reaches only a request still awaiting a decision. ${NOTHING}`,
+        { state: "none" },
+      );
+    }
+  }
+
+  const derivation = requestState(read.records, actionKey, ts, ttlMs);
+  if (derivation.state === "none") {
+    return refusal(
+      "not-pending",
+      `no request carries this action key; a study withdrawal reaches only a request still awaiting a decision. ${NOTHING}`,
+      { state: "none" },
+    );
+  }
+  if (derivation.state !== "requested") {
+    const gateCode = gateCodeOf(derivation.state);
+    return refusedOnRecord(
+      logPath,
+      actionKey,
+      gateCode,
+      `the request is not pending (state ${derivation.state}); a study withdrawal reaches only a request still awaiting a decision`,
+      derivation.state,
+      options,
+    );
   }
 
   // 5. The deny, through the gate's own path: human-only check, fresh
@@ -301,21 +347,62 @@ export function studyWithdraw(
   });
   if (!decided.ok) {
     if (LOG_FAULT_CODES.has(decided.code)) return refusal(decided.code, decided.message);
-    // The one record a gate refusal can carry here is the lazy `approval.expired`
-    // of a TTL that lapsed inside the window: the gate's statement of a lapse,
-    // never the study team's.
-    const left =
+    // A concurrent run of this same ref may be what won the race (a control
+    // plane retrying after its own timeout): that is this withdrawal, already
+    // done, and it answers as the replay it is, with nothing written.
+    const again = readGateRecords(logPath, options.schemaDir);
+    if (!again.ok) return refusal(again.code, again.message);
+    const won = replayOf(again.records, { actionKey }, input.ref);
+    if (won !== null) return { ok: true, idempotent: true, seq: won.seq, actionKey };
+    // The one record the gate itself can leave here is the lazy
+    // `approval.expired` of a TTL that lapsed inside the window.
+    const lapse =
       decided.record === undefined
-        ? NOTHING
-        : `The gate recorded the lapse it derived (${decided.record.event}, seq ${String(decided.record.seq)}); no study record was appended.`;
-    return refusal(
-      "not-pending",
-      `the gate refused the withdrawal (${decided.code}): the request stopped being decidable before the study team's answer could be recorded. ${left}`,
-      {
-        gateCode: decided.code,
-        ...(decided.state === undefined ? {} : { state: decided.state }),
-      },
+        ? ""
+        : ` (the gate recorded the lapse it derived: ${decided.record.event}, seq ${String(decided.record.seq)})`;
+    return refusedOnRecord(
+      logPath,
+      actionKey,
+      decided.code,
+      `the gate refused the withdrawal (${decided.code}): the request stopped being decidable before the study team's answer could be recorded${lapse}`,
+      decided.state,
+      options,
+      decided.drift,
     );
   }
   return { ok: true, idempotent: false, seq: decided.record.seq, actionKey };
+}
+
+/**
+ * A `not-pending` refusal for a request that exists, put on the record as
+ * `approval reject` puts one (cli/gate.ts `commandDecide`): ONE
+ * `audit.decision_refused` by the gate, naming `human:study-team` on channel
+ * `study` and the gate's own code. Best effort, as there: the refusal stands
+ * whatever the write does, and a write that failed is said in the message.
+ */
+function refusedOnRecord(
+  logPath: string,
+  actionKey: string,
+  gateCode: GateRefusalCode,
+  why: string,
+  state: RequestState | undefined,
+  options: StudyWithdrawOptions,
+  drift?: { requested: string; attested: string },
+): StudyWithdrawRefusal {
+  const recorded = recordRefusedDecision(
+    logPath,
+    { actionKey, decision: "reject", actor: STUDY_TEAM_ACTOR, channel: STUDY_CHANNEL },
+    { code: gateCode, message: why, ...(drift === undefined ? {} : { drift }) },
+    options,
+  );
+  const audit = recorded.ok ? recorded.audit : null;
+  const left =
+    audit === null
+      ? "The refused attempt could not be put on the record."
+      : `The refused attempt is on the record (audit.decision_refused, seq ${String(audit.seq)}).`;
+  return refusal("not-pending", `${why}. ${left}`, {
+    gateCode,
+    ...(state === undefined ? {} : { state }),
+    ...(audit === null ? {} : { auditSeq: audit.seq }),
+  });
 }

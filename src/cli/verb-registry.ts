@@ -55,6 +55,15 @@ export interface VerbSpec {
   readonly human_only: boolean;
   /** Why, for the cases where the answer needed an argument rather than a lookup. */
   readonly human_only_note?: string;
+  /**
+   * True for a verb only a hosted operator runs, which the agent-facing guide
+   * leaves out: `approval instructions`, its `--json` and its `--schemas` print
+   * {@link AGENT_GUIDE_VERBS}, and MCP answers a call to it as an unknown tool.
+   * Its existence is itself something an agent must not read (the study withdraw
+   * would tell an agent in a study that a study team can pull its cards). It is
+   * always also `human_only`; `--help` and docs/cli-reference.md keep it.
+   */
+  readonly operator_only?: true;
   /** Positional arguments, flags, and (where a verb takes one) the trailing argv. */
   readonly input: JsonSchema;
   /** The `--json` SUCCESS shape, or null for a verb that emits no single object. */
@@ -1132,8 +1141,9 @@ const VERBS: VerbSpec[] = [
     name: "study",
     subcommand: "withdraw",
     purpose:
-      "A hosted study operator DENIES one still-pending request before it can run, appending one approval.rejected by human:study-team on channel study with payload.study {reason: study_withdrawn, operator, ref}. Off unless the process was launched with APPROVAL_STUDY_MODE=1 (study-mode-off). Deny-only and pending-only: a request that is not pending is refused not-pending, and every refusal appends nothing. The same ref again answers idempotent. The output never names the action key.",
+      "A hosted study operator DENIES one still-pending request before it can run, appending one approval.rejected by human:study-team on channel study with payload.study {reason: study_withdrawn, operator, ref}. Off unless the process was launched with APPROVAL_STUDY_MODE=1 (study-mode-off). Deny-only and pending-only: a request that is not pending is refused not-pending and the refused attempt is recorded as one audit.decision_refused (the gate's own code); study-mode-off, a replay, an ambiguous ref, a ref naming no request and a log fault append nothing. The same ref again answers idempotent. The output never names the action key.",
     human_only: true,
+    operator_only: true,
     human_only_note:
       "It records a decision under a human identity, so it is human-only like reject. Its one caller is a root exec on the box running as the store's own uid, never an agent, and no transport publishes it.",
     input: input({
@@ -3426,6 +3436,14 @@ const VERBS: VerbSpec[] = [
 
 /** The registry. Order is the order the verb table prints in. */
 export const VERB_REGISTRY: readonly VerbSpec[] = VERBS;
+
+/**
+ * The registry as the agent-facing guide prints it: every verb but the
+ * `operator_only` ones (see {@link VerbSpec.operator_only}).
+ */
+export const AGENT_GUIDE_VERBS: readonly VerbSpec[] = VERBS.filter(
+  (spec) => spec.operator_only !== true,
+);
 
 /** `<name>` or `<name> <subcommand>` — how a verb is written on a command line. */
 export function verbLabel(spec: VerbSpec): string {
