@@ -1,5 +1,5 @@
 {
-  "about": "Overlay recipes the release check (scripts/overlay-recipes-check.mjs) lets resolve to a human-only class. Each entry is keyed by the recipe's file and its exact command text as the corpus holds it, and carries the reason it is right or the decision it waits on. An entry no held recipe matches fails the check, so delete it when the recipe or the classifier moves.",
+  "about": "Overlay recipes the release check (scripts/overlay-recipes-check.mjs) lets resolve to a human-only class. Each entry is keyed by the recipe's file and its exact command text as the corpus holds it, and carries the reason it is right or the decision it waits on. An entry no held recipe matches fails the check, so delete it when the recipe or the classifier moves. The CLASS-DIFF (--diff) reads the same entries: a call it would block (a move from auto, sampled or card to human-only or refused against the baseline core) passes when an entry names it with a reason; an optional flip {from, to} narrows the entry to that one move.",
   "entries": [
     {
       "file": "skills/agent-plaza/SKILL.md",

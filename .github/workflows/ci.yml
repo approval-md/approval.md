@@ -236,12 +236,32 @@ jobs:
     # scripts/overlay-recipes/allowlist.json lists it with a reason.
     #
     # Every event and every tier, as protected-paths runs: it is cheap, and the
-    # tag is cut from a main this job has passed on. It reads only files in the
-    # checkout; it fetches nothing from the overlay.
+    # tag is cut from a main this job has passed on.
+    #
+    # CLASS-DIFF (B-167, lead ruling CLAIMS L15681 (1)): the same corpus is
+    # also classified at BASELINE_CORE, the core the boxes run today (the
+    # control plane's APPROVAL_MD_VERSION; move this pin in the PR that
+    # follows a roll), installed from npm and held to its pinned integrity.
+    # The report lists every call (each recipe plus each tools: line of the
+    # template) whose class, decision or card style moves, and the job fails
+    # when an existing call moves from auto, sampled or card to human-only or
+    # refused, unless the allowlist names it with a reason. The report is the
+    # job summary and the `class-diff` artifact (markdown + JSON); its first
+    # line is the GATE line.
+    #
+    # The corpus check (pinned ref): the overlay is checked out at the sha
+    # corpus.json records and re-extracted with the committed extractor, and
+    # the job fails if that differs from the committed snapshot, so the
+    # corpus the gate reads is the overlay's own at that sha, never a hand
+    # edit. It runs the overlay's install/install_index.ts (the cron specs)
+    # under bun at that pinned sha, with read-only contents permission.
     name: overlay recipes (consumer corpus)
     needs: classify
     if: always()
     runs-on: ubuntu-latest
+    env:
+      BASELINE_CORE: "0.4.6"
+      BASELINE_CORE_INTEGRITY: "sha512-4yxAp6m9R74N+SKJajcTSiaMD5T/VTtzenrmtGHDI2rL9CuY8UxDde8RTCWAfCUQpDhk9mA5ksNKKMGo6mIG2A=="
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -250,7 +270,65 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: node scripts/overlay-recipes-check.mjs
+      - name: overlay sha the corpus pins
+        id: pin
+        run: echo "sha=$(node -p 'require("./scripts/overlay-recipes/corpus.json").overlay.sha')" >> "$GITHUB_OUTPUT"
+      - name: check out the overlay at the pinned sha
+        uses: actions/checkout@v4
+        with:
+          repository: Edge-City/agentvillage
+          ref: ${{ steps.pin.outputs.sha }}
+          path: .overlay
+          persist-credentials: false
+          sparse-checkout: |
+            skills
+            workspace
+            install
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: the committed corpus is the overlay's own extraction at that sha
+        run: |
+          set -euo pipefail
+          at=$(node -p 'require("./scripts/overlay-recipes/corpus.json").overlay.extracted_at')
+          bun scripts/overlay-recipes-extract.mjs --overlay .overlay --sha "${{ steps.pin.outputs.sha }}" --extracted-at "$at" --out "$RUNNER_TEMP/corpus.json"
+          if ! cmp -s "$RUNNER_TEMP/corpus.json" scripts/overlay-recipes/corpus.json; then
+            echo "::error::scripts/overlay-recipes/corpus.json differs from a fresh extraction of the overlay at ${{ steps.pin.outputs.sha }}; refresh it with the extractor, never by hand"
+            diff <(node -p 'JSON.stringify(require(process.argv[1]).recipes,null,1)' "$RUNNER_TEMP/corpus.json") <(node -p 'JSON.stringify(require(process.argv[1]).recipes,null,1)' "$PWD/scripts/overlay-recipes/corpus.json") | head -40 || true
+            exit 1
+          fi
+      - name: install the baseline core (the boxes' pin) from npm
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/baseline"
+          mkdir -p "$dir"
+          echo '{"name":"baseline-core","private":true}' > "$dir/package.json"
+          (cd "$dir" && npm install --no-audit --no-fund --ignore-scripts "approval-md@$BASELINE_CORE")
+          got=$(node -p 'const p = require(process.argv[1]).packages; p[Object.keys(p).find((k) => k.endsWith("node_modules/approval-md"))].integrity' "$dir/package-lock.json")
+          if [ "$got" != "$BASELINE_CORE_INTEGRITY" ]; then
+            echo "::error::approval-md@$BASELINE_CORE integrity $got is not the pinned $BASELINE_CORE_INTEGRITY"
+            exit 1
+          fi
+      - name: corpus check + CLASS-DIFF against the baseline core
+        run: |
+          set +e
+          node scripts/overlay-recipes-check.mjs \
+            --diff "$RUNNER_TEMP/baseline/node_modules/approval-md" \
+            --baseline-label "npm approval-md@$BASELINE_CORE (the boxes' pin)" \
+            --core-label "this build, ${{ github.sha }}" \
+            --md class-diff.md --diff-json class-diff.json
+          status=$?
+          if [ -f class-diff.md ]; then cat class-diff.md >> "$GITHUB_STEP_SUMMARY"; fi
+          exit $status
+      - name: upload the class-diff report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: class-diff
+          path: |
+            class-diff.md
+            class-diff.json
+          if-no-files-found: warn
 
   full:
     # The full gate's bulk, sharded (APRV-149). Three jobs run a third of the
@@ -370,7 +448,7 @@ jobs:
             exit 1
           fi
           if [ "$OVERLAY_RESULT" != "success" ]; then
-            echo "the overlay recipe corpus check did not succeed ($OVERLAY_RESULT); an overlay recipe resolves to a human-only class under this core and is not allowlisted (EDGEOS-BLOCK)"
+            echo "the overlay recipe corpus check did not succeed ($OVERLAY_RESULT); an overlay recipe resolves to a human-only class under this core and is not allowlisted, a shipped call flips from running to a deny against the boxes' core (CLASS-DIFF, B-167), or the corpus is not the overlay's own extraction (EDGEOS-BLOCK)"
             exit 1
           fi
           case "$TIER" in

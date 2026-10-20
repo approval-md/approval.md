@@ -55,6 +55,21 @@ before a tag.
   check fails on all eleven EdgeOS recipes; at the pinned sha it passes with
   one allowlisted recipe (`skills/agent-plaza/SKILL.md`, `--root "$HERMES_HOME"`,
   an open decision).
+- **CLASS-DIFF against the core the boxes run (B-167 release gate).**
+  `overlay-recipes-check.mjs --diff <baseline core>` classifies the same corpus
+  at a baseline core and at this one, over every recipe plus every `tools:`
+  line of the template (the box harness calls), and reports each call whose
+  class, decision (auto, sampled, card, human-only, refused) or card style
+  moves. An existing call moving from auto, sampled or card to human-only or
+  refused fails, unless the allowlist names it with a reason (an optional
+  `flip: {from, to}` narrows the entry to that move). The `overlay-recipes` job
+  now also re-extracts the corpus from the overlay at its pinned sha and fails
+  on any difference, installs the boxes' core from npm at a pinned integrity
+  (`BASELINE_CORE`, 0.4.6), and publishes the report (first line: the GATE
+  line) as the job summary and the `class-diff` artifact. Between 0.4.5 and
+  0.4.6, on the overlay the boxes ran on 19 October (`99d33417`), it reports
+  the eleven EdgeOS recipes moving `network.call` auto to `policy.core`
+  human-only: EDGEOS-BLOCK, caught before a tag.
 
 ## 0.4.6 — 2026-10-18
 
