@@ -15,6 +15,24 @@ before a tag.
 
 ## Unreleased
 
+## 0.4.7 — 2026-10-21
+
+0.4.7 carries everything merged since 0.4.6. It ends EDGEOS-BLOCK: from the
+19 October rolls, every EdgeOS skill recipe on a resident box was denied,
+because 0.4.6 read curl's header and `--url` values as reads of the Hermes
+home (where the box's terminal runs) and classed them `account.credential`,
+and its `fetch-output-unknown` refusal told the agent nothing it could act on.
+Under "Fixed", those curl and wget values are judged as what they are; every
+verdict that moves, moves from `account.credential` to the class the command
+had without it, and nothing moves stricter. Under "Changed", the
+`fetch-output-unknown` refusal names its remedy. Under "Added", a
+consumer-corpus check runs the overlay's shipped recipes through this core on
+every change, and the study switch (`APPROVAL_STUDY_MODE=1`) adds an operator
+withdraw and a "Looks wrong" button. **With the switch off, which is the
+default and every box today, the study changes change nothing:** no card row,
+no verb, no verdict. Upgrade every resident box; the order is in
+`docs/releases/0.4.7.md`.
+
 ### Changed
 
 - **The `fetch-output-unknown` refusal names its remedy (EDGEOS-BLOCK).** Core
@@ -56,6 +74,30 @@ before a tag.
   one allowlisted recipe (`skills/agent-plaza/SKILL.md`, `--root "$HERMES_HOME"`,
   an open decision).
 
+- **Study mode: an operator withdraw and a "Looks wrong" button, behind
+  `APPROVAL_STUDY_MODE=1` (LOKI-GATE G1/G2, APRV-527, APRV-528).** Both are off
+  unless the process is launched with `APPROVAL_STUDY_MODE` exactly `1`; the
+  switch is read from the environment only, never from a policy, so nothing an
+  agent proposes can turn it on. With it on, `approval study withdraw` lets a
+  hosted study operator DENY one request that is still pending, before it can
+  run. It never grants, alters or reopens a decision: it is the gate's own
+  reject, under `human:study-team` on channel `study`, and its record carries
+  `payload.study {reason: "study_withdrawn", operator, ref}`, with `operator`
+  an 8-hex pseudonymous id and `ref` the replay key, so a retry appends
+  nothing. A request that is no longer pending refuses `not-pending`, and the
+  attempt goes on the record as one `audit.decision_refused`. The verb is
+  human-only, so neither `approval serve` nor the MCP server publishes it, and
+  it has left the agent guide. With the switch on, the Telegram card also
+  carries a "Looks wrong" button: the approver's ordinary reject, flagged
+  `payload.study {reason: "looks_wrong"}`. It is absent from policy
+  attestation prompts. No enforcement path reads `payload.study`, and a reader
+  that ignores it reads an ordinary rejection. New refusal union
+  `study_withdraw_refusal_codes` (`study-mode-off`, `not-pending`,
+  `action-ref-ambiguous`) and channel refusal `study-reason-not-channel`.
+  SPEC.md §8 "The study record" and the §11.2 registry rows are amended and
+  attested (seq 84050). Conformance: `refusal-unions` and `schema-validation`
+  carry the new vectors.
+
 ### Fixed
 
 - **EDGEOS-BLOCK: curl's `--url` and literal `-H` values are not credential
@@ -77,6 +119,16 @@ before a tag.
   before, and the pure classifier's text rule is unchanged. Only verdicts of
   curl and wget commands move, all from `account.credential` to the class the
   command had without it.
+
+### Site
+
+- **A GitHub stars chip in the landing page hero (APRV-529).** It links to
+  the repository, ships with a committed count and refreshes it in the browser
+  from the public GitHub API at most once an hour (cached in `localStorage`,
+  no token, `credentials: 'omit'`). The heading does not move, and the chip is
+  hidden in print. The runtime is unchanged.
+- **The weekly agent-hours figure is refreshed (2026-10-18)** in
+  `metrics/agent-hours.json`.
 
 ## 0.4.6 — 2026-10-18
 
