@@ -2919,6 +2919,107 @@ const NON_OPENING_BINS: ReadonlySet<string> = new Set([
 const PRINTING_BINS: ReadonlySet<string> = new Set(["echo", "printf"]);
 
 /**
+ * A first character the shell may still expand into something else (a
+ * parameter, a substitution, a tilde, an escape, a glob or extended glob, a
+ * brace list, zsh's `=cmd`, `^`, `<N-M>` and `(a|b)` patterns, a process
+ * substitution), so the value curl finally receives may open with `@`. A
+ * leading `-` is here too: a word this walk takes for a value may be an option
+ * curl reads instead (`-K.env`), because the walk does not know every option
+ * that takes a value.
+ */
+const CURL_VALUE_UNKNOWN_OPENING = /^[\s\-$`~\\*?[\]{}()!+^<>=#%|&;'"]/u;
+
+/** Is this option value one curl (or wget) sends as written and never opens? */
+function curlValueSentAsWritten(value: string, opensFileWithAt: boolean): boolean {
+  if (value.length === 0) return false;
+  // curl reads `-H @FILE` as a file of headers and `--url @FILE` (8.13+) as a
+  // file of URLs. wget has no such spelling; the rule is the same anyway.
+  if (opensFileWithAt && value.startsWith("@")) return false;
+  if (CURL_VALUE_UNKNOWN_OPENING.test(value)) return false;
+  // A `file:` URL opens a local file. Which file it reads is the network
+  // classifier's to say, never this pass's; such a value keeps the judgement
+  // it had, and a header that opens `file:` is judged with it, since the walk
+  // may have taken a positional URL for a header value.
+  return !/^file:/iu.test(value);
+}
+
+/**
+ * The curl and wget option values that are not file reads (EDGEOS-BLOCK,
+ * APRV-533), taken out of the argv the credential pass judges.
+ *
+ * Every resident box runs its terminal in `$HERMES_HOME`, which holds
+ * credential material, and the pass reads a word with an unexpanded `$` as a
+ * read of the directory it may land in. So a header carrying `$EDGEOS_API_KEY`
+ * and a `--url "${EDGEOS_API_BASE:-…}/…"` were each a credential read there.
+ * curl opens neither: it reads a header from a file only for `-H @FILE`, and a
+ * URL from a file only for `--url @FILE`. What is taken out:
+ *
+ * - curl's `-H`/`--header` value (separate, or attached as `-HVALUE`) and
+ *   wget's `--header` value (separate, or `--header=VALUE`), when it opens
+ *   with neither `@` nor a character the shell may still expand
+ *   ({@link CURL_VALUE_UNKNOWN_OPENING}). `-H "$X"` and `-H @"$F"` are judged
+ *   as before: the expansion may open with `@`.
+ * - curl's `--url` value under the same rule, and additionally only when it
+ *   holds no unexpanded span, or names a literal scheme other than `file:`
+ *   before its first one (`https://h/${P}`).
+ * - curl's `--url` value opening with an unexpanded span moves to
+ *   `spannedUrls`, which the caller judges as the path an `@` or `file:`
+ *   expansion would read; a value whose last component is the span (`"$U"`)
+ *   stays a read of the working directory, as before.
+ *
+ * Everything else stays: every other option (`-d`, `--data*`, `-F`, `-T`,
+ * `-K`, `-o`, `-b`, `-c`, `--cacert`, `--cert`, `--key`, `-E`,
+ * `--netrc-file`, `--proxy-header`, `--variable`, …), a short-option cluster
+ * ending in `H` (`-sH`), curl's `--header=…` (curl takes no `=` spelling), and
+ * every word after `--`. The pure classifier's text rule
+ * ({@link credentialReadWords}) still reads every one of these words.
+ */
+function curlValuesNotRead(
+  bin: string,
+  args: readonly string[],
+): { args: readonly string[]; spannedUrls: string[] } {
+  if (bin !== "curl" && bin !== "wget") return { args, spannedUrls: [] };
+  const curl = bin === "curl";
+  const kept: string[] = [];
+  const spannedUrls: string[] = [];
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") {
+      kept.push(...args.slice(at));
+      break;
+    }
+    const next = args[at + 1];
+    if ((curl ? arg === "-H" || arg === "--header" : arg === "--header") && next !== undefined) {
+      kept.push(arg);
+      if (curlValueSentAsWritten(next, curl)) at += 1;
+      continue;
+    }
+    if (curl && arg.startsWith("-H") && arg.length > 2) {
+      if (!curlValueSentAsWritten(arg.slice(2), true)) kept.push(arg);
+      continue;
+    }
+    if (!curl && arg.startsWith("--header=")) {
+      if (!curlValueSentAsWritten(arg.slice("--header=".length), false)) kept.push(arg);
+      continue;
+    }
+    if (curl && arg === "--url" && next !== undefined) {
+      kept.push(arg);
+      const span = next.search(/[$`]/u);
+      const scheme = /^([A-Za-z][A-Za-z0-9+.-]*):/u.exec(next);
+      if (span === 0) {
+        spannedUrls.push(next);
+        at += 1;
+      } else if (curlValueSentAsWritten(next, true) && (span === -1 || (scheme !== null && scheme[0].length <= span))) {
+        at += 1;
+      }
+      continue;
+    }
+    kept.push(arg);
+  }
+  return { args: kept, spannedUrls };
+}
+
+/**
  * Every existing path a glob matches, any component of it a pattern
  * (APRV-522), or `null` when a directory on the way cannot be listed or the
  * matches run past 256, so the caller falls back to asking whether the
@@ -3180,7 +3281,9 @@ export function credentialReadLandings(
         return steered.some((tail) => words.some((segments) => steeredReadCouldNameCredential(tail, segments, hermesNames)));
       };
       // `steeredToo` is false only for git's verb word, which git never opens.
-      const judgeOne = (word: string, recursive: boolean, steeredToo = true): void => {
+      // `homeSpelled` is false only for a curl `--url` value that opens with an
+      // unexpanded span ({@link curlValuesNotRead}); see its use below.
+      const judgeOne = (word: string, recursive: boolean, steeredToo = true, homeSpelled = true): void => {
         // `$PWD` is the directory the segment runs in, which is each of `cwds`.
         const pwdRef = /^\$(?:\{PWD\}|PWD)(?=\/|$)/u;
         if (pwdRef.test(word)) {
@@ -3188,7 +3291,7 @@ export function credentialReadLandings(
             hit(word);
             return;
           }
-          for (const from of cwds) judgeOne(word.replace(pwdRef, from), recursive, steeredToo);
+          for (const from of cwds) judgeOne(word.replace(pwdRef, from), recursive, steeredToo, homeSpelled);
           if (steeredToo && steered.length > 0 && steeredRead(word.replace(pwdRef, "."), recursive)) hit(word);
           return;
         }
@@ -3257,7 +3360,7 @@ export function credentialReadLandings(
             for (const landed of new Set([lexical, canonicalPath(lexical), physicalLanding(from, prefix)])) {
               if (
                 (lastComponent && lands(landed, true)) ||
-                landedSpellings(landed, rest, configuredHome).some(unresolvedReadCouldNameCredential)
+                landedSpellings(landed, rest, homeSpelled ? configuredHome : null).some(unresolvedReadCouldNameCredential)
               ) {
                 hit(word);
                 return;
@@ -3299,7 +3402,7 @@ export function credentialReadLandings(
           if (lands(physical, recursive)) hit(physical);
         }
       };
-      const judge = (word: string, recursive: boolean, steeredToo = true): void => {
+      const judge = (word: string, recursive: boolean, steeredToo = true, homeSpelled = true): void => {
         // APRV-524 (review-b M1): a word holding the substitution sentinel is
         // judged a second time with every sentinel removed. That is how the
         // release before APRV-511 read it, its lexer adding nothing for a
@@ -3311,7 +3414,7 @@ export function credentialReadLandings(
         // name, and one after a glob that matches such a directory on disk are
         // judged too. Both judgements only record, so the stricter stands.
         if (word.includes(SUBSTITUTION_SENTINEL)) {
-          judge(word.split(SUBSTITUTION_SENTINEL).join(""), recursive, steeredToo);
+          judge(word.split(SUBSTITUTION_SENTINEL).join(""), recursive, steeredToo, homeSpelled);
         }
         const spellings = new Set<string>();
         for (const parameter of parameterSpellings(word)) {
@@ -3324,7 +3427,7 @@ export function credentialReadLandings(
           }
           for (const spelling of braced) spellings.add(spelling);
         }
-        for (const spelling of spellings) judgeOne(spelling, recursive, steeredToo);
+        for (const spelling of spellings) judgeOne(spelling, recursive, steeredToo, homeSpelled);
       };
       for (const target of shape.reads) judge(target, false);
       if (bin === null) continue;
@@ -3334,7 +3437,10 @@ export function credentialReadLandings(
       if (NON_OPENING_BINS.has(bin) && !(PRINTING_BINS.has(bin) && (feedsPipe || substituted))) continue;
       const recursive =
         RECURSIVE_READERS.has(bin) || DIRECTORY_COPIERS.has(bin) || DIRECTORY_READING_BINS.has(bin);
-      const words = credentialReadWords(bin, shape.args);
+      // EDGEOS-BLOCK (APRV-533): the curl and wget option values the tool sends
+      // and never opens are not read words ({@link curlValuesNotRead}).
+      const sent = curlValuesNotRead(bin, shape.args);
+      const words = credentialReadWords(bin, sent.args);
       // A copy's destination is WRITTEN, and the write half (the protected
       // scan, the Hermes organ pass) prices it; judged as a read it would make
       // `cp /tmp/x .` in a home a credential read of the home.
@@ -3357,6 +3463,14 @@ export function credentialReadLandings(
       const verbAt = bin === "git" ? gitVerbIndex(shape.args) : null;
       const verb = verbAt === null ? undefined : shape.args[verbAt];
       for (const [at, word] of words.entries()) judge(word, recursive, !(at === 0 && verb !== undefined && word === verb));
+      // A `--url` value opening with an unexpanded span may expand to `@FILE`
+      // (curl 8.13+ reads a URL list from FILE) or to a `file:` URL, and either
+      // reads the path the rest of the word spells. It is judged as that path
+      // from every working directory, the configured home not re-spelled as
+      // `$HERMES_HOME`: that spelling makes the known home one more unknown
+      // segment, and two unknowns in a row then read as an approval home's
+      // `vault*`, which the literal landing already rules in or out.
+      for (const word of sent.spannedUrls) judge(word, false, true, false);
       // M-E: a recursive search reads the working directory.
       if (readsWorkingDirectory(bin, shape.args, words)) judge(".", true);
     }
@@ -7723,15 +7837,19 @@ function resolvedPathClasses(
         if (landing.unknown || landing.paths.some((path) => writesIntoGateRoot(path))) add("policy.core");
       }
     };
-    const judgeRead = (word: string, recursive: boolean): void => {
+    // `homeSpelled` is false only for a curl `--url` value that opens with an
+    // unexpanded span (EDGEOS-BLOCK, APRV-533; {@link curlValuesNotRead}).
+    const judgeRead = (word: string, recursive: boolean, homeSpelled = true): void => {
       const braced = braceCandidates(word);
       if (braced === null) {
         add("account.credential");
         return;
       }
-      for (const each of braced) for (const spelling of tildeReadings(each)) judgeReadWord(spelling, recursive);
+      for (const each of braced) {
+        for (const spelling of tildeReadings(each)) judgeReadWord(spelling, recursive, homeSpelled);
+      }
     };
-    const judgeReadWord = (word: string, recursive: boolean): void => {
+    const judgeReadWord = (word: string, recursive: boolean, homeSpelled = true): void => {
       const target = expand(word);
       // Fix round 1 (M-C): an unexpanded tilde prefix lands somewhere unknown.
       if (target.hermesUnknown || target.landingUnknown) {
@@ -7762,7 +7880,7 @@ function resolvedPathClasses(
           const landing = landingPaths(spelled, volatile);
           if (landing.unknown) add("account.credential");
           for (const landed of [resolvePathSegments(spelled), ...landing.paths]) {
-            for (const spelling of landedSpellings(landed, rest, configuredHome)) {
+            for (const spelling of landedSpellings(landed, rest, homeSpelled ? configuredHome : null)) {
               if (unresolvedReadCouldNameCredential(spelling)) add("account.credential");
             }
           }
@@ -7995,7 +8113,14 @@ function resolvedPathClasses(
     const recursive =
       RECURSIVE_READERS.has(bin) || (DIRECTORY_READING_BINS.has(bin) && readWords.length > 0);
     if (segment.class.startsWith("read.") || recursive) {
-      for (const operand of operands) judgeRead(operand, recursive);
+      // EDGEOS-BLOCK (APRV-533): the curl and wget option values the tool
+      // sends and never opens are not read here either, and a span-led curl
+      // `--url` value is judged as the path an `@` or `file:` expansion would
+      // read, as the credential pass judges it ({@link curlValuesNotRead}).
+      const sent = curlValuesNotRead(bin, shape.args);
+      const readOperands = sent.args === shape.args ? operands : sent.args.filter((arg) => !arg.startsWith("-"));
+      for (const operand of readOperands) judgeRead(operand, recursive);
+      for (const url of sent.spannedUrls) judgeRead(url, recursive, false);
       // APRV-511 (cred-asymmetry round 3, N2): a recursive reader that no
       // argument proves names a path walks the working directory.
       if (walksWorkingDirectory(bin, shape.args)) judgeRead(".", true);

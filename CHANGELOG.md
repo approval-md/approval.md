@@ -15,6 +15,28 @@ before a tag.
 
 ## Unreleased
 
+### Fixed
+
+- **EDGEOS-BLOCK: curl's `--url` and literal `-H` values are not credential
+  file reads (APRV-533).** Every resident box runs its terminal in
+  `$HERMES_HOME` (terminal.cwd), which holds credential material. 0.4.6's
+  credential disk pass (`credential-path-resolved`) and the Hermes pass read
+  curl's header value `"Authorization: Bearer $EDGEOS_API_KEY"`, and its
+  `--url "${EDGEOS_API_BASE:-https://…}/events/…"`, as reads of that
+  directory, so every skills/edgeos recipe took `account.credential` there,
+  which the overlay template reserves to humans (exit 2), while the same
+  command from `$HOME` was `network.call`. curl opens a file for those two
+  options only as `-H @FILE` and `--url @FILE` (8.13+), so the disk passes
+  now skip a `-H`/`--header` or `--url` value (and wget's `--header`) that
+  opens with neither `@` nor a character the shell may still expand, and judge
+  a `--url` value opening with `$` as the path an `@` or `file:` expansion of
+  it would read. `-H @.env`, `-H "$X"`, `-H @"$F"`, `--url @.env`,
+  `--url "$U"`, `-K`, `-d`, `--data*`, `-F`, `-T`, `-o`, cookies, certificates,
+  `--netrc-file`, a `-sH` cluster and every word after `--` are judged as
+  before, and the pure classifier's text rule is unchanged. Only verdicts of
+  curl and wget commands move, all from `account.credential` to the class the
+  command had without it.
+
 ## 0.4.6 — 2026-10-18
 
 0.4.6 carries everything merged since 0.4.5. It closes the classifier holes
