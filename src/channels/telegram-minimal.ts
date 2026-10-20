@@ -66,7 +66,19 @@
  *   not name (the closed-field-set rule of SPEC.md §9), that is not an object,
  *   or whose declaration quotes nothing;
  * - a card longer than {@link MINIMAL_MESSAGE_BUDGET}: the canonical rendering
- *   is never cut to fit.
+ *   is never cut to fit. One exception (APRV-531, below).
+ *
+ * ## Full details on tap (APRV-531, SPEC.md §10.3 amended)
+ *
+ * A request whose class is DECLARED (an opaque payload whose every key the
+ * class's `say.quote` names) and which fails only on size is not sent
+ * technical. The card is built from the same parts, with the collapsed block
+ * replaced by one computed notice ({@link MINIMAL_ON_TAP_NOTICE}), and a third
+ * button, {@link MINIMAL_DETAILS_LABEL}, that decides nothing. Its tap sends the
+ * canonical rendering whole, byte for byte, as replies threaded to the card
+ * ({@link detailsReplies}), opened by {@link MINIMAL_DETAILS_OPENER} and closed
+ * by {@link MINIMAL_DETAILS_CLOSER}. A payload the runtime reads itself (a
+ * command, a file change, an email) and an undeclared class keep the fallback.
  *
  * Pure: no clock, no IO. It imports nothing from `telegram.ts`, which calls it.
  */
@@ -148,6 +160,44 @@ export const MINIMAL_DETAILS_HEADING = "Full details (tap to open)";
 export const MINIMAL_DENY_LABEL = "✋ Deny";
 
 /**
+ * The computed notice that takes the collapsed block's place on a card whose
+ * rendering is sent on tap (APRV-531; copy signed by product, L15775).
+ */
+export const MINIMAL_ON_TAP_NOTICE =
+  "This request is too long to show here. Tap Full details to read all of it before you decide.";
+
+/** The third button's label on such a card. It decides nothing (APRV-531). */
+export const MINIMAL_DETAILS_LABEL = "📄 Full details";
+
+/** The computed line the first detail reply opens with (APRV-531). */
+export const MINIMAL_DETAILS_OPENER = "Full details of the request above:";
+
+/** The computed line the last detail reply closes with (APRV-531). */
+export const MINIMAL_DETAILS_CLOSER = "End of full details. Approve or Deny on the card above.";
+
+/** What a second tap on Full details answers; nothing new is sent (APRV-531). */
+export const MINIMAL_DETAILS_ALREADY = "Already sent above.";
+
+/** The computed line every detail reply opens with (APRV-531 fold 1, M1a). */
+export function detailsPartLine(part: number, parts: number): string {
+  return `Part ${String(part)} of ${String(parts)}`;
+}
+
+/**
+ * The most replies a Full details tap may send (APRV-531 fold 1, M1b). A
+ * rendering that needs more is sent as the ordinary technical card, exactly as
+ * before the exception existed: Telegram's per-chat flood limit answers a long
+ * chain with 429 partway, and the tail would never arrive.
+ */
+export const MINIMAL_DETAILS_MAX_REPLIES = 6;
+
+/**
+ * The computed line sent when a reply chain fails partway (APRV-531 fold 1,
+ * S1). The card stays re-tappable, and the next tap starts again at part 1.
+ */
+export const MINIMAL_DETAILS_FAILED = "Full details could not be sent in full. Tap Full details again.";
+
+/**
  * Why a request was sent as the technical card although the policy asked for
  * minimal. Recorded on the decision as `rendering.fallback`.
  */
@@ -201,8 +251,17 @@ export interface MinimalCard {
   text: string;
   /** The first line, HTML (kept for the settle edit). */
   headline: string;
-  /** The collapsed block, HTML, `<blockquote expandable>` included (kept for the settle edit). */
+  /**
+   * The collapsed block, HTML, `<blockquote expandable>` included (kept for the
+   * settle edit). Empty on a card whose rendering is sent on tap.
+   */
   details: string;
+  /**
+   * Present on a card drawn without its collapsed block (APRV-531): the
+   * canonical rendering, plain and unescaped, that the Full details tap sends
+   * whole as replies. Absent on every card that holds the rendering itself.
+   */
+  onTap?: { rendering: string; replies: string[] };
   /**
    * Present, and `true`, when the class's `say` entry set a `does` phrase and
    * the runtime drew its own kind phrase instead, because it reads the payload
@@ -710,8 +769,102 @@ export function renderTelegramMinimal(
   }
   lines.push(escapeHtml(deadlineLine(request)));
 
+  const ignored = sayDoesIgnored ? { sayDoesIgnored: true as const } : {};
   const details = detailsBlock(technical);
   const text = `${lines.join("\n")}\n${details}`;
-  if (text.length > MINIMAL_MESSAGE_BUDGET) return { ok: false, reason: "too-long" };
-  return { ok: true, text, headline, details, ...(sayDoesIgnored ? { sayDoesIgnored: true as const } : {}) };
+  if (text.length <= MINIMAL_MESSAGE_BUDGET) return { ok: true, text, headline, details, ...ignored };
+
+  // APRV-531 (SPEC.md §10.3, the one exception). A declared class that fails
+  // ONLY on size: every other fallback has already returned above. Declared
+  // means an opaque payload whose every key the class's `say.quote` names
+  // (`excerptOf` refused anything else); a payload the runtime reads itself
+  // keeps the fallback. The card drops the collapsed block for a computed
+  // notice, and the rendering goes whole on the Full details tap.
+  if (excerpt.kind !== "opaque" || entry === null) return { ok: false, reason: "too-long" };
+  // Fold 1 (M1): a rendering that needs more replies than the cap, or that
+  // cannot be cut so every reply keeps all its bytes through Telegram's edge
+  // trim, is the ordinary form, as before the exception.
+  const replies = detailsReplies(technical.payloadText);
+  if (replies === null) return { ok: false, reason: "too-long" };
+  const onTapText = `${lines.join("\n")}\n${escapeHtml(MINIMAL_ON_TAP_NOTICE)}`;
+  if (onTapText.length > MINIMAL_MESSAGE_BUDGET) return { ok: false, reason: "too-long" };
+  return {
+    ok: true,
+    text: onTapText,
+    headline,
+    details: "",
+    onTap: { rendering: technical.payloadText, replies },
+    ...ignored,
+  };
+}
+
+/**
+ * The Full details replies for `rendering` (APRV-531), or `null` when the
+ * rendering cannot be sent that way and the card must be the ordinary form.
+ *
+ * Telegram HTML messages whose `<pre>` contents, decoded and concatenated, are
+ * `rendering` byte for byte. Every reply opens with a computed
+ * {@link detailsPartLine} ("Part k of n"); the first then carries
+ * {@link MINIMAL_DETAILS_OPENER} and the last ends with
+ * {@link MINIMAL_DETAILS_CLOSER}. None is summarised or shortened.
+ *
+ * Each message is at most `budget` UTF-16 units of HTML (default
+ * {@link MINIMAL_MESSAGE_BUDGET}, under Telegram's 4096 with room for a
+ * relay's label line; the parsed text is never longer than the HTML). The
+ * split is taken between grapheme clusters, by escaped length. Telegram trims
+ * white space at the edges of a message, and every reply but the last ends
+ * with its `</pre>`, so a cut is taken only after a cluster that is not white
+ * space: the part line protects each reply's start, and the closer the last
+ * one's end. A single cluster longer than a whole message on its own is split
+ * between code points, never inside a surrogate pair.
+ *
+ * `null` (fold 1, M1) when no such cut exists within one message (a run of
+ * white space longer than a message), or when the rendering needs more than
+ * `maxReplies` messages ({@link MINIMAL_DETAILS_MAX_REPLIES}).
+ */
+export function detailsReplies(
+  rendering: string,
+  budget: number = MINIMAL_MESSAGE_BUDGET,
+  maxReplies: number = MINIMAL_DETAILS_MAX_REPLIES,
+): string[] | null {
+  const open = `${escapeHtml(MINIMAL_DETAILS_OPENER)}\n`;
+  const close = `\n${escapeHtml(MINIMAL_DETAILS_CLOSER)}`;
+  const partMax = `${detailsPartLine(maxReplies, maxReplies)}\n`.length + 4;
+  // The worst case for every message: the part line, both computed lines and the `<pre>` pair.
+  const room = budget - partMax - open.length - close.length - "<pre></pre>".length;
+  if (room < 1) return null;
+  const tokens: { html: string; blank: boolean }[] = [];
+  for (const { segment } of GRAPHEMES.segment(rendering)) {
+    const html = escapeHtml(segment);
+    const blank = /\s/u.test(segment);
+    if (html.length <= room) tokens.push({ html, blank });
+    else for (const point of segment) tokens.push({ html: escapeHtml(point), blank: /\s/u.test(point) });
+  }
+  const chunks: string[] = [];
+  let from = 0;
+  while (from < tokens.length) {
+    let to = from;
+    let used = 0;
+    while (to < tokens.length && used + (tokens[to]?.html.length ?? 0) <= room) {
+      used += tokens[to]?.html.length ?? 0;
+      to += 1;
+    }
+    if (to === from) return null;
+    if (to < tokens.length) {
+      // Back off to the last cut after a cluster that is not white space; with none, no honest split exists.
+      let cut = to;
+      while (cut > from && tokens[cut - 1]?.blank === true) cut -= 1;
+      if (cut === from) return null;
+      to = cut;
+    }
+    chunks.push(tokens.slice(from, to).map((token) => token.html).join(""));
+    if (chunks.length > maxReplies) return null;
+    from = to;
+  }
+  if (chunks.length === 0) chunks.push("");
+  const parts = chunks.length;
+  return chunks.map(
+    (chunk, index) =>
+      `${escapeHtml(detailsPartLine(index + 1, parts))}\n${index === 0 ? open : ""}<pre>${chunk}</pre>${index === parts - 1 ? close : ""}`,
+  );
 }

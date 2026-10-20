@@ -15,6 +15,38 @@ before a tag.
 
 ## Unreleased
 
+- **Telegram: full details on tap for a declared class that does not fit
+  (APRV-531, APPROVAL-UX B-166).** Under `prompt.style: minimal`, a request
+  whose class is declared (an opaque payload whose every top-level key the
+  class's `say.quote` names) and whose minimal card is over the 3800-character
+  budget no longer falls back to the technical card (`too-long`). It keeps the
+  simple card, with the collapsed block replaced by the computed notice "This
+  request is too long to show here. Tap Full details to read all of it before
+  you decide." and a third button, 📄 Full details. That button decides
+  nothing and appends nothing to the log; its tap sends the canonical rendering
+  whole, byte for byte, as replies threaded to the card, each under Telegram's
+  limit and split between characters (never inside one), opened by "Full
+  details of the request above:" and closed by "End of full details. Approve or
+  Deny on the card above.", with a computed "Part k of n" line on every reply.
+  The replies carry no buttons, and a second tap answers "Already sent
+  above.". At most 6 replies: a rendering that needs more, or that cannot be
+  cut so no reply loses bytes to Telegram's edge trim, is the technical card
+  as before. A chain that fails partway says "Full details could not be sent
+  in full. Tap Full details again." and the next tap restarts at part 1; only
+  a complete chain counts as sent. After a listener restart, an on-tap card's
+  Approve decides nothing ("This card can no longer show its full details; use
+  the new card"); its Deny still works. A decision from the card is bound to the same
+  `display_hash`, its record says `{"style": "minimal"}`, and the settle edit
+  removes all three buttons. Every other fallback is unchanged, as is the
+  `undeclared` fallback for a class with no `say` entry, and an oversize
+  command, file change or email still gets the technical card. SPEC.md §10.3
+  and §5.2 are amended (pending attestation). Class-diff: none for class and
+  autonomy. Card style: an oversize declared opaque request of any declared
+  class (For Kicks orders and the declared tool-call classes such as
+  message.send, browser.exec, process.write, skill.manage) moves from the
+  technical card to the minimal card with Full details on tap. Behind the control plane's relay the replies arrive unthreaded until
+  the relay forwards `reply_parameters`.
+
 ## 0.4.6 — 2026-10-18
 
 0.4.6 carries everything merged since 0.4.5. It closes the classifier holes
