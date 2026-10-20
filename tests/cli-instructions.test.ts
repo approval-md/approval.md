@@ -39,6 +39,7 @@ import addFormatsModule from "ajv-formats";
 import type { FormatsPlugin } from "ajv-formats";
 
 import {
+  AGENT_GUIDE_VERBS,
   VERB_REGISTRY,
   verbLabel,
   type JsonSchema,
@@ -386,6 +387,9 @@ const HUMAN_ONLY: readonly string[] = [
   "grant",
   "reject",
   "revoke",
+  // Amended SPEC.md §8, the study record. A study operator's deny, recorded under
+  // the constant human:study-team: a decision under a human identity, like reject.
+  "study withdraw",
   "expire",
   "execution resolve",
   "execution reconcile",
@@ -682,10 +686,10 @@ test("instructions: the guide points a session at `approval values` (APRV-238)",
   assert.ok(guide.includes("`approval policy check` is the command that answers it"));
 });
 
-test("instructions: the printed table lists every registry entry", () => {
+test("instructions: the printed table lists every registry entry but the operator-only ones", () => {
   const run = runCli(["instructions"], scratch);
   assert.equal(run.code, 0);
-  for (const spec of VERB_REGISTRY) {
+  for (const spec of AGENT_GUIDE_VERBS) {
     const label = verbLabel(spec);
     assert.ok(run.stdout.includes(`  ${label} `), `the verb table omits "${label}"`);
   }
@@ -702,8 +706,32 @@ test("instructions: --json carries the guide and the registry in one object", ()
   assert.equal(run.code, 0);
   const parsed = JSON.parse(run.stdout) as { guide: string; verbs: unknown[] };
   assert.equal(typeof parsed.guide, "string");
-  assert.equal(parsed.verbs.length, VERB_REGISTRY.length);
+  assert.equal(parsed.verbs.length, AGENT_GUIDE_VERBS.length);
   assert.equal(parsed.guide, runCli(["instructions"], scratch).stdout);
+});
+
+// APRV-527, owner read S2. The study operator's withdraw is human-only AND
+// operator-only: the agent's guide, in all three forms, does not name it, so an
+// agent in a study does not learn from its own guide that a study team can pull
+// its cards. `--help` and docs/cli-reference.md keep it.
+test("instructions: an operator-only verb (study withdraw) is in none of the guide, --json or --schemas", () => {
+  const operatorOnly = VERB_REGISTRY.filter((spec) => spec.operator_only === true).map(verbLabel);
+  assert.deepEqual(operatorOnly, ["study withdraw"]);
+  for (const spec of VERB_REGISTRY.filter((candidate) => candidate.operator_only === true)) {
+    assert.equal(spec.human_only, true, `${verbLabel(spec)}: operator-only implies human-only`);
+  }
+  assert.deepEqual(
+    AGENT_GUIDE_VERBS.map(verbLabel),
+    VERB_REGISTRY.map(verbLabel).filter((label) => !operatorOnly.includes(label)),
+  );
+  for (const args of [["instructions"], ["instructions", "--json"], ["instructions", "--schemas"]]) {
+    const run = runCli(args, scratch);
+    assert.equal(run.code, 0, args.join(" "));
+    assert.equal(/study/iu.test(run.stdout), false, `${args.join(" ")} names the study verb`);
+  }
+  const help = runCli(["study", "withdraw", "--help"], scratch);
+  assert.equal(help.code, 0);
+  assert.match(help.stdout, /^approval study withdraw — /u);
 });
 
 test("instructions: --schemas is valid JSON and byte-stable across runs", () => {
@@ -713,9 +741,9 @@ test("instructions: --schemas is valid JSON and byte-stable across runs", () => 
   assert.equal(first.stdout, second.stdout);
 
   const parsed = JSON.parse(first.stdout) as { verbs: VerbSpec[] };
-  assert.equal(parsed.verbs.length, VERB_REGISTRY.length);
+  assert.equal(parsed.verbs.length, AGENT_GUIDE_VERBS.length);
   for (const [index, verb] of parsed.verbs.entries()) {
-    const spec = VERB_REGISTRY[index] as VerbSpec;
+    const spec = AGENT_GUIDE_VERBS[index] as VerbSpec;
     assert.equal(verb.name, spec.name);
     assert.equal(verb.subcommand, spec.subcommand);
     assert.equal(verb.human_only, spec.human_only);

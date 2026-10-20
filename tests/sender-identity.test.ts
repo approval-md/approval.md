@@ -961,6 +961,9 @@ test("the sender index inverts the policy's person-to-sender map and the refusal
       // with the stale-copy fallback off. A surface refusal: decide() is never
       // called for it.
       "nonce-not-issued",
+      // Amended SPEC.md §8 (the study record): a channel passed a study reason
+      // other than looks_wrong. Refused before the gate, nothing appended.
+      "study-reason-not-channel",
     ],
   );
 

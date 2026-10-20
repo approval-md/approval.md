@@ -93,6 +93,7 @@ import {
 } from "../src/cli/codex-bridge.js";
 import { CHANNEL_DECISION_REFUSAL_CODES } from "../src/core/sender-identity.js";
 import { RELAY_REFUSAL_CODES } from "../src/channels/relay.js";
+import { STUDY_WITHDRAW_REFUSAL_CODES } from "../src/core/study-withdraw.js";
 import { TOKEN_REFUSAL_CODES, TOKEN_VERIFY_REFUSAL_CODES } from "../src/core/token.js";
 import { validate, type ValidationMode } from "../src/core/validate.js";
 import { verifyText } from "../src/core/verify.js";
@@ -372,6 +373,11 @@ const UNIONS: Readonly<Record<string, readonly string[]>> = {
   // on the other side of the hop is a second implementation that branches on
   // them, so they are pinned here although the Telegram webhook's are not.
   relay_refusal_codes: RELAY_REFUSAL_CODES,
+  // Amended SPEC.md §8, the study record. The study operator's withdraw verb:
+  // the control plane that runs it on the box is a second implementation that
+  // branches on these strings, so they are pinned here for the reason the
+  // relay's are.
+  study_withdraw_refusal_codes: STUDY_WITHDRAW_REFUSAL_CODES,
 };
 
 function runUnion(input: Record<string, unknown>): Expectation {

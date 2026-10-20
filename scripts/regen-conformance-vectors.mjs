@@ -453,6 +453,10 @@ const unionVectors = [
     "relay_refusal_codes",
     "every way `approval channel relay` refuses an operator relay's post before or instead of applying the gesture it carries: a missing, wrong or duplicated secret header, a request this transport does not serve, a body too large, unreadable or outside the closed gesture shape, a sender that is not an EdgeOS id in the pinned grammar, an issued_at outside the freshness window, a nonce already claimed or a ledger that could not claim it, a propose whose hash is not the file on disk, and a gesture that threw. None of them appends to the log. Refusals the gate or the decision surface makes reach the caller verbatim from their own unions and are not members here",
   ],
+  [
+    "study_withdraw_refusal_codes",
+    "every way `approval study withdraw` refuses on its own, in evaluation order: the process was not launched with APPROVAL_STUDY_MODE=1, the request is not pending (decided, expired, withdrawn, never requested, or answered by someone else between the read and the append), or an action ref names more than one pending request. Only not-pending on a request that exists writes, and it writes one audit.decision_refused with the gate's own code. A log that cannot be read or written reaches the caller under the gate's own code, appends nothing, and is not a member here",
+  ],
 ].map(([union, description]) => ({
   id: `union-${union}`,
   description: `${description}. Order is definition order; conformance means emitting exactly these codes, no more, no fewer.`,
@@ -4815,7 +4819,23 @@ const SUITES = [
     // for the same reason as every bump here: the vector pins the whole array
     // in definition order. If another lane's major merges first, the collision
     // rule above applies and this takes the next major on regeneration.
-    vectors_version: "29.0.0",
+    //
+    // 30.0.0 (amended SPEC.md §8, the study record): `channel_decision_refusal_codes`
+    // gains `study-reason-not-channel`, the refusal a channel gets for a
+    // gesture carrying a study reason other than `looks_wrong`. A surface code:
+    // `decide` is never called for it and nothing is appended. Major for the
+    // reason 28.0.0 was. If another lane's major merges first, the collision
+    // rule above applies and this takes the next major on regeneration.
+    //
+    // 31.0.0 (APRV-527, amended SPEC.md §8, the study record): a new union,
+    // `study_withdraw_refusal_codes`, for `approval study withdraw`, the
+    // study operator's deny of one pending request. Major for the reason
+    // 7.0.0 and 26.0.0 were: a new union is a new pinned array a second
+    // implementation must answer, and the control plane that runs the verb
+    // on the box branches on these strings. Stacked on 30.0.0; if another
+    // lane's major merges first, the collision rule above applies and this
+    // takes the next major on regeneration.
+    vectors_version: "31.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -5056,7 +5076,17 @@ const SUITES = [
     // boolean custody, an unknown key under `exec.code`, an `execute_code`
     // value outside its enum). No existing expectation moves: the key is
     // OPTIONAL, and its absence is the closed answer.
-    vectors_version: "3.4.0",
+    // 3.5.0 (amended SPEC.md §8, the study record): a MINOR bump. Thirteen new
+    // fixtures for `payload.study`: two accepted `approval.rejected` records
+    // (a `study_withdrawn` under `human:study-team` on channel `study`, and a
+    // resident's `looks_wrong` on `telegram`) and eleven refused (the field on
+    // `approval.granted` and on `approval.revoked`, an unknown reason, an
+    // extra key, a withdrawal with no operator, with no ref, with an email for
+    // an operator, under another actor and on another channel, and a
+    // `looks_wrong` naming an operator or arriving on `cli`). No existing
+    // expectation moves: the field is OPTIONAL, and every record written
+    // before it validates exactly as it did.
+    vectors_version: "3.5.0",
     algorithm: "SPEC.md §8 write-boundary validation, JSON Schema 2020-12",
     description:
       "Every committed schema fixture, with the constraint each refusal violates named. Before APRV-122 the invalid fixtures asserted only that validation failed somehow; a refusal for the wrong reason passed.",

@@ -777,6 +777,7 @@ test("the ci aggregator requires the active tier to have succeeded (APRV-44)", (
     "full",
     "full-floor",
     "protected-paths",
+    "overlay-recipes",
   ]);
   assert.equal(ci["if"], "always()", "the aggregator must run even when tier jobs are skipped");
   const steps = ci["steps"] as Array<Record<string, unknown>>;

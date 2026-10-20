@@ -312,6 +312,18 @@ export const CHANNEL_DECISION_REFUSAL_CODES = [
    * sent was tapped. The repair is the newest card this listener sent.
    */
   "nonce-not-issued",
+  /**
+   * A channel reported a gesture carrying a study reason other than
+   * `looks_wrong` (amended SPEC.md §8, the study record).
+   *
+   * A channel may flag a resident's deny `looks_wrong`, and that is the whole
+   * of what a channel may say about a study. `study_withdrawn` is written by
+   * the study team's withdraw verb alone, under its own actor and channel, so a
+   * channel passing it is a surface claiming a hosted operator's act. Refused
+   * before the gate is called, with no record: the gesture names a reason no
+   * channel can hold, so there is no channel act to account for.
+   */
+  "study-reason-not-channel",
 ] as const;
 
 export type ChannelDecisionRefusalCode = (typeof CHANNEL_DECISION_REFUSAL_CODES)[number];
@@ -780,6 +792,9 @@ export function senderRefusalLine(code: ChannelDecisionRefusalCode): string {
     // most taps that reach this are genuine buttons from before a restart, and
     // no claim about a record, because many of these refusals write none.
     return "Not recorded — this listener is not holding that button (an earlier copy, or one it never sent), so it will not act on it. Tap the newest card this listener sent for the request.";
+  }
+  if (code === "study-reason-not-channel") {
+    return "Not recorded — this button carried a study reason a channel may not record. Nothing was decided; the request is still waiting.";
   }
   return "Not recorded — the policy maps this account to more than one approver, so the runtime cannot say who decided. Ask the operator to fix the policy.";
 }
