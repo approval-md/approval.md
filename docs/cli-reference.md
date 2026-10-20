@@ -2089,6 +2089,57 @@ success  {"ok":true,"task":"...","action_key":"...","state":"withdrawn",
 refusal  {"ok":false,"error":{"code":"...","message":"...","state"?:"..."}}
 ```
 
+## study withdraw
+
+A hosted study operator DENIES one request that is still pending, before it can
+run (SPEC.md §8, the study record). It is the only way a `study_withdrawn`
+record is written: a channel may pass `looks_wrong` and nothing else.
+
+**Off unless switched on at launch.** The verb refuses `study-mode-off` before it
+opens the log unless the process environment holds `APPROVAL_STUDY_MODE`
+exactly `1`. The switch is never read from a policy, because nothing an agent
+can propose into a policy file may turn it on. `--help` answers either way, so a
+control plane can probe whether the installed CLI has the verb.
+
+**Deny-only, constant identity.** There is no `--as`, no decision flag and no
+note. The record is one `approval.rejected` by `human:study-team` on channel
+`study`, with `payload.note` "withdrawn by the study team" and `payload.study`
+`{reason: "study_withdrawn", operator, ref}`. `--operator` is the first 8 hex of
+the SHA-256 of the operator's lower-cased staff email, never the email.
+
+**Pending-only, and a refusal writes nothing.** A request that is granted,
+rejected, revoked, expired, withdrawn or never requested is refused
+`not-pending`. The gate's `decide` re-derives the state under its head-moved
+retry, so a resident's tap that lands between the verb's read and its append
+wins and the withdrawal becomes `not-pending` (the gate's code rides as
+`gate_code`). Unlike `approval reject`, no `audit.decision_refused` is appended
+for any refusal: an operator's too-late or repeated withdrawal is not a person
+answering the gate, and the log stays byte-identical.
+
+**Replay-safe.** The `--ref` is matched against the verified log first. The same
+ref again for the same request answers `idempotent: true` with the earlier
+record's seq, and appends nothing.
+
+**Name by key or by ref.** `--action-ref` is the first 12 hex of the SHA-256 of
+the action key (the same 12 hex the Telegram listener's "Looks wrong" line
+prints), so a control plane never has to carry an action key off the box. More
+than one pending request under one ref is `action-ref-ambiguous`.
+
+**Not published.** The registry marks the verb human-only, so neither `approval
+serve` nor `approval mcp serve` offers it. Its caller is a root exec running as
+the store's own uid. The Telegram listener edits the resident's card on its next
+cycle to "WITHDRAWN BY THE STUDY TEAM" with "withdrawn by the study team at
+HH:MM UTC · nothing ran", and takes the buttons away. The requester's `wait`
+exits 1 (rejected).
+
+**`--json`** (one line; the action key is never printed):
+
+```
+success  {"ok":true,"idempotent":false,"seq":12}
+refusal  {"ok":false,"error":{"code":"not-pending","message":"...",
+          "state"?:"...","gate_code"?:"...","matches"?:2}}
+```
+
 ## expire
 
 No identity is accepted or resolved: no human decides an expiry, the clock does,

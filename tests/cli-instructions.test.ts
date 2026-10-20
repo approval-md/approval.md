@@ -386,6 +386,9 @@ const HUMAN_ONLY: readonly string[] = [
   "grant",
   "reject",
   "revoke",
+  // Amended SPEC.md §8, the study record. A study operator's deny, recorded under
+  // the constant human:study-team: a decision under a human identity, like reject.
+  "study withdraw",
   "expire",
   "execution resolve",
   "execution reconcile",

@@ -490,6 +490,16 @@ export const TELEGRAM_LOOKS_WRONG_HEADLINE = "SKIPPED — you flagged this as lo
  */
 export const TELEGRAM_LOOKS_WRONG_LABEL = "🚩 Looks wrong";
 
+/**
+ * The headline a card settles on when the study team withdrew its request
+ * (amended SPEC.md §8, the study record: an `approval.rejected` carrying
+ * `payload.study.reason` `study_withdrawn`). It replaces "✗ REJECTED" for that
+ * record only, so the resident reads that nobody they know said no and that
+ * nothing ran. The operator id in the record is never shown. Emoji-free like
+ * every other headline here.
+ */
+export const TELEGRAM_STUDY_WITHDRAWN_HEADLINE = "WITHDRAWN BY THE STUDY TEAM";
+
 /** A state {@link TELEGRAM_TERMINAL_HEADLINES} has a word for. */
 export type TelegramTerminalState = keyof typeof TELEGRAM_TERMINAL_HEADLINES;
 

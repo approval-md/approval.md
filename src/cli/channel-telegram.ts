@@ -153,6 +153,7 @@ import {
   TELEGRAM_REVIEW_RECORDED,
   TELEGRAM_CLAIMED_LABEL,
   TELEGRAM_DEFAULT_API_BASE,
+  TELEGRAM_STUDY_WITHDRAWN_HEADLINE,
   TELEGRAM_TERMINAL_HEADLINES,
   utcClock,
   type CheckpointTapResponse,
@@ -1875,6 +1876,23 @@ interface TerminalDelivery {
   outcome: TelegramTerminalState;
   /** The lines the approver reads under the headline on the edited message. */
   detail: string[];
+  /**
+   * A headline in place of the outcome's own word, when the settling record
+   * says more than its state (amended SPEC.md §8: a study withdrawal is a
+   * `rejected` that reads "WITHDRAWN BY THE STUDY TEAM"). Absent everywhere
+   * else, so every other annotation is byte-identical to before.
+   */
+  headline?: string;
+}
+
+/** Whether a settling record is the study team's withdrawal (amended SPEC.md §8). */
+function isStudyWithdrawal(payload: Record<string, unknown>): boolean {
+  const study = payload["study"];
+  return (
+    typeof study === "object" &&
+    study !== null &&
+    (study as Record<string, unknown>)["reason"] === "study_withdrawn"
+  );
 }
 
 /** The event that records each terminal state, for finding the settling record. */
@@ -2010,6 +2028,21 @@ function terminalDeliveries(
       continue;
     }
 
+    // Amended SPEC.md §8, the study record: the study team withdrew a pending
+    // request. Its own headline and line, so the resident never reads it as a
+    // person's REJECTED and does read that nothing ran. The operator id the
+    // record carries is not shown.
+    if (outcome === "rejected" && record !== undefined && isStudyWithdrawal(payload)) {
+      settled.push({
+        actionKey,
+        deliveryId,
+        outcome,
+        headline: TELEGRAM_STUDY_WITHDRAWN_HEADLINE,
+        detail: [`withdrawn by the study team at ${utcClock(record.ts)} · nothing ran`],
+      });
+      continue;
+    }
+
     // granted / rejected / revoked: a human answered, somewhere. The actor is
     // the log's, never this listener's configured identity — the answer may
     // have come from another surface entirely.
@@ -2079,7 +2112,7 @@ export async function dispatchPending(
       // must leave the others armed.
       await setup.channel.annotate(
         settled.deliveryId,
-        TELEGRAM_TERMINAL_HEADLINES[settled.outcome],
+        settled.headline ?? TELEGRAM_TERMINAL_HEADLINES[settled.outcome],
         settled.detail,
         settled.actionKey,
       );

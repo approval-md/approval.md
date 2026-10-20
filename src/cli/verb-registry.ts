@@ -1128,6 +1128,43 @@ const VERBS: VerbSpec[] = [
   },
 
   {
+    // APRV-527, amended SPEC.md §8 (the study record).
+    name: "study",
+    subcommand: "withdraw",
+    purpose:
+      "A hosted study operator DENIES one still-pending request before it can run, appending one approval.rejected by human:study-team on channel study with payload.study {reason: study_withdrawn, operator, ref}. Off unless the process was launched with APPROVAL_STUDY_MODE=1 (study-mode-off). Deny-only and pending-only: a request that is not pending is refused not-pending, and every refusal appends nothing. The same ref again answers idempotent. The output never names the action key.",
+    human_only: true,
+    human_only_note:
+      "It records a decision under a human identity, so it is human-only like reject. Its one caller is a root exec on the box running as the store's own uid, never an agent, and no transport publishes it.",
+    input: input({
+      // Exactly one of the key or `--action-ref`, which no strict 1-tuple can
+      // state (see `execution resolve`): a bounded list, and the verb refuses
+      // both-or-neither as a usage error.
+      positionals: {
+        type: "array",
+        items: { type: "string", title: "action-key", description: "the action's idempotency_key" },
+        maxItems: 1,
+        description: "the action key; absent when --action-ref names the request",
+      },
+      flags: {
+        "--action-ref": "string",
+        "--operator": "string",
+        "--ref": "string",
+        ...POLICY_FLAGS,
+        ...LOG_FLAG,
+        ...JSON_FLAG,
+        ...HELP_FLAGS,
+      },
+    }),
+    output: object(
+      { ok: { const: true }, idempotent: BOOLEAN, seq: INTEGER },
+      ["ok", "idempotent", "seq"],
+    ),
+    error: ERROR_SCHEMA,
+    exit_codes: BASE_EXIT_CODES,
+  },
+
+  {
     name: "token",
     purpose:
       "Report whether a live, unspent execution token exists for an action key, and print its digest so an operator can match it against the log. IT DOES NOT PRINT THE TOKEN and no future version can: the raw value exists only in the output of the grant that minted it. Exit 0 means granted, unrevoked, unexpired and unconsumed; every other answer is a refusal naming which of the three deaths applied. Writes nothing.",

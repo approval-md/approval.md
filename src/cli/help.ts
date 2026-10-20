@@ -970,6 +970,43 @@ ${GATE_CODES_POINTER}
 ${JSON_ERRORS}
 ${why("withdraw")}`;
 
+export const STUDY_HELP = `approval study — a hosted study operator's deny-only verb
+
+Usage:
+  approval study withdraw [<action-key>] [--action-ref <12 hex>]
+                          --operator <8 hex> --ref <ref> [--json]
+
+Subcommands:
+  withdraw   deny ONE still-pending request for the study team, before it runs
+
+Off unless this process was launched with APPROVAL_STUDY_MODE=1.
+${EXIT_CODES_POINTER}
+${why("study-withdraw")}`;
+
+export const STUDY_WITHDRAW_HELP = `approval study withdraw — deny one pending request for the study team
+
+Usage:
+  approval study withdraw [<action-key>] [--action-ref <12 hex>]
+        --operator <8 hex> --ref <ref> [--policy <p>] [--dir <p>] [--log <p>]
+        [--json]
+
+Flags:
+  --action-ref <hex>  first 12 hex of sha256(action key), in place of the key
+  --operator <hex>    first 8 hex of sha256(lower-cased staff email)
+  --ref <ref>         16-64 of [A-Za-z0-9_-]; the same ref again is idempotent
+
+OFF UNLESS APPROVAL_STUDY_MODE=1 is in this process's environment (else
+study-mode-off). DENY-ONLY and PENDING-ONLY: appends one approval.rejected by
+human:study-team on channel study with payload.study study_withdrawn. A
+request that is not pending is refused not-pending, and a refusal appends
+NOTHING (no audit.decision_refused). Never published over serve or MCP.
+
+JSON shape: docs/cli-reference.md#study-withdraw
+Refusal codes: study-mode-off, not-pending, action-ref-ambiguous (exit 1)
+${EXIT_CODES_POINTER}
+${JSON_ERRORS}
+${why("study-withdraw")}`;
+
 export const EXPIRE_HELP = `approval expire — lapse a request whose TTL has passed (system verb)
 
 Usage:
