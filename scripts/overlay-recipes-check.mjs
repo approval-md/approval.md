@@ -37,7 +37,9 @@
  *    human-only). BLOCKING: an existing call that ran (auto, sampled, card)
  *    and now runs with less autonomy or not at all (fold 1 S-4: autonomous ->
  *    supervised-retro, a higher live rate, auto -> card, and every move into
- *    a deny). Other moves are reported. New and removed calls are reported; a
+ *    a deny), or whose card falls from the minimal to the technical card. A
+ *    card's classes are read from the request the hook opened in the box's
+ *    store (its timeout line names none). Other moves are reported. New and removed calls are reported; a
  *    new recipe that the hook denies is the box check's finding. A tools line
  *    shadowed by an earlier line (first match wins in core) that was not
  *    shadowed in the baseline template is also BLOCKING.
@@ -304,6 +306,10 @@ export function diffCalls(baselineCalls, calls, allowlist = { entries: [] }) {
       (was.style ?? null) !== (now.style ?? null);
     let status = "unchanged";
     if (!DENIES.has(was.decision) && rankOf(now) < rankOf(was)) status = "blocking";
+    // Fold 2 (S-4): a card the resident read in plain words that now arrives as
+    // the technical card is a resident-visible regression too (the APPROVAL-UX
+    // undeclared-class fallback): blocking, unless accepted.
+    else if (!DENIES.has(now.decision) && /minimal/u.test(was.style ?? "") && !/minimal/u.test(now.style ?? "") && now.style !== null) status = "blocking";
     else if (moved) status = "changed";
     const row = { status, column, kind: now.kind, where: now.where, command: now.command, old: pick(was), new: pick(now) };
     if (status === "blocking") {
@@ -406,7 +412,7 @@ export function renderDiff(meta, diff, extra = {}) {
   out.push(`- candidate: core ${meta.core} (${meta.coreLabel}), overlay ${meta.overlayRepo}@${meta.overlay}`);
   out.push(
     "- every call through each core's real `approval hook hermes` in a box layout; recipes as terminal calls at $HERMES_HOME, $HOME, $HERMES_HOME/workspace and unset; harness calls as Hermes tool envelopes",
-    "- BLOCKING: an existing call that ran and now runs with less autonomy or not at all (CLAIMS L15681 (1); fold 1 S-4)",
+    "- BLOCKING: an existing call that ran and now runs with less autonomy or not at all, or whose card falls from minimal to technical (CLAIMS L15681 (1); S-4)",
     "",
   );
   for (const s of extra.shadowed ?? []) {
@@ -476,7 +482,14 @@ export async function loadCore(root) {
 export async function decideInBox({ core, corpus, overlayTree, boxRoot, toolsLines, concurrency = 1, harnessOnly = null }) {
   const load = loadCorpusPolicy(core.loadPolicyText, corpus);
   if (!load.ok) return { error: `the template policy did not load at core ${core.version}: ${load.code}: ${load.message}` };
-  const ran = await runBox({ coreRoot: core.root, corpus, policyText: policyTextOf(corpus), overlayTree, boxRoot, toolsLines, concurrency, harnessOnly });
+  // A fixed sampling secret (fold 2): when the template names
+  // `audit.sampling_secret_env`, the box exports it with a fixed dummy value, so
+  // a supervised-live class is drawn (sampled vs card) as on a box that holds a
+  // secret. When it names none (the overlay template today), live selection
+  // fails closed and every live call cards, exactly as on a real box.
+  const secretEnv = load.policy.audit?.sampling_secret_env;
+  const extraEnv = typeof secretEnv === "string" && secretEnv.length > 0 ? { [secretEnv]: "class-diff-fixed-sampling-value-not-a-secret" } : {};
+  const ran = await runBox({ coreRoot: core.root, corpus, policyText: policyTextOf(corpus), overlayTree, boxRoot, toolsLines, concurrency, harnessOnly, extraEnv });
   if ("error" in ran) return ran;
   const bad = ran.calls.filter((c) => c.verdict === "error");
   if (bad.length > 0) return { error: `${String(bad.length)} hook run(s) ended in neither allow nor deny at core ${core.version}, e.g. ${bad[0].code}: ${bad[0].detail}` };

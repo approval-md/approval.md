@@ -243,7 +243,10 @@ function writeAllowlist(): void {
   );
 }
 
-function gate(env: Record<string, string>, opts: { corpus?: string; baselineCorpus?: string; core?: string } = {}): { status: number | null; out: string; err: string } {
+function gate(
+  env: Record<string, string>,
+  opts: { corpus?: string; baselineCorpus?: string; core?: string; concurrency?: number } = {},
+): { status: number | null; out: string; err: string } {
   writeAllowlist();
   const corpus = opts.corpus ?? corpusWith([STAY, CURL]);
   const box = mkdtempSync(join(boxes, "box-"));
@@ -260,6 +263,7 @@ function gate(env: Record<string, string>, opts: { corpus?: string; baselineCorp
       "--overlay-tree", overlay,
       "--box-root", box,
       "--md", md,
+      "--box-concurrency", String(opts.concurrency ?? 1),
       // Sequential hook runs (the lead's load rule) over the harness tools the plants touch.
       "--harness-only", "terminal,read_file,search_files,send_message,web_search,mcp__index__list_intents",
     ],
@@ -314,4 +318,50 @@ test("S-1: a shipped recipe the hook denies in the box fails with no diff move, 
   assert.equal(run.status, 1, run.err);
   assert.match(run.out, /class-diff: none/u);
   assert.match(run.err, /denied by the real hook in the box layout/u);
+});
+
+// --- fold 2: carded calls keep their class, autonomy and style (S-4) -----------------------
+
+const NETWORK_ROW = /^(\s*)network\.call:(\s*)\{ autonomy: autonomous \}/mu;
+const withNetwork = (row: string): string => {
+  const block = baseCorpus.policy.block.replace(NETWORK_ROW, `$1network.call:$2${row}`);
+  assert.notEqual(block, baseCorpus.policy.block);
+  return block;
+};
+const LIVE_01 = withNetwork("{ autonomy: supervised-live, live_rate: 0.1 }");
+const LIVE_10 = withNetwork("{ autonomy: supervised-live, live_rate: 1.0 }");
+const MANUAL = withNetwork("{ autonomy: manual }");
+const SAY_LINE = /^\s*network\.call:\s*\{ quote: .*$\n/mu;
+const MANUAL_NO_SAY = MANUAL.replace(SAY_LINE, "");
+
+test("S-4 control: a template whose network.call cards on both sides passes, class-diff: none", BOX_TIMEOUT, () => {
+  const run = gate({}, { core: ROOT, corpus: corpusWith([STAY, CURL], MANUAL), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
+  assert.equal(run.status, 0, run.err);
+  assert.match(run.out, /^CLASS-DIFF PASS: .*class-diff: none/u);
+});
+
+test("S-4 plant: live_rate 0.1 -> 1.0 on network.call fails (more of its calls card)", BOX_TIMEOUT, () => {
+  assert.equal(MANUAL_NO_SAY === MANUAL, false, "the say line was removed");
+  const run = gate({}, { core: ROOT, corpus: corpusWith([STAY, CURL], LIVE_10), baselineCorpus: corpusWith([STAY, CURL], LIVE_01) });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.out, /^CLASS-DIFF FAIL \d+ BLOCKING/u);
+  assert.match(run.out, /supervised-live:0\.1.*supervised-live:1/u);
+});
+
+test("S-4 plant: supervised-live -> manual on network.call (sampled -> card) fails", BOX_TIMEOUT, () => {
+  const run = gate({}, { core: ROOT, corpus: corpusWith([STAY, CURL], MANUAL), baselineCorpus: corpusWith([STAY, CURL], LIVE_01) });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.out, /^CLASS-DIFF FAIL \d+ BLOCKING/u);
+});
+
+test("S-4 plant: network.call's card falls from minimal to technical (its say entry removed) fails", BOX_TIMEOUT, () => {
+  const run = gate({}, { core: ROOT, corpus: corpusWith([STAY, CURL], MANUAL_NO_SAY), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.out, /minimal card .*technical \(undeclared\) card/u);
+});
+
+test("N-6: carded calls at box concurrency 4 read no false refusal (one store per worker)", BOX_TIMEOUT, () => {
+  const run = gate({}, { core: ROOT, corpus: corpusWith([STAY, CURL], MANUAL), baselineCorpus: corpusWith([STAY, CURL], MANUAL), concurrency: 4 });
+  assert.equal(run.status, 0, run.err);
+  assert.doesNotMatch(`${run.out}${run.err}`, /append-failed/u);
 });

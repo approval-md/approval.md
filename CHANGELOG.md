@@ -97,6 +97,16 @@ before a tag.
     extractor.
   - **Fail closed:** a hook run that exits 0 without an allow line is an
     error, never an allow.
+- **Carded calls keep their class (B-167 fold 2).** A card's classes are
+  read from the request the hook opened in the box's store, so these now
+  block:
+  - a higher `live_rate`;
+  - supervised-live -> manual;
+  - a card falling from minimal to technical.
+
+  The box exports a fixed sampling value when the template names
+  `audit.sampling_secret_env`. Each concurrent worker has its own store, so
+  a lost log race can no longer read as a refusal.
 
 ## 0.4.6 — 2026-10-18
 

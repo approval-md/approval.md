@@ -26,7 +26,7 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** Envelopes for core's own Hermes tools, with inputs a box sees. `$HH` and `$WS` are filled per box. */
@@ -95,6 +95,33 @@ export function readVerdict(status, stdout, stderr) {
   return { verdict: status === 2 ? "deny" : "error", code, classes: cls === undefined ? [] : [cls], reason: "" };
 }
 
+/** task -> the classes its request registered, read from each store's log. */
+export function requestedClasses(stores) {
+  const out = new Map();
+  for (const store of stores) {
+    const log = join(store, ".approval", "log", "events.jsonl");
+    if (!existsSync(log)) continue;
+    for (const line of readFileSync(log, "utf8").split("\n")) {
+      if (line.trim() === "") continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (typeof event.task !== "string") continue;
+      const add = (cls) => {
+        if (typeof cls !== "string") return;
+        if (!out.has(event.task)) out.set(event.task, new Set());
+        out.get(event.task).add(cls);
+      };
+      if (event.event === "task.registered") for (const action of event.payload?.actions ?? []) add(action.class);
+      if (event.event === "approval.requested") add(event.payload?.class);
+    }
+  }
+  return out;
+}
+
 function boxEnv(home, hh, extra) {
   const env = {};
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("APPROVAL_") && k !== "HERMES_HOME") env[k] = v;
@@ -126,15 +153,23 @@ export async function runBox({ coreRoot, corpus, policyText, overlayTree, boxRoo
     writeFileSync(join(hh, ".env"), "EDGEOS_API_KEY=dummy-not-a-secret\n");
     writeFileSync(join(hh, "config.yaml"), "model: fake-model\n");
     writeFileSync(join(ws, "notes.md"), "a\n");
-    const store = join(box, "store");
-    mkdirSync(store);
     const env = boxEnv(home, hh, extraEnv);
-    const cliSync = (args) => spawnSync(process.execPath, [cli, ...args], { cwd: store, env, encoding: "utf8" });
-    let r = cliSync(["init", "--json"]);
-    if (r.status !== 0) return { error: `approval init failed at ${coreRoot}: ${r.stderr}` };
-    writeFileSync(join(store, "APPROVAL.md"), `# Policy\n\n\`\`\`yaml approval-policy\n${policyText}\n\`\`\`\n`);
-    r = cliSync(["policy", "attest", "--bootstrap", "--as", "human:operator"]);
-    if (r.status !== 0) return { error: `approval policy attest failed at ${coreRoot}: ${r.stderr}` };
+    // One store per worker (fold 2, N-6): concurrent hooks appending to one log
+    // could lose a race (`hook-gate-refused:append-failed`), which read as a
+    // refusal. A box's hooks share one log; ours never race on it.
+    const workers = Math.max(1, concurrency);
+    const stores = [];
+    for (let w = 0; w < workers; w += 1) {
+      const store = join(box, `store-${String(w)}`);
+      mkdirSync(store);
+      const cliSync = (args) => spawnSync(process.execPath, [cli, ...args], { cwd: store, env, encoding: "utf8" });
+      let r = cliSync(["init", "--json"]);
+      if (r.status !== 0) return { error: `approval init failed at ${coreRoot}: ${r.stderr}` };
+      writeFileSync(join(store, "APPROVAL.md"), `# Policy\n\n\`\`\`yaml approval-policy\n${policyText}\n\`\`\`\n`);
+      r = cliSync(["policy", "attest", "--bootstrap", "--as", "human:operator"]);
+      if (r.status !== 0) return { error: `approval policy attest failed at ${coreRoot}: ${r.stderr}` };
+      stores.push(store);
+    }
 
     const fill = (c) => {
       let o = c;
@@ -169,7 +204,7 @@ export async function runBox({ coreRoot, corpus, policyText, overlayTree, boxRoo
     }
     const scrub = (s) => s.replaceAll(ws, "$WS").replaceAll(hh, "$HH").replaceAll(home, "$HOME").replaceAll(box, "$BOX");
     let n = 0;
-    const one = (job) =>
+    const one = (job, store) =>
       new Promise((resolveJob) => {
         n += 1;
         const id = `cd-${String(n)}`;
@@ -194,19 +229,30 @@ export async function runBox({ coreRoot, corpus, policyText, overlayTree, boxRoo
         p.stderr.on("data", (d) => (se += d));
         p.on("close", (status) => {
           const v = readVerdict(status, so, se);
-          resolveJob({ key: job.key, column: job.column, kind: job.kind, where: job.where, command: job.command, ...v, reason: scrub(v.reason), detail: scrub(se.trim().slice(0, 240)) });
+          resolveJob({ key: job.key, column: job.column, kind: job.kind, where: job.where, command: job.command, ...v, task: `hook:class-diff:${id}`, reason: scrub(v.reason), detail: scrub(se.trim().slice(0, 240)) });
         });
         p.stdin.end(JSON.stringify(envelope));
       });
     const calls = Array.from({ length: jobs.length });
     let next = 0;
-    const worker = async () => {
+    const worker = async (w) => {
       while (next < jobs.length) {
         const i = next++;
-        calls[i] = await one(jobs[i]);
+        calls[i] = await one(jobs[i], stores[w]);
       }
     };
-    await Promise.all(Array.from({ length: concurrency }, worker));
+    await Promise.all(Array.from({ length: workers }, (_, w) => worker(w)));
+    // A card's classes (fold 2, S-4): the hook's timeout line names none, so read
+    // them from the request the hook opened, in the store's own log: the
+    // `task.registered` actions and `approval.requested` events of that task.
+    const requested = requestedClasses(stores);
+    for (const call of calls) {
+      const fromStore = requested.get(call.task);
+      if (fromStore !== undefined && (call.verdict === "deny" || call.verdict === "allow")) {
+        call.requested = [...fromStore].sort();
+        if (call.classes.length === 0) call.classes = call.requested;
+      }
+    }
     return { calls };
   } finally {
     rmSync(box, { recursive: true, force: true });
