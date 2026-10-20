@@ -119,7 +119,7 @@ before a tag.
   - The sampling secret name may not be a box layout or runtime variable
     (HOME, HERMES_HOME, PATH, `APPROVAL_*`, `NODE_*`); naming one exits 2.
   - The minimal -> technical card rule compares per class.
-- **Cards are bound and read more strictly (B-167 fold 5).**
+- **Cards are bound and read more strictly (B-167 folds 5 and 6).**
   - A call that wrote its own request binds only to the rows it wrote. A deny
     naming another call's request, even one with the same command, exits 2.
   - A card whose bound request names no class that needs a human (every class
@@ -127,6 +127,9 @@ before a tag.
     logged a class other than the one it carded on.
   - When every class on the old card was minimal, a class new to the card at
     another style blocks (one more technical card for the resident).
+  - Fold 6: a card whose bound request logs a class other than the one its key
+    names (core keys each action `<task>:<class>`) is an error, and the gate
+    exits 2, even when the logged class needs a human.
 
 ## 0.4.6 — 2026-10-18
 

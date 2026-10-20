@@ -204,7 +204,12 @@ export function bindRequest({ text, tool, input, span }, requests) {
   if (foreign !== undefined) return { error: `request ${tasks[0]} carries an action of another call (${String(foreign.summary).slice(0, 80)})` };
   const classes = [...new Set(all.map((r) => r.cls).filter((c) => typeof c === "string"))].sort();
   if (classes.length === 0) return { error: `request ${tasks[0]} names no class` };
-  return { task: tasks[0], classes };
+  // Fold 6 (review-b N-15): core keys every action `<task>:<cls>` (hook.ts
+  // actionKey; an adopted key is an earlier request's of the same class), so a
+  // row whose key is not its own task and class is a core that logged a class
+  // other than the one it carded on. decideInBox makes such a card an error.
+  const mislabeled = all.filter((r) => r.key !== `${r.task}:${String(r.cls)}`).map((r) => ({ key: r.key, cls: r.cls }));
+  return mislabeled.length > 0 ? { task: tasks[0], classes, mislabeled } : { task: tasks[0], classes };
 }
 
 /**
@@ -372,6 +377,7 @@ export async function runBox({ coreRoot, corpus, policyText, overlayTree, boxRoo
       }
       call.task = bound.task;
       call.requested = bound.classes;
+      if (bound.mislabeled !== undefined) call.mislabeled = bound.mislabeled;
       call.classes = card ? [...new Set([...call.classes, ...bound.classes])].sort() : call.classes.length === 0 ? bound.classes : call.classes;
     });
     return { calls };

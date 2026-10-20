@@ -236,6 +236,19 @@ export function cardWithoutHumanClass(core, load, call) {
 }
 
 /**
+ * Fold 6 (review-b N-15): the rows of a `hook-timeout` card's bound request
+ * whose key is not `<task>:<class>` of the row itself (bindRequest's
+ * `mislabeled`). The key carries the class the hook carded on; a row logging
+ * another class, even one that needs a human, would let the card rank at the
+ * logged class and hide a real move, so decideInBox makes it a verdict error
+ * and the gate exits 2.
+ */
+export function cardKeyClassMismatch(call) {
+  if (call.verdict !== "deny" || call.code !== "hook-timeout") return [];
+  return Array.isArray(call.mislabeled) ? call.mislabeled : [];
+}
+
+/**
  * Turn one hook verdict from the box into a decided call: decision, autonomy
  * level (strictest over the classes the hook named), card style.
  */
@@ -536,12 +549,22 @@ export async function decideInBox({ core, corpus, overlayTree, boxRoot, toolsLin
   const ran = await runBox({ coreRoot: core.root, corpus, policyText: policyTextOf(corpus), overlayTree, boxRoot, toolsLines, concurrency, harnessOnly, extraEnv });
   if ("error" in ran) return ran;
   for (const c of ran.calls) {
-    if (!cardWithoutHumanClass(core, load, c)) continue;
-    const named = (c.requested ?? []).join(", ") || "no class";
+    if (cardWithoutHumanClass(core, load, c)) {
+      const named = (c.requested ?? []).join(", ") || "no class";
+      Object.assign(c, {
+        verdict: "error",
+        code: "card-request-no-human-class",
+        detail: `the hook carded this call, but the request it bound to names ${named}, none of which needs a human at core ${core.version}; ${c.detail ?? ""}`.slice(0, 400),
+      });
+      continue;
+    }
+    const wrong = cardKeyClassMismatch(c);
+    if (wrong.length === 0) continue;
+    const rows = wrong.map((w) => `${String(w.key)} as ${String(w.cls ?? "no class")}`).join(", ");
     Object.assign(c, {
       verdict: "error",
-      code: "card-request-no-human-class",
-      detail: `the hook carded this call, but the request it bound to names ${named}, none of which needs a human at core ${core.version}; ${c.detail ?? ""}`.slice(0, 400),
+      code: "card-request-class-mismatch",
+      detail: `the hook carded this call, but request ${String(c.task)} logs ${rows}: a key names another class than its row, so the core logged a class other than the one it carded on (core ${core.version}); ${c.detail ?? ""}`.slice(0, 400),
     });
   }
   const bad = ran.calls.filter((c) => c.verdict === "error");

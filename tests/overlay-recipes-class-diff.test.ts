@@ -30,6 +30,10 @@
  * binds only its own rows (N-9); a card bound to no class that needs a human
  * exits 2 (N-10); a class new to an all-minimal card at another style blocks
  * (N-11, owner N1); and pure tests for the fold-3 checks no test held (N-13).
+ *
+ * Fold 6 (review-b recheck of 2502bc44): a card whose bound request logs a
+ * class other than the one its key names exits 2, even when the logged class
+ * needs a human (N-15).
  */
 
 import assert from "node:assert/strict";
@@ -44,6 +48,7 @@ import { parse } from "yaml";
 
 import {
   acceptanceErrors,
+  cardKeyClassMismatch,
   cardWithoutHumanClass,
   diffCalls,
   entryMatches,
@@ -271,6 +276,35 @@ test("N-10: a card whose bound request names no class that needs a human is flag
   // Not a card: an allow or another deny is never flagged.
   assert.equal(cardWithoutHumanClass(core, {}, { verdict: "allow", code: null, classes: ["read.web"], requested: ["read.web"] }), false);
   assert.equal(cardWithoutHumanClass(core, {}, { verdict: "deny", code: "hook-class-human-only", classes: ["read.web"] }), false);
+});
+
+test("N-15: a bound row whose key is not its own task and class is mislabeled, and a card carrying one is flagged", () => {
+  // Every class field logged as digest.share (it needs a human), the keys still the carded network.call (review-b C4).
+  const relabeled = req(10, "hook:s:cd-8", "network.call").map((r) => ({ ...r, cls: "digest.share" }));
+  const call = { tool: "terminal", input: { command: CMD }, span: [10, 20] };
+  const keyed = bindRequest({ ...call, text: DENY("hook:s:cd-8:network.call") }, relabeled);
+  assert.equal(keyed.task, "hook:s:cd-8");
+  assert.deepEqual(keyed.classes, ["digest.share"]);
+  assert.deepEqual(keyed.mislabeled, [
+    { key: "hook:s:cd-8:network.call", cls: "digest.share" },
+    { key: "hook:s:cd-8:network.call", cls: "digest.share" },
+  ]);
+  // The span path (the deny names no key) reads the same rows.
+  assert.equal(bindRequest({ ...call, text: "" }, relabeled).mislabeled?.length, 2);
+  // One row of a two-class request with no class: mislabeled too (the other row's class is not the whole request).
+  const partial = [...req(10, "hook:s:cd-9", "network.call"), ...req(12, "hook:s:cd-9", "read.web").map((r) => ({ ...r, cls: null }))];
+  assert.deepEqual(bindRequest({ ...call, text: DENY("hook:s:cd-9:network.call, hook:s:cd-9:read.web") }, partial).mislabeled, [
+    { key: "hook:s:cd-9:read.web", cls: null },
+    { key: "hook:s:cd-9:read.web", cls: null },
+  ]);
+  // Keys that are their rows' own task and class: no field at all.
+  assert.deepEqual(bindRequest({ ...call, text: DENY("hook:s:cd-8:network.call") }, req(10, "hook:s:cd-8", "network.call")), { task: "hook:s:cd-8", classes: ["network.call"] });
+  // Only a card is flagged.
+  const card = { verdict: "deny", code: "hook-timeout", classes: ["digest.share"], requested: keyed.classes, mislabeled: keyed.mislabeled };
+  assert.equal(cardKeyClassMismatch(card).length, 2);
+  assert.deepEqual(cardKeyClassMismatch({ ...card, mislabeled: undefined }), []);
+  assert.deepEqual(cardKeyClassMismatch({ ...card, verdict: "allow", code: null }), []);
+  assert.deepEqual(cardKeyClassMismatch({ ...card, code: "hook-class-human-only" }), []);
 });
 
 test("N-11 (owner N1): a class new to an all-minimal card, at another style, blocks", () => {
@@ -582,6 +616,14 @@ test("N-10: both cores log a class other than the one they carded on (review-b C
   const run = gate({ PLANT_CLS: "other:read.web" }, { ...both(), corpus: corpusWith([STAY, CURL], MANUAL_NO_SAY), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
   assert.equal(run.status, 2, `${run.err}\n${run.out.slice(0, 400)}`);
   assert.match(run.err, /card-request-no-human-class: the hook carded this call, but the request it bound to names read\.web, none of which needs a human/u);
+});
+
+// --- fold 6: review-b recheck of 2502bc44 (N-15) -------------------------------------------
+
+test("N-15: both cores log digest.share (it needs a human) while carding on network.call (review-b C4), with a real minimal -> technical move: exit 2, never none", BOX_TIMEOUT, () => {
+  const run = gate({ PLANT_CLS: "other:digest.share" }, { ...both(), corpus: corpusWith([STAY, CURL], MANUAL_NO_SAY), baselineCorpus: corpusWith([STAY, CURL], MANUAL) });
+  assert.equal(run.status, 2, `${run.err}\n${run.out.slice(0, 400)}`);
+  assert.match(run.err, /card-request-class-mismatch: the hook carded this call, but request hook:class-diff:cd-\d+ logs hook:class-diff:cd-\d+:network\.call as digest\.share/u);
 });
 
 const withSecret = (block: string, name: string): string => {
