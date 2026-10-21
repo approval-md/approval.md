@@ -263,6 +263,11 @@ jobs:
     # a change to this workflow, a protected path (policy.edit.ci) that needs
     # Carter's grant or attest. The corpus is re-extracted from the overlay at
     # its pinned sha with the BASE branch's extractor, not this PR's.
+    #
+    # NEW-CALLS (B-167N, APRV-534): scripts/overlay-recipes-newcalls.mjs, pinned
+    # here like the other gate files. It runs when the overlay's class-diff job
+    # passes --expected (the overlay's expected.json) and --tag-corpus; this
+    # job's pinned corpus carries no envelopes, so it does not run it here.
     name: overlay recipes (consumer corpus)
     needs: classify
     if: always()
@@ -273,9 +278,10 @@ jobs:
       CORPUS_RECIPES: "63"
       PIN_CORPUS: "069cae876367a6c65613a645bbece0212583dde3d6e186454d5d4a9f287cb1c4"
       PIN_ALLOWLIST: "408a7e3b6b0f86900e7e3b94cd724445a84910580316d2a1c718074adb4f526d"
-      PIN_CHECK: "765d059c2996d431f909ec6e9d0a523af0a7168e37c8f3a2abc652c25d051b04"
-      PIN_BOX: "c7b4c00b2e41e2ae7294d67c76ba7cd086c2f35a3b796c064714475fd47fa3ca"
-      PIN_EXTRACT: "d20bad05e8a81408fa3ee2a69bd14212f01170553a8a27c3e992908df9accfa6"
+      PIN_CHECK: "726e2c3a31d7408faa4c8252351d18fe451237a7cad28f86e4091f824d1297a5"
+      PIN_BOX: "7bf13a104f3b9dbb4c915d0070ae3ce95a88096c323780ed4d2e3bfcb0470b1c"
+      PIN_EXTRACT: "fd4880ea4c007be68312dba105f4bb512935db3e3ba47d2cfc2adf4af059f49a"
+      PIN_NEWCALLS: "cb59c7b23283fff9a346fa92e4f92fcb59808a058463a8abb8487244f30b2fab"
     steps:
       # Depth 2: HEAD^1 is the base the change is measured against (a pull
       # request's merge commit's first parent, the queue's base, or the main a
@@ -305,6 +311,7 @@ jobs:
           pin scripts/overlay-recipes-check.mjs "$PIN_CHECK"
           pin scripts/overlay-recipes-box.mjs "$PIN_BOX"
           pin scripts/overlay-recipes-extract.mjs "$PIN_EXTRACT"
+          pin scripts/overlay-recipes-newcalls.mjs "$PIN_NEWCALLS"
           n=$(node -p 'require("./scripts/overlay-recipes/corpus.json").recipes.length')
           if [ "$n" != "$CORPUS_RECIPES" ]; then
             echo "::error::the corpus holds $n recipes, not the $CORPUS_RECIPES this workflow pins"

@@ -17,6 +17,22 @@ before a tag.
 
 ### Added
 
+- **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-534).**
+  `overlay-recipes-check.mjs --expected <expected.json> --tag-corpus <corpus>`
+  finds every call that is new or changed against the previous release (a new
+  recipe, other command bytes, or a call the CLASS-DIFF moved between the
+  cores) and requires its declared outcome: class, decision, `card_style:
+  minimal` for a card, and the decision in each settings cell (ask, autonomous,
+  supervised-retro, supervised-live with a fixed sampling secret, manual). The
+  real hook (and the daemon `propose` a plugin makes behind a call, as a For
+  Kicks order does) must give exactly it under the village default template.
+  An undeclared new call, a class or decision other than declared (an expected
+  card that runs auto included), an undeclared refusal, a technical card, a
+  stale or duplicate entry, a schema-invalid envelope input, or a limiting
+  entry without `accepted_by: "human:carter"` and a date exits 1. The extractor
+  gains `--with-envelopes`: each mini-app manifest operation as the exact
+  `village` call the hook sees, and every gated plugin tool with its registered
+  input schema; without the flag its output is unchanged.
 - **CLASS-DIFF against the core the boxes run (B-167 release gate).**
   `overlay-recipes-check.mjs --diff <baseline core>` classifies the same corpus
   at a baseline core and at this one, over every recipe plus every `tools:`
