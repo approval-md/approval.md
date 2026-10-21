@@ -194,6 +194,10 @@ test("P2: a settings cell rewrites the class row (other flags kept), names the f
 // --- extractor scope (3a, 3b): the envelopes come from the manifests and the plugins' own code ---------
 
 const EXTRACT = join(ROOT, "scripts", "overlay-recipes-extract.mjs");
+// The extractor runs under bun (the overlay's cron specs are TypeScript); the
+// full-gate shards carry no bun, so these tests skip there, by name. The
+// overlay's class-diff job runs this extractor on every overlay PR.
+const NO_BUN = spawnSync("bun", ["--version"], { encoding: "utf8" }).status === 0 ? false : "bun is not on this runner (the overlay's class-diff job runs the extractor)";
 const PLUGIN_PY = [
   "SCHEMA = {",
   '    "name": "village",',
@@ -237,7 +241,7 @@ function extractFixture(over: { gated?: string | null; plugin?: string; extra?: 
   return { status: run.status, corpus, err: run.stderr };
 }
 
-test("3a/3b (P5, P6): manifest operations become the exact village call, relay tools one each, and the gated tool keeps its registered schema", async () => {
+test("3a/3b (P5, P6): manifest operations become the exact village call, relay tools one each, and the gated tool keeps its registered schema", { skip: NO_BUN }, async () => {
   // @ts-expect-error no declaration file for the standalone box runner
   const { envelopeKey } = (await import("../../scripts/overlay-recipes-box.mjs")) as { envelopeKey: (t: string, i: unknown) => string };
   const run = extractFixture();
@@ -267,7 +271,7 @@ test("3a/3b (P5, P6): manifest operations become the exact village call, relay t
   assert.deepEqual(run.corpus["tools_unread"], []);
 });
 
-test("security fold: the extractor exits 1 on a duplicate envelope key or a manifest id with no unambiguous key", () => {
+test("security fold: the extractor exits 1 on a duplicate envelope key or a manifest id with no unambiguous key", { skip: NO_BUN }, () => {
   const dup = extractFixture({ extra: { "mini-apps/forkicks2/manifest.json": JSON.stringify({ manifest: 2, id: "forkicks2", operations: [{ name: "forkicks.menu" }] }) } });
   assert.equal(dup.status, 1);
   assert.match(dup.err, /duplicate envelope key village#forkicks\.menu/u);
@@ -276,14 +280,14 @@ test("security fold: the extractor exits 1 on a duplicate envelope key or a mani
   assert.match(dotted.err, /no unambiguous envelope key/u);
 });
 
-test("3b fails closed: no gated list exits 1; a gated registration whose schema is not a literal is reported unread", () => {
+test("3b fails closed: no gated list exits 1; a gated registration whose schema is not a literal is reported unread", { skip: NO_BUN }, () => {
   assert.equal(extractFixture({ gated: null }).status, 1);
   const computed = extractFixture({ plugin: 'def register(ctx):\n    ctx.register_tool(name="village", schema=make_schema())\n' });
   assert.equal(computed.status, 0, computed.err);
   assert.match(JSON.stringify(computed.corpus["tools_unread"]), /schema is not a module-level dict literal/u);
 });
 
-test("without --with-envelopes the corpus carries no envelope keys (the pinned corpus keeps its bytes)", () => {
+test("without --with-envelopes the corpus carries no envelope keys (the pinned corpus keeps its bytes)", { skip: NO_BUN }, () => {
   const dir = mkdtempSync(join(tmpdir(), "new-calls-extract-"));
   mkdirSync(join(dir, "skills", "approval", "templates"), { recursive: true });
   mkdirSync(join(dir, "workspace"), { recursive: true });
