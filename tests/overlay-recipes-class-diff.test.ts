@@ -299,6 +299,15 @@ test("N-15: a bound row whose key is not its own task and class is mislabeled, a
   ]);
   // Keys that are their rows' own task and class: no field at all.
   assert.deepEqual(bindRequest({ ...call, text: DENY("hook:s:cd-8:network.call") }, req(10, "hook:s:cd-8", "network.call")), { task: "hook:s:cd-8", classes: ["network.call"] });
+  // P12 (review-b N-17): a row of task T keyed under another task U, same class.
+  // The class half of the key is right, so only the task half catches it (a
+  // suffix-only `key.endsWith(":" + cls)` compare, MN15d, passes it).
+  const [registered, requested] = req(10, "hook:s:cd-8", "network.call");
+  const crossKeyed = [{ ...registered!, key: "hook:s:cd-9:network.call" }, requested!];
+  const p12 = bindRequest({ ...call, text: DENY("hook:s:cd-8:network.call") }, crossKeyed);
+  assert.equal(p12.task, "hook:s:cd-8");
+  assert.deepEqual(p12.mislabeled, [{ key: "hook:s:cd-9:network.call", cls: "network.call" }]);
+  assert.equal(bindRequest({ ...call, text: "" }, crossKeyed).mislabeled?.length, 1, "the span path flags it too");
   // Only a card is flagged.
   const card = { verdict: "deny", code: "hook-timeout", classes: ["digest.share"], requested: keyed.classes, mislabeled: keyed.mislabeled };
   assert.equal(cardKeyClassMismatch(card).length, 2);
@@ -422,17 +431,15 @@ function corpusWith(recipes: { where: string; command: string }[], block = baseC
   return path;
 }
 
-/** The --url curl is denied from the Hermes home at 0.4.6 (B-162): listed there only, accepted. */
+/**
+ * Empty since the 0.4.7 rebase round. At 0.4.6 the --url curl was denied from
+ * the Hermes home (B-162) and was listed here for that column. From 0.4.7
+ * (#666) it is network.call there as everywhere, so the entry went stale and
+ * the gate made it fail; the corpus keeps the curl, now run in every column.
+ */
 const allowlist = join(scratch, "allowlist.json");
 function writeAllowlist(): void {
-  writeFileSync(
-    allowlist,
-    JSON.stringify({
-      entries: [
-        { file: "skills/edgeos/SKILL.md", command: CURL.command, scope: "box", columns: ["hermes-home"], reason: "B-162 test entry: denied from the Hermes home", ...ACCEPTED },
-      ],
-    }),
-  );
+  writeFileSync(allowlist, JSON.stringify({ entries: [] }));
 }
 
 function gate(
