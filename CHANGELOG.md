@@ -15,46 +15,8 @@ before a tag.
 
 ## Unreleased
 
-### Changed
-
-- **The `fetch-output-unknown` refusal names its remedy (EDGEOS-BLOCK).** Core
-  0.4.6 (APRV-511) classes a curl or wget word that starts with `$` in an option
-  slot `policy.core` by rule `fetch-output-unknown`: a quoted
-  `"${EDGEOS_API_BASE:-https://…}/events"` is one argv word, but the variable
-  could hold `-o <organ path>`, so the download's output cannot be known. The
-  overlay's template reserves `policy.core` to humans, so from the 19 October
-  rolls every EdgeOS skill recipe was denied outright with
-  `hook-class-human-only` and Hermes reported `plugin_block` (EDGEOS-BLOCK).
-  The rule stays exactly as it was. When it fires for that cause, the
-  human-only refusal now ends with one fixed line telling the agent to pass the
-  URL as the value of `--url` (`curl --url "$VAR/..."`), and to use
-  `curl --url` in place of wget, which has no equivalent. The class, the rule,
-  the refusal code and every other cause's text (an unknown option, `-K` or
-  another config source, an ambiguous prefix, an output a variable decides)
-  are byte for byte 0.4.6's, and `argvWordUnknowable` and `fetchOutputs` are
-  unchanged. **Convention for agent-facing recipes:** a curl recipe whose URL
-  starts with a variable passes it with `--url` (the overlay's EdgeOS skill
-  does since agentvillage #427), and a wget recipe of that shape is written as
-  curl.
-
 ### Added
 
-- **A consumer-corpus release check: the overlay's shipped recipes through this
-  core (EDGEOS-BLOCK).** The 0.4.6 rule was right, and nobody had run the
-  fleet's own recipes through it before the tag. `scripts/overlay-recipes/
-  corpus.json` is a pinned snapshot of every shell recipe the overlay
-  (Edge-City/agentvillage) ships to agents, extracted the way the overlay's own
-  EDGEOS-BLOCK test extracts them, with the overlay sha it came from and the
-  overlay's template policy block. `scripts/overlay-recipes-check.mjs` runs
-  each through `classifyForHook` as built and fails when one resolves to a
-  human-only class under that template, unless
-  `scripts/overlay-recipes/allowlist.json` lists it with a reason; a stale
-  allowlist entry fails too. The new CI job `overlay-recipes` runs it on every
-  change and the `ci` aggregator requires it. `scripts/overlay-recipes-extract.mjs`
-  refreshes the snapshot at a new overlay sha. Against the pre-#427 overlay the
-  check fails on all eleven EdgeOS recipes; at the pinned sha it passes with
-  one allowlisted recipe (`skills/agent-plaza/SKILL.md`, `--root "$HERMES_HOME"`,
-  an open decision).
 - **CLASS-DIFF against the core the boxes run (B-167 release gate).**
   `overlay-recipes-check.mjs --diff <baseline core>` classifies the same corpus
   at a baseline core and at this one, over every recipe plus every `tools:`
@@ -130,6 +92,121 @@ before a tag.
   - Fold 6: a card whose bound request logs a class other than the one its key
     names (core keys each action `<task>:<class>`) is an error, and the gate
     exits 2, even when the logged class needs a human.
+
+## 0.4.7 — 2026-10-21
+
+0.4.7 carries everything merged since 0.4.6. It ends EDGEOS-BLOCK: from the
+19 October rolls, every EdgeOS skill recipe on a resident box was denied,
+because 0.4.6 read curl's header and `--url` values as reads of the Hermes
+home (where the box's terminal runs) and classed them `account.credential`,
+and its `fetch-output-unknown` refusal told the agent nothing it could act on.
+Under "Fixed", those curl and wget values are judged as what they are; every
+verdict that moves, moves from `account.credential` to the class the command
+had without it, and nothing moves stricter. Under "Changed", the
+`fetch-output-unknown` refusal names its remedy. Under "Added", a
+consumer-corpus check runs the overlay's shipped recipes through this core on
+every change, and the study switch (`APPROVAL_STUDY_MODE=1`) adds an operator
+withdraw and a "Looks wrong" button. **With the switch off, which is the
+default and every box today, the study changes change nothing:** no card row,
+no verb, no verdict. Upgrade every resident box; the order is in
+`docs/releases/0.4.7.md`.
+
+### Changed
+
+- **The `fetch-output-unknown` refusal names its remedy (EDGEOS-BLOCK).** Core
+  0.4.6 (APRV-511) classes a curl or wget word that starts with `$` in an option
+  slot `policy.core` by rule `fetch-output-unknown`: a quoted
+  `"${EDGEOS_API_BASE:-https://…}/events"` is one argv word, but the variable
+  could hold `-o <organ path>`, so the download's output cannot be known. The
+  overlay's template reserves `policy.core` to humans, so from the 19 October
+  rolls every EdgeOS skill recipe was denied outright with
+  `hook-class-human-only` and Hermes reported `plugin_block` (EDGEOS-BLOCK).
+  The rule stays exactly as it was. When it fires for that cause, the
+  human-only refusal now ends with one fixed line telling the agent to pass the
+  URL as the value of `--url` (`curl --url "$VAR/..."`), and to use
+  `curl --url` in place of wget, which has no equivalent. The class, the rule,
+  the refusal code and every other cause's text (an unknown option, `-K` or
+  another config source, an ambiguous prefix, an output a variable decides)
+  are byte for byte 0.4.6's, and `argvWordUnknowable` and `fetchOutputs` are
+  unchanged. **Convention for agent-facing recipes:** a curl recipe whose URL
+  starts with a variable passes it with `--url` (the overlay's EdgeOS skill
+  does since agentvillage #427), and a wget recipe of that shape is written as
+  curl.
+
+### Added
+
+- **A consumer-corpus release check: the overlay's shipped recipes through this
+  core (EDGEOS-BLOCK).** The 0.4.6 rule was right, and nobody had run the
+  fleet's own recipes through it before the tag. `scripts/overlay-recipes/
+  corpus.json` is a pinned snapshot of every shell recipe the overlay
+  (Edge-City/agentvillage) ships to agents, extracted the way the overlay's own
+  EDGEOS-BLOCK test extracts them, with the overlay sha it came from and the
+  overlay's template policy block. `scripts/overlay-recipes-check.mjs` runs
+  each through `classifyForHook` as built and fails when one resolves to a
+  human-only class under that template, unless
+  `scripts/overlay-recipes/allowlist.json` lists it with a reason; a stale
+  allowlist entry fails too. The new CI job `overlay-recipes` runs it on every
+  change and the `ci` aggregator requires it. `scripts/overlay-recipes-extract.mjs`
+  refreshes the snapshot at a new overlay sha. Against the pre-#427 overlay the
+  check fails on all eleven EdgeOS recipes; at the pinned sha it passes with
+  one allowlisted recipe (`skills/agent-plaza/SKILL.md`, `--root "$HERMES_HOME"`,
+  an open decision).
+
+- **Study mode: an operator withdraw and a "Looks wrong" button, behind
+  `APPROVAL_STUDY_MODE=1` (LOKI-GATE G1/G2, APRV-527, APRV-528).** Both are off
+  unless the process is launched with `APPROVAL_STUDY_MODE` exactly `1`; the
+  switch is read from the environment only, never from a policy, so nothing an
+  agent proposes can turn it on. With it on, `approval study withdraw` lets a
+  hosted study operator DENY one request that is still pending, before it can
+  run. It never grants, alters or reopens a decision: it is the gate's own
+  reject, under `human:study-team` on channel `study`, and its record carries
+  `payload.study {reason: "study_withdrawn", operator, ref}`, with `operator`
+  an 8-hex pseudonymous id and `ref` the replay key, so a retry appends
+  nothing. A request that is no longer pending refuses `not-pending`, and the
+  attempt goes on the record as one `audit.decision_refused`. The verb is
+  human-only, so neither `approval serve` nor the MCP server publishes it, and
+  it has left the agent guide. With the switch on, the Telegram card also
+  carries a "Looks wrong" button: the approver's ordinary reject, flagged
+  `payload.study {reason: "looks_wrong"}`. It is absent from policy
+  attestation prompts. No enforcement path reads `payload.study`, and a reader
+  that ignores it reads an ordinary rejection. New refusal union
+  `study_withdraw_refusal_codes` (`study-mode-off`, `not-pending`,
+  `action-ref-ambiguous`) and channel refusal `study-reason-not-channel`.
+  SPEC.md §8 "The study record" and the §11.2 registry rows are amended and
+  attested (seq 84050). Conformance: `refusal-unions` and `schema-validation`
+  carry the new vectors.
+
+### Fixed
+
+- **EDGEOS-BLOCK: curl's `--url` and literal `-H` values are not credential
+  file reads (APRV-533).** Every resident box runs its terminal in
+  `$HERMES_HOME` (terminal.cwd), which holds credential material. 0.4.6's
+  credential disk pass (`credential-path-resolved`) and the Hermes pass read
+  curl's header value `"Authorization: Bearer $EDGEOS_API_KEY"`, and its
+  `--url "${EDGEOS_API_BASE:-https://…}/events/…"`, as reads of that
+  directory, so every skills/edgeos recipe took `account.credential` there,
+  which the overlay template reserves to humans (exit 2), while the same
+  command from `$HOME` was `network.call`. curl opens a file for those two
+  options only as `-H @FILE` and `--url @FILE` (8.13+), so the disk passes
+  now skip a `-H`/`--header` or `--url` value (and wget's `--header`) that
+  opens with neither `@` nor a character the shell may still expand, and judge
+  a `--url` value opening with `$` as the path an `@` or `file:` expansion of
+  it would read. `-H @.env`, `-H "$X"`, `-H @"$F"`, `--url @.env`,
+  `--url "$U"`, `-K`, `-d`, `--data*`, `-F`, `-T`, `-o`, cookies, certificates,
+  `--netrc-file`, a `-sH` cluster and every word after `--` are judged as
+  before, and the pure classifier's text rule is unchanged. Only verdicts of
+  curl and wget commands move, all from `account.credential` to the class the
+  command had without it.
+
+### Site
+
+- **A GitHub stars chip in the landing page hero (APRV-529).** It links to
+  the repository, ships with a committed count and refreshes it in the browser
+  from the public GitHub API at most once an hour (cached in `localStorage`,
+  no token, `credentials: 'omit'`). The heading does not move, and the chip is
+  hidden in print. The runtime is unchanged.
+- **The weekly agent-hours figure is refreshed (2026-10-18)** in
+  `metrics/agent-hours.json`.
 
 ## 0.4.6 — 2026-10-18
 

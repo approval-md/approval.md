@@ -172,6 +172,16 @@ off (a relayed channel, or `--no-stale-copy`). It is a surface code because
 another branch claims 28.0.0 first, the collision rule below gives this change
 the next major at merge.
 
+It is **31.0.0** since APRV-527 (the study record, amended SPEC.md §8), stacked on the
+30.0.0 that added `study-reason-not-channel`: a new union,
+`study_withdraw_refusal_codes` (`study-mode-off`, `not-pending`,
+`action-ref-ambiguous`), the refusals of `approval study withdraw`, the hosted
+study operator's deny of one pending request. The control plane that runs the
+verb on the box is a second implementation that branches on these strings,
+which is why it is registered here as the relay's union is. If another branch
+claims 31.0.0 first, the collision rule below gives this change the next major
+at merge.
+
 ## Changing the suite
 
 The vectors are generated, never hand-edited:

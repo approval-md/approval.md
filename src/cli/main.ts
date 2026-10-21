@@ -1151,6 +1151,15 @@ export async function main(argv: string[], options: MainOptions = {}): Promise<n
       const { commandExpire } = await import("./gate.js");
       return commandExpire(rest, streams, cwd);
     }
+    // APRV-527, amended SPEC.md §8 (the study record). `study withdraw` is a hosted study
+    // operator's DENY of one still-pending request, recorded under the constant
+    // `human:study-team`. Off unless the process was launched with
+    // APPROVAL_STUDY_MODE=1; human-only in the registry, so neither `serve` nor
+    // MCP publishes it; deny-only and pending-only in core.
+    case "study": {
+      const { commandStudy } = await import("./study.js");
+      return commandStudy(rest, streams, cwd);
+    }
     // The token verbs (APRV-17). `token` reports status and writes nothing;
     // `consume` is internal plumbing for APRV-18's `approval run` and is the
     // only sanctioned appender of execution.started on the manual path.

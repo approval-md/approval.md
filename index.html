@@ -43,7 +43,7 @@
       "applicationCategory": "DeveloperApplication",
       "applicationSubCategory": "Command line tool",
       "operatingSystem": "macOS, Linux",
-      "softwareVersion": "0.4.6",
+      "softwareVersion": "0.4.7",
       "softwareRequirements": "Node.js 20 or newer",
       "license": "https://www.apache.org/licenses/LICENSE-2.0",
       "installUrl": "https://www.npmjs.com/package/approval-md",
@@ -204,6 +204,27 @@
     mask-composite:intersect;
   }
   .hero > *:not(#field){position:relative;z-index:1}
+
+  /* ---- GitHub stars chip ---- */
+  /* Sits in the hero's top padding, so the heading below it never moves. The
+     id selector matches the specificity of the rule above, and comes later. */
+  .hero > #gh-stars{position:absolute;top:12px;right:0}
+  .stars{
+    display:inline-flex;align-items:center;gap:8px;white-space:nowrap;
+    border:1px solid var(--border-strong);border-radius:999px;background:var(--surface);
+    padding:5px 11px;font-size:11px;line-height:1;letter-spacing:.3px;color:var(--muted);
+  }
+  .stars .st{
+    width:12px;height:12px;display:block;
+    fill:none;stroke:currentColor;stroke-width:1.5;stroke-linejoin:round;
+  }
+  .stars .w{text-transform:uppercase}
+  .stars .n{
+    color:var(--fg);font-variant-numeric:tabular-nums;
+    border-left:1px solid var(--border-strong);padding-left:8px;
+  }
+  .stars:hover{color:var(--fg);background:var(--raised)}
+  .stars:hover .st{color:var(--green);fill:currentColor}
 
   /* ---- install and copyable commands ---- */
   .install{margin-top:26px}
@@ -443,7 +464,7 @@
 
   /* ---- print ---- */
   @media print{
-    .theme,.skip,.copy,.gate,.mailer{display:none !important}
+    .theme,.skip,.copy,.gate,.mailer,.stars{display:none !important}
     body{background:#fff;color:#000;font-size:10pt}
     main{padding:0}
     .sub,.steps p,.harness li,.note,.shortcut,footer{color:#000}
@@ -462,6 +483,7 @@
     <!-- ======================= hero ======================= -->
     <header class="hero">
       <canvas id="field" aria-hidden="true"></canvas>
+      <a class="stars" id="gh-stars" href="https://github.com/approval-md/approval.md" aria-label="GitHub stars: 7. approval.md on GitHub"><svg class="st" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M8 1.6l1.98 4.01 4.42.64-3.2 3.12.76 4.4L8 11.69l-3.96 2.08.76-4.4-3.2-3.12 4.42-.64z"/></svg><span class="w">GitHub</span><span class="n" id="gh-stars-n">7</span></a>
       <h1>
         <span class="mark" aria-label="approval.md">appr<svg viewBox="24 60 224 208" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><path class="bx" d="M 92 78 L 34 78 L 34 250 L 92 250 L 92 222 L 64 222 L 64 106 L 92 106 Z"/><path class="bx" d="M 142 78 L 200 78 L 200 250 L 142 250 L 142 222 L 170 222 L 170 106 L 142 106 Z"/><path d="M 74 176 L 116 220 L 232 80" fill="none" stroke="#17A15E" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/></svg>val<span class="md">.md</span></span>
         <span class="claim">human approval for agent actions</span>
@@ -473,7 +495,7 @@
           <pre><code id="cmd-npm">npm install -g approval-md</code></pre>
           <button class="copy" type="button" data-copy="cmd-npm" aria-label="Copy the npm install command">Copy</button>
         </div>
-        <span class="note" id="pkg-version">v0.4.6</span>
+        <span class="note" id="pkg-version">v0.4.7</span>
         <details class="source-install">
           <summary>Latest features / contribute</summary>
           <p class="note">Use a source checkout to contribute or to run unreleased work.</p>
@@ -730,6 +752,51 @@ approval up</code></pre>
     setMode(next.getAttribute('data-mode'));
   });
   applyMode(readMode());
+
+  /* ---------------- GitHub stars ---------------- */
+  /* The page is static, so the chip ships with a committed count and asks the
+     public API for a fresher one at most once an hour per browser: anonymous
+     calls are capped at 60 an hour per IP, and a failed call backs off for the
+     same hour. Any failure (offline, rate limited, an odd payload, blocked
+     storage) keeps the committed number; the chip never shows an error. */
+  function formatStars(n) {
+    if (n < 1000) { return String(n); }
+    if (n < 999950) { return (Math.round(n / 100) / 10) + 'k'; }
+    return (Math.round(n / 100000) / 10) + 'M';
+  }
+  (function () {
+    var link = document.getElementById('gh-stars');
+    var num = document.getElementById('gh-stars-n');
+    var KEY = 'approval-stars';
+    var HOUR = 3600000;
+    if (!link || !num) { return; }
+    function isCount(v) { return typeof v === 'number' && isFinite(v) && v >= 0 && Math.floor(v) === v; }
+    function show(n) {
+      num.textContent = formatStars(n);
+      link.setAttribute('aria-label', 'GitHub stars: ' + n + '. approval.md on GitHub');
+    }
+    var saved = null;
+    try { saved = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { saved = null; }
+    /* A failed call keeps whatever count was remembered, and still starts the hour. */
+    function remember(n) {
+      var keep = isCount(n) ? n : (saved && isCount(saved.n) ? saved.n : null);
+      try { localStorage.setItem(KEY, JSON.stringify(keep === null ? { t: Date.now() } : { n: keep, t: Date.now() })); }
+      catch (e) { /* storage blocked: the next view asks again */ }
+    }
+    /* A remembered count, even a stale one, is newer than the committed one. */
+    if (saved && isCount(saved.n)) { show(saved.n); }
+    var age = saved && typeof saved.t === 'number' ? Date.now() - saved.t : -1;
+    if (age >= 0 && age < HOUR) { return; }
+    if (!window.fetch) { return; }
+    fetch('https://api.github.com/repos/approval-md/approval.md', { credentials: 'omit' })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        var n = data ? data.stargazers_count : null;
+        if (isCount(n)) { show(n); }
+        remember(n);
+      })
+      .catch(function () { remember(null); });
+  })();
 
   /* ---------------- copyable commands ---------------- */
   /* navigator.clipboard needs no permission prompt for a write inside a user
