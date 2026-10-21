@@ -15,6 +15,111 @@ before a tag.
 
 ## Unreleased
 
+### Added
+
+- **CLASS-DIFF against the core the boxes run (B-167 release gate).**
+  `overlay-recipes-check.mjs --diff <baseline core>` classifies the same corpus
+  at a baseline core and at this one, over every recipe plus every `tools:`
+  line of the template (the box harness calls), and reports each call whose
+  class, decision (auto, sampled, card, human-only, refused) or card style
+  moves. An existing call moving from auto, sampled or card to human-only or
+  refused fails, unless the allowlist names it with a reason (an optional
+  `flip: {from, to}` narrows the entry to that move). The `overlay-recipes` job
+  now also re-extracts the corpus from the overlay at its pinned sha and fails
+  on any difference, installs the boxes' core from npm at a pinned integrity
+  (`BASELINE_CORE`, 0.4.7), and publishes the report (first line: the GATE
+  line) as the job summary and the `class-diff` artifact. Between 0.4.5 and
+  0.4.6, on the overlay the boxes ran on 19 October (`99d33417`), it reports
+  the eleven EdgeOS recipes moving `network.call` auto to `policy.core`
+  human-only: EDGEOS-BLOCK, caught before a tag. Every call is diffed in two
+  working directories, a neutral one and a box-like Hermes home (a `.hermes`
+  directory with a dummy `.env`, HERMES_HOME set to it), because the APRV-522
+  credential pass decides a reader's unexpanded `$` word by where it starts.
+  From the Hermes home, 0.4.6 also denies the `--url` EdgeOS recipes
+  (`-H "Authorization: Bearer $EDGEOS_API_KEY"` gains `account.credential`,
+  human-only under the template), and the diff reports those eleven as
+  blocking in that column.
+- **The class-diff runs the real hook in a box (B-167 fold 1, review-b's
+  refute).** Every shipped call now goes through each core's own `approval
+  hook hermes` (scripts/overlay-recipes-box.mjs), in a box layout:
+  HOME/.hermes with a dummy `.env`, `config.yaml`, the overlay's skills and
+  workspace, APPROVAL_HERMES_HOME set, and an attested store. Recipes run as
+  terminal calls at $HERMES_HOME, $HOME, workspace and unset; harness calls
+  run as Hermes tool envelopes (core's own tools plus every `tools:` line).
+  - **Blocking moves:** an existing call that loses autonomy (autonomous ->
+    supervised-retro, a higher live rate, auto -> card) or stops running.
+  - **Shadowed tools line:** a tools line newly shadowed by an earlier one
+    blocks.
+  - **The box check:** a shipped recipe the hook denies in the box fails
+    unless the allowlist lists it.
+  - **Acceptance by name:** every allowlist entry needs Carter's acceptance
+    (`accepted_by`, `accepted_at`), and a trivial reason is refused.
+  - **Pinned in CI:** ci.yml pins the gate's own files by sha256 and the
+    corpus by its count, and re-extracts the corpus with the base branch's
+    extractor.
+  - **Fail closed:** a hook run that exits 0 without an allow line is an
+    error, never an allow.
+- **Carded calls keep their class (B-167 fold 2).** A card's classes are
+  read from the request the hook opened in the box's store, so these now
+  block:
+  - a higher `live_rate`;
+  - supervised-live -> manual;
+  - a card falling from minimal to technical.
+
+  The box exports a fixed sampling value when the template names
+  `audit.sampling_secret_env`. Each concurrent worker has its own store, so
+  a lost log race can no longer read as a refusal.
+- **A card's request is bound to its call (B-167 fold 3).**
+  - The runner takes the request key from the hook's own `hook-timeout` deny,
+    looks it up in that call's store, and checks it against the call's tool and
+    command. It no longer guesses the task id.
+  - When the deny names no key, it matches by tool and command among what the
+    call appended.
+  - A card whose request cannot be bound is an error, and the gate exits 2.
+    A renamed or swapped task id is read correctly, and a card can no longer
+    fall to "class-diff: none".
+  - The sampling secret name may not be a box layout or runtime variable
+    (HOME, HERMES_HOME, PATH, `APPROVAL_*`, `NODE_*`); naming one exits 2.
+  - The minimal -> technical card rule compares per class.
+- **Cards are bound and read more strictly (B-167 folds 5 and 6).**
+  - A call that wrote its own request binds only to the rows it wrote. A deny
+    naming another call's request, even one with the same command, exits 2.
+  - A card whose bound request names no class that needs a human (every class
+    autonomous or supervised-retro) is an error, and the gate exits 2: the core
+    logged a class other than the one it carded on.
+  - When every class on the old card was minimal, a class new to the card at
+    another style blocks (one more technical card for the resident).
+  - Fold 6: a card whose bound request logs a class other than the one its key
+    names (core keys each action `<task>:<class>`) is an error, and the gate
+    exits 2, even when the logged class needs a human. A row of the bound task
+    keyed under another task with the same class is caught too.
+- **The class-diff baseline is 0.4.7, and the EdgeOS entries are gone (B-167,
+  0.4.7 rebase round).** `BASELINE_CORE` is npm approval-md@0.4.7 at its
+  pinned integrity, the core the boxes run from the 0.4.7 roll. Under 0.4.7
+  (APRV-533, #666) the eleven `--url` EdgeOS recipes are `network.call` at the
+  Hermes home as everywhere else, so their eleven hermes-home allowlist
+  entries matched nothing and failed as stale; they are deleted. Seven entries remain for
+  Carter's acceptance: agent-plaza, the four operator READMEs and the two
+  edge-india placeholder lines.
+
+## 0.4.7 — 2026-10-21
+
+0.4.7 carries everything merged since 0.4.6. It ends EDGEOS-BLOCK: from the
+19 October rolls, every EdgeOS skill recipe on a resident box was denied,
+because 0.4.6 read curl's header and `--url` values as reads of the Hermes
+home (where the box's terminal runs) and classed them `account.credential`,
+and its `fetch-output-unknown` refusal told the agent nothing it could act on.
+Under "Fixed", those curl and wget values are judged as what they are; every
+verdict that moves, moves from `account.credential` to the class the command
+had without it, and nothing moves stricter. Under "Changed", the
+`fetch-output-unknown` refusal names its remedy. Under "Added", a
+consumer-corpus check runs the overlay's shipped recipes through this core on
+every change, and the study switch (`APPROVAL_STUDY_MODE=1`) adds an operator
+withdraw and a "Looks wrong" button. **With the switch off, which is the
+default and every box today, the study changes change nothing:** no card row,
+no verb, no verdict. Upgrade every resident box; the order is in
+`docs/releases/0.4.7.md`.
+
 ### Changed
 
 - **The `fetch-output-unknown` refusal names its remedy (EDGEOS-BLOCK).** Core
@@ -55,6 +160,62 @@ before a tag.
   check fails on all eleven EdgeOS recipes; at the pinned sha it passes with
   one allowlisted recipe (`skills/agent-plaza/SKILL.md`, `--root "$HERMES_HOME"`,
   an open decision).
+
+- **Study mode: an operator withdraw and a "Looks wrong" button, behind
+  `APPROVAL_STUDY_MODE=1` (LOKI-GATE G1/G2, APRV-527, APRV-528).** Both are off
+  unless the process is launched with `APPROVAL_STUDY_MODE` exactly `1`; the
+  switch is read from the environment only, never from a policy, so nothing an
+  agent proposes can turn it on. With it on, `approval study withdraw` lets a
+  hosted study operator DENY one request that is still pending, before it can
+  run. It never grants, alters or reopens a decision: it is the gate's own
+  reject, under `human:study-team` on channel `study`, and its record carries
+  `payload.study {reason: "study_withdrawn", operator, ref}`, with `operator`
+  an 8-hex pseudonymous id and `ref` the replay key, so a retry appends
+  nothing. A request that is no longer pending refuses `not-pending`, and the
+  attempt goes on the record as one `audit.decision_refused`. The verb is
+  human-only, so neither `approval serve` nor the MCP server publishes it, and
+  it has left the agent guide. With the switch on, the Telegram card also
+  carries a "Looks wrong" button: the approver's ordinary reject, flagged
+  `payload.study {reason: "looks_wrong"}`. It is absent from policy
+  attestation prompts. No enforcement path reads `payload.study`, and a reader
+  that ignores it reads an ordinary rejection. New refusal union
+  `study_withdraw_refusal_codes` (`study-mode-off`, `not-pending`,
+  `action-ref-ambiguous`) and channel refusal `study-reason-not-channel`.
+  SPEC.md §8 "The study record" and the §11.2 registry rows are amended and
+  attested (seq 84050). Conformance: `refusal-unions` and `schema-validation`
+  carry the new vectors.
+
+### Fixed
+
+- **EDGEOS-BLOCK: curl's `--url` and literal `-H` values are not credential
+  file reads (APRV-533).** Every resident box runs its terminal in
+  `$HERMES_HOME` (terminal.cwd), which holds credential material. 0.4.6's
+  credential disk pass (`credential-path-resolved`) and the Hermes pass read
+  curl's header value `"Authorization: Bearer $EDGEOS_API_KEY"`, and its
+  `--url "${EDGEOS_API_BASE:-https://…}/events/…"`, as reads of that
+  directory, so every skills/edgeos recipe took `account.credential` there,
+  which the overlay template reserves to humans (exit 2), while the same
+  command from `$HOME` was `network.call`. curl opens a file for those two
+  options only as `-H @FILE` and `--url @FILE` (8.13+), so the disk passes
+  now skip a `-H`/`--header` or `--url` value (and wget's `--header`) that
+  opens with neither `@` nor a character the shell may still expand, and judge
+  a `--url` value opening with `$` as the path an `@` or `file:` expansion of
+  it would read. `-H @.env`, `-H "$X"`, `-H @"$F"`, `--url @.env`,
+  `--url "$U"`, `-K`, `-d`, `--data*`, `-F`, `-T`, `-o`, cookies, certificates,
+  `--netrc-file`, a `-sH` cluster and every word after `--` are judged as
+  before, and the pure classifier's text rule is unchanged. Only verdicts of
+  curl and wget commands move, all from `account.credential` to the class the
+  command had without it.
+
+### Site
+
+- **A GitHub stars chip in the landing page hero (APRV-529).** It links to
+  the repository, ships with a committed count and refreshes it in the browser
+  from the public GitHub API at most once an hour (cached in `localStorage`,
+  no token, `credentials: 'omit'`). The heading does not move, and the chip is
+  hidden in print. The runtime is unchanged.
+- **The weekly agent-hours figure is refreshed (2026-10-18)** in
+  `metrics/agent-hours.json`.
 
 ## 0.4.6 — 2026-10-18
 

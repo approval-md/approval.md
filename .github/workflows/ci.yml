@@ -236,21 +236,155 @@ jobs:
     # scripts/overlay-recipes/allowlist.json lists it with a reason.
     #
     # Every event and every tier, as protected-paths runs: it is cheap, and the
-    # tag is cut from a main this job has passed on. It reads only files in the
-    # checkout; it fetches nothing from the overlay.
+    # tag is cut from a main this job has passed on.
+    #
+    # CLASS-DIFF and box check (B-167, lead ruling CLAIMS L15681 (1); fold 1
+    # after review-b's refute). Every shipped call goes through the REAL
+    # `approval hook hermes` of this build and of BASELINE_CORE (the core the
+    # boxes run: the control plane's APPROVAL_MD_VERSION; move this pin in the
+    # PR that follows a roll), each in a box layout (HOME/.hermes with a dummy
+    # `.env`, `config.yaml`, the overlay's skills and workspace,
+    # APPROVAL_HERMES_HOME set as the control plane sets it, an attested
+    # store): recipes as terminal calls at $HERMES_HOME, $HOME,
+    # $HERMES_HOME/workspace and unset, harness calls as Hermes tool envelopes
+    # (core's own tools and every tools: line). It fails when:
+    # - a shipped recipe is denied by the hook in the box (human-only or
+    #   refused) and the allowlist does not list it with Carter's acceptance;
+    # - an existing call loses autonomy or stops running between the two cores
+    #   (auto -> card, autonomous -> supervised-retro, a higher live rate, and
+    #   every move into a deny), unless accepted by name;
+    # - a tools line is newly shadowed by an earlier one (first match wins).
+    # The report is the job summary and the `class-diff` artifact (markdown +
+    # JSON); its first line is the GATE line.
+    #
+    # No self-bypass (fold 1 M-3): the gate's own files (the corpus, the
+    # allowlist, the check, the box runner, the extractor) are pinned here by
+    # sha256, and the corpus by its recipe count, so changing any of them is
+    # a change to this workflow, a protected path (policy.edit.ci) that needs
+    # Carter's grant or attest. The corpus is re-extracted from the overlay at
+    # its pinned sha with the BASE branch's extractor, not this PR's.
     name: overlay recipes (consumer corpus)
     needs: classify
     if: always()
     runs-on: ubuntu-latest
+    env:
+      BASELINE_CORE: "0.4.7"
+      BASELINE_CORE_INTEGRITY: "sha512-HksuK9n/+lUQqW6g/7PU4iM7V50Ttp3wtdiioQJr1j2ZOvWyT9C5VgN6PGL9ULUTM5j/2EAsKa2BBizJYdTEUg=="
+      CORPUS_RECIPES: "63"
+      PIN_CORPUS: "069cae876367a6c65613a645bbece0212583dde3d6e186454d5d4a9f287cb1c4"
+      PIN_ALLOWLIST: "408a7e3b6b0f86900e7e3b94cd724445a84910580316d2a1c718074adb4f526d"
+      PIN_CHECK: "765d059c2996d431f909ec6e9d0a523af0a7168e37c8f3a2abc652c25d051b04"
+      PIN_BOX: "c7b4c00b2e41e2ae7294d67c76ba7cd086c2f35a3b796c064714475fd47fa3ca"
+      PIN_EXTRACT: "d20bad05e8a81408fa3ee2a69bd14212f01170553a8a27c3e992908df9accfa6"
     steps:
+      # Depth 2: HEAD^1 is the base the change is measured against (a pull
+      # request's merge commit's first parent, the queue's base, or the main a
+      # push moved from), read from git rather than from event text.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: node scripts/overlay-recipes-check.mjs
+      - name: the gate's own files are the ones this workflow pins
+        run: |
+          set -euo pipefail
+          bad=0
+          pin() {
+            got=$(sha256sum "$1" | cut -d' ' -f1)
+            if [ "$got" != "$2" ]; then
+              echo "::error::$1 has sha256 $got, not the $2 this workflow pins: a change to the gate's own files is a change to ci.yml (protected, Carter's grant)"
+              bad=1
+            fi
+          }
+          pin scripts/overlay-recipes/corpus.json "$PIN_CORPUS"
+          pin scripts/overlay-recipes/allowlist.json "$PIN_ALLOWLIST"
+          pin scripts/overlay-recipes-check.mjs "$PIN_CHECK"
+          pin scripts/overlay-recipes-box.mjs "$PIN_BOX"
+          pin scripts/overlay-recipes-extract.mjs "$PIN_EXTRACT"
+          n=$(node -p 'require("./scripts/overlay-recipes/corpus.json").recipes.length')
+          if [ "$n" != "$CORPUS_RECIPES" ]; then
+            echo "::error::the corpus holds $n recipes, not the $CORPUS_RECIPES this workflow pins"
+            bad=1
+          fi
+          exit $bad
+      - name: overlay sha the corpus pins
+        id: pin
+        run: echo "sha=$(node -p 'require("./scripts/overlay-recipes/corpus.json").overlay.sha')" >> "$GITHUB_OUTPUT"
+      - name: check out the overlay at the pinned sha
+        uses: actions/checkout@v4
+        with:
+          repository: Edge-City/agentvillage
+          ref: ${{ steps.pin.outputs.sha }}
+          path: .overlay
+          persist-credentials: false
+          sparse-checkout: |
+            skills
+            workspace
+            install
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: the committed corpus is the overlay's own extraction at that sha (base branch's extractor)
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/base-extractor"
+          mkdir -p "$tools/scripts"
+          extractor=scripts/overlay-recipes-extract.mjs
+          BASE_SHA=$(git rev-parse --verify --quiet HEAD^1 || true)
+          if [ -n "$BASE_SHA" ] && git cat-file -e "$BASE_SHA:scripts/overlay-recipes-extract.mjs" 2>/dev/null; then
+            git show "$BASE_SHA:scripts/overlay-recipes-extract.mjs" > "$tools/scripts/overlay-recipes-extract.mjs"
+            extractor="$tools/scripts/overlay-recipes-extract.mjs"
+            echo "extracting with the base branch's extractor ($BASE_SHA)"
+          else
+            echo "::notice::no extractor at the base (${BASE_SHA:-none}); extracting with this checkout's, which the sha256 pin above holds"
+          fi
+          at=$(node -p 'require("./scripts/overlay-recipes/corpus.json").overlay.extracted_at')
+          bun "$extractor" --overlay "$GITHUB_WORKSPACE/.overlay" --sha "${{ steps.pin.outputs.sha }}" --extracted-at "$at" --out "$RUNNER_TEMP/corpus.json"
+          if ! cmp -s "$RUNNER_TEMP/corpus.json" scripts/overlay-recipes/corpus.json; then
+            echo "::error::scripts/overlay-recipes/corpus.json differs from a fresh extraction of the overlay at ${{ steps.pin.outputs.sha }}; refresh it with the extractor, never by hand"
+            diff <(node -p 'JSON.stringify(require(process.argv[1]).recipes,null,1)' "$RUNNER_TEMP/corpus.json") <(node -p 'JSON.stringify(require(process.argv[1]).recipes,null,1)' "$PWD/scripts/overlay-recipes/corpus.json") | head -40 || true
+            exit 1
+          fi
+      - name: install the baseline core (the boxes' pin) from npm
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/baseline"
+          mkdir -p "$dir"
+          echo '{"name":"baseline-core","private":true}' > "$dir/package.json"
+          (cd "$dir" && npm install --no-audit --no-fund --ignore-scripts "approval-md@$BASELINE_CORE")
+          got=$(node -p 'const p = require(process.argv[1]).packages; p[Object.keys(p).find((k) => k.endsWith("node_modules/approval-md"))].integrity' "$dir/package-lock.json")
+          if [ "$got" != "$BASELINE_CORE_INTEGRITY" ]; then
+            echo "::error::approval-md@$BASELINE_CORE integrity $got is not the pinned $BASELINE_CORE_INTEGRITY"
+            exit 1
+          fi
+      - name: corpus check + box check + CLASS-DIFF against the baseline core
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set +e
+          mkdir -p "$RUNNER_TEMP/boxes"
+          node scripts/overlay-recipes-check.mjs \
+            --overlay-tree "$GITHUB_WORKSPACE/.overlay" --box-root "$RUNNER_TEMP/boxes" --box-concurrency 4 \
+            --diff "$RUNNER_TEMP/baseline/node_modules/approval-md" \
+            --baseline-label "npm approval-md@$BASELINE_CORE, the boxes' pin" \
+            --core-label "this build ${SHA:0:12}" \
+            --md class-diff.md --diff-json class-diff.json
+          status=$?
+          if [ -f class-diff.md ]; then cat class-diff.md >> "$GITHUB_STEP_SUMMARY"; fi
+          exit $status
+      - name: upload the class-diff report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: class-diff
+          path: |
+            class-diff.md
+            class-diff.json
+          if-no-files-found: warn
 
   full:
     # The full gate's bulk, sharded (APRV-149). Three jobs run a third of the
@@ -370,7 +504,7 @@ jobs:
             exit 1
           fi
           if [ "$OVERLAY_RESULT" != "success" ]; then
-            echo "the overlay recipe corpus check did not succeed ($OVERLAY_RESULT); an overlay recipe resolves to a human-only class under this core and is not allowlisted (EDGEOS-BLOCK)"
+            echo "the overlay recipe corpus check did not succeed ($OVERLAY_RESULT); an overlay recipe resolves to a human-only class under this core and is not allowlisted, a shipped call flips from running to a deny against the boxes' core (CLASS-DIFF, B-167), or the corpus is not the overlay's own extraction (EDGEOS-BLOCK)"
             exit 1
           fi
           case "$TIER" in

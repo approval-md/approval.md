@@ -752,7 +752,8 @@ export function createApprovalMcpServer(options: ServerOptions): Server {
     const spec = byName.get(name);
     if (spec === undefined) {
       const human = VERB_REGISTRY.find(
-        (candidate) => toolName(candidate) === name && candidate.human_only,
+        (candidate) =>
+          toolName(candidate) === name && candidate.human_only && candidate.operator_only !== true,
       );
       if (human !== undefined) {
         // Checked FIRST, and the same answer for a guest as for anyone else:

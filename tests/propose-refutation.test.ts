@@ -218,9 +218,13 @@ test("B1: a grant whose window lapsed reads `expired` (exit 3), and propose re-f
   // The hour-71-of-72 shape, scaled to seconds so a real CLI runs it. The
   // window is wide enough for a loaded CI runner's spawns to land inside it,
   // and the lapse is waited out from the moment propose returned (the request
-  // was stamped before then), not by a fixed sleep a slow spawn can eat.
-  const windowMs = 8_000;
-  const dir = caseDir(policyText("8s"));
+  // was stamped before then), not by a fixed sleep a slow spawn can eat. The
+  // merge queue's node 20 shard spent about 3.4 s per spawn, so an 8 s window
+  // lapsed before the read inside it (runs 39478762910, 39485581522); 30 s
+  // leaves that runner more than three times the room. The fixed-clock case
+  // below pins the same rule at hour 71 of 72 with no wall clock.
+  const windowMs = 30_000;
+  const dir = caseDir(policyText("30s"));
   const key = `${INFERRED}:lapsed-grant`;
   const task = proposedTaskId(AGENT, INFERRED, key);
   assert.equal(proposeRun(dir, INFERRED, key).code, 0);

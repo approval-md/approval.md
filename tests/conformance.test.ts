@@ -30,6 +30,7 @@ import { EXECUTE_REFUSAL_CODES } from "../src/core/execute.js";
 import { GATE_REFUSAL_CODES } from "../src/core/gate.js";
 import { CHANNEL_DECISION_REFUSAL_CODES } from "../src/core/sender-identity.js";
 import { RELAY_REFUSAL_CODES } from "../src/channels/relay.js";
+import { STUDY_WITHDRAW_REFUSAL_CODES } from "../src/core/study-withdraw.js";
 import { TOKEN_REFUSAL_CODES, TOKEN_VERIFY_REFUSAL_CODES } from "../src/core/token.js";
 import {
   checkManifest,
@@ -276,6 +277,9 @@ test("the §11.1 invariant 6 refusal unions are covered in full", () => {
   // APRV-455: the relay's transport refusals, which the control plane on the
   // other side of the hop branches on.
   assert.deepEqual(pinned.get("relay_refusal_codes"), [...RELAY_REFUSAL_CODES]);
+  // Amended SPEC.md §8, the study record: the study operator's withdraw verb,
+  // which the control plane running it on the box branches on.
+  assert.deepEqual(pinned.get("study_withdraw_refusal_codes"), [...STUDY_WITHDRAW_REFUSAL_CODES]);
 });
 
 test("every gate refusal code a scripted scenario can reach is pinned by a vector", () => {

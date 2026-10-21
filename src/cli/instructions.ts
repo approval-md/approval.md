@@ -22,7 +22,7 @@ import { boolFlag, parseFlags } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { INSTRUCTIONS_HELP } from "./help.js";
 import type { Streams } from "./main.js";
-import { VERB_REGISTRY, verbLabel, type VerbSpec } from "./verb-registry.js";
+import { AGENT_GUIDE_VERBS, verbLabel, type VerbSpec } from "./verb-registry.js";
 
 /**
  * The first sentence of a purpose paragraph, for the table. Purposes are
@@ -50,15 +50,18 @@ function wrap(text: string, width: number): string[] {
   return lines;
 }
 
-/** The verb table, generated from the registry so it cannot go stale. */
+/**
+ * The verb table, generated from the registry so it cannot go stale. An
+ * `operator_only` verb is left out here and in both JSON forms below.
+ */
 function verbTable(): string {
-  const width = VERB_REGISTRY.reduce(
+  const width = AGENT_GUIDE_VERBS.reduce(
     (widest, spec) => Math.max(widest, verbLabel(spec).length),
     0,
   );
   const indent = `  ${" ".repeat(width)}  `;
   const lines: string[] = [];
-  for (const spec of VERB_REGISTRY) {
+  for (const spec of AGENT_GUIDE_VERBS) {
     const marker = spec.human_only ? "[HUMAN-ONLY] " : "";
     const wrapped = wrap(`${marker}${oneLiner(spec)}`, 78 - indent.length);
     lines.push(`  ${verbLabel(spec).padEnd(width)}  ${wrapped[0] ?? ""}`);
@@ -238,7 +241,7 @@ export function instructionsGuide(): string {
 
 /** The registry as the object `--schemas` prints. */
 function schemasDocument(): { verbs: readonly VerbSpec[] } {
-  return { verbs: VERB_REGISTRY };
+  return { verbs: AGENT_GUIDE_VERBS };
 }
 
 export function commandInstructions(
@@ -291,7 +294,7 @@ export function commandInstructions(
 
   const guide = instructionsGuide();
   if (boolFlag(parsed.flags, "--json")) {
-    streams.out(`${JSON.stringify({ guide, verbs: VERB_REGISTRY })}\n`);
+    streams.out(`${JSON.stringify({ guide, verbs: AGENT_GUIDE_VERBS })}\n`);
     return EXIT_OK;
   }
 
