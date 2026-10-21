@@ -376,9 +376,11 @@ test("M-3 (c): ci.yml pins the gate's own files by sha256 and the corpus by its 
   const pins: [string, string][] = [
     ["PIN_CORPUS", "scripts/overlay-recipes/corpus.json"],
     ["PIN_ALLOWLIST", "scripts/overlay-recipes/allowlist.json"],
+    ["PIN_EXPECTED", "scripts/overlay-recipes/expected.json"],
     ["PIN_CHECK", "scripts/overlay-recipes-check.mjs"],
     ["PIN_BOX", "scripts/overlay-recipes-box.mjs"],
     ["PIN_EXTRACT", "scripts/overlay-recipes-extract.mjs"],
+    ["PIN_NEWCALLS", "scripts/overlay-recipes-newcalls.mjs"],
   ];
   for (const [name, path] of pins) assert.equal(env[name], sha(path), `${name} pins ${path}`);
   const corpus = JSON.parse(readFileSync(join(ROOT, "scripts", "overlay-recipes", "corpus.json"), "utf8")) as { recipes: unknown[] };
