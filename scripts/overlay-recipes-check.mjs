@@ -715,6 +715,20 @@ async function main() {
     if (!Array.isArray(corpus.envelopes) || !Array.isArray(tagCorpus.envelopes)) fail("--expected needs corpora extracted with --with-envelopes (3a/3b)");
     if (!existsSync(expectedPath)) fail(`no expected.json at ${expectedPath}`);
     validated = validateExpected(readJson(expectedPath, "expected.json"));
+    // P1, security fold: accepted_by is text the PR author writes, so it is not
+    // the control. The control is this pin: the overlay's expected.json must be
+    // byte for byte the copy approval.md holds (scripts/overlay-recipes/expected.json,
+    // sha256-pinned as PIN_EXPECTED in ci.yml, a protected path), plus code-owner
+    // review of the overlay file. The pinned copy is read from this script's own
+    // checkout only; no flag or variable names another one.
+    const pinnedPath = join(REPO_ROOT, "scripts", "overlay-recipes", "expected.json");
+    const pinned = existsSync(pinnedPath) ? readFileSync(pinnedPath) : null;
+    if (pinned === null || !pinned.equals(readFileSync(expectedPath))) {
+      complain(
+        `expected.json at ${expectedPath} is not the copy this approval.md checkout pins (scripts/overlay-recipes/expected.json, PIN_EXPECTED in its ci.yml): ` +
+          "a change to the declared outcomes lands in an approval.md PR first (reviewed by approval), then the overlay moves its tool ref (B-167N P1).",
+      );
+    }
   }
   const jobsFor = (c, onlyDeclared = false) => (validated === undefined ? { envelopes: [], proposals: [] } : newCallJobs(c, validated, onlyDeclared));
 

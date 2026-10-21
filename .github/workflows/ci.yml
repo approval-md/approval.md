@@ -268,6 +268,10 @@ jobs:
     # here like the other gate files. It runs when the overlay's class-diff job
     # passes --expected (the overlay's expected.json) and --tag-corpus; this
     # job's pinned corpus carries no envelopes, so it does not run it here.
+    # scripts/overlay-recipes/expected.json is the overlay's expected.json, byte
+    # for byte, pinned here like the allowlist (PIN_EXPECTED): the check refuses
+    # an overlay expected.json that is not this copy, so a changed declaration
+    # (an acceptance by human:carter included) lands here first.
     name: overlay recipes (consumer corpus)
     needs: classify
     if: always()
@@ -278,10 +282,11 @@ jobs:
       CORPUS_RECIPES: "63"
       PIN_CORPUS: "069cae876367a6c65613a645bbece0212583dde3d6e186454d5d4a9f287cb1c4"
       PIN_ALLOWLIST: "408a7e3b6b0f86900e7e3b94cd724445a84910580316d2a1c718074adb4f526d"
-      PIN_CHECK: "726e2c3a31d7408faa4c8252351d18fe451237a7cad28f86e4091f824d1297a5"
-      PIN_BOX: "7bf13a104f3b9dbb4c915d0070ae3ce95a88096c323780ed4d2e3bfcb0470b1c"
-      PIN_EXTRACT: "fd4880ea4c007be68312dba105f4bb512935db3e3ba47d2cfc2adf4af059f49a"
-      PIN_NEWCALLS: "cb59c7b23283fff9a346fa92e4f92fcb59808a058463a8abb8487244f30b2fab"
+      PIN_EXPECTED: "7a8e35c3959f3930426c8f99d2299da10dd3584dabff156b3124d3702ab74fb2"
+      PIN_CHECK: "268e6d046c26e4078d4f2d2bd2e5db1e1877e76b68b8ba06383e8af8cb750289"
+      PIN_BOX: "ae87d7be0e0bd143071eda27c120356dcc18764a120e595e06513a25ffacd3e6"
+      PIN_EXTRACT: "d68b77e7831f400e3cede4da6e7fa82ece4ec740983ee743e2f1db9796a3104c"
+      PIN_NEWCALLS: "6752bd813990be06de79a7068ed1f540640437d002ce93ac1808da53052241d1"
     steps:
       # Depth 2: HEAD^1 is the base the change is measured against (a pull
       # request's merge commit's first parent, the queue's base, or the main a
@@ -308,6 +313,7 @@ jobs:
           }
           pin scripts/overlay-recipes/corpus.json "$PIN_CORPUS"
           pin scripts/overlay-recipes/allowlist.json "$PIN_ALLOWLIST"
+          pin scripts/overlay-recipes/expected.json "$PIN_EXPECTED"
           pin scripts/overlay-recipes-check.mjs "$PIN_CHECK"
           pin scripts/overlay-recipes-box.mjs "$PIN_BOX"
           pin scripts/overlay-recipes-extract.mjs "$PIN_EXTRACT"

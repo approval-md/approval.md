@@ -31,6 +31,11 @@ import {
   // @ts-expect-error no declaration file for the standalone check script
 } from "../../scripts/overlay-recipes-check.mjs";
 import {
+  envelopeKey,
+  envelopeKeyErrors,
+  // @ts-expect-error no declaration file for the standalone box runner
+} from "../../scripts/overlay-recipes-box.mjs";
+import {
   acceptanceErrorsN,
   changeSet,
   judgeLayer,
@@ -43,7 +48,12 @@ import {
 } from "../../scripts/overlay-recipes-newcalls.mjs";
 
 const ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const SCRIPT = join(ROOT, "scripts", "overlay-recipes-check.mjs");
+// The box tests run a scratch copy of scripts/ (TOOL), so each can write the
+// pinned expected.json copy the check compares with (security fold, P1).
+const TOOL = mkdtempSync(join(tmpdir(), "new-calls-tool-"));
+copyTree(join(ROOT, "scripts"), join(TOOL, "scripts"), { recursive: true });
+const SCRIPT = join(TOOL, "scripts", "overlay-recipes-check.mjs");
+const PINNED = join(TOOL, "scripts", "overlay-recipes", "expected.json");
 
 type Json = Record<string, unknown>;
 const READ_MATRIX = { ask: "card", autonomous: "auto", "supervised-retro": "auto", "supervised-live": "sampled", manual: "card" };
@@ -124,6 +134,24 @@ test("the layer judge: class, decision, hazard B, an undeclared deny, unclassifi
   assert.deepEqual(judgeLayer({ class: "network.call", decision: "sampled", card_style: "minimal" }, actual({ decision: "sampled", drawn: "skip", style: "technical (undeclared)" })), []);
 });
 
+test("security fold: envelope keys are unambiguous; a part carrying a separator, or not a string, has no key", () => {
+  assert.equal(envelopeKey("village", { operation: "mini-app.read", appId: "dizko", tool: "search_events" }), "village#mini-app.read:dizko.search_events");
+  // The old concatenation made these two one key ("village#a:b.c"); now neither the id nor the operation may carry a separator.
+  assert.equal(envelopeKey("village", { operation: "a:b", tool: "c" }), null);
+  assert.equal(envelopeKey("village", { operation: "a", appId: "b.c" }), null);
+  assert.notEqual(envelopeKey("village", { operation: "a", appId: "b", tool: "c" }), envelopeKey("village", { operation: "a.b", tool: "c" }));
+  assert.equal(envelopeKey("vil#lage", {}), null);
+  assert.equal(envelopeKey("village", { operation: 1 }), null);
+  assert.match(envelopeKeyErrors("village", { appId: "x:y" }).join(";"), /appId "x:y" is not a key part/u);
+  assert.match(validateExpected({ entries: [envelopeEntry({ input: { operation: "forkicks.order.confirm", appId: "a.b" } })] }).errors[0].message, /no unambiguous envelope key/u);
+});
+
+test("security fold: two envelopes with one key in a corpus are a finding, never skipped", () => {
+  const st = changeSet({ corpus: { recipes: [], envelopes: [{ key: "t#a", tool: "t", input: { operation: "a" }, where: "m1" }, { key: "t#a", tool: "t", input: { operation: "a" }, where: "m2" }] }, tagCorpus: { recipes: [], envelopes: [] } });
+  assert.equal(st.duplicates.length, 1);
+  assert.match(st.duplicates[0].why, /a second envelope with this key/u);
+});
+
 test("P3: NEW is a key absent at the previous release; CHANGED is other bytes or a core move; the rest is unchanged", () => {
   const tag = { recipes: [{ where: "a.md:1", command: "x  y" }, { where: "a.md:2", command: "z" }, { where: "a.md:3", command: "w" }], envelopes: [{ key: "t#a", tool: "t", input: { operation: "a" } }] };
   const head = {
@@ -179,7 +207,7 @@ const PLUGIN_PY = [
   "",
 ].join("\n");
 
-function extractFixture(over: { gated?: string | null; plugin?: string } = {}): { status: number | null; corpus: Json; err: string } {
+function extractFixture(over: { gated?: string | null; plugin?: string; extra?: Record<string, string> } = {}): { status: number | null; corpus: Json; err: string } {
   const dir = mkdtempSync(join(tmpdir(), "new-calls-extract-"));
   const put = (path: string, text: string): void => {
     mkdirSync(join(dir, path, ".."), { recursive: true });
@@ -196,6 +224,7 @@ function extractFixture(over: { gated?: string | null; plugin?: string } = {}): 
   put("mini-apps/forkicks/manifest.json", JSON.stringify({ manifest: 2, id: "forkicks", operations: [{ name: "forkicks.menu" }, { name: "forkicks.order.confirm" }] }));
   put("mini-apps/dizko/manifest.json", JSON.stringify({ manifest: 2, id: "dizko", operations: [{ name: "dizko.search_events", target: { tool: "search_events" } }, { name: "dizko.weird" }], data: { context: {} } }));
   put("mini-apps/legacy/manifest.json", JSON.stringify({ id: "legacy", operations: ["mini-app.read"] }));
+  for (const [path, text] of Object.entries(over.extra ?? {})) put(path, text);
   const out = join(dir, "corpus.json");
   const run = spawnSync("bun", [EXTRACT, "--overlay", dir, "--sha", "a".repeat(40), "--extracted-at", "2026-10-21T00:00:00Z", "--out", out, "--with-envelopes"], { encoding: "utf8" });
   let corpus: Json = {};
@@ -218,7 +247,7 @@ test("3a/3b (P5, P6): manifest operations become the exact village call, relay t
     envelopes.map((e) => e.key),
     [
       "village#mini-app.read:dizko.search_events",
-      "unmapped#dizko.dizko.weird",
+      'unmapped#["dizko","dizko.weird"]',
       "village#mini-app.context.read:dizko",
       "village#mini-app.context.write:dizko",
       "village#forkicks.menu",
@@ -236,6 +265,15 @@ test("3a/3b (P5, P6): manifest operations become the exact village call, relay t
   const schema = tools[0]?.schema ?? {};
   assert.deepEqual((schema["properties"] as Json)["draftId"], { type: ["string", "null"] });
   assert.deepEqual(run.corpus["tools_unread"], []);
+});
+
+test("security fold: the extractor exits 1 on a duplicate envelope key or a manifest id with no unambiguous key", () => {
+  const dup = extractFixture({ extra: { "mini-apps/forkicks2/manifest.json": JSON.stringify({ manifest: 2, id: "forkicks2", operations: [{ name: "forkicks.menu" }] }) } });
+  assert.equal(dup.status, 1);
+  assert.match(dup.err, /duplicate envelope key village#forkicks\.menu/u);
+  const dotted = extractFixture({ extra: { "mini-apps/a.b/manifest.json": JSON.stringify({ id: "a.b", operations: ["mini-app.read"] }) } });
+  assert.equal(dotted.status, 1);
+  assert.match(dotted.err, /no unambiguous envelope key/u);
 });
 
 test("3b fails closed: no gated list exits 1; a gated registration whose schema is not a literal is reported unread", () => {
@@ -268,7 +306,7 @@ const planted = join(plantedRoot, "planted");
 const boxes = mkdtempSync(join(tmpdir(), "new-calls-boxes-"));
 const overlay = join(scratch, "overlay");
 after(() => {
-  for (const dir of [scratch, plantedRoot, boxes]) rmSync(dir, { recursive: true, force: true });
+  for (const dir of [scratch, plantedRoot, boxes, TOOL]) rmSync(dir, { recursive: true, force: true });
 });
 
 const baseCorpus = JSON.parse(readFileSync(join(ROOT, "scripts", "overlay-recipes", "corpus.json"), "utf8")) as Json & { policy: { block: string } };
@@ -310,10 +348,11 @@ function corpusFile(recipes: unknown[], envelopes: unknown[], block = BLOCK): st
 
 function gate(
   entries: unknown[],
-  opts: { corpus?: string; tag?: string; core?: string; diff?: boolean; env?: Record<string, string> } = {},
+  opts: { corpus?: string; tag?: string; core?: string; diff?: boolean; env?: Record<string, string>; pinned?: string } = {},
 ): { status: number | null; md: string; err: string } {
   const expected = join(scratch, `expected-${String(Math.random()).slice(2)}.json`);
   writeFileSync(expected, JSON.stringify({ entries }));
+  writeFileSync(PINNED, opts.pinned ?? JSON.stringify({ entries }));
   const allowlist = join(scratch, "allowlist.json");
   writeFileSync(allowlist, JSON.stringify({ entries: [] }));
   const corpus = opts.corpus ?? corpusFile([STAY], [ENVELOPE]);
@@ -379,6 +418,18 @@ test("P1: the limiting entry accepted by another human, or with the date left fo
   assert.match(placeholder.md, /Carter fills it/u);
 });
 
+test("P1 security fold: an overlay expected.json that is not approval.md's pinned copy exits 1, even with human:carter on every entry", BOX_TIMEOUT, () => {
+  const run = gate([recipeEntry(), envelopeEntry()], { pinned: JSON.stringify({ entries: [recipeEntry()] }) });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.err, /is not the copy this approval\.md checkout pins/u);
+});
+
+test("security fold: two corpus envelopes with one key exit 1", BOX_TIMEOUT, () => {
+  const run = gate([recipeEntry(), envelopeEntry()], { corpus: corpusFile([STAY], [ENVELOPE, { ...ENVELOPE, where: "mini-apps/other/manifest.json#forkicks.order.confirm" }]) });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.md, /a second envelope with this key in the head corpus/u);
+});
+
 test("P4: a stale entry, or two entries for one key, exits 1", BOX_TIMEOUT, () => {
   const stale = gate([recipeEntry(), envelopeEntry(), recipeEntry({ command: "bun skills/edgeos/scripts/events.ts --when never" })]);
   assert.equal(stale.status, 1, stale.err);
@@ -392,6 +443,12 @@ test("P6: an envelope input the tool's registered schema refuses exits 1", BOX_T
   const run = gate([recipeEntry(), envelopeEntry({ input: { operation: "forkicks.order.confirm", draftId: "fk-draft-0001", url: "https://example.com/" } })]);
   assert.equal(run.status, 1, run.err);
   assert.match(run.md, /schema \(P6\): input: url is not a property/u);
+});
+
+test("P2: a settings matrix cell other than declared exits 1 (the recipe under ask cards; declared auto)", BOX_TIMEOUT, () => {
+  const run = gate([recipeEntry({ matrix: { ...READ_MATRIX, ask: "auto" } }), envelopeEntry()]);
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.md, /matrix ask: hermes-home card, declared auto/u);
 });
 
 test("a technical card on the propose (an unlisted payload key) exits 1", BOX_TIMEOUT, () => {

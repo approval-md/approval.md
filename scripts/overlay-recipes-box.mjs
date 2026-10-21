@@ -77,16 +77,42 @@ const fillPaths = (value, hh, ws) =>
  * what selects the call inside the tool. For the village-bridge `village` tool
  * that is its `operation`, then the app a generic operation names and the MCP
  * tool (`village#mini-app.read:dizko.search_events`,
- * `village#mini-app.context.read:dizko`). The extractor keys the
- * corpus envelopes and the check keys expected.json entries with this one
- * function, so the two always agree.
+ * `village#mini-app.context.read:dizko`). The extractor keys the corpus
+ * envelopes and the check keys expected.json entries with this one rule.
+ *
+ * Unambiguous by construction (security fold): each part is a string of a
+ * closed character set that excludes the separators that follow it (a tool
+ * name has no `#`, `:` or `.`; an operation no `#` or `:`; an app id and an MCP
+ * tool no `#`, `:` or `.`), so two different calls never share a key. A part
+ * outside its set, or present but not a string, has no key:
+ * `envelopeKeyErrors` names why, and `envelopeKey` returns null.
  */
+const KEY_PARTS = [
+  ["tool", /^[A-Za-z0-9_-]{1,128}$/u],
+  ["operation", /^[A-Za-z0-9_.-]{1,128}$/u],
+  ["appId", /^[A-Za-z0-9_-]{1,128}$/u],
+  ["mcp tool", /^[A-Za-z0-9_-]{1,128}$/u],
+];
+
+export function envelopeKeyErrors(tool, input) {
+  const i = input !== null && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const values = [tool, i.operation, i.appId, i.tool];
+  const errors = [];
+  KEY_PARTS.forEach(([name, re], n) => {
+    const v = values[n];
+    if (n > 0 && v === undefined) return;
+    if (typeof v !== "string" || !re.test(v)) errors.push(`${name} ${JSON.stringify(v ?? null)} is not a key part (${String(re)})`);
+  });
+  return errors;
+}
+
 export function envelopeKey(tool, input) {
+  if (envelopeKeyErrors(tool, input).length > 0) return null;
   const i = input !== null && typeof input === "object" && !Array.isArray(input) ? input : {};
   let key = String(tool);
-  if (typeof i.operation === "string") key += `#${i.operation}`;
-  if (typeof i.appId === "string") key += `:${i.appId}`;
-  if (typeof i.tool === "string") key += `.${i.tool}`;
+  if (i.operation !== undefined) key += `#${i.operation}`;
+  if (i.appId !== undefined) key += `:${i.appId}`;
+  if (i.tool !== undefined) key += `.${i.tool}`;
   return key;
 }
 

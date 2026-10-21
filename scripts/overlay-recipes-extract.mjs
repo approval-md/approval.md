@@ -136,15 +136,19 @@ if (block === null) {
 
 /**
  * The envelope key, the same rule as scripts/overlay-recipes-box.mjs
- * `envelopeKey` (tests/overlay-recipes-new-calls.test.ts holds the two equal).
- * Copied, not imported: ci.yml runs the BASE branch's extractor as a lone file.
+ * `envelopeKey` (tests/overlay-recipes-new-calls.test.ts holds the two equal):
+ * closed character sets that exclude the separators, so no two calls share a
+ * key; a part outside its set is no key (null). Copied, not imported: ci.yml
+ * runs the BASE branch's extractor as a lone file.
  */
 function envelopeKey(tool, input) {
   const i = input !== null && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const parts = [[tool, /^[A-Za-z0-9_-]{1,128}$/u, false], [i.operation, /^[A-Za-z0-9_.-]{1,128}$/u, true], [i.appId, /^[A-Za-z0-9_-]{1,128}$/u, true], [i.tool, /^[A-Za-z0-9_-]{1,128}$/u, true]];
+  if (parts.some(([v, re, optional]) => !(optional && v === undefined) && (typeof v !== "string" || !re.test(v)))) return null;
   let key = String(tool);
-  if (typeof i.operation === "string") key += `#${i.operation}`;
-  if (typeof i.appId === "string") key += `:${i.appId}`;
-  if (typeof i.tool === "string") key += `.${i.tool}`;
+  if (i.operation !== undefined) key += `#${i.operation}`;
+  if (i.appId !== undefined) key += `:${i.appId}`;
+  if (i.tool !== undefined) key += `.${i.tool}`;
   return key;
 }
 
@@ -262,7 +266,7 @@ export function manifestEnvelopes(overlayDir, villageSchema) {
       // The app-scoped operations take the app from the caller (handle(): APP_SCOPED_OPERATIONS).
       if (ops.has(name)) push(name, APP_SCOPED.has(name) ? { operation: name, appId: id } : { operation: name });
       else if (typeof op?.target?.tool === "string" && ops.has("mini-app.read")) push(name, { operation: "mini-app.read", appId: id, tool: op.target.tool });
-      else out.push({ key: `unmapped#${id}.${name}`, tool: null, input: null, where: `${where}#${name}`, app: id, operation: name, unmapped: "no village operation reaches this manifest operation" });
+      else out.push({ key: `unmapped#${JSON.stringify([id, name])}`, tool: null, input: null, where: `${where}#${name}`, app: id, operation: name, unmapped: "no village operation reaches this manifest operation" });
     }
     if (manifest?.data?.context !== undefined) {
       for (const op of ["mini-app.context.read", "mini-app.context.write"]) {
@@ -291,6 +295,21 @@ if (process.argv.includes("--with-envelopes")) {
   // A gated plugin tool no manifest reaches gets one bare envelope of its own.
   for (const t of tools) {
     if (!envelopes.some((e) => e.tool === t.name)) envelopes.push({ key: envelopeKey(t.name, {}), tool: t.name, input: {}, where: t.file });
+  }
+  // Security fold: an envelope with no unambiguous key, or two envelopes with one
+  // key, would let one call stand for another; never skipped, exit 1.
+  const bad = envelopes.filter((e) => e.key === null);
+  const seenKeys = new Map();
+  const dups = [];
+  for (const e of envelopes) {
+    if (e.key === null) continue;
+    if (seenKeys.has(e.key)) dups.push(`${e.key} (${seenKeys.get(e.key)} and ${e.where})`);
+    else seenKeys.set(e.key, e.where);
+  }
+  if (bad.length > 0 || dups.length > 0) {
+    for (const e of bad) process.stderr.write(`no unambiguous envelope key for ${e.where} (an id or tool name outside [A-Za-z0-9_-], or an operation outside [A-Za-z0-9_.-])\n`);
+    for (const d of dups) process.stderr.write(`duplicate envelope key ${d}\n`);
+    process.exit(1);
   }
   envelopeScope = { gated, tools, unread, envelopes };
 }

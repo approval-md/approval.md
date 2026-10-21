@@ -376,6 +376,7 @@ test("M-3 (c): ci.yml pins the gate's own files by sha256 and the corpus by its 
   const pins: [string, string][] = [
     ["PIN_CORPUS", "scripts/overlay-recipes/corpus.json"],
     ["PIN_ALLOWLIST", "scripts/overlay-recipes/allowlist.json"],
+    ["PIN_EXPECTED", "scripts/overlay-recipes/expected.json"],
     ["PIN_CHECK", "scripts/overlay-recipes-check.mjs"],
     ["PIN_BOX", "scripts/overlay-recipes-box.mjs"],
     ["PIN_EXTRACT", "scripts/overlay-recipes-extract.mjs"],

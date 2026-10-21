@@ -43,7 +43,7 @@
  * Pure but for the core functions it is handed.
  */
 
-import { envelopeKey } from "./overlay-recipes-box.mjs";
+import { envelopeKey, envelopeKeyErrors } from "./overlay-recipes-box.mjs";
 
 export const VILLAGE_DEFAULT = "village default";
 export const CELLS = ["ask", "autonomous", "supervised-retro", "supervised-live", "manual"];
@@ -119,6 +119,10 @@ export function validateExpected(doc) {
     const err = (message) => errors.push({ key: label, message });
     if (kind === null) {
       err("an entry names either file + command (a recipe) or tool + input (an envelope)");
+      return;
+    }
+    if (kind === "envelope" && key === null) {
+      err(`no unambiguous envelope key: ${envelopeKeyErrors(entry.tool, entry.input).join("; ")}`);
       return;
     }
     if (seen.has(key)) err(`a second entry for this key (entries[${String(seen.get(key))}] and entries[${String(i)}]); one key, one declared outcome (P4)`);
@@ -374,6 +378,15 @@ export function changeSet({ corpus, tagCorpus, movedKeys = new Set() }) {
   }
   const tagEnvelopes = new Map((tagCorpus.envelopes ?? []).map((e) => [e.key, e]));
   const status = new Map();
+  const duplicates = [];
+  for (const side of [corpus, tagCorpus]) {
+    const seen = new Set();
+    for (const e of side.envelopes ?? []) {
+      if (typeof e.key !== "string" || e.key === "") duplicates.push({ key: String(e.key), where: e.where, why: "an envelope with no key" });
+      else if (seen.has(e.key)) duplicates.push({ key: e.key, where: e.where, why: `a second envelope with this key in the ${side === corpus ? "head" : "previous release's"} corpus` });
+      else seen.add(e.key);
+    }
+  }
   for (const r of corpus.recipes ?? []) {
     const k = recipeKey(fileOf(r.where), r.command);
     if (status.has(k)) continue;
@@ -384,7 +397,7 @@ export function changeSet({ corpus, tagCorpus, movedKeys = new Set() }) {
     else status.set(k, { kind: "recipe", status: "unchanged", where: r.where, command: r.command });
   }
   for (const e of corpus.envelopes ?? []) {
-    if (status.has(e.key)) continue;
+    if (status.has(e.key)) continue; // a duplicate: reported in `duplicates`, which fails the run
     const at = tagEnvelopes.get(e.key);
     const st =
       at === undefined ? "new"
@@ -393,6 +406,7 @@ export function changeSet({ corpus, tagCorpus, movedKeys = new Set() }) {
       : "unchanged";
     status.set(e.key, { kind: "envelope", status: st, where: e.where, command: e.key, envelope: e });
   }
+  status.duplicates = duplicates;
   return status;
 }
 
@@ -407,6 +421,8 @@ export function judgeNewCalls({ corpus, tagCorpus, validated, head, cells = {}, 
   const find = (key, message) => findings.push({ key: keyLabel(key), message });
   for (const e of validated.errors) findings.push({ key: e.key, message: e.message });
   const status = changeSet({ corpus, tagCorpus, movedKeys });
+  // Security fold: two envelopes sharing a key would let one call stand for another; fail, never skip.
+  for (const d of status.duplicates ?? []) findings.push({ key: d.key, message: `${d.why} (${String(d.where)}); one key, one call` });
   const byKey = new Map(validated.entries.map((v) => [v.key, v]));
   const tools = new Map((corpus.tools ?? []).map((t) => [t.name, t]));
   for (const u of corpus.tools_unread ?? []) findings.push({ key: `${u.plugin}:${u.file}:${String(u.line)}`, message: `a gated plugin tool registration the extractor cannot read (${u.why}); fail closed` });
