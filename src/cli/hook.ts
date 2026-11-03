@@ -4107,7 +4107,7 @@ export function classifyForHook(
     scratchRoots: roots,
     ...(readRoots.length === 0 ? {} : { readRoots }),
     ...(execCode ? { execCode: true } : {}),
-    ...(noRuleSegments ? { noRuleSegments: true } : {}),
+    ...(noRuleSegments ? { noRuleSegments: true, noRuleCwds: [cwd, ...credentialCwds] } : {}),
   });
   const rewritten = refineRewrite(classified, cwd);
   const scratched = refineScratchDelete(rewritten.result, roots);

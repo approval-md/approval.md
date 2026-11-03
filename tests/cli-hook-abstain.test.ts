@@ -391,6 +391,9 @@ test("(o) after a cd (or pushd/popd) the no-rule segment keeps the refusal", () 
     "command cd /tmp; frobnicate x",
     "echo $(cd /tmp) && frobnicate x",
     "(cd /tmp; ls) && frobnicate x",
+    "if cd /tmp; then frobnicate y; fi",
+    "while popd; do frobnicate; done",
+    "! cd - && frobnicate x",
   ]) {
     const v = verdict(claude(dir, command, `t-o-${String(command.length)}`));
     assert.equal(v.permission, "deny", command);
@@ -401,7 +404,7 @@ test("(o) after a cd (or pushd/popd) the no-rule segment keeps the refusal", () 
 test("(p) a flag carrying a joined value keeps the refusal", () => {
   const dir = ready(policy("abstain"));
   const before = rawLog(dir);
-  for (const command of [`frobnicate -o${homedir()}/.ssh/id_rsa`, "frobnicate --out=/tmp/x", "frobnicate -o./x"]) {
+  for (const command of [`frobnicate -o${homedir()}/.ssh/id_rsa`, "frobnicate --out=/tmp/x", "frobnicate -o./x", "frobnicate -fPATH", "frobnicate -oAPPROVAL.md"]) {
     const v = verdict(claude(dir, command, `t-p-${String(command.length)}`));
     assert.equal(v.permission, "deny", command);
   }
@@ -474,5 +477,29 @@ test("(v) a word carrying = or : keeps the refusal", () => {
     const v = verdict(claude(dir, command, `t-v-${String(command.length)}`));
     assert.equal(v.permission, "deny", command);
   }
+  assert.equal(rawLog(dir), before);
+});
+
+test("(w) a cwd inside a dot-directory, a protected path or a credential home keeps the refusal, even for a bare word", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  for (const [cwd, command] of [
+    [join(homedir(), ".ssh"), "frobnicate id_rsa"],
+    [join(dir, ".approval"), "frobnicate status"],
+    [join(dir, ".approval", "log"), "frobnicate"],
+  ] as const) {
+    const event = JSON.stringify({
+      hook_event_name: "PreToolUse",
+      session_id: "cc-sess-abstain",
+      tool_use_id: `t-w-${String(cwd.length)}`,
+      cwd,
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    const run = runCli(["hook", "claude-code", "--as", "agent:cc", "--dir", dir], dir, event);
+    assert.equal(verdict(run).permission, "deny", `${cwd}: ${command}`);
+  }
+  // The same bare words from the neutral tenant directory still abstain.
+  assertAbstained(dir, claude(dir, "frobnicate id_rsa", "t-w-neutral"), before);
   assert.equal(rawLog(dir), before);
 });
