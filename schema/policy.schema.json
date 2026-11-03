@@ -47,6 +47,13 @@
           "description": "SPEC.md §5.2 (APRV-499, proposed): what a harness hook does with a tool call that neither the harness adapter's own tables (its shell, file, read and pass-through tools and its hard-coded rule table) nor any `tools` entry claims. `record`: the call is classified `harness.tool.unmapped`, which resolves `autonomous` when no `classes` rule matches it, so it proceeds and leaves an `execution.started` naming the tool. `ask`: the same class resolves `manual` when no rule matches it, so the call waits for a human. A `classes` rule matching `harness.tool.unmapped` decides it instead, exactly as a rule decides any class over `defaults.autonomy`. ABSENT, the behaviour of every policy written before the key existed: such a call is not a gate question, is allowed, and leaves no record.",
           "examples": ["record", "ask"]
         },
+        "unclassified_command": {
+          "type": "string",
+          "enum": ["deny", "abstain"],
+          "description": "What a Claude Code hook answers for a Bash command a segment of which no built-in rule covers (`unclassified`). `deny` (THE DEFAULT, and what an absent key means): refused `hook-unclassified`, as every earlier build did. `abstain`: under an attested policy, and only when every other segment of the command resolves `autonomous`, the hook gives NO verdict (empty stdout, exit 0, nothing appended), so the harness's own permission flow decides the call. `opaque` and `unparseable` commands, the classifier's other refusals, and every other harness keep the deny.",
+          "default": "deny",
+          "examples": ["deny", "abstain"]
+        },
         "on_expiry": {
           "type": "string",
           "enum": ["reject"],

@@ -113,7 +113,20 @@ export interface ClassifiedSegment {
    * length, never the text (SPEC.md §11.1 invariant 3).
    */
   execCode?: ExecCodeSource;
+  /**
+   * The no-rule detail of a segment no built-in rule covers, present only on
+   * the {@link NO_RULE_CLASS} stand-in a {@link ClassifierContext.noRuleSegments}
+   * caller asked for.
+   */
+  noRule?: string;
 }
+
+/**
+ * The class a segment no built-in rule covers takes under
+ * {@link ClassifierContext.noRuleSegments}. Undotted, so no policy pattern
+ * names it; the hook answers it before any class is resolved.
+ */
+export const NO_RULE_CLASS = "unclassified";
 
 /**
  * What an `exec.code` segment runs, as the classifier read it (APRV-510).
@@ -2301,6 +2314,14 @@ export interface ClassifierContext {
    * refused whatever this says.
    */
   execCode?: boolean;
+  /**
+   * Classify a segment no built-in rule covers as a {@link NO_RULE_CLASS}
+   * stand-in and read on, rather than refusing the whole command at it, so a
+   * caller sees every other segment's class. Only the no-rule case: every
+   * other refusal returns as it always did. `src/cli/hook.ts` passes `true`
+   * only under `defaults.unclassified_command: abstain`.
+   */
+  noRuleSegments?: boolean;
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -6592,7 +6613,7 @@ type SegmentOutcome =
       /** The program an `exec.code` answer runs (APRV-510). */
       execCode?: ExecCodeSource;
     }
-  | { ok: false; code: ClassifierFailureCode; detail: string };
+  | { ok: false; code: ClassifierFailureCode; detail: string; noRule?: true };
 
 function classifySegment(
   segment: LexSegment,
@@ -7021,6 +7042,7 @@ function classifySegment(
     return {
       ok: false,
       code: "unclassified",
+      noRule: true,
       detail:
         sub === null
           ? `no rule for ${basename}`
@@ -7291,6 +7313,11 @@ export function classifyCommand(
       continue;
     }
     const outcome = classifySegment(segment, protectedPaths, execContext);
+    if (!outcome.ok && outcome.noRule === true && context.noRuleSegments === true) {
+      segments.push({ text: segment.text, class: NO_RULE_CLASS, rule: "no-rule", noRule: outcome.detail });
+      if (!classes.includes(NO_RULE_CLASS)) classes.push(NO_RULE_CLASS);
+      continue;
+    }
     if (!outcome.ok) {
       return { ok: false, code: outcome.code, segment: segment.text, detail: outcome.detail };
     }

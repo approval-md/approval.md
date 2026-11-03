@@ -19,6 +19,7 @@ answers:
 | `supervised` | allow | `task.registered`, `execution.started` |
 | `manual` | wait for a human, then allow or deny | `task.registered`, `approval.requested`, the decision, `execution.started` on an allow |
 | unclassifiable | deny | nothing |
+| no built-in rule, under `defaults.unclassified_command: abstain` | no verdict (empty stdout, exit 0; its PostToolUse report is silent too): Claude Code's own permission flow decides | nothing |
 
 No approval lifecycle exists off the manual path (amended SPEC.md §6.3): the
 `autonomous` and `supervised` rows request nothing, ask nobody, and record no

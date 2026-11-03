@@ -110,6 +110,7 @@ import {
   GATE_SELF_CLASS,
   gitVerbIndex,
   isCredentialPath,
+  NO_RULE_CLASS,
   NODE_SKILL_SCRIPT_RULE,
   protectedPathClass,
   SKILL_SCRIPT_RULE,
@@ -4098,12 +4099,15 @@ export function classifyForHook(
    * or absent directory costs nothing.
    */
   credentialCwds: readonly string[] = [],
+  /** A no-rule segment becomes a {@link NO_RULE_CLASS} stand-in (`defaults.unclassified_command: abstain`). */
+  noRuleSegments = false,
 ): RefinedClassification {
   const roots = resolveScratchRoots(cwd);
   const classified = classifyCommand(command, protectedPaths, {
     scratchRoots: roots,
     ...(readRoots.length === 0 ? {} : { readRoots }),
     ...(execCode ? { execCode: true } : {}),
+    ...(noRuleSegments ? { noRuleSegments: true } : {}),
   });
   const rewritten = refineRewrite(classified, cwd);
   const scratched = refineScratchDelete(rewritten.result, roots);
@@ -5893,7 +5897,13 @@ function expiryAt(at: string | undefined): string {
  */
 export type HarnessVerdict =
   | { permission: "allow"; reason: string }
-  | { permission: "deny"; code: string; detail: string };
+  | { permission: "deny"; code: string; detail: string }
+  /**
+   * No verdict (`defaults.unclassified_command: abstain`): Claude Code's own
+   * permission flow decides. `code` and `detail` are the deny any other
+   * renderer gives in its place.
+   */
+  | { permission: "abstain"; code: string; detail: string };
 
 /**
  * The hook's own rendering of a verdict: one decision object on stdout, in the
@@ -5909,6 +5919,8 @@ function renderVerdict(
   codexCommand: string | undefined,
   verdict: HarnessVerdict,
 ): number {
+  // The no-verdict arm: empty stdout at exit 0 is Claude Code's "no decision".
+  if (verdict.permission === "abstain" && adapter.kind === "claude-code") return EXIT_OK;
   return verdict.permission === "allow"
     ? allow(streams, verdict.reason, adapter.kind, codexCommand)
     : deny(streams, verdict.code, verdict.detail, adapter.kind);
@@ -6958,6 +6970,44 @@ function readReportedOutcome(input: HookInput, adapter: HarnessAdapter): Outcome
 }
 
 /**
+ * Whether the pre-execution half ABSTAINED on this call
+ * (`defaults.unclassified_command: abstain`), asked again of the same inputs:
+ * a Claude Code Bash command with a no-rule segment, every other segment
+ * autonomous, under the attested policy. Any other answer is false, so the
+ * missing start is reported as it always was.
+ */
+function abstainedEarlier(
+  flags: Record<string, string | boolean>,
+  cwd: string,
+  input: HookInput,
+  adapter: HarnessAdapter,
+  logPath: string,
+): boolean {
+  if (adapter.kind !== "claude-code" || input.toolName !== adapter.shellTool) return false;
+  const { root, options } = hookScope(flags, cwd);
+  const load = loadPolicy(
+    options.policy?.file === undefined
+      ? { dir: options.policy?.dir ?? cwd }
+      : { file: options.policy.file },
+  );
+  if (!load.ok || load.policy.defaults?.unclassified_command !== "abstain") return false;
+  const described = describeToolCall(
+    input,
+    adapter,
+    load.policy.protected_paths ?? [],
+    cwd,
+    resolveReadRoots(cwd, policyRootOf(load, root), load.policy.read_scope?.roots),
+    load.policy,
+    true,
+    execGateOf(adapter, load.policy),
+  );
+  if (described.kind !== "abstain") return false;
+  if (!described.classes.every((cls) => resolvePolicy(load, cls).autonomy === "autonomous")) return false;
+  const read = readVerifiedRecords(logPath);
+  return read.ok && attestationRefusal(checkAttestation(read.records, load.source.path)) === null;
+}
+
+/**
  * The post-execution half of `approval hook <harness>` (APRV-145).
  *
  * It closes the delegated `execution.started` records the pre-execution half
@@ -7055,6 +7105,12 @@ function runPostToolUse(
     actor,
   );
   if (!finished.ok) {
+    // `defaults.unclassified_command: abstain`: the pre-execution half gave no
+    // verdict and wrote no start, so this report has nothing to close and says
+    // nothing, exactly as that half did.
+    if (finished.code === "not-delegated" && abstainedEarlier(flags, cwd, input, adapter, logPath)) {
+      return EXIT_OK;
+    }
     return report(
       streams,
       `post-tool-gate-refused:${finished.code}`,
@@ -7111,7 +7167,14 @@ type ToolDescription =
    */
   | { kind: "allow"; reason: string; unclaimed?: true }
   /** The classifier could not read it, or the input was malformed. */
-  | { kind: "deny"; code: string; detail: string };
+  | { kind: "deny"; code: string; detail: string }
+  /**
+   * A Bash command with a segment no built-in rule covers, under
+   * `defaults.unclassified_command: abstain` on Claude Code. `classes` are the
+   * OTHER segments' classes; `code` and `detail` are the deny every caller that
+   * does not abstain gives instead, byte for byte today's.
+   */
+  | { kind: "abstain"; classes: string[]; code: string; detail: string };
 
 function describeToolCall(
   input: HookInput,
@@ -7290,6 +7353,7 @@ function describeToolCall(
       readRoots,
       callGate.shell,
       credentialCwds,
+      adapter.kind === "claude-code" && toolPolicy?.defaults?.unclassified_command === "abstain",
     );
     const classified = refined.result;
     if (!classified.ok) {
@@ -7314,6 +7378,15 @@ function describeToolCall(
         kind: "deny",
         code: `hook-${classified.code}`,
         detail: `${classified.detail} (segment: ${classified.segment}). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
+      };
+    }
+    const noRule = classified.segments.find((segment) => segment.noRule !== undefined);
+    if (noRule !== undefined) {
+      return {
+        kind: "abstain",
+        classes: classified.classes.filter((cls) => cls !== NO_RULE_CLASS),
+        code: "hook-unclassified",
+        detail: `${noRule.noRule ?? ""} (segment: ${noRule.text}). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
       };
     }
     // APRV-510: a program segment is bound by its hash and length, never its
@@ -9166,7 +9239,7 @@ function* runBypass(
     // the case this path already names as one nothing here can vouch for.
     closedExecCodeGate("window"),
   );
-  if (described.kind === "deny") {
+  if (described.kind === "deny" || described.kind === "abstain") {
     return deny(
       streams,
       described.code,
@@ -9877,6 +9950,28 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
   );
   if (described.kind === "deny") {
     return { permission: "deny", code: described.code, detail: described.detail };
+  }
+  if (described.kind === "abstain") {
+    // `defaults.unclassified_command: abstain`. No verdict, and nothing
+    // appended, only when every OTHER segment resolves autonomous (a human-only,
+    // supervised or manual segment keeps today's deny) and the policy that says
+    // so is the attested one.
+    const refused = { permission: "deny" as const, code: described.code, detail: described.detail };
+    if (!described.classes.every((cls) => resolvePolicy(load, cls).autonomy === "autonomous")) return refused;
+    if (!existsSync(logPath) && !existsSync(dirname(logPath))) {
+      return { permission: "deny", code: "hook-log-unreachable", detail: `no log at ${logPath}, so whether the policy that abstains is the attested one cannot be established; the hook writes to an existing log and never creates one` };
+    }
+    const read = windowRecords === null ? readVerifiedRecords(logPath) : { ok: true as const, records: windowRecords };
+    if (!read.ok) return { permission: "deny", code: "hook-io", detail: read.message };
+    const unattested = attestationRefusal(checkAttestation(read.records, load.source.path));
+    if (unattested !== null) {
+      return {
+        permission: "deny",
+        code: `hook-gate-refused:${unattested.code}`,
+        detail: `${unattested.message}. Until then the hook does not abstain: \`defaults.unclassified_command\` is read only from the attested policy.`,
+      };
+    }
+    return { permission: "abstain", code: described.code, detail: described.detail };
   }
   if (described.kind === "allow") {
     if (described.unclaimed !== true) return { permission: "allow", reason: described.reason };
