@@ -135,7 +135,7 @@ function assertAbstained(dir: string, run: Run, before: string): void {
   assert.equal(rawLog(dir), before);
 }
 
-const UNCLASSIFIED = "railway variable set FOO=bar";
+const UNCLASSIFIED = "railway whoami";
 
 test("(a) without the key an unclassified Bash command is denied hook-unclassified, unchanged", () => {
   for (const key of [null, "deny"]) {
@@ -143,7 +143,7 @@ test("(a) without the key an unclassified Bash command is denied hook-unclassifi
     const before = rawLog(dir);
     const v = verdict(claude(dir, UNCLASSIFIED, `t-a-${String(key)}`));
     assert.equal(v.permission, "deny");
-    assert.match(v.reason, /^hook-unclassified: no rule for railway variable \(segment: railway variable set FOO=bar\)/u);
+    assert.match(v.reason, /^hook-unclassified: no rule for railway whoami \(segment: railway whoami\)/u);
     assert.equal(rawLog(dir), before);
   }
 });
@@ -199,7 +199,7 @@ test("(e) under abstain a human-only class is denied as before, alone or beside 
   for (const command of [`${UNCLASSIFIED} && npm publish`, `npm publish; ${UNCLASSIFIED}`]) {
     const mixed = verdict(claude(dir, command, `t-e-${String(command.length)}`));
     assert.equal(mixed.permission, "deny", command);
-    assert.match(mixed.reason, /^hook-unclassified: no rule for railway variable/u, command);
+    assert.match(mixed.reason, /^hook-unclassified: no rule for railway whoami/u, command);
   }
   // Nor a class that would wait for a human (deps.add resolves manual here).
   const manual = verdict(claude(dir, `${UNCLASSIFIED} && npm install left-pad`, "t-e-manual"));
@@ -317,7 +317,7 @@ test("(k) a no-rule segment beside a side-effecting segment keeps today's deny, 
   ]) {
     const v = verdict(claude(dir, command, `t-k-${String(command.length)}`));
     assert.equal(v.permission, "deny", command);
-    assert.match(v.reason, /^hook-unclassified: no rule for railway variable/u, command);
+    assert.match(v.reason, /^hook-unclassified: no rule for railway whoami/u, command);
   }
   // Alone, the autonomous push is still allowed and recorded as before.
   assert.equal(verdict(claude(dir, "git push origin feature-x", "t-k-alone")).permission, "allow");
@@ -381,7 +381,17 @@ test("(n) the abstain is believed only of the bytes attested: an edit between th
 test("(o) after a cd (or pushd/popd) the no-rule segment keeps the refusal", () => {
   const dir = ready(policy("abstain"));
   const before = rawLog(dir);
-  for (const command of ["cd ~/.ssh && frobnicate id_rsa", `pushd ${dir} && frobnicate x`, "popd; frobnicate x"]) {
+  for (const command of [
+    "cd ~/.ssh && frobnicate id_rsa",
+    `pushd ${dir} && frobnicate x`,
+    "popd; frobnicate x",
+    "builtin cd /tmp && frobnicate x",
+    "'cd' /tmp && frobnicate x",
+    "\\cd /tmp && frobnicate x",
+    "command cd /tmp; frobnicate x",
+    "echo $(cd /tmp) && frobnicate x",
+    "(cd /tmp; ls) && frobnicate x",
+  ]) {
     const v = verdict(claude(dir, command, `t-o-${String(command.length)}`));
     assert.equal(v.permission, "deny", command);
   }
@@ -391,7 +401,7 @@ test("(o) after a cd (or pushd/popd) the no-rule segment keeps the refusal", () 
 test("(p) a flag carrying a joined value keeps the refusal", () => {
   const dir = ready(policy("abstain"));
   const before = rawLog(dir);
-  for (const command of [`frobnicate -o${homedir()}/.ssh/id_rsa`, "frobnicate -fPATH", "frobnicate --out=/tmp/x"]) {
+  for (const command of [`frobnicate -o${homedir()}/.ssh/id_rsa`, "frobnicate --out=/tmp/x", "frobnicate -o./x"]) {
     const v = verdict(claude(dir, command, `t-p-${String(command.length)}`));
     assert.equal(v.permission, "deny", command);
   }
@@ -407,11 +417,18 @@ test("(q) an assignment in front of the no-rule command keeps the refusal", () =
   assert.equal(rawLog(dir), before);
 });
 
-test("(r) a plain relative word in a neutral directory still abstains", () => {
+test("(r) a bare word, a flag with a separate plain value, or nothing at all still abstains; a path-like word does not", () => {
   const dir = ready(policy("abstain"));
   const before = rawLog(dir);
-  assertAbstained(dir, claude(dir, "frobnicate ./file", "t-r"), before);
-  assertAbstained(dir, claude(dir, "frobnicate -v plain-word --flag", "t-r2"), before);
+  assertAbstained(dir, claude(dir, "frobnicate status", "t-r1"), before);
+  assertAbstained(dir, claude(dir, "frobnicate --flag value", "t-r2"), before);
+  assertAbstained(dir, claude(dir, "frobnicate", "t-r3"), before);
+  assertAbstained(dir, claude(dir, "frobnicate -v plain-word --flag", "t-r4"), before);
+  // A symlink in a neutral directory is reached through a path-like word: refused.
+  for (const command of ["frobnicate ./file", "frobnicate ./link", "frobnicate .env", "frobnicate sub/dir"]) {
+    assert.equal(verdict(claude(dir, command, `t-r-${String(command.length)}`)).permission, "deny", command);
+  }
+  assert.equal(rawLog(dir), before);
 });
 
 test("(s) a word with a glob or brace character, quoted or not, keeps the refusal", () => {
@@ -437,5 +454,25 @@ test("(t) relative words are also judged from the envelope's cwd: a credential t
   });
   const run = runCli(["hook", "claude-code", "--as", "agent:cc", "--dir", dir], dir, event);
   assert.equal(verdict(run).permission, "deny");
+  assert.equal(rawLog(dir), before);
+});
+
+test("(u) a heredoc, a here-string or a pipe-fed no-rule segment keeps the refusal", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  for (const command of ["frobnicate <<'X'\nbody line\nX", "frobnicate <<< word", "git status | frobnicate", "frobnicate < input"]) {
+    const v = verdict(claude(dir, command, `t-u-${String(command.length)}`));
+    assert.equal(v.permission, "deny", command);
+  }
+  assert.equal(rawLog(dir), before);
+});
+
+test("(v) a word carrying = or : keeps the refusal", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  for (const command of ["frobnicate key=~/.ssh/id_rsa", "frobnicate key=value", "frobnicate host:path", "frobnicate --opt=plain"]) {
+    const v = verdict(claude(dir, command, `t-v-${String(command.length)}`));
+    assert.equal(v.permission, "deny", command);
+  }
   assert.equal(rawLog(dir), before);
 });

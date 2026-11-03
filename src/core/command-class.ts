@@ -48,8 +48,6 @@
  * dependency sense as well: `policy-match.ts` itself imports only types.
  */
 
-import { isAbsolute, resolve as resolvePath } from "node:path";
-
 import { isDateDisplay, isZoneValue } from "./date-argv.js";
 import { parseGitPushArgv, splitGitPush } from "./git-push-argv.js";
 import {
@@ -2324,12 +2322,6 @@ export interface ClassifierContext {
    * only under `defaults.unclassified_command: abstain`.
    */
   noRuleSegments?: boolean;
-  /**
-   * The directories a no-rule segment's relative words are ALSO judged from
-   * (the hook's own cwd and the envelope's), so a protected path or credential
-   * reached relatively keeps the refusal. Read only with `noRuleSegments`.
-   */
-  noRuleCwds?: readonly string[];
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -7053,38 +7045,29 @@ function classifySegment(
   const binExact = (segment.words[cursor] as LexWord).exact;
   const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin, execShape !== null, binExact);
   if (rule === null) {
-    // `defaults.unclassified_command: abstain` (ClassifierContext.noRuleSegments):
-    // a segment may stand in as no-rule only when every one of its words can be
-    // checked as written, and none names a protected path or a credential.
-    // Fail closed: an assignment, a flag carrying a joined value (`--x=v`,
-    // `-ov`), a word the shell would still change (`$`, a glob or brace, a
-    // leading `~`), any glob or brace character even quoted, or a
-    // substitution keeps the refusal; so does a protected or credential hit on
-    // the binary, any word or any redirection, as written or resolved from
-    // each directory the hook judges from.
+    // `defaults.unclassified_command: abstain` (ClassifierContext.noRuleSegments).
+    // FAIL CLOSED. The segment stands in as no-rule only when no word of it
+    // (the binary, assignments, flags with their dashes stripped, positionals,
+    // redirect targets) looks like a path or carries anything the shell would
+    // still change: no `/`, no leading `~` or `.`, no glob or brace character,
+    // no `$`, no `=` or `:`, no substitution; when it has no heredoc,
+    // here-string or other stdin-fed body; and when no word names a protected
+    // path or a credential. Anything else keeps the refusal.
     const lexWords = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
-    const unreadable =
-      assignments.length > 0 ||
-      lexWords.some(
-        (word) =>
-          !word.exact || word.substitutions.length > 0 || /[*?[\]{}]/u.test(word.text),
-      ) ||
-      args.some((arg) => isFlag(arg) && (arg.includes("=") || (!arg.startsWith("--") && arg.length > 2)));
-    // A `NAME=value` argument (not an assignment: it follows the binary) is
-    // judged by its value too.
-    const named = lexWords.flatMap((word) =>
-      word.text.includes("=") ? [word.text, word.text.slice(word.text.indexOf("=") + 1)] : [word.text],
-    );
-    const resolved = named.flatMap((word) =>
-      isAbsolute(word) ? [] : (context.noRuleCwds ?? []).map((base) => resolvePath(base, word)),
-    );
     const guarded =
-      unreadable ||
+      segment.heredoc ||
+      segment.stdinFed ||
+      segment.bodySubstitutions.length > 0 ||
+      segment.redirects.some((redirect) => redirect.op === "<") ||
+      lexWords.some((word) => !word.exact || word.substitutions.length > 0 || noRuleWordRefused(word.text)) ||
       deferredCredential !== null ||
       fetched.unknown !== null ||
       fetchedOutputProtected !== null ||
-      strictestProtected([...named, ...resolved], protectedPaths) !== null ||
-      [...named, ...resolved].some((word) => isCredentialPath(word));
+      strictestProtected(
+        lexWords.map((word) => word.text),
+        protectedPaths,
+      ) !== null ||
+      lexWords.some((word) => isCredentialPath(word.text));
     return {
       ok: false,
       code: "unclassified",
@@ -7300,6 +7283,78 @@ function classifySegment(
  * ever LOOSEN a class, and no rule reads it to loosen a protected or credential
  * one.
  */
+/**
+ * A word a no-rule stand-in may not carry (`defaults.unclassified_command:
+ * abstain`): anything that looks like a path or that the shell would still
+ * change. `/`, `$`, `=`, `:`, a glob or brace character anywhere, or a leading
+ * `~` or `.` once a flag's dashes are stripped.
+ */
+function noRuleWordRefused(text: string): boolean {
+  const bare = text.replace(/^-+/u, "");
+  return /[/$=:*?[\]{}]/u.test(text) || bare.startsWith("~") || bare.startsWith(".");
+}
+
+/** The command words that change the shell's directory. */
+const DIRECTORY_VERBS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
+
+/**
+ * Words that run the word after them as the command (or set up its
+ * environment or timer). Behind one, every later word of the segment is judged
+ * as a possible command word: fail closed rather than parse each one's options.
+ */
+const COMMAND_RUNNERS: ReadonlySet<string> = new Set([
+  "builtin",
+  "command",
+  "exec",
+  "time",
+  "nohup",
+  "env",
+  "timeout",
+  "gtimeout",
+  "nice",
+  "caffeinate",
+  "sudo",
+  "xargs",
+]);
+
+/**
+ * May any segment change the shell's directory (`defaults.unclassified_command:
+ * abstain`)? Judged from the LEXED command word: after the leading assignments,
+ * dequoted, its basename. Behind a {@link COMMAND_RUNNERS} word every later
+ * word counts. Every substitution body (in a word, a redirection or a heredoc
+ * body) is lexed and judged the same way. Fail closed: a command word that is
+ * not a literal, or a body that does not lex, answers yes.
+ */
+function segmentsMayChangeDirectory(segments: readonly LexSegment[], depth = 0): boolean {
+  if (depth > 8) return true;
+  for (const segment of segments) {
+    const bodies = [
+      ...segment.bodySubstitutions,
+      ...segment.words.flatMap((word) => word.substitutions),
+      ...segment.redirects.flatMap((redirect) => redirect.target.substitutions),
+    ];
+    for (const body of bodies) {
+      const inner = lex(body);
+      if (!inner.ok || segmentsMayChangeDirectory(inner.segments, depth + 1)) return true;
+    }
+    let at = 0;
+    while (at < segment.words.length && (segment.words[at] as LexWord).assignment) at += 1;
+    let behindRunner = false;
+    for (; at < segment.words.length; at += 1) {
+      const word = segment.words[at] as LexWord;
+      if (!word.exact) return true;
+      const base = word.text.split("/").pop() ?? "";
+      if (DIRECTORY_VERBS.has(base)) return true;
+      if (COMMAND_RUNNERS.has(base)) {
+        behindRunner = true;
+        continue;
+      }
+      if (!behindRunner) break;
+    }
+  }
+  return false;
+}
+
 export function classifyCommand(
   command: string,
   protectedPaths: readonly ProtectedPathEntry[] = [],
@@ -7325,10 +7380,10 @@ export function classifyCommand(
   // line, so a later `python3 -c` keeps its pre-APRV-510 refusal.
   let execContext = context;
   // `defaults.unclassified_command: abstain`: a command that changes directory
-  // anywhere (`cd`, `pushd`, `popd`, inside a subshell or not) moves where a
-  // no-rule segment's relative words land, so no segment of it stands in.
-  const movesDirectory =
-    context.noRuleSegments === true && /(^|[\s;&|(`])(cd|pushd|popd)($|[\s;&|)`])/u.test(command);
+  // anywhere, judged from its lexed command words (subshells and every
+  // substitution body included, fail closed on a word that is not a literal),
+  // moves where a no-rule segment's words land, so no segment of it stands in.
+  const movesDirectory = context.noRuleSegments === true && segmentsMayChangeDirectory(lexed.segments);
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };
