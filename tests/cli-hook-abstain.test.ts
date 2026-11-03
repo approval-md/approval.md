@@ -21,7 +21,9 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { abstainPolicyRefusal } from "../src/cli/hook.js";
 import { loadPolicyText } from "../src/core/policy-load.js";
+import { readVerifiedRecords } from "../src/core/state.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 
@@ -51,7 +53,7 @@ function runCli(args: string[], cwd: string, input = ""): Run {
   return { code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
 }
 
-function policy(key: string | null): string {
+function policy(key: string | null, top: readonly string[] = [], classes: readonly string[] = []): string {
   return [
     "# Policy",
     "",
@@ -62,11 +64,13 @@ function policy(key: string | null): string {
     '  approval_ttl: "1h"',
     "  on_expiry: reject",
     ...(key === null ? [] : [`  unclassified_command: ${key}`]),
+    ...top,
     "classes:",
     "  read.*:",
     "    autonomy: autonomous",
     "  release.publish:",
     "    autonomy: human-only",
+    ...classes,
     "```",
     "",
   ].join("\n");
@@ -296,4 +300,75 @@ test("(j) the PostToolUse half of an abstained call is silent: exit 0, nothing p
   assert.equal(gated.code, 2);
   assert.match(gated.stderr, /post-tool-gate-refused:not-delegated/u);
   assert.equal(rawLog(dir), before);
+});
+
+/** The rule: abstain ONLY when every segment other than the no-rule one(s) is a read (`read`, `read.*`). */
+test("(k) a no-rule segment beside a side-effecting segment keeps today's deny, even when that segment is autonomous", () => {
+  const dir = ready(policy("abstain", [], ["  vcs.push.branch:", "    autonomy: autonomous", "  vcs.commit.branch:", "    autonomy: autonomous"]));
+  const before = rawLog(dir);
+  for (const command of [
+    `git push origin feature-x && ${UNCLASSIFIED}`,
+    `${UNCLASSIFIED}; git push origin feature-x`,
+    `git commit -m wip && ${UNCLASSIFIED}`,
+  ]) {
+    const v = verdict(claude(dir, command, `t-k-${String(command.length)}`));
+    assert.equal(v.permission, "deny", command);
+    assert.match(v.reason, /^hook-unclassified: no rule for railway variable/u, command);
+  }
+  // Alone, the autonomous push is still allowed and recorded as before.
+  assert.equal(verdict(claude(dir, "git push origin feature-x", "t-k-alone")).permission, "allow");
+  assert.equal(starts(dir), 1);
+  assert.notEqual(rawLog(dir), before);
+});
+
+test("(l) a no-rule segment that names a protected path or a credential keeps the refusal", () => {
+  // The protected and credential families human-only, so a refusal is immediate rather than a wait.
+  const dir = ready(policy("abstain", [], ["  policy.*:", "    autonomy: human-only", "  log.*:", "    autonomy: human-only", "  account.*:", "    autonomy: human-only"]));
+  const before = rawLog(dir);
+  for (const command of [
+    `${UNCLASSIFIED} > APPROVAL.md`,
+    "railway up APPROVAL.md",
+    "railway up --config=.approval/log/events.jsonl",
+    "railway up .approval/env",
+  ]) {
+    const run = claude(dir, command, `t-l-${String(command.length)}`);
+    assert.notEqual(run.stdout, "", `${command} must not abstain`);
+    assert.equal(verdict(run).permission, "deny", command);
+  }
+  assert.equal(rawLog(dir), before);
+});
+
+test("(m) an exec.code segment beside a no-rule segment keeps the deny", () => {
+  const dir = ready(policy("abstain", ["exec:", "  code:", "    custody: attested"], ["  exec.code:", "    autonomy: autonomous"]));
+  const before = rawLog(dir);
+  const v = verdict(claude(dir, `python3 -c 'print(1)' && ${UNCLASSIFIED}`, "t-m"));
+  assert.equal(v.permission, "deny");
+  assert.match(v.reason, /^hook-unclassified: /u);
+  assert.equal(rawLog(dir), before);
+});
+
+test("(n) the abstain is believed only of the bytes attested: an edit between the two reads refuses", () => {
+  const dir = ready(policy("abstain"));
+  const path = join(dir, "APPROVAL.md");
+  const attestedText = policy("abstain");
+  const loaded = loadPolicyText(path, attestedText);
+  assert.equal(loaded.ok, true);
+  if (!loaded.ok) return;
+  const read = readVerifiedRecords(logPath(dir));
+  assert.equal(read.ok, true);
+  if (!read.ok) return;
+  // The same bytes: no refusal.
+  assert.equal(abstainPolicyRefusal(loaded, { path, bytes: Buffer.from(attestedText, "utf8") }, read.records), null);
+  // The decision was made on the attested policy, the file read for the attestation is an edit.
+  const edited = policy("abstain", [], ["  vcs.*:", "    autonomy: autonomous"]);
+  const swapped = abstainPolicyRefusal(loaded, { path, bytes: Buffer.from(edited, "utf8") }, read.records);
+  assert.notEqual(swapped, null);
+  // The decision was made on an edit, the bytes read back are the attested ones.
+  const loadedEdit = loadPolicyText(path, edited);
+  assert.equal(loadedEdit.ok, true);
+  if (!loadedEdit.ok) return;
+  const back = abstainPolicyRefusal(loadedEdit, { path, bytes: Buffer.from(attestedText, "utf8") }, read.records);
+  assert.notEqual(back, null);
+  // No file at all to read back.
+  assert.notEqual(abstainPolicyRefusal(loaded, null, read.records), null);
 });

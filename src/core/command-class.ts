@@ -6647,7 +6647,13 @@ function classifySegment(
   let substitutedEscape: { path: string; rule: string } | null = null;
   for (const word of expanded) {
     for (const inner of word.substitutions) {
-      const nested = classifyCommand(inner, protectedPaths, context);
+      // A substitution keeps today's refusal: the no-rule stand-in is for the
+      // command's own segments only.
+      const nested = classifyCommand(
+        inner,
+        protectedPaths,
+        context.noRuleSegments === true ? { ...context, noRuleSegments: false } : context,
+      );
       if (!nested.ok) {
         return {
           ok: false,
@@ -7039,10 +7045,25 @@ function classifySegment(
   const binExact = (segment.words[cursor] as LexWord).exact;
   const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin, execShape !== null, binExact);
   if (rule === null) {
+    // `defaults.unclassified_command: abstain` (ClassifierContext.noRuleSegments):
+    // a segment may stand in as no-rule only when it names no protected path,
+    // in a positional, an option's value or a redirection, and touches no
+    // credential. Any such hit keeps the refusal, never an abstain.
+    const named = [
+      ...judged,
+      ...args.filter((arg) => isFlag(arg) && arg.includes("=")).map((arg) => arg.slice(arg.indexOf("=") + 1)),
+      ...redirectTargets,
+    ];
+    const guarded =
+      deferredCredential !== null ||
+      fetched.unknown !== null ||
+      fetchedOutputProtected !== null ||
+      strictestProtected(named, protectedPaths) !== null ||
+      named.some((word) => isCredentialPath(word));
     return {
       ok: false,
       code: "unclassified",
-      noRule: true,
+      ...(guarded ? {} : { noRule: true as const }),
       detail:
         sub === null
           ? `no rule for ${basename}`
