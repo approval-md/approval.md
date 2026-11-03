@@ -48,6 +48,8 @@
  * dependency sense as well: `policy-match.ts` itself imports only types.
  */
 
+import { isAbsolute, resolve as resolvePath } from "node:path";
+
 import { isDateDisplay, isZoneValue } from "./date-argv.js";
 import { parseGitPushArgv, splitGitPush } from "./git-push-argv.js";
 import {
@@ -2322,6 +2324,12 @@ export interface ClassifierContext {
    * only under `defaults.unclassified_command: abstain`.
    */
   noRuleSegments?: boolean;
+  /**
+   * The directories a no-rule segment's relative words are ALSO judged from
+   * (the hook's own cwd and the envelope's), so a protected path or credential
+   * reached relatively keeps the refusal. Read only with `noRuleSegments`.
+   */
+  noRuleCwds?: readonly string[];
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -7046,20 +7054,37 @@ function classifySegment(
   const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin, execShape !== null, binExact);
   if (rule === null) {
     // `defaults.unclassified_command: abstain` (ClassifierContext.noRuleSegments):
-    // a segment may stand in as no-rule only when it names no protected path,
-    // in a positional, an option's value or a redirection, and touches no
-    // credential. Any such hit keeps the refusal, never an abstain.
-    const named = [
-      ...judged,
-      ...args.filter((arg) => isFlag(arg) && arg.includes("=")).map((arg) => arg.slice(arg.indexOf("=") + 1)),
-      ...redirectTargets,
-    ];
+    // a segment may stand in as no-rule only when every one of its words can be
+    // checked as written, and none names a protected path or a credential.
+    // Fail closed: an assignment, a flag carrying a joined value (`--x=v`,
+    // `-ov`), a word the shell would still change (`$`, a glob or brace, a
+    // leading `~`), any glob or brace character even quoted, or a
+    // substitution keeps the refusal; so does a protected or credential hit on
+    // the binary, any word or any redirection, as written or resolved from
+    // each directory the hook judges from.
+    const lexWords = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
+    const unreadable =
+      assignments.length > 0 ||
+      lexWords.some(
+        (word) =>
+          !word.exact || word.substitutions.length > 0 || /[*?[\]{}]/u.test(word.text),
+      ) ||
+      args.some((arg) => isFlag(arg) && (arg.includes("=") || (!arg.startsWith("--") && arg.length > 2)));
+    // A `NAME=value` argument (not an assignment: it follows the binary) is
+    // judged by its value too.
+    const named = lexWords.flatMap((word) =>
+      word.text.includes("=") ? [word.text, word.text.slice(word.text.indexOf("=") + 1)] : [word.text],
+    );
+    const resolved = named.flatMap((word) =>
+      isAbsolute(word) ? [] : (context.noRuleCwds ?? []).map((base) => resolvePath(base, word)),
+    );
     const guarded =
+      unreadable ||
       deferredCredential !== null ||
       fetched.unknown !== null ||
       fetchedOutputProtected !== null ||
-      strictestProtected(named, protectedPaths) !== null ||
-      named.some((word) => isCredentialPath(word));
+      strictestProtected([...named, ...resolved], protectedPaths) !== null ||
+      [...named, ...resolved].some((word) => isCredentialPath(word));
     return {
       ok: false,
       code: "unclassified",
@@ -7299,6 +7324,11 @@ export function classifyCommand(
   // what a bare name resolves to, `exec.code` is closed for the rest of the
   // line, so a later `python3 -c` keeps its pre-APRV-510 refusal.
   let execContext = context;
+  // `defaults.unclassified_command: abstain`: a command that changes directory
+  // anywhere (`cd`, `pushd`, `popd`, inside a subshell or not) moves where a
+  // no-rule segment's relative words land, so no segment of it stands in.
+  const movesDirectory =
+    context.noRuleSegments === true && /(^|[\s;&|(`])(cd|pushd|popd)($|[\s;&|)`])/u.test(command);
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };
@@ -7334,7 +7364,7 @@ export function classifyCommand(
       continue;
     }
     const outcome = classifySegment(segment, protectedPaths, execContext);
-    if (!outcome.ok && outcome.noRule === true && context.noRuleSegments === true) {
+    if (!outcome.ok && outcome.noRule === true && context.noRuleSegments === true && !movesDirectory) {
       segments.push({ text: segment.text, class: NO_RULE_CLASS, rule: "no-rule", noRule: outcome.detail });
       if (!classes.includes(NO_RULE_CLASS)) classes.push(NO_RULE_CLASS);
       continue;

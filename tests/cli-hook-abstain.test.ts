@@ -16,7 +16,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -154,11 +154,15 @@ test("(b) under an attested abstain policy an unclassified Bash command gets no 
   assertAbstained(dir, claude(dir, UNCLASSIFIED, "t-b"), before);
 });
 
-test("(b2) a cd prefix and a read segment still abstain: every other segment is autonomous", () => {
+test("(b2) a read segment beside it still abstains; a cd anywhere in the command keeps the deny", () => {
   const dir = ready(policy("abstain"));
   const before = rawLog(dir);
-  assertAbstained(dir, claude(dir, `cd ${dir} && ${UNCLASSIFIED}`, "t-b2-cd"), before);
   assertAbstained(dir, claude(dir, `git status && ${UNCLASSIFIED}`, "t-b2-git"), before);
+  // A directory change moves where the no-rule segment's relative words land, so it never abstains.
+  const v = verdict(claude(dir, `cd ${dir} && ${UNCLASSIFIED}`, "t-b2-cd"));
+  assert.equal(v.permission, "deny");
+  assert.match(v.reason, /^hook-unclassified: /u);
+  assert.equal(rawLog(dir), before);
 });
 
 test("(c) under abstain an opaque command is still denied", () => {
@@ -371,4 +375,67 @@ test("(n) the abstain is believed only of the bytes attested: an edit between th
   assert.notEqual(back, null);
   // No file at all to read back.
   assert.notEqual(abstainPolicyRefusal(loaded, null, read.records), null);
+});
+
+/** Fail closed: a no-rule segment whose words cannot be checked as written never abstains. */
+test("(o) after a cd (or pushd/popd) the no-rule segment keeps the refusal", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  for (const command of ["cd ~/.ssh && frobnicate id_rsa", `pushd ${dir} && frobnicate x`, "popd; frobnicate x"]) {
+    const v = verdict(claude(dir, command, `t-o-${String(command.length)}`));
+    assert.equal(v.permission, "deny", command);
+  }
+  assert.equal(rawLog(dir), before);
+});
+
+test("(p) a flag carrying a joined value keeps the refusal", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  for (const command of [`frobnicate -o${homedir()}/.ssh/id_rsa`, "frobnicate -fPATH", "frobnicate --out=/tmp/x"]) {
+    const v = verdict(claude(dir, command, `t-p-${String(command.length)}`));
+    assert.equal(v.permission, "deny", command);
+  }
+  assert.equal(rawLog(dir), before);
+});
+
+test("(q) an assignment in front of the no-rule command keeps the refusal", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  const v = verdict(claude(dir, `FOO=${dir}/APPROVAL.md frobnicate`, "t-q"));
+  assert.equal(v.permission, "deny");
+  assert.equal(verdict(claude(dir, "FOO=bar frobnicate", "t-q2")).permission, "deny");
+  assert.equal(rawLog(dir), before);
+});
+
+test("(r) a plain relative word in a neutral directory still abstains", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  assertAbstained(dir, claude(dir, "frobnicate ./file", "t-r"), before);
+  assertAbstained(dir, claude(dir, "frobnicate -v plain-word --flag", "t-r2"), before);
+});
+
+test("(s) a word with a glob or brace character, quoted or not, keeps the refusal", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  for (const command of ["frobnicate ~/.ss*/id_rsa", "frobnicate 'a?b'", "frobnicate x[1]", "frobnicate {a,b}", "frobnicate $HOME/x", "frobnicate \"$PWD/x\""]) {
+    const v = verdict(claude(dir, command, `t-s-${String(command.length)}`));
+    assert.equal(v.permission, "deny", command);
+  }
+  assert.equal(rawLog(dir), before);
+});
+
+test("(t) relative words are also judged from the envelope's cwd: a credential there keeps the refusal", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  const event = JSON.stringify({
+    hook_event_name: "PreToolUse",
+    session_id: "cc-sess-abstain",
+    tool_use_id: "t-t",
+    cwd: join(dir, ".approval"),
+    tool_name: "Bash",
+    tool_input: { command: "frobnicate env" },
+  });
+  const run = runCli(["hook", "claude-code", "--as", "agent:cc", "--dir", dir], dir, event);
+  assert.equal(verdict(run).permission, "deny");
+  assert.equal(rawLog(dir), before);
 });
