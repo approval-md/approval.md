@@ -7105,6 +7105,10 @@ function classifySegment(
       // table does not know (`uv run npm publish`, `caffeinate -i npm publish`,
       // `su x -c 'npm publish'`) is not a no-rule segment. Last, so it runs
       // only for a segment every other guard let through.
+      // F-12 fold (SEC-2): APFS is case-insensitive (`NPM publish`, `Claude
+      // -p` run the real binaries), so a command word with an upper-case
+      // letter never stands in.
+      (context.noRuleSegments === true && /[A-Z]/u.test(bin)) ||
       (context.noRuleSegments === true && tailReachesRule(segment, protectedPaths, context, 0));
     return {
       ok: false,
@@ -7374,18 +7378,57 @@ function tailReachesRule(
   if (depth > NO_RULE_TAIL_DEPTH || segment.words.length > NO_RULE_TAIL_WORDS) return true;
   const off: ClassifierContext = { ...context, noRuleSegments: false, execCode: false };
   for (let at = from; at < segment.words.length; at += 1) {
-    const outcome = classifySegment({ ...segment, words: segment.words.slice(at) }, protectedPaths, off);
-    if (outcome.ok || outcome.ruleless !== true) return true;
+    const tail = segment.words.slice(at);
+    const head = tail[0] as LexWord;
+    // SEC-2: APFS is case-insensitive, so `NPM publish` runs npm. A tail is
+    // read as written and with its command word folded to lower case.
+    const folded = head.text.toLowerCase();
+    const readings = folded === head.text ? [tail] : [tail, [{ ...head, text: folded }, ...tail.slice(1)]];
+    for (const words of readings) {
+      const outcome = classifySegment({ ...segment, words }, protectedPaths, off);
+      if (outcome.ok || outcome.ruleless !== true) return true;
+    }
   }
   for (const word of segment.words) {
     if (!/[\s;&|<>()`'"\\]/u.test(word.text)) continue;
+    // SEC-1: a quoted script stands in only as ONE plain segment that passes
+    // the no-rule guard itself; anything else is today's deny.
     const inner = lex(word.text);
-    if (!inner.ok) return true;
-    for (const part of inner.segments) {
-      if (part.opaque !== null || tailReachesRule(part, protectedPaths, context, depth + 1, 0)) return true;
-    }
+    if (!inner.ok || inner.segments.length !== 1) return true;
+    const part = inner.segments[0] as LexSegment;
+    if (innerPartRefused(part, protectedPaths) || tailReachesRule(part, protectedPaths, context, depth + 1, 0)) return true;
   }
   return false;
+}
+
+/**
+ * The no-rule guard applied to a script lexed out of a quoted word (F-12 fold,
+ * SEC-1): no redirection, heredoc, stdin feed, subshell, substitution or
+ * opaque construct; no word that is not a literal, looks like a path, changes
+ * directory, or names a protected file or a credential in any case; and no
+ * upper-case letter in its command word (SEC-2).
+ */
+function innerPartRefused(part: LexSegment, protectedPaths: readonly ProtectedPathEntry[]): boolean {
+  return (
+    part.opaque !== null ||
+    part.heredoc ||
+    part.stdinFed ||
+    part.subshell ||
+    part.redirects.length > 0 ||
+    part.bodySubstitutions.length > 0 ||
+    /[A-Z]/u.test(part.words[0]?.text ?? "") ||
+    part.words.some(
+      (word) =>
+        !word.exact ||
+        word.substitutions.length > 0 ||
+        noRuleWordRefused(word.text) ||
+        DIRECTORY_VERBS.has(word.text.split("/").pop() ?? "") ||
+        protectedNameFolded(word.text, protectedPaths) ||
+        strictestProtected([word.text], protectedPaths) !== null ||
+        isCredentialPath(word.text) ||
+        isCredentialPath(word.text.toLowerCase()),
+    )
+  );
 }
 
 /**

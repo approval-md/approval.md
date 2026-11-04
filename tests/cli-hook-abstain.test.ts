@@ -686,3 +686,46 @@ test("(y) on draft 5 with the key on, the laundered and directory-moved shapes k
   assertAbstained(dir, claude(dir, UNCLASSIFIED, "t-y-plain"), before);
   assert.equal(rawLog(dir), before);
 });
+
+test("(z) SEC-1: a quoted script stands in only as one plain segment that passes the no-rule guard itself", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  for (const command of [
+    "frobnicate -c 'helper >> approval.md'",
+    "frobnicate -c 'helper > claude.md'",
+    "frobnicate -c 'cd private; helper token'",
+    "frobnicate -c 'helper; frob2'",
+    "frobnicate -c 'helper && frob2'",
+    "frobnicate -c 'helper | frob2'",
+    "frobnicate -c 'helper < input'",
+    "frobnicate -c 'chdir private'",
+    "frobnicate -c 'helper approvals.md'",
+  ]) {
+    const run = claude(dir, command, `t-z1-${String(command.length)}-${command.slice(14, 22)}`);
+    assert.notEqual(run.stdout, "", `${command} must not abstain`);
+    assert.equal(verdict(run).permission, "deny", command);
+  }
+  // One plain segment of unknown words still abstains.
+  assertAbstained(dir, claude(dir, "frobnicate -c 'helper plain-word'", "t-z1-plain"), before);
+  assert.equal(rawLog(dir), before);
+});
+
+test("(z2) SEC-2: APFS is case-insensitive: an upper-case command word, as written or read in a tail, keeps the deny", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  for (const command of [
+    "NPM publish",
+    "command Git push origin main",
+    "uv run NPM publish",
+    "Claude -p hi",
+    "Frobnicate x",
+    "frobnicate -c 'Helper x'",
+  ]) {
+    const run = claude(dir, command, `t-z2-${String(command.length)}-${command.slice(0, 6)}`);
+    assert.notEqual(run.stdout, "", `${command} must not abstain`);
+    assert.equal(verdict(run).permission, "deny", command);
+  }
+  // An upper-case ARGUMENT that no rule knows, even folded, still abstains.
+  assertAbstained(dir, claude(dir, "frobnicate README", "t-z2-readme"), before);
+  assert.equal(rawLog(dir), before);
+});
