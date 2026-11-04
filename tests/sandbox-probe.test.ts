@@ -12,8 +12,10 @@
  * The distinction that carries that last property is `denied` versus
  * `unreachable`. The always-on egress case connects to RFC 5737's TEST-NET-1
  * (192.0.2.1), which is reserved for documentation and routes nowhere, so no
- * packet leaves for anything real. Inside a sandbox the kernel refuses the
- * socket itself, with EPERM, in milliseconds; outside one the connection fails
+ * packet leaves for anything real. Inside macOS's sandbox the kernel refuses
+ * the socket itself, with EPERM, in milliseconds; inside a Linux network
+ * namespace there is no route at all, and the same connect answers ENETUNREACH
+ * just as fast (SANDBOX_DENY_CODE below); outside one the connection fails
  * some other way, and WHICH other way is a fact about the host's routing rather
  * than about this code. A machine with no opinion about the address hangs until
  * the timeout, a machine whose stack knows there is no route answers
@@ -103,6 +105,49 @@ function unsandboxedShape(verdict: ConnectVerdict): string | null {
   }
   if (verdict.code === null || !NOT_SANDBOXED_CODES.has(verdict.code)) {
     return `unrecognised failure code ${String(verdict.code)}: add it to NOT_SANDBOXED_CODES if it is an ordinary routing failure`;
+  }
+  return null;
+}
+
+/**
+ * The errno each mechanism's denial carries, and the only one accepted from it.
+ *
+ * Seatbelt refuses the socket itself, so macOS answers EPERM. A Linux network
+ * namespace (`bwrap --unshare-net`, `unshare --net`) refuses nothing: it holds
+ * no route but its own loopback, so the same connect answers ENETUNREACH in
+ * milliseconds. That case first ran when GitHub's ubuntu-latest moved from
+ * 24.04, where it skipped for want of unprivileged user namespaces, to 26.04,
+ * where `bwrap --unshare-net` works.
+ *
+ * Keyed by mechanism rather than pooled, so macOS still FAILS on ENETUNREACH and
+ * Linux on EPERM. On Linux the code alone is weaker evidence than Seatbelt's,
+ * because ENETUNREACH is also an ordinary routing failure (NOT_SANDBOXED_CODES);
+ * the millisecond bound and the detect probe, which only reports bwrap or
+ * unshare after one of them created a namespace, carry the rest.
+ */
+const SANDBOX_DENY_CODE: ReadonlyMap<string, string> = new Map([
+  ["sandbox-exec", "EPERM"],
+  ["bwrap", "ENETUNREACH"],
+  ["unshare", "ENETUNREACH"],
+]);
+
+/**
+ * Does `verdict` prove `mechanism` DENIED the connect? Returns null when it does,
+ * and otherwise the reason it does not, for the assertion message. A success, a
+ * timeout, a slow refusal, any other errno, and an unknown mechanism all fail.
+ */
+function sandboxedShape(mechanism: string | null, verdict: ConnectVerdict): string | null {
+  if (verdict.outcome === "connected") return "the sandboxed child reached the network";
+  if (verdict.outcome !== "error") {
+    return `expected an immediate socket refusal, got ${JSON.stringify(verdict)}`;
+  }
+  const expected = mechanism === null ? undefined : SANDBOX_DENY_CODE.get(mechanism);
+  if (expected === undefined) return `no deny code is known for mechanism ${String(mechanism)}`;
+  if (verdict.code !== expected) {
+    return `expected ${String(mechanism)}'s ${expected}, got ${JSON.stringify(verdict)}`;
+  }
+  if (verdict.ms >= 1000) {
+    return `the connection was refused after ${verdict.ms}ms, which is a timeout wearing a refusal's name`;
   }
   return null;
 }
@@ -258,6 +303,40 @@ test("the shape table accepts every routing failure and rejects the sandbox's re
   }
 });
 
+test("the deny table is keyed by mechanism: EPERM for Seatbelt, ENETUNREACH for a Linux namespace", () => {
+  // Pure, so the per-mechanism rule is pinned on every host, including the
+  // macOS laptops that never run the Linux leg.
+  const verdict = (
+    outcome: ConnectVerdict["outcome"],
+    code: string | null,
+    ms = 5,
+  ): ConnectVerdict => ({ outcome, code, ms });
+
+  for (const [mechanism, accepted] of [
+    ["sandbox-exec", verdict("error", "EPERM")],
+    ["bwrap", verdict("error", "ENETUNREACH")],
+    ["unshare", verdict("error", "ENETUNREACH")],
+  ] as const) {
+    assert.equal(sandboxedShape(mechanism, accepted), null, `${mechanism} ${JSON.stringify(accepted)}`);
+  }
+
+  for (const [mechanism, rejected] of [
+    ["sandbox-exec", verdict("error", "ENETUNREACH")], // Seatbelt's deny is EPERM, never a routing failure
+    ["bwrap", verdict("error", "EPERM")], // no namespace answers EPERM: stop and look
+    ["unshare", verdict("error", "ECONNREFUSED")],
+    ["bwrap", verdict("error", null)],
+    ["bwrap", verdict("timeout", null, 1500)], // slow is not denied
+    ["unshare", verdict("connected", null)],
+    ["sandbox-exec", verdict("connected", null)],
+    ["sandbox-exec", verdict("error", "EPERM", 1500)], // a timeout wearing a refusal's name
+    ["bwrap", verdict("error", "ENETUNREACH", 1500)],
+    [null, verdict("error", "EPERM")], // no mechanism, no deny
+    ["firejail", verdict("error", "ENETUNREACH")], // unknown mechanism
+  ] as const) {
+    assert.notEqual(sandboxedShape(mechanism, rejected), null, `${String(mechanism)} ${JSON.stringify(rejected)}`);
+  }
+});
+
 test("control: outside the sandbox, a connect fails in a way only the NETWORK explains", async () => {
   // Two legs, because each covers the other's weakness (APRV-286).
   //
@@ -320,25 +399,12 @@ test("outbound network inside the sandbox is DENIED, not merely slow", { skip: S
     "1500",
   ]);
   const verdict = JSON.parse(stdout) as ConnectVerdict;
-  assert.notEqual(verdict.outcome, "connected", "the sandboxed child reached the network");
-  assert.equal(
-    verdict.outcome,
-    "error",
-    `expected an immediate socket refusal, got ${JSON.stringify(verdict)}`,
-  );
-  // EPERM, specifically: the kernel refusing to open the socket at all. That is
-  // the sandbox's own signature, and the control above pins that it does not
-  // appear without one (amended by the build lane, where the control's timeout
-  // turned out to be a fact about one machine's routing).
-  assert.equal(
-    verdict.code,
-    "EPERM",
-    `expected the sandbox's EPERM, got ${JSON.stringify(verdict)}`,
-  );
-  assert.ok(
-    verdict.ms < 1000,
-    `the connection was refused after ${verdict.ms}ms, which is a timeout wearing a refusal's name`,
-  );
+  // The mechanism's own deny, in milliseconds: EPERM under Seatbelt (the kernel
+  // refusing to open the socket at all, which the control above pins never
+  // appears without one), ENETUNREACH inside a Linux network namespace. A
+  // success, a timeout or any other errno fails (SANDBOX_DENY_CODE).
+  const why = sandboxedShape(FOUND.mechanism, verdict);
+  assert.equal(why, null, `${String(why)}; verdict ${JSON.stringify(verdict)}`);
 });
 
 test("credential starvation: --strip-env keeps a secret-named variable out of the child", { skip: SKIP }, () => {
