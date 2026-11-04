@@ -7353,7 +7353,7 @@ const DIRECTORY_VERBS: ReadonlySet<string> = new Set(["cd", "pushd", "popd", "ch
  * allowlist, because APFS folds case and Unicode (`NPM`, `ｎｐｍ`, a letter with
  * a diacritic, a Cyrillic lookalike may all reach a real binary).
  */
-const NO_RULE_COMMAND_WORD = /^[a-z0-9_.+\/-]+$/u;
+const NO_RULE_COMMAND_WORD = /^[a-z0-9_.+/-]+$/u;
 
 /** Words past which the no-rule tail check refuses outright (fail closed). */
 const NO_RULE_TAIL_WORDS = 64;
