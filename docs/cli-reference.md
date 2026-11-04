@@ -5584,6 +5584,9 @@ where blocking is the right failure mode. No new exit code is defined here.
 
 The verdict is never "ask": the harness's own prompt would collect a decision
 that no event records, no channel delivered, and no audit can reconstruct.
+Under an attested `defaults.unclassified_command: abstain`, a Claude Code Bash
+call that no built-in rule covers gets no verdict at all (empty stdout, exit 0,
+nothing recorded), and the harness decides it; that is still never "ask".
 
 The classifier is best effort and is not scheming-robust (SPEC.md §11). It reads
 the command text and nothing else — never the agent's own `description` field,

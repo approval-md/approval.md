@@ -113,7 +113,20 @@ export interface ClassifiedSegment {
    * length, never the text (SPEC.md §11.1 invariant 3).
    */
   execCode?: ExecCodeSource;
+  /**
+   * The no-rule detail of a segment no built-in rule covers, present only on
+   * the {@link NO_RULE_CLASS} stand-in a {@link ClassifierContext.noRuleSegments}
+   * caller asked for.
+   */
+  noRule?: string;
 }
+
+/**
+ * The class a segment no built-in rule covers takes under
+ * {@link ClassifierContext.noRuleSegments}. Undotted, so no policy pattern
+ * names it; the hook answers it before any class is resolved.
+ */
+export const NO_RULE_CLASS = "unclassified";
 
 /**
  * What an `exec.code` segment runs, as the classifier read it (APRV-510).
@@ -2301,6 +2314,21 @@ export interface ClassifierContext {
    * refused whatever this says.
    */
   execCode?: boolean;
+  /**
+   * Classify a segment no built-in rule covers as a {@link NO_RULE_CLASS}
+   * stand-in and read on, rather than refusing the whole command at it, so a
+   * caller sees every other segment's class. Only the no-rule case: every
+   * other refusal returns as it always did. `src/cli/hook.ts` passes `true`
+   * only under `defaults.unclassified_command: abstain`.
+   */
+  noRuleSegments?: boolean;
+  /**
+   * The directories the hook judges a no-rule segment from (its own cwd and
+   * the envelope's). Read only with {@link noRuleSegments}: a cwd inside a
+   * dot-directory, a protected path or a credential home refuses the stand-in,
+   * and every word is also judged resolved against each of them.
+   */
+  noRuleCwds?: readonly string[];
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -6592,7 +6620,19 @@ type SegmentOutcome =
       /** The program an `exec.code` answer runs (APRV-510). */
       execCode?: ExecCodeSource;
     }
-  | { ok: false; code: ClassifierFailureCode; detail: string };
+  | {
+      ok: false;
+      code: ClassifierFailureCode;
+      detail: string;
+      noRule?: true;
+      /**
+       * The segment failed ONLY because no built-in rule names its binary (the
+       * `matchRule` miss), guarded or not. Read by {@link tailReachesRule}: a
+       * tail of a no-rule segment that fails any other way (opaque, a refusal
+       * of its own) is a command the table has an opinion on.
+       */
+      ruleless?: true;
+    };
 
 function classifySegment(
   segment: LexSegment,
@@ -6626,7 +6666,13 @@ function classifySegment(
   let substitutedEscape: { path: string; rule: string } | null = null;
   for (const word of expanded) {
     for (const inner of word.substitutions) {
-      const nested = classifyCommand(inner, protectedPaths, context);
+      // A substitution keeps today's refusal: the no-rule stand-in is for the
+      // command's own segments only.
+      const nested = classifyCommand(
+        inner,
+        protectedPaths,
+        context.noRuleSegments === true ? { ...context, noRuleSegments: false } : context,
+      );
       if (!nested.ok) {
         return {
           ok: false,
@@ -7018,9 +7064,68 @@ function classifySegment(
   const binExact = (segment.words[cursor] as LexWord).exact;
   const rule = matchRule(basename, sub, args, substituted, assigned, assignments, bin, execShape !== null, binExact);
   if (rule === null) {
+    // `defaults.unclassified_command: abstain` (ClassifierContext.noRuleSegments).
+    // FAIL CLOSED. The segment stands in as no-rule only when no word of it
+    // (the binary, assignments, flags with their dashes stripped, positionals,
+    // redirect targets) looks like a path or carries anything the shell would
+    // still change: no `/`, no leading `~` or `.`, no glob or brace character,
+    // no `$`, no `=` or `:`, no substitution, no single-dash word longer than
+    // two characters; when it has no heredoc, here-string or other stdin-fed
+    // body; when no cwd it is judged from is inside a dot-directory, a
+    // protected path or a credential home; and when no word, as written or
+    // resolved against each of those cwds, names a protected path or a
+    // credential. Anything else keeps the refusal.
+    const lexWords = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
+    const cwds = (context.noRuleCwds ?? []).map((dir) => dir.replace(/\/+$/u, ""));
+    const resolvedWords = lexWords.flatMap((word) => cwds.map((dir) => `${dir}/${word.text}`));
+    const cwdRefused = cwds.some(
+      (dir) =>
+        dir.split("/").some((part) => part.startsWith(".")) ||
+        strictestProtected([dir, `${dir}/`], protectedPaths) !== null ||
+        isCredentialPath(dir) ||
+        isCredentialPath(`${dir}/`),
+    );
+    const guarded =
+      cwdRefused ||
+      segment.heredoc ||
+      segment.stdinFed ||
+      segment.bodySubstitutions.length > 0 ||
+      segment.redirects.some((redirect) => redirect.op === "<") ||
+      lexWords.some((word) => !word.exact || word.substitutions.length > 0 || noRuleWordRefused(word.text)) ||
+      deferredCredential !== null ||
+      fetched.unknown !== null ||
+      fetchedOutputProtected !== null ||
+      strictestProtected([...lexWords.map((word) => word.text), ...resolvedWords], protectedPaths) !== null ||
+      [...lexWords.map((word) => word.text), ...resolvedWords].some((word) => isCredentialPath(word)) ||
+      // F-12 fold (review-b N2): APFS and the default macOS volume are case-
+      // insensitive, so `>> approval.md` is the policy file. Fail closed: a bare
+      // word that names a protected file or a credential in ANY case refuses.
+      lexWords.some((word) => protectedNameFolded(word.text, protectedPaths) || isCredentialPath(word.text.toLowerCase())) ||
+      // F-12 fold (review-b M1, laundering): a known command behind a word the
+      // table does not know (`uv run npm publish`, `caffeinate -i npm publish`,
+      // `su x -c 'npm publish'`) is not a no-rule segment. Last, so it runs
+      // only for a segment every other guard let through.
+      // F-12 fold (SEC-4): a binary the rule table KNOWS, with a subcommand no
+      // row lists (`npm pub`, a git or gh alias, `make <target>`), is a miss on
+      // a known program, not a no-rule segment: today's deny.
+      knownRuleBin(basename) ||
+      // F-12 fold round 2 (review-b CS2): a harness name or an alias of one
+      // (`claude-bountify`, `claude-b1`, `claude-edge`, `claude-crash`) is
+      // never a no-rule segment: today's deny.
+      harnessNamed(basename) ||
+      // F-12 fold (SEC-2, SEC-3): APFS folds case and Unicode, so `NPM
+      // publish`, `ｎｐｍ publish` or a lookalike letter may run a real binary.
+      // An ALLOWLIST: the command word and every later word (each is read as a
+      // command by the tail check below) must be lower-case ASCII.
+      (context.noRuleSegments === true && segment.words.slice(cursor).some((word) => !NO_RULE_COMMAND_WORD.test(word.text))) ||
+      (context.noRuleSegments === true && tailReachesRule(segment, protectedPaths, context, 0));
     return {
       ok: false,
       code: "unclassified",
+      // SEC-4: only a binary no row names is a plain no-rule miss for the tail check
+      // (CS2: nor is a harness name, so `frobnicate claude-b1 -p hi` keeps the deny).
+      ...(knownRuleBin(basename) || harnessNamed(basename) ? {} : { ruleless: true as const }),
+      ...(guarded ? {} : { noRule: true as const }),
       detail:
         sub === null
           ? `no rule for ${basename}`
@@ -7232,6 +7337,195 @@ function classifySegment(
  * ever LOOSEN a class, and no rule reads it to loosen a protected or credential
  * one.
  */
+/**
+ * A word a no-rule stand-in may not carry (`defaults.unclassified_command:
+ * abstain`): anything that looks like a path or that the shell would still
+ * change. `/`, `$`, `=`, `:`, a glob or brace character anywhere, or a leading
+ * `~` or `.` once a flag's dashes are stripped.
+ */
+function noRuleWordRefused(text: string): boolean {
+  const bare = text.replace(/^-+/u, "");
+  const joinedShortFlag = text.startsWith("-") && !text.startsWith("--") && text.length > 2;
+  return joinedShortFlag || /[/$=:*?[\]{}]/u.test(text) || bare.startsWith("~") || bare.startsWith(".");
+}
+
+/**
+ * The command words that change the shell's directory: bash's three and zsh's
+ * `chdir` (F-12 fold, review-b M2b: Claude Code runs Bash commands in $SHELL,
+ * zsh on macOS). No other bash, zsh, dash or ksh builtin changes it; an alias,
+ * a function or `AUTO_CD` can (Known limits).
+ */
+const DIRECTORY_VERBS: ReadonlySet<string> = new Set(["cd", "pushd", "popd", "chdir"]);
+
+/**
+ * The only spelling a word the no-rule guard reads as a command may have (F-12
+ * fold, SEC-2/SEC-3): lower-case ASCII letters, digits and `_ . + / -`. An
+ * allowlist, because APFS folds case and Unicode (`NPM`, `ｎｐｍ`, a letter with
+ * a diacritic, a Cyrillic lookalike may all reach a real binary).
+ */
+const NO_RULE_COMMAND_WORD = /^[a-z0-9_.+/-]+$/u;
+
+/** Every binary some row of {@link COMMAND_RULES} names (F-12 fold, SEC-4). */
+let KNOWN_RULE_BINS: ReadonlySet<string> | null = null;
+function knownRuleBin(basename: string): boolean {
+  KNOWN_RULE_BINS ??= new Set(COMMAND_RULES.flatMap((rule) => rule.bins));
+  return KNOWN_RULE_BINS.has(basename);
+}
+
+/**
+ * A command word that names an agent harness or an alias of one (F-12 fold
+ * round 2, review-b CS2): `claude`, `codex`, `hermes`, `cursor`, `muse`,
+ * `grok`, alone or followed by `-` or `_` and anything (`claude-bountify`,
+ * `claude-b1`, `claude-edge`, `claude-crash`, `cursor-agent`). Claude Code's
+ * Bash tool keeps the user's shell aliases, and a text classifier cannot see
+ * an alias, so such a word never stands in as a no-rule segment: today's deny.
+ */
+const HARNESS_NAMED = /^(?:claude|codex|hermes|cursor|muse|grok)(?:[-_].*)?$/u;
+function harnessNamed(basename: string): boolean {
+  return HARNESS_NAMED.test(basename);
+}
+
+/** Words past which the no-rule tail check refuses outright (fail closed). */
+const NO_RULE_TAIL_WORDS = 64;
+/** Nesting of quoted scripts the tail check reads before it refuses. */
+const NO_RULE_TAIL_DEPTH = 3;
+
+/**
+ * Does a no-rule segment hand any of its later words to a command the rule
+ * table knows (F-12 fold, review-b M1: laundering)? Every tail `words[i..]`
+ * (i >= `from`) is classified as a segment of its own with the stand-in OFF;
+ * any answer other than the plain no-rule miss (a class, an opaque or any
+ * other refusal) answers yes. This is also where `command` and `builtin` are
+ * TRANSPARENT, as bash reads them: `command npm publish` runs `npm publish`,
+ * so its tail is classified and the segment keeps today's deny. Deliberately
+ * not a classified answer for the whole segment: the classifier without the
+ * key stays as it was, and a runner never earns an allow its bare form would
+ * need a policy row for. A word carrying a space or a shell operator
+ * (`su x -c 'npm publish'`, `osascript -e 'do shell script "…"'`) is read as
+ * the script a runner may hand to a shell: it must lex, and each of its
+ * segments is judged the same way from its first word. Fail closed: too many
+ * words, too deep a nesting, a script that does not lex or carries an opaque
+ * construct answers yes.
+ */
+function tailReachesRule(
+  segment: LexSegment,
+  protectedPaths: readonly ProtectedPathEntry[],
+  context: ClassifierContext,
+  depth: number,
+  from = 1,
+): boolean {
+  if (depth > NO_RULE_TAIL_DEPTH || segment.words.length > NO_RULE_TAIL_WORDS) return true;
+  const off: ClassifierContext = { ...context, noRuleSegments: false, execCode: false };
+  for (let at = from; at < segment.words.length; at += 1) {
+    const words = segment.words.slice(at);
+    // SEC-2/SEC-3: a word read as a command is lower-case ASCII or refused.
+    if (!NO_RULE_COMMAND_WORD.test((words[0] as LexWord).text)) return true;
+    const outcome = classifySegment({ ...segment, words }, protectedPaths, off);
+    if (outcome.ok || outcome.ruleless !== true) return true;
+  }
+  for (const word of segment.words) {
+    if (!/[\s;&|<>()`'"\\]/u.test(word.text)) continue;
+    if (quotedScriptRefused(word.text, protectedPaths, context, depth)) return true;
+  }
+  return false;
+}
+
+/**
+ * SEC-1: a quoted script stands in only as ONE plain segment that passes the
+ * no-rule guard itself; anything else is today's deny. Defence in depth (F-12
+ * fold round 2, review-b CN1): through {@link classifyCommand} every word that
+ * carries a space or a quote is refused first by the SEC-3 allowlist, so this
+ * check is reached today only by its unit test (tests/cli-hook-abstain.test.ts
+ * (z7)). It stays so that a later widening of the allowlist cannot open it.
+ */
+export function quotedScriptRefused(
+  script: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  context: ClassifierContext,
+  depth: number,
+): boolean {
+  const inner = lex(script);
+  if (!inner.ok || inner.segments.length !== 1) return true;
+  const part = inner.segments[0] as LexSegment;
+  return innerPartRefused(part, protectedPaths) || tailReachesRule(part, protectedPaths, context, depth + 1, 0);
+}
+
+/**
+ * The no-rule guard applied to a script lexed out of a quoted word (F-12 fold,
+ * SEC-1): no redirection, heredoc, stdin feed, subshell, substitution or
+ * opaque construct; no word that is not a literal, looks like a path, changes
+ * directory, or names a protected file or a credential in any case; and a
+ * command word of lower-case ASCII only (SEC-2, SEC-3).
+ */
+function innerPartRefused(part: LexSegment, protectedPaths: readonly ProtectedPathEntry[]): boolean {
+  return (
+    part.opaque !== null ||
+    part.heredoc ||
+    part.stdinFed ||
+    part.subshell ||
+    part.redirects.length > 0 ||
+    part.bodySubstitutions.length > 0 ||
+    !NO_RULE_COMMAND_WORD.test(part.words[0]?.text ?? "") ||
+    part.words.some(
+      (word) =>
+        !word.exact ||
+        word.substitutions.length > 0 ||
+        noRuleWordRefused(word.text) ||
+        DIRECTORY_VERBS.has(word.text.split("/").pop() ?? "") ||
+        protectedNameFolded(word.text, protectedPaths) ||
+        strictestProtected([word.text], protectedPaths) !== null ||
+        isCredentialPath(word.text) ||
+        isCredentialPath(word.text.toLowerCase()),
+    )
+  );
+}
+
+/**
+ * Does `text`, compared without case, name a protected file by its basename
+ * (F-12 fold, review-b N2)? The built-in names and the policy's own entries.
+ * Read only by the no-rule guard, where rule (1) has already refused any word
+ * with a `/` or a leading `.`, so a bare name is the whole question.
+ */
+function protectedNameFolded(text: string, protectedPaths: readonly ProtectedPathEntry[]): boolean {
+  const folded = text.toLowerCase();
+  if (folded.length === 0) return false;
+  const names = [
+    ...CORE_FILENAMES,
+    ...PROTECTED_FILENAMES,
+    ...protectedPaths.map((entry) => (typeof entry === "string" ? entry : entry.path)),
+  ];
+  return names.some((name) => (name.split("/").filter((part) => part.length > 0).pop() ?? "").toLowerCase() === folded);
+}
+
+/**
+ * May any segment change the shell's directory (`defaults.unclassified_command:
+ * abstain`)? Judged from the LEXED words, every word of every segment (so a
+ * runner, `builtin`, a shell keyword like `if`, `while` or `!` in front of it
+ * changes nothing): any word whose dequoted basename is `cd`, `pushd` or `popd`
+ * answers yes. Every substitution body (in a word, a redirection or a heredoc
+ * body) is lexed and judged the same way. Fail closed: a command word (the
+ * first after the assignments) that is not a literal, or a body that does not
+ * lex, answers yes.
+ */
+function segmentsMayChangeDirectory(segments: readonly LexSegment[], depth = 0): boolean {
+  if (depth > 8) return true;
+  for (const segment of segments) {
+    const bodies = [
+      ...segment.bodySubstitutions,
+      ...segment.words.flatMap((word) => word.substitutions),
+      ...segment.redirects.flatMap((redirect) => redirect.target.substitutions),
+    ];
+    for (const body of bodies) {
+      const inner = lex(body);
+      if (!inner.ok || segmentsMayChangeDirectory(inner.segments, depth + 1)) return true;
+    }
+    const commandWord = segment.words.find((word) => !word.assignment);
+    if (commandWord !== undefined && !commandWord.exact) return true;
+    if (segment.words.some((word) => DIRECTORY_VERBS.has(word.text.split("/").pop() ?? ""))) return true;
+  }
+  return false;
+}
+
 export function classifyCommand(
   command: string,
   protectedPaths: readonly ProtectedPathEntry[] = [],
@@ -7256,6 +7550,11 @@ export function classifyCommand(
   // what a bare name resolves to, `exec.code` is closed for the rest of the
   // line, so a later `python3 -c` keeps its pre-APRV-510 refusal.
   let execContext = context;
+  // `defaults.unclassified_command: abstain`: a command that changes directory
+  // anywhere, judged from its lexed command words (subshells and every
+  // substitution body included, fail closed on a word that is not a literal),
+  // moves where a no-rule segment's words land, so no segment of it stands in.
+  const movesDirectory = context.noRuleSegments === true && segmentsMayChangeDirectory(lexed.segments);
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };
@@ -7270,10 +7569,14 @@ export function classifyCommand(
       // APRV-510: and with `exec.code` closed. `bash -c` and `sh -c` stay out of
       // the class's scope, so a program inside an unwrapped shell script keeps
       // the refusal it had before the class existed.
+      // F-12 fold (review-b M2a): the inner script runs in the directory the
+      // OUTER command moved to, which the inner scan cannot see, so after an
+      // outer cd/pushd/popd/chdir no inner segment stands in.
       const inner = classifyCommand(script, protectedPaths, {
         ...context,
         unwrapShell: false,
         execCode: false,
+        noRuleSegments: context.noRuleSegments === true && !movesDirectory,
       });
       if (!inner.ok) {
         // The refusal is the INNER one, reported against the inner segment: an
@@ -7291,6 +7594,11 @@ export function classifyCommand(
       continue;
     }
     const outcome = classifySegment(segment, protectedPaths, execContext);
+    if (!outcome.ok && outcome.noRule === true && context.noRuleSegments === true && !movesDirectory) {
+      segments.push({ text: segment.text, class: NO_RULE_CLASS, rule: "no-rule", noRule: outcome.detail });
+      if (!classes.includes(NO_RULE_CLASS)) classes.push(NO_RULE_CLASS);
+      continue;
+    }
     if (!outcome.ok) {
       return { ok: false, code: outcome.code, segment: segment.text, detail: outcome.detail };
     }

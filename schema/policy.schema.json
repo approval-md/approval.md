@@ -47,6 +47,13 @@
           "description": "SPEC.md §5.2 (APRV-499, proposed): what a harness hook does with a tool call that neither the harness adapter's own tables (its shell, file, read and pass-through tools and its hard-coded rule table) nor any `tools` entry claims. `record`: the call is classified `harness.tool.unmapped`, which resolves `autonomous` when no `classes` rule matches it, so it proceeds and leaves an `execution.started` naming the tool. `ask`: the same class resolves `manual` when no rule matches it, so the call waits for a human. A `classes` rule matching `harness.tool.unmapped` decides it instead, exactly as a rule decides any class over `defaults.autonomy`. ABSENT, the behaviour of every policy written before the key existed: such a call is not a gate question, is allowed, and leaves no record.",
           "examples": ["record", "ask"]
         },
+        "unclassified_command": {
+          "type": "string",
+          "enum": ["deny", "abstain"],
+          "description": "What a Claude Code hook answers for a Bash command a segment of which no built-in rule covers (`unclassified`). `deny` (THE DEFAULT, and what an absent key means): refused `hook-unclassified`, as every earlier build did. `abstain`: under an attested policy, and only when every other segment of the command is a read (`read`, `read.*`; never `exec.code`) that resolves `autonomous`, no segment changes directory (`cd`, `pushd`, `popd`, zsh `chdir`; a login-shell script after an outer directory change included), no word of the no-rule segment looks like a path or carries `$`, `=` or `:` (no `/`, no leading `~` or `.`, no glob, no single-dash word longer than two characters) or names a protected path or credential (protected names in any letter case), and no later word of it, read as a command (a quoted word read as a script), is one a built-in rule covers (so `command`, `builtin` or a runner in front of a known command keeps the deny); the command word and every later word are lower-case ASCII (`[a-z0-9_.+/-]`: APFS folds case and Unicode), and a quoted script is never read as one, with no heredoc, here-string or stdin feed, judged from no cwd inside a dot-directory or protected path, the hook gives NO verdict (empty stdout, exit 0, nothing appended), so the harness's own permission flow decides the call. `opaque` and `unparseable` commands, the classifier's other refusals, and every other harness keep the deny.",
+          "default": "deny",
+          "examples": ["deny", "abstain"]
+        },
         "on_expiry": {
           "type": "string",
           "enum": ["reject"],

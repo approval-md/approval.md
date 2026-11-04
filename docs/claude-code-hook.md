@@ -19,6 +19,33 @@ answers:
 | `supervised` | allow | `task.registered`, `execution.started` |
 | `manual` | wait for a human, then allow or deny | `task.registered`, `approval.requested`, the decision, `execution.started` on an allow |
 | unclassifiable | deny | nothing |
+| no built-in rule, under `defaults.unclassified_command: abstain` | no verdict (empty stdout, exit 0; its PostToolUse report is silent too): Claude Code's own permission flow decides | nothing |
+
+The abstain row is fail-closed: a no-rule segment stands in only when every
+other segment is a read, no segment changes directory (`cd`, `pushd`, `popd`,
+zsh's `chdir`, behind any word; a `bash -c`/`sh -c`/`zsh -c` script after an
+outer directory change included), no word looks like a path or carries `$`,
+`=` or `:`, no word names a protected file or a credential (in any letter
+case), and no LATER word of the segment, read as a command, is one a built-in
+rule covers. That last check makes `command`, `builtin` and every runner
+transparent: `command npm publish`, `uv run npm publish`, `caffeinate -i npm
+publish` and `su x -c 'npm publish'` (a quoted word is read as the script a
+runner may hand to a shell, and must be one plain segment that passes the
+same guard) keep today's deny. Because APFS folds case and Unicode (`NPM
+publish` runs npm), the command word and every later word must be lower-case
+ASCII (`[a-z0-9_.+/-]`): anything else keeps the deny. A binary the rule
+table knows, with a subcommand no row lists (`npm pub`, a git or gh alias),
+is a miss on a known program and keeps the deny; so does a command word
+that names an agent harness or an alias of one (`claude-b1`, `claude-edge`,
+`codex-x`: `^(claude|codex|hermes|cursor|muse|grok)([-_].*)?$`, as written or
+read in a tail), and under a tripped loop floor no command abstains. So does an unknown CLI whose
+subcommand is also a command (`railway whoami`: `whoami` is `read.shell`).
+Anything else is today's deny. Known limits: a bare word can name a symlink in
+a neutral cwd; and an unknown command name may be an alias, a shell function or
+a directory under zsh `AUTO_CD` / bash `autocd` that changes directory, which
+no text classifier can see; an alias can also run any command, a classified
+one or a harness launch, under a name outside that pattern (`alias cb='claude
+-p'`).
 
 No approval lifecycle exists off the manual path (amended SPEC.md §6.3): the
 `autonomous` and `supervised` rows request nothing, ask nobody, and record no

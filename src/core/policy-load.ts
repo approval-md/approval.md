@@ -279,6 +279,12 @@ export interface Policy {
      * leaves no record, which is every earlier build's behaviour.
      */
     unmapped_tool?: UnmappedToolMode;
+    /**
+     * What a Claude Code hook answers for a Bash command with a segment no
+     * built-in rule covers. Absent means `deny`, byte for byte every earlier
+     * build; `abstain` gives no verdict, so the harness decides the call.
+     */
+    unclassified_command?: "deny" | "abstain";
   };
   /**
    * Amended SPEC.md §5.2 (APRV-38): duration after which a payload whose action
