@@ -6620,7 +6620,19 @@ type SegmentOutcome =
       /** The program an `exec.code` answer runs (APRV-510). */
       execCode?: ExecCodeSource;
     }
-  | { ok: false; code: ClassifierFailureCode; detail: string; noRule?: true };
+  | {
+      ok: false;
+      code: ClassifierFailureCode;
+      detail: string;
+      noRule?: true;
+      /**
+       * The segment failed ONLY because no built-in rule names its binary (the
+       * `matchRule` miss), guarded or not. Read by {@link tailReachesRule}: a
+       * tail of a no-rule segment that fails any other way (opaque, a refusal
+       * of its own) is a command the table has an opinion on.
+       */
+      ruleless?: true;
+    };
 
 function classifySegment(
   segment: LexSegment,
@@ -7084,10 +7096,20 @@ function classifySegment(
       fetched.unknown !== null ||
       fetchedOutputProtected !== null ||
       strictestProtected([...lexWords.map((word) => word.text), ...resolvedWords], protectedPaths) !== null ||
-      [...lexWords.map((word) => word.text), ...resolvedWords].some((word) => isCredentialPath(word));
+      [...lexWords.map((word) => word.text), ...resolvedWords].some((word) => isCredentialPath(word)) ||
+      // F-12 fold (review-b N2): APFS and the default macOS volume are case-
+      // insensitive, so `>> approval.md` is the policy file. Fail closed: a bare
+      // word that names a protected file or a credential in ANY case refuses.
+      lexWords.some((word) => protectedNameFolded(word.text, protectedPaths) || isCredentialPath(word.text.toLowerCase())) ||
+      // F-12 fold (review-b M1, laundering): a known command behind a word the
+      // table does not know (`uv run npm publish`, `caffeinate -i npm publish`,
+      // `su x -c 'npm publish'`) is not a no-rule segment. Last, so it runs
+      // only for a segment every other guard let through.
+      (context.noRuleSegments === true && tailReachesRule(segment, protectedPaths, context, 0));
     return {
       ok: false,
       code: "unclassified",
+      ruleless: true,
       ...(guarded ? {} : { noRule: true as const }),
       detail:
         sub === null
@@ -7312,8 +7334,76 @@ function noRuleWordRefused(text: string): boolean {
   return joinedShortFlag || /[/$=:*?[\]{}]/u.test(text) || bare.startsWith("~") || bare.startsWith(".");
 }
 
-/** The command words that change the shell's directory. */
-const DIRECTORY_VERBS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
+/**
+ * The command words that change the shell's directory: bash's three and zsh's
+ * `chdir` (F-12 fold, review-b M2b: Claude Code runs Bash commands in $SHELL,
+ * zsh on macOS). No other bash, zsh, dash or ksh builtin changes it; an alias,
+ * a function or `AUTO_CD` can (Known limits).
+ */
+const DIRECTORY_VERBS: ReadonlySet<string> = new Set(["cd", "pushd", "popd", "chdir"]);
+
+/** Words past which the no-rule tail check refuses outright (fail closed). */
+const NO_RULE_TAIL_WORDS = 64;
+/** Nesting of quoted scripts the tail check reads before it refuses. */
+const NO_RULE_TAIL_DEPTH = 3;
+
+/**
+ * Does a no-rule segment hand any of its later words to a command the rule
+ * table knows (F-12 fold, review-b M1: laundering)? Every tail `words[i..]`
+ * (i >= `from`) is classified as a segment of its own with the stand-in OFF;
+ * any answer other than the plain no-rule miss (a class, an opaque or any
+ * other refusal) answers yes. This is also where `command` and `builtin` are
+ * TRANSPARENT, as bash reads them: `command npm publish` runs `npm publish`,
+ * so its tail is classified and the segment keeps today's deny. Deliberately
+ * not a classified answer for the whole segment: the classifier without the
+ * key stays as it was, and a runner never earns an allow its bare form would
+ * need a policy row for. A word carrying a space or a shell operator
+ * (`su x -c 'npm publish'`, `osascript -e 'do shell script "…"'`) is read as
+ * the script a runner may hand to a shell: it must lex, and each of its
+ * segments is judged the same way from its first word. Fail closed: too many
+ * words, too deep a nesting, a script that does not lex or carries an opaque
+ * construct answers yes.
+ */
+function tailReachesRule(
+  segment: LexSegment,
+  protectedPaths: readonly ProtectedPathEntry[],
+  context: ClassifierContext,
+  depth: number,
+  from = 1,
+): boolean {
+  if (depth > NO_RULE_TAIL_DEPTH || segment.words.length > NO_RULE_TAIL_WORDS) return true;
+  const off: ClassifierContext = { ...context, noRuleSegments: false, execCode: false };
+  for (let at = from; at < segment.words.length; at += 1) {
+    const outcome = classifySegment({ ...segment, words: segment.words.slice(at) }, protectedPaths, off);
+    if (outcome.ok || outcome.ruleless !== true) return true;
+  }
+  for (const word of segment.words) {
+    if (!/[\s;&|<>()`'"\\]/u.test(word.text)) continue;
+    const inner = lex(word.text);
+    if (!inner.ok) return true;
+    for (const part of inner.segments) {
+      if (part.opaque !== null || tailReachesRule(part, protectedPaths, context, depth + 1, 0)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Does `text`, compared without case, name a protected file by its basename
+ * (F-12 fold, review-b N2)? The built-in names and the policy's own entries.
+ * Read only by the no-rule guard, where rule (1) has already refused any word
+ * with a `/` or a leading `.`, so a bare name is the whole question.
+ */
+function protectedNameFolded(text: string, protectedPaths: readonly ProtectedPathEntry[]): boolean {
+  const folded = text.toLowerCase();
+  if (folded.length === 0) return false;
+  const names = [
+    ...CORE_FILENAMES,
+    ...PROTECTED_FILENAMES,
+    ...protectedPaths.map((entry) => (typeof entry === "string" ? entry : entry.path)),
+  ];
+  return names.some((name) => (name.split("/").filter((part) => part.length > 0).pop() ?? "").toLowerCase() === folded);
+}
 
 /**
  * May any segment change the shell's directory (`defaults.unclassified_command:
@@ -7387,10 +7477,14 @@ export function classifyCommand(
       // APRV-510: and with `exec.code` closed. `bash -c` and `sh -c` stay out of
       // the class's scope, so a program inside an unwrapped shell script keeps
       // the refusal it had before the class existed.
+      // F-12 fold (review-b M2a): the inner script runs in the directory the
+      // OUTER command moved to, which the inner scan cannot see, so after an
+      // outer cd/pushd/popd/chdir no inner segment stands in.
       const inner = classifyCommand(script, protectedPaths, {
         ...context,
         unwrapShell: false,
         execCode: false,
+        noRuleSegments: context.noRuleSegments === true && !movesDirectory,
       });
       if (!inner.ok) {
         // The refusal is the INNER one, reported against the inner segment: an

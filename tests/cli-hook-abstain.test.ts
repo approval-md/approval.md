@@ -135,7 +135,10 @@ function assertAbstained(dir: string, run: Run, before: string): void {
   assert.equal(rawLog(dir), before);
 }
 
-const UNCLASSIFIED = "railway whoami";
+// F-12 fold: `railway whoami` no longer abstains (its tail `whoami` is
+// `read.shell`, test (x)), so the fixture is a CLI whose every later word is
+// unknown to the table.
+const UNCLASSIFIED = "railway status";
 
 test("(a) without the key an unclassified Bash command is denied hook-unclassified, unchanged", () => {
   for (const key of [null, "deny"]) {
@@ -143,7 +146,7 @@ test("(a) without the key an unclassified Bash command is denied hook-unclassifi
     const before = rawLog(dir);
     const v = verdict(claude(dir, UNCLASSIFIED, `t-a-${String(key)}`));
     assert.equal(v.permission, "deny");
-    assert.match(v.reason, /^hook-unclassified: no rule for railway whoami \(segment: railway whoami\)/u);
+    assert.match(v.reason, /^hook-unclassified: no rule for railway status \(segment: railway status\)/u);
     assert.equal(rawLog(dir), before);
   }
 });
@@ -199,7 +202,7 @@ test("(e) under abstain a human-only class is denied as before, alone or beside 
   for (const command of [`${UNCLASSIFIED} && npm publish`, `npm publish; ${UNCLASSIFIED}`]) {
     const mixed = verdict(claude(dir, command, `t-e-${String(command.length)}`));
     assert.equal(mixed.permission, "deny", command);
-    assert.match(mixed.reason, /^hook-unclassified: no rule for railway whoami/u, command);
+    assert.match(mixed.reason, /^hook-unclassified: no rule for railway status/u, command);
   }
   // Nor a class that would wait for a human (deps.add resolves manual here).
   const manual = verdict(claude(dir, `${UNCLASSIFIED} && npm install left-pad`, "t-e-manual"));
@@ -317,7 +320,7 @@ test("(k) a no-rule segment beside a side-effecting segment keeps today's deny, 
   ]) {
     const v = verdict(claude(dir, command, `t-k-${String(command.length)}`));
     assert.equal(v.permission, "deny", command);
-    assert.match(v.reason, /^hook-unclassified: no rule for railway whoami/u, command);
+    assert.match(v.reason, /^hook-unclassified: no rule for railway status/u, command);
   }
   // Alone, the autonomous push is still allowed and recorded as before.
   assert.equal(verdict(claude(dir, "git push origin feature-x", "t-k-alone")).permission, "allow");
@@ -334,6 +337,11 @@ test("(l) a no-rule segment that names a protected path or a credential keeps th
     "railway up APPROVAL.md",
     "railway up --config=.approval/log/events.jsonl",
     "railway up .approval/env",
+    // F-12 fold (review-b N2): APFS is case-insensitive.
+    `${UNCLASSIFIED} >> approval.md`,
+    `${UNCLASSIFIED} > Approval.MD`,
+    "frobnicate approvals.md",
+    "frobnicate claude.md",
   ]) {
     const run = claude(dir, command, `t-l-${String(command.length)}`);
     assert.notEqual(run.stdout, "", `${command} must not abstain`);
@@ -375,6 +383,17 @@ test("(n) the abstain is believed only of the bytes attested: an edit between th
   assert.notEqual(back, null);
   // No file at all to read back.
   assert.notEqual(abstainPolicyRefusal(loaded, null, read.records), null);
+  // F-12 fold (review-b S2, mutant attest-skip): bytes that PARSE to the
+  // attested policy but are not the attested bytes (a prose-only edit outside
+  // the yaml block) still refuse, on the attestation half alone.
+  const prose = `${attestedText}\nA prose line nobody attested.\n`;
+  const proseLoaded = loadPolicyText(path, prose);
+  assert.equal(proseLoaded.ok, true);
+  if (!proseLoaded.ok) return;
+  assert.equal(JSON.stringify(proseLoaded.policy), JSON.stringify(loaded.policy), "the edit parses equal");
+  const unattested = abstainPolicyRefusal(loaded, { path, bytes: Buffer.from(prose, "utf8") }, read.records);
+  assert.notEqual(unattested, null);
+  assert.match(unattested?.code ?? "", /^hook-gate-refused:/u);
 });
 
 /** Fail closed: a no-rule segment whose words cannot be checked as written never abstains. */
@@ -394,6 +413,20 @@ test("(o) after a cd (or pushd/popd) the no-rule segment keeps the refusal", () 
     "if cd /tmp; then frobnicate y; fi",
     "while popd; do frobnicate; done",
     "! cd - && frobnicate x",
+    // F-12 fold (review-b M2a): a login-shell script runs where the OUTER cd went.
+    "cd ~/.ssh && bash -c 'frobnicate id_rsa'",
+    "cd ~/.aws && bash -c 'frobnicate credentials'",
+    "cd ~/.claude-b1 && bash -c 'frobnicate settings.json'",
+    "cd .git && bash -c 'frobnicate config'",
+    "cd .approval/log && bash -c 'frobnicate events.jsonl'",
+    "cd .github/workflows && bash -c 'frobnicate ci.yml'",
+    "cd ~/.ssh; bash -c 'frobnicate id_rsa'",
+    "cd ~/.ssh || bash -c 'frobnicate id_rsa'",
+    "cd ~/.ssh && sh -c 'frobnicate id_ed25519'",
+    "pushd sub && zsh -c 'frobnicate x'",
+    // F-12 fold (review-b M2b): zsh's chdir is cd.
+    "chdir Library; frobnicate x",
+    "chdir private; frobnicate odin-token",
   ]) {
     const v = verdict(claude(dir, command, `t-o-${String(command.length)}`));
     assert.equal(v.permission, "deny", command);
@@ -501,5 +534,155 @@ test("(w) a cwd inside a dot-directory, a protected path or a credential home ke
   }
   // The same bare words from the neutral tenant directory still abstain.
   assertAbstained(dir, claude(dir, "frobnicate id_rsa", "t-w-neutral"), before);
+  assert.equal(rawLog(dir), before);
+});
+
+/**
+ * F-12 fold (review-b M1, laundering): a classified command behind a word the
+ * table does not know is not a no-rule segment. Every later word is read as a
+ * command (and a quoted word as the script a runner may hand to a shell); any
+ * answer other than "no rule" keeps today's deny.
+ */
+const LAUNDERED: readonly string[] = [
+  "command npm publish",
+  "builtin npm publish",
+  "command -p npm publish",
+  "command -- npm publish",
+  "command git push origin main",
+  "command claude -p hi",
+  "command security dump-keychain",
+  "command ssh host",
+  "command rm x",
+  "uv run npm publish",
+  "caffeinate npm publish",
+  "caffeinate -i npm publish",
+  "arch npm publish",
+  "nice npm publish",
+  "script -q out npm publish",
+  "screen -d -m npm publish",
+  "tmux new -d npm publish",
+  "su x -c 'npm publish'",
+  "setsid npm publish",
+  "flock lockname npm publish",
+  "taskpolicy -b npm publish",
+  "launchctl asuser 501 npm publish",
+  "gtimeout 5 npm publish",
+  "osascript -e 'do shell script \"npm publish\"'",
+  "parallel npm publish",
+  "chronic npm publish",
+  "unbuffer npm publish",
+  "bunx npm publish",
+  "sg staff npm publish",
+  "sg staff -c 'npm publish'",
+  "strace npm publish",
+  "dtruss npm publish",
+  "lldb npm publish",
+  "busybox rm x",
+  // The quoted script is read segment by segment, not only its first word.
+  "frobnicate 'helper; npm publish'",
+];
+
+test("(x) a classified command behind an unknown word (command, builtin, a runner) keeps today's deny", () => {
+  const dir = ready(
+    policy("abstain", [], [
+      "  vcs.push.main:",
+      "    autonomy: human-only",
+      "  harness.launch.*:",
+      "    autonomy: human-only",
+      "  account.credential:",
+      "    autonomy: human-only",
+    ]),
+  );
+  const before = rawLog(dir);
+  for (const command of LAUNDERED) {
+    const run = claude(dir, command, `t-x-${String(command.length)}-${command.slice(0, 6)}`);
+    assert.notEqual(run.stdout, "", `${command} must not abstain`);
+    assert.equal(verdict(run).permission, "deny", command);
+  }
+  // Fail closed: an unknown CLI whose subcommand is a command the table reads keeps the deny too.
+  const whoami = verdict(claude(dir, "railway whoami", "t-x-whoami"));
+  assert.equal(whoami.permission, "deny");
+  assert.match(whoami.reason, /^hook-unclassified: no rule for railway whoami/u);
+  // A quoted word that reads as unknown words only, and a lookup, still abstain.
+  assertAbstained(dir, claude(dir, "frobnicate 'a b'", "t-x-ab"), before);
+  assertAbstained(dir, claude(dir, "command -v frobnicate", "t-x-v"), before);
+  assert.equal(rawLog(dir), before);
+});
+
+/** Draft 5 of the factory hands policy (W1-12 [F-12]), its yaml block with the key turned on. Synthetic copy. */
+const DRAFT5 = [
+  "# Factory hands policy (draft 5, test copy)",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: supervised-retro",
+  "  channel: cli",
+  "  approval_ttl: 2h",
+  "  on_expiry: reject",
+  "  token_delivery: sealed",
+  "  unclassified_command: abstain",
+  "approvers:",
+  "  carter:",
+  "    channels: [cli]",
+  "classes:",
+  ...[
+    ["read.*", "autonomous"],
+    ["read.shell", "autonomous"],
+    ["files.write.workspace", "autonomous"],
+    ["files.delete.scratch", "autonomous"],
+    ["vcs.commit.branch", "autonomous"],
+    ["vcs.push.branch", "autonomous"],
+    ["vcs.push.main", "autonomous"],
+    ["vcs.pr.*", "autonomous"],
+    ["deps.install", "autonomous"],
+    ["exec.code", "autonomous"],
+    ["log.sync", "autonomous"],
+    ["factory.railway.var", "autonomous"],
+    ["factory.roll", "autonomous"],
+    ["factory.paste", "autonomous"],
+    ["factory.deploy", "autonomous"],
+    ["factory.tool.local", "autonomous"],
+    ["factory.prod.read", "autonomous"],
+    ["factory.referendum", "human-only"],
+    ["factory.ddl", "human-only"],
+    ["factory.secret.rotate", "human-only"],
+    ["factory.npm.publish", "human-only"],
+    ["release.publish", "human-only"],
+    ["factory.partner.message", "human-only"],
+    ["factory.tag.first-roll", "human-only"],
+    ["account.credential", "human-only"],
+    ["policy.core", "human-only"],
+    ["policy.edit.ci", "human-only"],
+    ["log.mutate", "human-only"],
+    ["factory.claims.mutate", "human-only"],
+    ["vcs.history.rewrite", "human-only"],
+    ["vcs.ref.delete", "human-only"],
+    ["harness.launch.*", "human-only"],
+  ].flatMap(([name, autonomy]) => [`  ${String(name)}:`, `    autonomy: ${String(autonomy)}`]),
+  "budgets:",
+  "  global:",
+  "    daily_actions: 20000",
+  "```",
+  "",
+].join("\n");
+
+test("(y) on draft 5 with the key on, the laundered and directory-moved shapes keep today's deny", () => {
+  assert.equal(loadPolicyText("APPROVAL.md", DRAFT5).ok, true);
+  const dir = ready(DRAFT5);
+  const before = rawLog(dir);
+  for (const command of [
+    ...LAUNDERED,
+    "cd ~/.ssh && bash -c 'frobnicate id_rsa'",
+    "cd .approval/log && bash -c 'frobnicate events.jsonl'",
+    "chdir Library; frobnicate x",
+    `${UNCLASSIFIED} >> approval.md`,
+  ]) {
+    const run = claude(dir, command, `t-y-${String(command.length)}-${command.slice(0, 6)}`);
+    assert.notEqual(run.stdout, "", `${command} must not abstain`);
+    assert.equal(verdict(run).permission, "deny", command);
+  }
+  // The key still does its job on draft 5.
+  assertAbstained(dir, claude(dir, UNCLASSIFIED, "t-y-plain"), before);
   assert.equal(rawLog(dir), before);
 });
