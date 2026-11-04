@@ -10177,6 +10177,16 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
    * unknown class is routed exactly as it is counted.
    */
   const readsOnly = classes.every((cls) => !isSideEffectingClass(cls));
+  // F-12 fold (SEC-5): `classes` leaves the no-rule stand-in out, and a no-rule
+  // segment is side-effecting for the floor (an unknown command may write).
+  // Under a tripped floor it never abstains: it keeps today's deny.
+  if (tripped !== null && described.abstain !== undefined) {
+    return {
+      permission: "deny",
+      code: described.abstain.code,
+      detail: `${described.abstain.detail} (loop-escalated (amended SPEC.md §10.2): ${tripped.scope} ${tripped.key} has ${String(tripped.consecutiveFailures)} consecutive failed side-effecting harness tool calls, so a command the classifier cannot read is not handed to the harness. ${loopClearance(tripped.scope, tripped.key)})`,
+    };
+  }
   /**
    * The floor as this invocation applies it: `null` for a command that only
    * looks, whatever the streak says.

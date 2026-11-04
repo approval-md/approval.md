@@ -7105,6 +7105,10 @@ function classifySegment(
       // table does not know (`uv run npm publish`, `caffeinate -i npm publish`,
       // `su x -c 'npm publish'`) is not a no-rule segment. Last, so it runs
       // only for a segment every other guard let through.
+      // F-12 fold (SEC-4): a binary the rule table KNOWS, with a subcommand no
+      // row lists (`npm pub`, a git or gh alias, `make <target>`), is a miss on
+      // a known program, not a no-rule segment: today's deny.
+      knownRuleBin(basename) ||
       // F-12 fold (SEC-2, SEC-3): APFS folds case and Unicode, so `NPM
       // publish`, `ｎｐｍ publish` or a lookalike letter may run a real binary.
       // An ALLOWLIST: the command word and every later word (each is read as a
@@ -7114,7 +7118,8 @@ function classifySegment(
     return {
       ok: false,
       code: "unclassified",
-      ruleless: true,
+      // SEC-4: only a binary no row names is a plain no-rule miss for the tail check.
+      ...(knownRuleBin(basename) ? {} : { ruleless: true as const }),
       ...(guarded ? {} : { noRule: true as const }),
       detail:
         sub === null
@@ -7354,6 +7359,13 @@ const DIRECTORY_VERBS: ReadonlySet<string> = new Set(["cd", "pushd", "popd", "ch
  * a diacritic, a Cyrillic lookalike may all reach a real binary).
  */
 const NO_RULE_COMMAND_WORD = /^[a-z0-9_.+/-]+$/u;
+
+/** Every binary some row of {@link COMMAND_RULES} names (F-12 fold, SEC-4). */
+let KNOWN_RULE_BINS: ReadonlySet<string> | null = null;
+function knownRuleBin(basename: string): boolean {
+  KNOWN_RULE_BINS ??= new Set(COMMAND_RULES.flatMap((rule) => rule.bins));
+  return KNOWN_RULE_BINS.has(basename);
+}
 
 /** Words past which the no-rule tail check refuses outright (fail closed). */
 const NO_RULE_TAIL_WORDS = 64;

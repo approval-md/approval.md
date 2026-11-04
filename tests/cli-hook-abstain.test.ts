@@ -751,3 +751,49 @@ test("(z3) SEC-3: only lower-case ASCII command words stand in (fullwidth, diacr
   }
   assert.equal(rawLog(dir), before);
 });
+
+test("(z4) SEC-4: a binary the rule table knows, with a subcommand no row lists, keeps the deny (aliases, unlisted targets)", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  for (const command of ["npm pub", "npm publ", "git p origin main", "gh rel create v1", "pnpm pub", "frobnicate npm pub"]) {
+    const run = claude(dir, command, `t-z4-${String(command.length)}-${command.slice(0, 5)}`);
+    assert.notEqual(run.stdout, "", `${command} must not abstain`);
+    assert.equal(verdict(run).permission, "deny", command);
+  }
+  assertAbstained(dir, claude(dir, UNCLASSIFIED, "t-z4-plain"), before);
+  assert.equal(rawLog(dir), before);
+});
+
+test("(z5) SEC-5: under a tripped loop floor a no-rule command is never handed to the harness", () => {
+  const dir = ready(policy("abstain", [], ["  files.write.workspace:", "    autonomy: autonomous"]));
+  const call = (event: string, command: string, id: string, response?: unknown): Run =>
+    runCli(
+      ["hook", "claude-code", "--as", "agent:cc", "--dir", dir],
+      dir,
+      JSON.stringify({
+        hook_event_name: event,
+        session_id: "cc-sess-floor",
+        tool_use_id: id,
+        cwd: dir,
+        tool_name: "Bash",
+        tool_input: { command },
+        ...(response === undefined ? {} : { tool_response: response }),
+      }),
+    );
+  // Before any failure the no-rule command abstains in this session.
+  const clean = rawLog(dir);
+  assertAbstained(dir, call("PreToolUse", UNCLASSIFIED, "t-z5-0"), clean);
+  // Three failed side-effecting calls trip the session's floor.
+  for (const id of ["t-z5-1", "t-z5-2", "t-z5-3"]) {
+    assert.equal(verdict(call("PreToolUse", "mkdir -p build", id)).permission, "allow");
+    const post = call("PostToolUse", "mkdir -p build", id, { type: "error", error: "boom" });
+    assert.equal(post.code, 0, post.stderr);
+  }
+  const before = rawLog(dir);
+  const run = call("PreToolUse", UNCLASSIFIED, "t-z5-4");
+  assert.notEqual(run.stdout, "", "a tripped floor must not abstain");
+  const v = verdict(run);
+  assert.equal(v.permission, "deny");
+  assert.match(v.reason, /^hook-unclassified: .*loop-escalated/u);
+  assert.equal(rawLog(dir), before);
+});

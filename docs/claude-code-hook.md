@@ -33,7 +33,10 @@ publish` and `su x -c 'npm publish'` (a quoted word is read as the script a
 runner may hand to a shell, and must be one plain segment that passes the
 same guard) keep today's deny. Because APFS folds case and Unicode (`NPM
 publish` runs npm), the command word and every later word must be lower-case
-ASCII (`[a-z0-9_.+/-]`): anything else keeps the deny. So does an unknown CLI whose
+ASCII (`[a-z0-9_.+/-]`): anything else keeps the deny. A binary the rule
+table knows, with a subcommand no row lists (`npm pub`, a git or gh alias),
+is a miss on a known program and keeps the deny, and under a tripped loop
+floor no command abstains. So does an unknown CLI whose
 subcommand is also a command (`railway whoami`: `whoami` is `read.shell`).
 Anything else is today's deny. Known limits: a bare word can name a symlink in
 a neutral cwd; and an unknown command name may be an alias, a shell function or
