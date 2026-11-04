@@ -7105,10 +7105,11 @@ function classifySegment(
       // table does not know (`uv run npm publish`, `caffeinate -i npm publish`,
       // `su x -c 'npm publish'`) is not a no-rule segment. Last, so it runs
       // only for a segment every other guard let through.
-      // F-12 fold (SEC-2): APFS is case-insensitive (`NPM publish`, `Claude
-      // -p` run the real binaries), so a command word with an upper-case
-      // letter never stands in.
-      (context.noRuleSegments === true && /[A-Z]/u.test(bin)) ||
+      // F-12 fold (SEC-2, SEC-3): APFS folds case and Unicode, so `NPM
+      // publish`, `ｎｐｍ publish` or a lookalike letter may run a real binary.
+      // An ALLOWLIST: the command word and every later word (each is read as a
+      // command by the tail check below) must be lower-case ASCII.
+      (context.noRuleSegments === true && segment.words.slice(cursor).some((word) => !NO_RULE_COMMAND_WORD.test(word.text))) ||
       (context.noRuleSegments === true && tailReachesRule(segment, protectedPaths, context, 0));
     return {
       ok: false,
@@ -7346,6 +7347,14 @@ function noRuleWordRefused(text: string): boolean {
  */
 const DIRECTORY_VERBS: ReadonlySet<string> = new Set(["cd", "pushd", "popd", "chdir"]);
 
+/**
+ * The only spelling a word the no-rule guard reads as a command may have (F-12
+ * fold, SEC-2/SEC-3): lower-case ASCII letters, digits and `_ . + / -`. An
+ * allowlist, because APFS folds case and Unicode (`NPM`, `ｎｐｍ`, a letter with
+ * a diacritic, a Cyrillic lookalike may all reach a real binary).
+ */
+const NO_RULE_COMMAND_WORD = /^[a-z0-9_.+\/-]+$/u;
+
 /** Words past which the no-rule tail check refuses outright (fail closed). */
 const NO_RULE_TAIL_WORDS = 64;
 /** Nesting of quoted scripts the tail check reads before it refuses. */
@@ -7378,16 +7387,11 @@ function tailReachesRule(
   if (depth > NO_RULE_TAIL_DEPTH || segment.words.length > NO_RULE_TAIL_WORDS) return true;
   const off: ClassifierContext = { ...context, noRuleSegments: false, execCode: false };
   for (let at = from; at < segment.words.length; at += 1) {
-    const tail = segment.words.slice(at);
-    const head = tail[0] as LexWord;
-    // SEC-2: APFS is case-insensitive, so `NPM publish` runs npm. A tail is
-    // read as written and with its command word folded to lower case.
-    const folded = head.text.toLowerCase();
-    const readings = folded === head.text ? [tail] : [tail, [{ ...head, text: folded }, ...tail.slice(1)]];
-    for (const words of readings) {
-      const outcome = classifySegment({ ...segment, words }, protectedPaths, off);
-      if (outcome.ok || outcome.ruleless !== true) return true;
-    }
+    const words = segment.words.slice(at);
+    // SEC-2/SEC-3: a word read as a command is lower-case ASCII or refused.
+    if (!NO_RULE_COMMAND_WORD.test((words[0] as LexWord).text)) return true;
+    const outcome = classifySegment({ ...segment, words }, protectedPaths, off);
+    if (outcome.ok || outcome.ruleless !== true) return true;
   }
   for (const word of segment.words) {
     if (!/[\s;&|<>()`'"\\]/u.test(word.text)) continue;
@@ -7405,8 +7409,8 @@ function tailReachesRule(
  * The no-rule guard applied to a script lexed out of a quoted word (F-12 fold,
  * SEC-1): no redirection, heredoc, stdin feed, subshell, substitution or
  * opaque construct; no word that is not a literal, looks like a path, changes
- * directory, or names a protected file or a credential in any case; and no
- * upper-case letter in its command word (SEC-2).
+ * directory, or names a protected file or a credential in any case; and a
+ * command word of lower-case ASCII only (SEC-2, SEC-3).
  */
 function innerPartRefused(part: LexSegment, protectedPaths: readonly ProtectedPathEntry[]): boolean {
   return (
@@ -7416,7 +7420,7 @@ function innerPartRefused(part: LexSegment, protectedPaths: readonly ProtectedPa
     part.subshell ||
     part.redirects.length > 0 ||
     part.bodySubstitutions.length > 0 ||
-    /[A-Z]/u.test(part.words[0]?.text ?? "") ||
+    !NO_RULE_COMMAND_WORD.test(part.words[0]?.text ?? "") ||
     part.words.some(
       (word) =>
         !word.exact ||

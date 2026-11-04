@@ -603,8 +603,9 @@ test("(x) a classified command behind an unknown word (command, builtin, a runne
   const whoami = verdict(claude(dir, "railway whoami", "t-x-whoami"));
   assert.equal(whoami.permission, "deny");
   assert.match(whoami.reason, /^hook-unclassified: no rule for railway whoami/u);
-  // A quoted word that reads as unknown words only, and a lookup, still abstain.
-  assertAbstained(dir, claude(dir, "frobnicate 'a b'", "t-x-ab"), before);
+  // SEC-3: a word with a space is read as a command too, so it is refused even when it names nothing.
+  assert.equal(verdict(claude(dir, "frobnicate 'a b'", "t-x-ab")).permission, "deny");
+  // A lookup of unknown words still abstains.
   assertAbstained(dir, claude(dir, "command -v frobnicate", "t-x-v"), before);
   assert.equal(rawLog(dir), before);
 });
@@ -700,13 +701,15 @@ test("(z) SEC-1: a quoted script stands in only as one plain segment that passes
     "frobnicate -c 'helper < input'",
     "frobnicate -c 'chdir private'",
     "frobnicate -c 'helper approvals.md'",
+    // SEC-3: the allowlist refuses any word with a space, so even a plain quoted script keeps the deny.
+    "frobnicate -c 'helper plain-word'",
   ]) {
     const run = claude(dir, command, `t-z1-${String(command.length)}-${command.slice(14, 22)}`);
     assert.notEqual(run.stdout, "", `${command} must not abstain`);
     assert.equal(verdict(run).permission, "deny", command);
   }
-  // One plain segment of unknown words still abstains.
-  assertAbstained(dir, claude(dir, "frobnicate -c 'helper plain-word'", "t-z1-plain"), before);
+  // Unknown lower-case words still abstain.
+  assertAbstained(dir, claude(dir, "frobnicate -c helper plain-word", "t-z1-plain"), before);
   assert.equal(rawLog(dir), before);
 });
 
@@ -720,12 +723,31 @@ test("(z2) SEC-2: APFS is case-insensitive: an upper-case command word, as writt
     "Claude -p hi",
     "Frobnicate x",
     "frobnicate -c 'Helper x'",
+    // SEC-3: the allowlist also refuses an upper-case argument (it is read as a command by the tail check).
+    "frobnicate README",
   ]) {
     const run = claude(dir, command, `t-z2-${String(command.length)}-${command.slice(0, 6)}`);
     assert.notEqual(run.stdout, "", `${command} must not abstain`);
     assert.equal(verdict(run).permission, "deny", command);
   }
-  // An upper-case ARGUMENT that no rule knows, even folded, still abstains.
-  assertAbstained(dir, claude(dir, "frobnicate README", "t-z2-readme"), before);
+  // Lower-case ASCII words still abstain.
+  assertAbstained(dir, claude(dir, "frobnicate readme", "t-z2-readme"), before);
+  assert.equal(rawLog(dir), before);
+});
+
+test("(z3) SEC-3: only lower-case ASCII command words stand in (fullwidth, diacritic and lookalike letters keep the deny)", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  for (const command of [
+    "\uFF4E\uFF50\uFF4D publish", // fullwidth npm
+    "\u0143pm publish", // Latin capital N with acute
+    "n\u0440m publish", // Cyrillic er in place of p
+    "frobnicate \u0441url x", // a lookalike in a later word
+    "\u00E9cho x", // a lower-case letter outside ASCII
+  ]) {
+    const run = claude(dir, command, `t-z3-${String(command.length)}-${String(command.codePointAt(0))}`);
+    assert.notEqual(run.stdout, "", `${command} must not abstain`);
+    assert.equal(verdict(run).permission, "deny", command);
+  }
   assert.equal(rawLog(dir), before);
 });

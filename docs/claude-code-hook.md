@@ -31,9 +31,9 @@ rule covers. That last check makes `command`, `builtin` and every runner
 transparent: `command npm publish`, `uv run npm publish`, `caffeinate -i npm
 publish` and `su x -c 'npm publish'` (a quoted word is read as the script a
 runner may hand to a shell, and must be one plain segment that passes the
-same guard) keep today's deny. A command word with an upper-case letter never
-stands in, and a later word is also read folded to lower case (APFS runs
-`NPM publish` as `npm publish`). So does an unknown CLI whose
+same guard) keep today's deny. Because APFS folds case and Unicode (`NPM
+publish` runs npm), the command word and every later word must be lower-case
+ASCII (`[a-z0-9_.+/-]`): anything else keeps the deny. So does an unknown CLI whose
 subcommand is also a command (`railway whoami`: `whoami` is `read.shell`).
 Anything else is today's deny. Known limits: a bare word can name a symlink in
 a neutral cwd; and an unknown command name may be an alias, a shell function or
