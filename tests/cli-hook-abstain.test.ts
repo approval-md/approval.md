@@ -22,6 +22,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { abstainPolicyRefusal } from "../src/cli/hook.js";
+import { quotedScriptRefused } from "../src/core/command-class.js";
 import { loadPolicyText } from "../src/core/policy-load.js";
 import { readVerifiedRecords } from "../src/core/state.js";
 
@@ -796,4 +797,53 @@ test("(z5) SEC-5: under a tripped loop floor a no-rule command is never handed t
   assert.equal(v.permission, "deny");
   assert.match(v.reason, /^hook-unclassified: .*loop-escalated/u);
   assert.equal(rawLog(dir), before);
+});
+
+test("(z6) CS2: a harness name or an alias of one never stands in, as the command word or in a tail", () => {
+  const dir = ready(policy("abstain"));
+  const before = rawLog(dir);
+  for (const command of [
+    "claude-bountify -p hi",
+    "claude-b1 -p hi",
+    "claude-edge --resume",
+    "claude-crash",
+    "claude_main -p hi",
+    "codex-b2 exec x",
+    "hermes-x chat",
+    "cursor-x run",
+    "frobnicate claude-b1 -p hi",
+  ]) {
+    const run = claude(dir, command, `t-z6-${String(command.length)}-${command.slice(0, 9)}`);
+    assert.notEqual(run.stdout, "", `${command} must not abstain`);
+    assert.equal(verdict(run).permission, "deny", command);
+  }
+  // A word that only starts with a harness name, with no `-` or `_` after it, still abstains.
+  assertAbstained(dir, claude(dir, "frobnicate claudette", "t-z6-plain"), before);
+  assertAbstained(dir, claude(dir, UNCLASSIFIED, "t-z6-plain2"), before);
+  assert.equal(rawLog(dir), before);
+});
+
+test("(z7) CN1: the SEC-1 quoted-script check, reached past the SEC-3 allowlist, refuses every non-plain script", () => {
+  // Through classifyCommand the SEC-3 allowlist refuses a word with a space or a quote first (test (z)), so SEC-1 is
+  // defence in depth; this calls it directly so a change that disables it fails here.
+  const ctx = { noRuleSegments: true };
+  for (const script of [
+    "helper >> approval.md",
+    "helper > claude.md",
+    "helper < input",
+    "helper; frob2",
+    "helper && frob2",
+    "helper | frob2",
+    "cd private",
+    "chdir private",
+    "helper approvals.md",
+    "helper ~/.ssh/id_rsa",
+    "helper $(frob2)",
+    "Helper x",
+    "npm publish",
+  ]) {
+    assert.equal(quotedScriptRefused(script, [], ctx, 0), true, script);
+  }
+  // Positive control: a plain script of unknown lower-case words passes SEC-1.
+  assert.equal(quotedScriptRefused("helper plain-word", [], ctx, 0), false);
 });

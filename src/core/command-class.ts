@@ -7109,6 +7109,10 @@ function classifySegment(
       // row lists (`npm pub`, a git or gh alias, `make <target>`), is a miss on
       // a known program, not a no-rule segment: today's deny.
       knownRuleBin(basename) ||
+      // F-12 fold round 2 (review-b CS2): a harness name or an alias of one
+      // (`claude-bountify`, `claude-b1`, `claude-edge`, `claude-crash`) is
+      // never a no-rule segment: today's deny.
+      harnessNamed(basename) ||
       // F-12 fold (SEC-2, SEC-3): APFS folds case and Unicode, so `NPM
       // publish`, `ｎｐｍ publish` or a lookalike letter may run a real binary.
       // An ALLOWLIST: the command word and every later word (each is read as a
@@ -7118,8 +7122,9 @@ function classifySegment(
     return {
       ok: false,
       code: "unclassified",
-      // SEC-4: only a binary no row names is a plain no-rule miss for the tail check.
-      ...(knownRuleBin(basename) ? {} : { ruleless: true as const }),
+      // SEC-4: only a binary no row names is a plain no-rule miss for the tail check
+      // (CS2: nor is a harness name, so `frobnicate claude-b1 -p hi` keeps the deny).
+      ...(knownRuleBin(basename) || harnessNamed(basename) ? {} : { ruleless: true as const }),
       ...(guarded ? {} : { noRule: true as const }),
       detail:
         sub === null
@@ -7367,6 +7372,19 @@ function knownRuleBin(basename: string): boolean {
   return KNOWN_RULE_BINS.has(basename);
 }
 
+/**
+ * A command word that names an agent harness or an alias of one (F-12 fold
+ * round 2, review-b CS2): `claude`, `codex`, `hermes`, `cursor`, `muse`,
+ * `grok`, alone or followed by `-` or `_` and anything (`claude-bountify`,
+ * `claude-b1`, `claude-edge`, `claude-crash`, `cursor-agent`). Claude Code's
+ * Bash tool keeps the user's shell aliases, and a text classifier cannot see
+ * an alias, so such a word never stands in as a no-rule segment: today's deny.
+ */
+const HARNESS_NAMED = /^(?:claude|codex|hermes|cursor|muse|grok)(?:[-_].*)?$/u;
+function harnessNamed(basename: string): boolean {
+  return HARNESS_NAMED.test(basename);
+}
+
 /** Words past which the no-rule tail check refuses outright (fail closed). */
 const NO_RULE_TAIL_WORDS = 64;
 /** Nesting of quoted scripts the tail check reads before it refuses. */
@@ -7407,14 +7425,29 @@ function tailReachesRule(
   }
   for (const word of segment.words) {
     if (!/[\s;&|<>()`'"\\]/u.test(word.text)) continue;
-    // SEC-1: a quoted script stands in only as ONE plain segment that passes
-    // the no-rule guard itself; anything else is today's deny.
-    const inner = lex(word.text);
-    if (!inner.ok || inner.segments.length !== 1) return true;
-    const part = inner.segments[0] as LexSegment;
-    if (innerPartRefused(part, protectedPaths) || tailReachesRule(part, protectedPaths, context, depth + 1, 0)) return true;
+    if (quotedScriptRefused(word.text, protectedPaths, context, depth)) return true;
   }
   return false;
+}
+
+/**
+ * SEC-1: a quoted script stands in only as ONE plain segment that passes the
+ * no-rule guard itself; anything else is today's deny. Defence in depth (F-12
+ * fold round 2, review-b CN1): through {@link classifyCommand} every word that
+ * carries a space or a quote is refused first by the SEC-3 allowlist, so this
+ * check is reached today only by its unit test (tests/cli-hook-abstain.test.ts
+ * (z7)). It stays so that a later widening of the allowlist cannot open it.
+ */
+export function quotedScriptRefused(
+  script: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  context: ClassifierContext,
+  depth: number,
+): boolean {
+  const inner = lex(script);
+  if (!inner.ok || inner.segments.length !== 1) return true;
+  const part = inner.segments[0] as LexSegment;
+  return innerPartRefused(part, protectedPaths) || tailReachesRule(part, protectedPaths, context, depth + 1, 0);
 }
 
 /**
