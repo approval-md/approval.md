@@ -85,10 +85,14 @@ defaults to fable):
   evaluation): **opus/sonnet subagents — never fable**.
 - *Token-heavy coding* (feature builds from a settled spec task, schema
   fixture generation, per-channel mirrors like telegram→web, mechanical
-  refactors, test suites against written acceptance criteria): **Opus 5
-  subagents** (`model: "opus"`), orchestrated by fable. Fable writes the
-  spec/task, reviews the diff, and keeps only small context-bound edits
-  inline.
+  refactors, test suites against written acceptance criteria): **Opus 5.5
+  subagents**, spawned as the `opus-high` agent type (`model: opus`,
+  `effort: high`) so effort is pinned high rather than inherited,
+  orchestrated by fable. Fable writes the spec/task, reviews the diff, and
+  keeps only small context-bound edits inline. Give each worker one coherent
+  implementation-and-verification unit with a short brief; it reports on
+  completion, a real blocker, or a material decision — fable does not poll
+  it.
 - *Verification* (running the test matrix, log-verify sweeps, CLI
   output/schema conformance checks after a change): **sonnet 5 subagents**
   handed an explicit pass/fail checklist. Fable steps in only for novel
