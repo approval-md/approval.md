@@ -77,9 +77,10 @@
  * merely finding an empty delivered set. Each call **re-derives** the pending
  * queue from the verified log ({@link buildPendingQueue}), so which requests
  * are pending is always the log's answer and never this process's memory. A
- * request appended while the listener is running is therefore delivered on the
- * next cycle, without a restart; a request that was decided or whose TTL lapsed
- * simply stops appearing in the derivation and is never sent.
+ * request appended while the listener is running also wakes that same dispatch
+ * through a file watcher and one-second stat fallback, even during a long poll.
+ * A request that was decided or whose TTL lapsed simply stops appearing in the
+ * derivation and is never sent.
  *
  * What *is* remembered, and only in {@link DispatchState} for this process's
  * lifetime, is which action keys this listener has already put on the phone.
@@ -99,8 +100,8 @@
  * A key that fails to send stays undelivered, so the next cycle retries it.
  * There is **no attempt limit**: giving up would turn a transient outage into a
  * pending request no human ever sees, which is the one failure this project
- * exists to prevent. The retry rate is bounded by the poll cycle itself (the
- * long-poll timeout, or the channel's doubling backoff after a poll error), and
+ * exists to prevent. Unchanged observation ticks never retry a send. A changed
+ * log or the next poll cycle retries it (with backoff after a poll error), and
  * the stderr warnings are throttled after {@link DISPATCH_LOUD_ATTEMPTS}
  * consecutive failures for one key so a long outage cannot bury the terminal.
  * The one exception is the **startup** dispatch, which still exits non-zero on
@@ -108,7 +109,7 @@
  * learn it immediately rather than watch a listener retry forever.
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, watch, type FSWatcher } from "node:fs";
 import { isAbsolute, resolve as resolvePathSegments } from "node:path";
 
 import { HUMAN_ACTOR_ENV, resolveHumanActor } from "../core/attest.js";
@@ -3896,54 +3897,165 @@ export function wireListener(setup: ListenSetup, streams: Streams): DispatchStat
   return state;
 }
 
+/**
+ * Observation is only a latency hint (SPEC §8/§10.2). In particular, neither
+ * a filesystem event nor this fingerprint is evidence that a request exists.
+ * Excluding atime keeps the verified reads themselves from waking dispatch.
+ */
+function listenerLogFingerprint(logPath: string): { identity: string; version: string } {
+  try {
+    const stat = statSync(logPath, { bigint: true });
+    const identity = `${stat.dev}:${stat.ino}`;
+    return { identity, version: `${identity}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}` };
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code ?? "unknown";
+    return { identity: code, version: code };
+  }
+}
+
 export function startListener(setup: ListenSetup, streams: Streams): RunningListener {
   const { channel } = setup;
   const state = wireListener(setup, streams);
 
   let stopping = false;
+  let watcher: FSWatcher | undefined;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let scheduledDispatch: Promise<void> | undefined;
+  let operation = Promise.resolve();
+  let dispatchFailure: { cause: unknown } | undefined;
+  const closeWatch = (): void => {
+    watcher?.close();
+    watcher = undefined;
+  };
+  const stopObservation = (): void => {
+    closeWatch();
+    if (timer !== undefined) clearInterval(timer);
+    timer = undefined;
+  };
   const stop = (): void => {
     stopping = true;
+    scheduledDispatch = undefined;
+    stopObservation();
     channel.stop();
   };
 
+  // Only finite work holds this queue. getUpdates waits outside it, so a
+  // new request can dispatch immediately while a poll is pending. Updates
+  // enter behind the send that issued their buttons, once every nonce and
+  // paced/review/checkpoint bookkeeping entry is armed.
+  const serialize = (run: () => Promise<void>): Promise<void> => {
+    if (stopping) return Promise.resolve();
+    const next = operation.then(async () => {
+      if (!stopping) await run();
+    });
+    // A malformed update batch remains an ordinary poll failure: listen owns
+    // its retry/backoff. Recover the queue tail, not the caller's rejection.
+    operation = next.catch(() => {});
+    return next;
+  };
+
+  // One promise covers ONE finite pass, not all the wakes it may cause. A
+  // queued pass coalesces hints; once it starts, hints can queue one successor.
+  // beforePoll can therefore reach getUpdates even under continuous appends.
+  const dispatch = (): Promise<void> => {
+    if (stopping) return Promise.resolve();
+    if (scheduledDispatch !== undefined) return scheduledDispatch;
+    scheduledDispatch = serialize(async () => {
+      // Clear on entry, before any await. Clearing on exit would erase a
+      // successor queued while this pass was sending.
+      scheduledDispatch = undefined;
+      try {
+        reportCycle(await dispatchPending(setup, streams, state, new Date().toISOString()), streams);
+      } catch (cause) {
+        dispatchFailure = { cause };
+        stop();
+      }
+    });
+    return scheduledDispatch;
+  };
+
   const done = (async (): Promise<ListenerOutcome> => {
-    // The startup cycle. Same call as every later one; only its *failures* are
-    // treated differently, because an operator who has just mistyped a token or
-    // pointed at an unreadable log should learn it at once rather than watch a
-    // retry loop.
-    const startup = await dispatchPending(setup, streams, state, new Date().toISOString());
-    if (startup.queueError !== undefined) {
-      return { kind: "queue-error", ...startup.queueError };
+    try {
+      // Startup remains fatal on a queue/send failure. No observation exists
+      // yet, so a startup failure cannot leave a timer or watcher behind.
+      const startup = await dispatchPending(setup, streams, state, new Date().toISOString());
+      if (startup.queueError !== undefined) {
+        return { kind: "queue-error", ...startup.queueError };
+      }
+      const firstFailure = startup.failed[0];
+      if (firstFailure !== undefined) {
+        return { kind: "send-failed", message: firstFailure.message };
+      }
+      if (stopping) return { kind: "stopped" };
+
+      let observed = listenerLogFingerprint(setup.logPath);
+      const check = (): void => {
+        if (stopping) return;
+        const next = listenerLogFingerprint(setup.logPath);
+        if (next.identity !== observed.identity) closeWatch();
+        if (next.version !== observed.version) {
+          observed = next;
+          void dispatch();
+        }
+      };
+      const attach = (): void => {
+        if (stopping || watcher !== undefined) return;
+        try {
+          const attached = watch(setup.logPath, (event, filename) => {
+            if (stopping || watcher !== attached) return;
+            // Renames and nameless hints may mean the handle watches an old
+            // inode. Reattach on the bounded fallback, not in an event loop.
+            if (event === "rename" || filename === null) closeWatch();
+            check();
+          });
+          watcher = attached;
+          attached.on("error", () => {
+            if (watcher === attached) closeWatch();
+          });
+        } catch {
+          // A missing path or exhausted watcher budget still has stat/poll.
+          // Do not create a directory or log merely to watch it.
+        }
+      };
+      attach();
+      timer = setInterval(() => {
+        check();
+        attach();
+        check(); // Close the stat-to-attachment race, including inode changes.
+      }, 1000);
+      check();
+      // Also re-derive once after attaching: startup may have awaited a send
+      // while the log grew, before the initial fingerprint was sampled.
+      await dispatch();
+      if (stopping) {
+        if (dispatchFailure !== undefined) throw dispatchFailure.cause;
+        return { kind: "stopped" };
+      }
+
+      const beforePoll = dispatch;
+      const conflictAdvice = conflictAdviceFor(setup);
+      await channel.listen({
+        ...(setup.once ? { once: true } : {}), beforePoll, conflictAdvice,
+        processUpdates: serialize,
+      });
+      stop();
+      await operation;
+      if (dispatchFailure !== undefined) throw dispatchFailure.cause;
+      if (setup.json) {
+        streams.out(`${JSON.stringify({ event: "stopped", ...channel.stats() })}\n`);
+      }
+      return { kind: "stopped" };
+    } finally {
+      // once, rejection and startup failure have the same resource ownership
+      // as stop. An in-flight bounded send drains before done settles; queued
+      // work is suppressed, and no observer can start another pass.
+      stop();
+      await operation;
     }
-    const firstFailure = startup.failed[0];
-    if (firstFailure !== undefined) {
-      return { kind: "send-failed", message: firstFailure.message };
-    }
-    // A stop that arrived during the startup cycle: `listen()` clears its own
-    // stopped flag on entry, so a loop entered now would ignore it and block.
-    if (stopping) return { kind: "stopped" };
-
-    // Every subsequent cycle: re-derive, send what is new, complain and carry
-    // on. Runs before each `getUpdates`, including the poll after a recovered
-    // poll error, so a request appended mid-run is delivered without a restart.
-    const beforePoll = async (): Promise<void> => {
-      reportCycle(await dispatchPending(setup, streams, state, new Date().toISOString()), streams);
-    };
-
-    // APRV-390. The 409's report reads the ownership registry at the moment
-    // the conflict happens; the channel prints what this returns and knows
-    // nothing about instances or files.
-    const conflictAdvice = conflictAdviceFor(setup);
-
-    await channel.listen(
-      setup.once ? { once: true, beforePoll, conflictAdvice } : { beforePoll, conflictAdvice },
-    );
-
-    if (setup.json) {
-      streams.out(`${JSON.stringify({ event: "stopped", ...channel.stats() })}\n`);
-    }
-    return { kind: "stopped" };
-  })();
+  })().then((outcome) => {
+    if (dispatchFailure !== undefined) throw dispatchFailure.cause;
+    return outcome;
+  });
 
   return { done, stop };
 }
