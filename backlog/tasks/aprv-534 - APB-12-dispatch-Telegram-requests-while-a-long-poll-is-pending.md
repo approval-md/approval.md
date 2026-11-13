@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@codex-contextsling'
 created_date: '2026-11-13 04:41'
-updated_date: '2026-11-13 05:29'
+updated_date: '2026-11-13 07:04'
 labels: []
 dependencies: []
 references:
@@ -39,6 +39,8 @@ Review-required refinement: share a finite-operation queue between dispatch and 
 Independent refutation refinement: beforePoll and initial observer attachment must await a finite scheduling barrier, not the entire coalescing runner. Sustained real log changes must not starve the next getUpdates call. Keep trailing passes asynchronous and coalesced, with each pass and received-update batch retaining FIFO exclusion; add a deterministic continuous-append regression.
 
 Preserve transport recovery: the generic FIFO tail recovers for subsequent operations but returns an intake rejection to TelegramChannel.listen for its existing retry/backoff. Only a dispatch wrapper records a fatal unexpected dispatch failure and stops. Add malformed successful-HTTP result:null then valid-result recovery regression.
+
+External review-b45331 fold supersedes the fatal-dispatch sentence above: preserve startup fatal outcomes, but an unexpected dispatch exception after startup reports a sanitized diagnostic and continues; a later wake or poll retries. Preserve finite FIFO fairness, early-tap exclusion and shutdown drain. Add stop-skipped update-batch no-ack coverage and document safe pre-poll expiry sweep.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -51,10 +53,14 @@ Second candidate: 19/19 watcher tests and conformance accepted. Fresh independen
 Final candidate: 22/22 watcher tests and 306/306 focused Telegram regressions pass (actual exit 0); build, typecheck, lint and conformance each exit 0, with 910/910 conformance vectors. AC1 held-poll real-append test; AC2 bursts/mid-send/FIFO tests; AC3 stable-stat/failure/recovery tests; AC4 stop/once/startup/error/JSON-drain tests; AC5 existing channel/minimal/webhook regressions plus real-append corruption, pacing, callback, early-tap and retry tests. Conformance and fresh independent refutation accepted the final finite-pass/error-neutral queue. Independent original fairness/retry reproductions and strict stop/repeated-error probes pass. Full local CI and committed protected-path guard remain delivery gates; task stays In Progress until completed.
 
 Accepted full local CI completed exit 0 on Darwin Node 26.8.2: build, all three test shards, and lint passed; 6946 total tests, 6934 passed, 0 failed, 11 skipped, 1 todo. Shards: 2063, 2400, 2483 tests. Runtime/test hashes still match final conformance and refutation acceptances. Linux GitHub PR CI and committed protected-path guard remain separately reported delivery checks. No live Telegram, provider, version, publish, tag, pin, or merge act.
+
+Reopened for external HOLD45331 S1 plus N1/N4. ZZZ export explicitly paused at a safe checkpoint; sole active implementation is this fold. Existing CI evidence applies only to9c4f4698 until affected checks and review pass on the fold.
+
+Review-b45331 fold completed: unexpected post-startup dispatch exceptions now emit a constant safe warning and preserve polling/retry; startup fatal behavior remains. N1 documents terminal-or-lapsed expiry sweep; N4 real intake/provider stub proves skipped-stop batch offsets0,0,42 with exactly one decision. Watch23/23, focused307/307, build/typecheck/lint/conformance910 each exit0. Affected Astra conformance/refutation accept final hashes; six strict rejection probes0. Full local tier covered6947 tests:6933passed,2failed,11skipped,1todo; both failures were build-freshness because a comment-only N1 refinement landed after compilation. Final rebuild0 and both affected files rerun33/33 exit0, resolving those failures without runtime changes. Sandbox attempt interrupted130 for localhostEPERM retained separately. GitHub exact-fold-head CI still required.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Added watch/stat-driven Telegram dispatch during long polls, using finite FIFO passes shared with update intake so early taps remain bound and sustained appends keep polling. Observer shutdown drains active work before final statistics. Verified 22 watcher regressions, 306 focused regressions, 910 conformance vectors and all full local CI shards (6934 passed, 0 failed; exit 0). Independent conformance/refutation accepted; delivery is one draft PR for external review.
+Watch/stat wakes dispatch during long polls through finite FIFO passes shared with update intake. Post-startup dispatch errors report safely and recover; startup failures remain fatal. Shutdown drains active work and queued taps remain unacknowledged for redelivery. Verified23watch/307focused/910conformance and full-tier coverage with two stale-build failures resolved by rebuild+33-test rerun; independent affected reviews accept. One existing draft PR for external review, no release/merge.
 <!-- SECTION:FINAL_SUMMARY:END -->

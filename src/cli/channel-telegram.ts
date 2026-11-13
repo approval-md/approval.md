@@ -3922,7 +3922,6 @@ export function startListener(setup: ListenSetup, streams: Streams): RunningList
   let timer: ReturnType<typeof setInterval> | undefined;
   let scheduledDispatch: Promise<void> | undefined;
   let operation = Promise.resolve();
-  let dispatchFailure: { cause: unknown } | undefined;
   const closeWatch = (): void => {
     watcher?.close();
     watcher = undefined;
@@ -3942,10 +3941,14 @@ export function startListener(setup: ListenSetup, streams: Streams): RunningList
   // Only finite work holds this queue. getUpdates waits outside it, so a
   // new request can dispatch immediately while a poll is pending. Updates
   // enter behind the send that issued their buttons, once every nonce and
-  // paced/review/checkpoint bookkeeping entry is armed.
+  // paced/review/checkpoint bookkeeping entry is armed. The synchronous
+  // pre-poll sweep is the sole exception: it drops only terminal or lapsed
+  // entries past retention, so it cannot remove a nonce this pass just armed.
   const serialize = (run: () => Promise<void>): Promise<void> => {
     if (stopping) return Promise.resolve();
     const next = operation.then(async () => {
+      // A stopped batch never reaches intake or advances its offset. With no
+      // later getUpdates to acknowledge it, Telegram can redeliver it.
       if (!stopping) await run();
     });
     // A malformed update batch remains an ordinary poll failure: listen owns
@@ -3966,9 +3969,15 @@ export function startListener(setup: ListenSetup, streams: Streams): RunningList
       scheduledDispatch = undefined;
       try {
         reportCycle(await dispatchPending(setup, streams, state, new Date().toISOString()), streams);
-      } catch (cause) {
-        dispatchFailure = { cause };
-        stop();
+      } catch {
+        // A later dispatch exception must not stop receiving taps on cards
+        // already sent. Keep the retry cadence and omit arbitrary exception
+        // text, which can carry payload bytes or credentials.
+        try {
+          streams.err("approval: telegram dispatch failed unexpectedly; the listener is still up and retries on the next changed-log or poll cycle\n");
+        } catch {
+          // A broken diagnostic sink cannot turn this into a detached rejection.
+        }
       }
     });
     return scheduledDispatch;
@@ -4028,7 +4037,6 @@ export function startListener(setup: ListenSetup, streams: Streams): RunningList
       // while the log grew, before the initial fingerprint was sampled.
       await dispatch();
       if (stopping) {
-        if (dispatchFailure !== undefined) throw dispatchFailure.cause;
         return { kind: "stopped" };
       }
 
@@ -4040,7 +4048,6 @@ export function startListener(setup: ListenSetup, streams: Streams): RunningList
       });
       stop();
       await operation;
-      if (dispatchFailure !== undefined) throw dispatchFailure.cause;
       if (setup.json) {
         streams.out(`${JSON.stringify({ event: "stopped", ...channel.stats() })}\n`);
       }
@@ -4052,10 +4059,7 @@ export function startListener(setup: ListenSetup, streams: Streams): RunningList
       stop();
       await operation;
     }
-  })().then((outcome) => {
-    if (dispatchFailure !== undefined) throw dispatchFailure.cause;
-    return outcome;
-  });
+  })();
 
   return { done, stop };
 }

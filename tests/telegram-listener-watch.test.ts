@@ -480,15 +480,36 @@ test("stop during startup drains its send and never attaches observation or ente
   assert.equal(listen.mock.callCount(), 0);
 });
 
-test("unexpected observer dispatch rejection stops polling and releases resources", async (t) => {
+test("unexpected observer dispatch exceptions report safely, keep polling and recover", async (t) => {
   const world = await fixture(t);
   const observer = observation(t);
   const running = await heldPoll(world);
-  t.mock.method(world.channel, "takeReleased", () => { throw new Error("unexpected dispatch failure"); });
-  world.append(); observer.hint();
-  await assert.rejects(running.done, /unexpected dispatch failure/);
+  const original = world.channel.takeReleased.bind(world.channel);
+  let attempts = 0;
+  t.mock.method(world.channel, "takeReleased", () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error(`unexpected dispatch failure ${TOKEN}`);
+    return original();
+  });
+  const first = world.append(); observer.hint();
+  await until(() => world.errors.some((line) => line.includes("dispatch failed unexpectedly")), "safe dispatch warning");
+  assert.equal(world.errors.some((line) => line.includes(TOKEN)), false);
+  assert.equal(observer.closed, 0);
+  assert.equal(observer.cleared, 0);
+  // Stable ticks do not create an eager failure retry loop.
+  observer.tick(); observer.hint(); await delay(10);
+  assert.equal(attempts, 1);
+  world.mock.queueUpdate(messageUpdate({ chatId: CHAT, text: "not a command" }));
+  await until(() => cards(world, first) === 1 &&
+    world.mock.requests.filter((entry) => entry.method === "getUpdates").length >= 2,
+  "next poll cycle retries dispatch and continues polling");
+  const second = world.append(); observer.hint();
+  await until(() => cards(world, second) === 1, "watch observation remains active after recovery");
+  running.stop();
+  assert.deepEqual(await running.done, { kind: "stopped" });
   assert.equal(observer.closed, 1);
   assert.equal(observer.cleared, 1);
+  assertClean(world.unit);
 });
 
 for (const staleCopy of [true, false]) for (const grouped of [false, true]) {
@@ -637,5 +658,73 @@ test("a malformed getUpdates batch retains poll error backoff and retries", asyn
   world.mock.queueUpdate(messageUpdate({ chatId: CHAT, text: "not a command" }));
   await until(() => cards(world, key) === 1, "dispatch after malformed-batch recovery");
   running.stop(); await running.done;
+  assertClean(world.unit);
+});
+
+test("stop skips a queued update batch without advancing or acknowledging its offset", async (t) => {
+  const network = deferred();
+  const offsets: number[] = [];
+  let update: Record<string, unknown> | undefined;
+  let acknowledged = false;
+  const world = await fixture(t, "burst", {
+    fetch: async (url, init) => {
+      if (!url.endsWith("/getUpdates")) return fetch(url, init);
+      const offset = (JSON.parse(init.body) as { offset: number }).offset;
+      offsets.push(offset);
+      await network.promise;
+      if (offset > 41) acknowledged = true;
+      const result = acknowledged || update === undefined ? [] : [{ update_id: 41, ...update }];
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true, result }) };
+    },
+  });
+  world.releaseOnCleanup(network.resolve);
+  const observer = observation(t);
+  let queued = false;
+  const listen = world.channel.listen.bind(world.channel);
+  t.mock.method(world.channel, "listen", (options: TelegramListenOptions) => listen({
+    ...options,
+    processUpdates: async (runBatch) => {
+      queued = true;
+      await options.processUpdates!(runBatch);
+    },
+  }));
+  const first = world.append();
+  const running = world.start();
+  await until(() => offsets.length === 1, "held mock network poll");
+  const send = deferred();
+  world.releaseOnCleanup(send.resolve);
+  const notify = world.channel.notify.bind(world.channel);
+  let sending = false;
+  t.mock.method(world.channel, "notify", async (...args: Parameters<typeof notify>) => {
+    sending = true; await send.promise; return notify(...args);
+  });
+  world.append(); observer.hint();
+  await until(() => sending, "dispatch blocks update intake");
+  update = callbackUpdate({ chatId: CHAT, data: world.mock.callbackDataFor(first, "reject") });
+  network.resolve();
+  await until(() => queued, "returned update batch queued behind dispatch");
+  running.stop(); send.resolve();
+  assert.deepEqual(await running.done, { kind: "stopped" });
+  assert.equal(world.channel.stats().updates, 0);
+  assert.deepEqual(offsets, [0]);
+  assert.equal(acknowledged, false);
+  assert.equal(observer.closed, 1);
+  assert.equal(observer.cleared, 1);
+  const before = readVerifiedRecords(world.unit.logPath);
+  assert.ok(before.ok);
+  assert.equal(before.records.some((record) => record.event === "approval.rejected"), false);
+
+  // The same real channel still has offset 0, so the provider redelivers the
+  // unacknowledged tap. Only the poll after actual intake acknowledges id 41.
+  const redelivered = await world.channel.pollOnce();
+  assert.equal(redelivered.updates, 1);
+  assert.deepEqual(offsets, [0, 0]);
+  assert.equal(acknowledged, false);
+  await world.channel.pollOnce();
+  assert.deepEqual(offsets, [0, 0, 42]);
+  assert.equal(acknowledged, true);
+  const after = readVerifiedRecords(world.unit.logPath);
+  assert.ok(after.ok);
+  assert.equal(after.records.filter((record) => record.event === "approval.rejected" && record.action_key === first).length, 1);
   assertClean(world.unit);
 });
