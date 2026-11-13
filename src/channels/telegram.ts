@@ -3206,6 +3206,13 @@ export interface TelegramListenOptions {
    */
   beforePoll?: () => Promise<void>;
   /**
+   * Optional owner queue for the finite update batch, after getUpdates returns.
+   * A listener dispatching while the network poll waits uses this to keep
+   * callbacks behind delivery bookkeeping (including newly issued nonces).
+   * The network wait itself must remain outside that queue.
+   */
+  processUpdates?: (runBatch: () => Promise<void>) => Promise<void>;
+  /**
    * What the caller knows about who else might be polling this bot (APRV-390).
    *
    * Consulted only when a poll fails with the Bot API's 409, and appended to
@@ -4599,7 +4606,7 @@ export class TelegramChannel implements TestableChannel {
           await options.beforePoll();
           if (this.stopped) return;
         }
-        await this.pollOnce();
+        await this.pollOnce(options);
         backoff = this.backoffMs;
         if (repeats > 0) {
           this.complain(
@@ -4649,7 +4656,7 @@ export class TelegramChannel implements TestableChannel {
    * One `getUpdates` batch, processed. Throws on a transport failure — which is
    * what {@link listen} catches and retries.
    */
-  async pollOnce(): Promise<TelegramPollResult> {
+  async pollOnce(options: Pick<TelegramListenOptions, "processUpdates"> = {}): Promise<TelegramPollResult> {
     this.claimOrThrow("poll");
     // APRV-135. Before the long poll, not after: this is where the loop is
     // about to block for up to `pollTimeoutSeconds`, and a sweep that ran after
@@ -4670,7 +4677,11 @@ export class TelegramChannel implements TestableChannel {
     );
 
     const result = emptyPollResult();
-    for (const raw of updates) await this.intake(raw, result);
+    const runBatch = async (): Promise<void> => {
+      for (const raw of updates) await this.intake(raw, result);
+    };
+    if (options.processUpdates === undefined) await runBatch();
+    else await options.processUpdates(runBatch);
     return result;
   }
 
