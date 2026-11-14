@@ -244,6 +244,8 @@ const LISTEN_FLAGS: Record<string, FlagKind> = {
   "--api-base": "string",
   /** APRV-456: refuse a tap on a button this process is not holding. */
   "--no-stale-copy": "boolean",
+  /** APRV-535: leave `sends_during_poll` out of the getUpdates body. */
+  "--no-sends-during-poll": "boolean",
   "--poll-timeout": "string",
   "--once": "boolean",
   /** APRV-390: start on a credential this instance did not configure. */
@@ -371,6 +373,16 @@ export interface ListenSetup {
    * unique within one Bot API deployment and nothing more.
    */
   apiBase: string;
+  /**
+   * `--no-sends-during-poll` (APRV-535): stop {@link startListener} saying
+   * `sends_during_poll` in its `getUpdates` body.
+   *
+   * Absent, the polling listener says it, because it does send a new
+   * request's card while its poll is held (APRV-534's log watch). The flag
+   * withdraws only the claim: the watch and its dispatch run exactly as
+   * before. Telegram's own API base never sees the field either way.
+   */
+  noSendsDuringPoll?: boolean;
   /**
    * How the one-sentence model gloss is obtained (APRV-144).
    *
@@ -836,6 +848,8 @@ export interface ListenRequest {
    * {@link apiBase} names anything but the Bot API; see {@link staleCopyFor}.
    */
   noStaleCopy?: boolean;
+  /** `--no-sends-during-poll` (APRV-535). See {@link ListenSetup.noSendsDuringPoll}. */
+  noSendsDuringPoll?: boolean;
   /** `--poll-timeout` as typed, or `null` for the channel's own default. */
   pollTimeout: string | null;
   once: boolean;
@@ -1016,6 +1030,8 @@ export function prepareListen(request: ListenRequest): ListenPreparation {
       crossInstance,
       allowCrossInstance: request.allowCrossInstance === true,
       apiBase: request.apiBase ?? TELEGRAM_DEFAULT_API_BASE,
+      // APRV-535. Present only when the operator turned the claim off.
+      ...(request.noSendsDuringPoll === true ? { noSendsDuringPoll: true } : {}),
 
       gateOptions: { policy: request.policy },
       tagOptions: {
@@ -1144,6 +1160,8 @@ function setUp(
     apiBase: stringFlag(flags, "--api-base"),
     // APRV-456.
     noStaleCopy: boolFlag(flags, "--no-stale-copy"),
+    // APRV-535.
+    noSendsDuringPoll: boolFlag(flags, "--no-sends-during-poll"),
     pollTimeout: stringFlag(flags, "--poll-timeout"),
     once: boolFlag(flags, "--once"),
     json,
@@ -4042,9 +4060,16 @@ export function startListener(setup: ListenSetup, streams: Streams): RunningList
 
       const beforePoll = dispatch;
       const conflictAdvice = conflictAdviceFor(setup);
+      // APRV-535. The claim is made here and nowhere else, because this is the
+      // one loop whose cards go out while its poll is held: the watch and the
+      // timer above are armed and `processUpdates` keeps getUpdates outside the
+      // dispatch queue. A one-batch `--once` run says nothing, and the
+      // channel's own default is off, so no other caller can send it.
+      const sendsDuringPoll = !setup.once && setup.noSendsDuringPoll !== true;
       await channel.listen({
         ...(setup.once ? { once: true } : {}), beforePoll, conflictAdvice,
         processUpdates: serialize,
+        ...(sendsDuringPoll ? { sendsDuringPoll: true } : {}),
       });
       stop();
       await operation;

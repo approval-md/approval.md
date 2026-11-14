@@ -294,6 +294,8 @@ const UP_FLAGS: Record<string, FlagKind> = {
   "--api-base": "string",
   /** APRV-456: refuse a Telegram tap on a button this process is not holding. */
   "--no-stale-copy": "boolean",
+  /** APRV-535: leave `sends_during_poll` out of the Telegram getUpdates body. */
+  "--no-sends-during-poll": "boolean",
   "--poll-timeout": "string",
   "--port": "string",
   "--no-telegram": "boolean",
@@ -567,6 +569,9 @@ export function commandUp(
       // APRV-456. A relayed --api-base already turns the stale-copy fallback
       // off; this is the explicit form for any other shape.
       noStaleCopy: boolFlag(flags, "--no-stale-copy"),
+      // APRV-535. The same flag as on `channel telegram listen`: this IS that
+      // listener.
+      noSendsDuringPoll: boolFlag(flags, "--no-sends-during-poll"),
       pollTimeout: stringFlag(flags, "--poll-timeout"),
       once,
       json,
