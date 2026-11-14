@@ -274,6 +274,39 @@ export {
 /** The real Bot API. Overridden only by tests, against a local mock. */
 export const TELEGRAM_DEFAULT_API_BASE = "https://api.telegram.org";
 
+/**
+ * The one extra `getUpdates` body field a listener sends when it puts a new
+ * request's card on the phone while its own poll is still held (APRV-535).
+ *
+ * Since APRV-534 the polling listener (`startListener`) wakes dispatch from a
+ * log watch, so a card no longer waits for the poll to end. A relay in front
+ * of the Bot API cannot see that from outside; this field is how the listener
+ * says it, so a relay may hold this box's poll longer. It is a claim about
+ * this process's own behaviour and nothing more: no update, decision or
+ * permission depends on it. Never sent to Telegram's own API base (see
+ * {@link isTelegramOwnApiBase}), so a request to the real Bot API is byte for
+ * byte what it was.
+ */
+export const TELEGRAM_SENDS_DURING_POLL_FIELD = "sends_during_poll";
+
+const TELEGRAM_DEFAULT_API_HOST = new URL(TELEGRAM_DEFAULT_API_BASE).hostname;
+
+/**
+ * Whether `apiBase` is Telegram's own Bot API (APRV-535): its host is
+ * {@link TELEGRAM_DEFAULT_API_BASE}'s, whatever the case, port or path.
+ *
+ * A base that does not parse as a URL counts as Telegram's own, so the
+ * {@link TELEGRAM_SENDS_DURING_POLL_FIELD} claim is sent only where a base is
+ * known to be somebody else's.
+ */
+export function isTelegramOwnApiBase(apiBase: string): boolean {
+  try {
+    return new URL(apiBase).hostname === TELEGRAM_DEFAULT_API_HOST;
+  } catch {
+    return true;
+  }
+}
+
 /** Telegram's hard limit on a message's text. */
 export const TELEGRAM_MAX_MESSAGE_CHARS = 4096;
 
@@ -3213,6 +3246,13 @@ export interface TelegramListenOptions {
    */
   processUpdates?: (runBatch: () => Promise<void>) => Promise<void>;
   /**
+   * Say {@link TELEGRAM_SENDS_DURING_POLL_FIELD} in every `getUpdates` body
+   * (APRV-535). OFF unless a caller passes `true`, and only the listener that
+   * really dispatches while the poll is held (`startListener`, APRV-534) does.
+   * Ignored against Telegram's own API base ({@link isTelegramOwnApiBase}).
+   */
+  sendsDuringPoll?: boolean;
+  /**
    * What the caller knows about who else might be polling this bot (APRV-390).
    *
    * Consulted only when a poll fails with the Bot API's 409, and appended to
@@ -4656,7 +4696,9 @@ export class TelegramChannel implements TestableChannel {
    * One `getUpdates` batch, processed. Throws on a transport failure — which is
    * what {@link listen} catches and retries.
    */
-  async pollOnce(options: Pick<TelegramListenOptions, "processUpdates"> = {}): Promise<TelegramPollResult> {
+  async pollOnce(
+    options: Pick<TelegramListenOptions, "processUpdates" | "sendsDuringPoll"> = {},
+  ): Promise<TelegramPollResult> {
     this.claimOrThrow("poll");
     // APRV-135. Before the long poll, not after: this is where the loop is
     // about to block for up to `pollTimeoutSeconds`, and a sweep that ran after
@@ -4666,13 +4708,18 @@ export class TelegramChannel implements TestableChannel {
     const nowMs = this.now();
     if (nowMs - this.lastSweepMs >= TELEGRAM_SWEEP_INTERVAL_MS) this.sweep(nowMs);
 
+    const body: Record<string, unknown> = {
+      offset: this.offset,
+      timeout: this.pollTimeoutSeconds,
+      allowed_updates: this.allowedUpdates(),
+    };
+    // APRV-535. Appended last, so the body is today's plus exactly one field.
+    if (options.sendsDuringPoll === true && !isTelegramOwnApiBase(this.apiBase)) {
+      body[TELEGRAM_SENDS_DURING_POLL_FIELD] = true;
+    }
     const updates = await this.call<unknown[]>(
       "getUpdates",
-      {
-        offset: this.offset,
-        timeout: this.pollTimeoutSeconds,
-        allowed_updates: this.allowedUpdates(),
-      },
+      body,
       this.requestTimeoutMs ?? (this.pollTimeoutSeconds + 10) * 1000,
     );
 

@@ -4761,6 +4761,17 @@ key and nothing in an update can set it or clear it. `approval up` and
 [`channel telegram webhook`](#channel-telegram-webhook) take the same flag and
 apply the same rule.
 
+**Cards during the poll, and `--no-sends-during-poll`** (APRV-534, APRV-535).
+While a `getUpdates` is held, the listener watches the log (a file watch plus a
+one-second stat) and sends a newly appended request's card at once, without
+waiting for the poll to end. When `--api-base` names anything other than the
+Bot API, each `getUpdates` body says so with one more field,
+`"sends_during_poll": true`, so a relay may hold this listener's poll longer.
+Nothing about the decision path reads it. To `https://api.telegram.org` the
+field is never sent and the body is exactly what it was. `--once` does not send
+it, and `--no-sends-during-poll` leaves it out without changing the watch or
+when cards are sent. `approval up` takes the same flag.
+
 **The execution token is printed on this terminal's stdout and is never sent to
 Telegram.** A chat transcript is stored on someone else's servers, backed up to
 phones, and readable by anyone later added to the chat — it is not a credential

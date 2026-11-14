@@ -15,6 +15,19 @@ before a tag.
 
 ## Unreleased
 
+### Added
+
+- **The polling listener says, in its `getUpdates` body, that it sends cards
+  during the poll (APRV-535).** Since APRV-534 a new request's card goes out
+  while the listener's poll is still held. Against any `--api-base` other than
+  the Bot API, the body of each `getUpdates` from `channel telegram listen` and
+  `approval up` now carries one more field, `"sends_during_poll": true`, so a
+  relay can hold that box's poll longer. The field name is exported as
+  `TELEGRAM_SENDS_DURING_POLL_FIELD`. A request to `https://api.telegram.org` is
+  byte for byte what it was, `--once` sends no field, and
+  `--no-sends-during-poll` leaves it out. With no relay that reads it, nothing
+  changes.
+
 ## 0.4.7 — 2026-10-21
 
 0.4.7 carries everything merged since 0.4.6. It ends EDGEOS-BLOCK: from the

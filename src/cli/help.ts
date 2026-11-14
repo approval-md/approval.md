@@ -2043,7 +2043,7 @@ export const TELEGRAM_LISTEN_HELP = `approval channel telegram listen — delive
 Usage:
   approval channel telegram listen [--once] [--as human:<id>] [--payloads <f>]
                                    [--policy <p>] [--dir <p>] [--log <p>] [--no-gloss]
-                                   [--gloss-provider <claude|codex>] [--gloss-model <id>] [--api-base <url>] [--no-stale-copy] [--poll-timeout <s>] [--json]
+                                   [--gloss-provider <claude|codex>] [--gloss-model <id>] [--api-base <url>] [--no-stale-copy] [--poll-timeout <s>] [--json] [--no-sends-during-poll]
 
 Flags:
   --no-gloss / --gloss-provider <p>   drop gloss (ON by default) / choose claude|codex (default claude)
@@ -2052,7 +2052,7 @@ Flags:
   --payloads <f>   OPTIONAL OVERRIDE: JSON file of action key -> payload
   --policy <p> / --dir <p> / --log <p>   the policy, its dir, the log written to
   --api-base <url> / --poll-timeout <s> / --allow-cross-instance   Bot API base / long-poll seconds (25) / start on another instance's bot
-  --no-stale-copy / --once / --json   refuse a button this process is not holding (implied by any --api-base but the Bot API) / one getUpdates batch then exit / ONE JSON OBJECT PER LINE
+  --no-stale-copy / --no-sends-during-poll / --once / --json   refuse a button this process is not holding (implied by any --api-base but the Bot API) / leave sends_during_poll out of getUpdates / one getUpdates batch then exit / ONE JSON OBJECT PER LINE
   -h, --help       this text
 Config is ENVIRONMENT-ONLY and the policy names the variables. Delivery is per cycle;
 a new request reaches the phone without restart. THE TOKEN IS PRINTED HERE, NEVER SENT TO TELEGRAM.
@@ -2190,12 +2190,12 @@ export const UP_HELP = `approval up — the daemon and every configured channel,
 Usage:
   approval up [every "daemon run" flag] [--as human:<id>] [--port <n>]
               [--payloads <f>] [--payload-dir <d>] [--api-base <url>] [--no-stale-copy] [--poll-timeout <s>] [--no-gloss]
-              [--gloss-provider <claude|codex>] [--gloss-model <id>] [--no-telegram] [--no-web] [--no-preflight] [--no-build]
+              [--gloss-provider <claude|codex>] [--gloss-model <id>] [--no-telegram] [--no-web] [--no-preflight] [--no-build] [--no-sends-during-poll]
 
 Flags (every "daemon run" flag, unchanged, plus):
   --as human:<id>  the approver every decision is recorded against
   --payloads <f> / --payload-dir <d>  payload overrides: telegram / web
-  --api-base <url> / --poll-timeout <s> / --no-stale-copy   Bot API base / long-poll seconds / refuse a button this process is not holding (implied by any base but the Bot API)
+  --api-base <url> / --poll-timeout <s> / --no-stale-copy / --no-sends-during-poll   Bot API base / long-poll seconds / refuse a button this process is not holding (implied by any base but the Bot API) / leave sends_during_poll out of getUpdates (sent only to a base that is not the Bot API)
   --port <n>       queue-page port. Precedence: --port, channels.web.port
   --no-telegram / --no-web / --allow-cross-instance   leave that channel out / start on another instance's bot
   --no-gloss / --restart-backoff <d>   drop gloss / first retry wait
