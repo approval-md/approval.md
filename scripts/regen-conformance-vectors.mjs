@@ -5488,7 +5488,10 @@ const SUITES = [
     // short name. First numbered 1.9.0; APRV-511 (in 0.4.6) merged first and
     // took 1.9.0, so by the 1.4.0 rule (the number is claimed at merge) this set
     // takes 1.10.0. Regenerating over 0.4.6 leaves every earlier vector,
-    // APRV-511's 1.9.0 set included, byte-identical.
+    // APRV-511's 1.9.0 set included, byte-identical. Rebuilt on 0.4.8, whose
+    // command-class file is still 1.9.0 (354 vectors): regenerating there
+    // leaves all 354 byte-identical and adds these twelve. The letter-case
+    // and no-rule abstain checks added on 0.4.8 move no vector.
     vectors_version: "1.10.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
