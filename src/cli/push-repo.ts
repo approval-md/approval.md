@@ -259,6 +259,11 @@ export function runsConcurrently(command: string): boolean {
  * reads, except that `cd` moves the directory, which is followed: a literal
  * absolute target, `.`/`..`-relative, or `~/`. A bare relative name is looked up
  * through `CDPATH` by the shell, so it is not followed.
+ *
+ * "A read" is a `read.*` class and nothing else. Under
+ * `defaults.unclassified_command: abstain` a segment no rule covers stands in
+ * as `NO_RULE_CLASS` (`unclassified`); nobody can say what that program
+ * writes, so it is not a read here, and a push on its line is unreadable.
  */
 function directoriesFor(
   segments: readonly ClassifiedSegment[],

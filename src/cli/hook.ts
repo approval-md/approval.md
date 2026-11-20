@@ -4069,12 +4069,14 @@ export function refineSkillScripts(
 }
 
 /**
- * The classifier, its context, and all six impure refinements, in the one
- * order every caller must use.
+ * The classifier, its context, and all seven impure refinements, in the one
+ * order every caller must use: the push repository (APRV-518), the history
+ * rewrite, scratch deletes, the read scope, the write scope, skill scripts and
+ * credential reads.
  *
  * `hook classify` printing a different class from the one `hook claude-code`
  * decides would make the explainer a different program (APRV-108's note), and
- * that stays true now there are six refinements in the chain.
+ * that stays true now there are seven refinements in the chain.
  *
  * `readRoots` is the one argument whose ABSENCE is the loose answer rather than
  * the strict one (APRV-347), so it is passed explicitly at every call site: an
@@ -4112,7 +4114,11 @@ export function classifyForHook(
   });
   // APRV-518. A `git push` whose refs its remote configuration or its current
   // branch decides is answered from the checkout it runs in. First, because it
-  // reads only push segments, which no pass below changes.
+  // reads only push segments, which no pass below changes. It runs on the
+  // classification `noRuleSegments` shaped: a no-rule stand-in
+  // (`NO_RULE_CLASS`, `defaults.unclassified_command: abstain`) is not a
+  // `read.*` class, so the pass counts it as a segment that may change what
+  // git reads, and a push on the same line is answered as unreadable.
   const pushed = refinePushRepo(classified, cwd, command);
   const rewritten = refineRewrite(pushed.result, cwd);
   const scratched = refineScratchDelete(rewritten.result, roots);
