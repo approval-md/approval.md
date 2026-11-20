@@ -15,11 +15,71 @@ before a tag.
 
 ## Unreleased
 
+## 0.4.8 — 2026-11-20
+
+0.4.8 carries everything merged since 0.4.7. On Telegram, a new request's
+approval card goes out as soon as the request is in the log, while the polling
+listener's `getUpdates` is still held, instead of after the poll returns
+(APRV-534, #672), and the listener says so in its poll body to a relay that is
+not the Bot API (APRV-535, #673). For Claude Code, an opt-in policy key,
+`defaults.unclassified_command: abstain`, lets the harness's own permission
+flow decide a narrow, fail-closed set of Bash calls that no built-in rule
+covers (#670). **With the key absent, which is the default, the hook's
+verdicts are 0.4.7's.** A request to `https://api.telegram.org` is byte for
+byte 0.4.7's, and webhook mode is unchanged. `SPEC.md`, `APPROVAL.md` and
+`conformance/` are unchanged since 0.4.7. **Rollout note:** a core older than
+0.4.8 refuses the `unclassified_command` key (the schema's `defaults` admits
+no unknown key) and fails the whole policy closed, so a policy gains the key
+only after every core that reads it runs 0.4.8.
+
+### Changed
+
+- **The polling listener sends a new request's card during a held long poll
+  (APB-12, APRV-534, #672).** Before, a request appended while `getUpdates`
+  was held waited for the poll to return before its card was sent. Now the
+  listener behind `channel telegram listen` and `approval up` wakes its
+  existing verified-log dispatch when the log changes, through a file watcher
+  with a one-second stat fallback for missed notifications. A wake is only a
+  latency hint: every card is still derived from the verified log, and an
+  unchanged log never retries a send. Dispatch passes and received update
+  batches share one FIFO queue of finite work, so a tap that arrives before
+  its card's delivery nonce is registered waits for it, and sustained appends
+  cannot starve the next `getUpdates`. A dispatch exception after startup
+  prints one fixed diagnostic (no exception text), and the listener keeps
+  receiving taps and retries on the next wake or poll; a startup failure is
+  fatal, as before. Stop drains the active pass before the final statistics,
+  and an update batch a stop skipped is not acknowledged, so Telegram can
+  redeliver it. Delivery pacing and the payload, identity and authorization
+  checks are unchanged, and so are direct polling and webhook mode.
+
 ### Added
 
+- **`defaults.unclassified_command: deny | abstain` for the Claude Code hook
+  (F-12, #670).** Absent or `deny` is 0.4.7's behaviour: a Bash command with a
+  segment no built-in rule covers is denied `hook-unclassified`. Under an
+  attested `abstain`, such a call gets no verdict (empty stdout, exit 0,
+  nothing appended, and its PostToolUse half is silent), and Claude Code's own
+  permission flow decides it. The verdict is still never "ask". The abstain
+  is fail-closed: it applies only when every other segment is a read that
+  resolves `autonomous`, no segment changes directory, no word of the no-rule
+  segment looks like a path or carries `$`, `=` or `:`, no word names a
+  protected file or a credential in any letter case, no later word read as a
+  command is one a rule covers (`command npm publish`, `uv run npm publish`),
+  the command words are lower-case ASCII, no rule lists the binary, the
+  command word does not name an agent harness or an alias of one
+  (`^(claude|codex|hermes|cursor|muse|grok)([-_].*)?$`), the loop floor is not
+  tripped, and the policy bytes read once are the attested bytes. Anything
+  else is the deny. `opaque` and `unparseable` commands, command
+  substitutions, an open window, every other harness and `approval hook
+  classify` keep 0.4.7's answers, and an unattested policy carrying the key is
+  refused `hook-gate-refused:policy-not-attested`. `schema/policy.schema.json`
+  gains the key; `docs/claude-code-hook.md` lists the rule and its known
+  limits (a bare word naming a symlink, shell aliases, functions and
+  `autocd`).
+
 - **The polling listener says, in its `getUpdates` body, that it sends cards
-  during the poll (APRV-535).** Since APRV-534 a new request's card goes out
-  while the listener's poll is still held. Against any `--api-base` other than
+  during the poll (APRV-535, #673).** Since APRV-534 a new request's card goes
+  out while the listener's poll is still held. Against any `--api-base` other than
   the Bot API, the body of each `getUpdates` from `channel telegram listen` and
   `approval up` now carries one more field, `"sends_during_poll": true`, so a
   relay can hold that box's poll longer. The field name is exported as
@@ -27,6 +87,19 @@ before a tag.
   byte for byte what it was, `--once` sends no field, and
   `--no-sends-during-poll` leaves it out. With no relay that reads it, nothing
   changes.
+
+### Tests
+
+- **The sandbox probe accepts `ENETUNREACH` as the deny inside a Linux
+  network namespace (#671).** On `bwrap`/`unshare` the egress test now
+  requires `ENETUNREACH` within its millisecond bound, while macOS Seatbelt
+  still requires `EPERM`; each mechanism accepts only its own errno. Tests
+  only; the probe script and the runtime are unchanged.
+
+### Site
+
+- **The weekly agent-hours figure is refreshed (2026-10-25, 2026-11-16;
+  #669, #674)** in `metrics/agent-hours.json`. The runtime is unchanged.
 
 ## 0.4.7 — 2026-10-21
 
