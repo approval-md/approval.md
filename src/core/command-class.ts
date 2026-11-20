@@ -2476,14 +2476,21 @@ function isUnknownValue(word: string): boolean {
 /** A bare release tag: the conventional `v` plus a semantic-version-shaped value. */
 const V_PREFIXED_SEMVER = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 
-/** Does one side of a push refspec explicitly name a tag? */
+/**
+ * Does one side of a push refspec explicitly name a tag?
+ *
+ * The `refs/`, `tags/` and `heads/` prefixes are compared without case
+ * (APRV-518): on a case-insensitive filesystem a loose `refs/TAGS/t1` is the
+ * file `refs/tags/t1`, so a spelling git may resolve to a tag is read as one.
+ */
 function isTagRef(name: string): boolean {
-  if (name.startsWith("refs/tags/")) return true;
-  if (name.startsWith("refs/heads/")) return false;
+  const folded = name.toLowerCase();
+  if (folded.startsWith("refs/tags/")) return true;
+  if (folded.startsWith("refs/heads/")) return false;
   // APRV-518: git's ref DWIM tries `refs/<name>` first, so `tags/t1` is
   // `refs/tags/t1` wherever that tag exists (a local source always, a remote
   // destination when the remote has it).
-  if (name.startsWith("tags/")) return true;
+  if (folded.startsWith("tags/")) return true;
   return V_PREFIXED_SEMVER.test(name);
 }
 
@@ -2494,12 +2501,18 @@ function isTagRef(name: string): boolean {
  * remote's refs through `refs/%s` first, and `git push origin lane:heads/main`
  * moved the remote trunk on git 2.50.1. Any other `refs/…` or `tags/…` /
  * `remotes/…` is not a branch.
+ *
+ * The prefixes are compared without case, like the branch name itself
+ * ({@link isTrunkBranch}): on a case-insensitive filesystem a remote's loose
+ * `refs/HEADS/main` is its `refs/heads/main`, so `lane:refs/HEADS/main` and
+ * `lane:HEADS/MAIN` read as the trunk wherever their lower-case spelling does.
  */
 function destinationBranch(destination: string): string | null {
-  if (destination.startsWith("refs/heads/")) return destination.slice("refs/heads/".length);
-  if (destination.startsWith("refs/")) return null;
-  if (destination.startsWith("heads/")) return destination.slice("heads/".length);
-  if (destination.startsWith("tags/") || destination.startsWith("remotes/")) return null;
+  const folded = destination.toLowerCase();
+  if (folded.startsWith("refs/heads/")) return destination.slice("refs/heads/".length);
+  if (folded.startsWith("refs/")) return null;
+  if (folded.startsWith("heads/")) return destination.slice("heads/".length);
+  if (folded.startsWith("tags/") || folded.startsWith("remotes/")) return null;
   return destination;
 }
 
@@ -2881,8 +2894,12 @@ function gitPushClass(
   // No repository word (`git push`, `git push --repo=m`): the push may use any
   // configured remote, so every one of them is in play.
   const inPlay = remoteWord === undefined ? [...facts.remotes.keys()] : [remoteWord];
+  // A legacy file is opened by its name, so on a case-insensitive filesystem
+  // `git push OLD` reads `remotes/old`: the name is compared without case.
   const legacy =
-    remoteWord === undefined ? facts.legacyRemotes.length > 0 : facts.legacyRemotes.includes(remoteWord);
+    remoteWord === undefined
+      ? facts.legacyRemotes.length > 0
+      : facts.legacyRemotes.some((name) => name.toLowerCase() === remoteWord.toLowerCase());
   if (legacy) return { class: "vcs.history.rewrite", rule: GIT_PUSH_CONFIG_UNREADABLE_RULE };
 
   const headAs = facts.head === null || facts.headIsDefault ? "main" : `refs/heads/${facts.head}`;
@@ -2913,9 +2930,12 @@ function gitPushClass(
       });
     }
   }
+  // Compared without case: a loose `refs/tags/v1` answers `git push origin V1`
+  // on a case-insensitive filesystem, and the remote then gets a tag.
+  const foldedTags = new Set([...facts.tags].map((tag) => tag.toLowerCase()));
   const localTags = named
     .map((refspec) => refspec.replace(/^\+/u, ""))
-    .filter((name) => facts.tags.has(name));
+    .filter((name) => foldedTags.has(name.toLowerCase()));
   if (localTags.length > 0) {
     candidates.push({ class: "release.publish", rule: "git-push-local-tag", path: localTags.join(" ") });
   }
