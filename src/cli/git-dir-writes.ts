@@ -529,9 +529,11 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
     // itself (`sort -o`, `uniq in out`, sed's `w`: follow-up, item B);
     // `git`'s own words are file writes only where git writes through them.
     const gitWrites = bin === "git" ? gitWriteTargets(shape.args).filter(pathOrPattern) : [];
-    // A sed script's possible file keeps its blanks (`w .git/my config`).
-    const readOutputs =
-      bin === null ? [] : readWriteTargets(bin, shape.args).filter((word) => (bin === "sed" ? word.length > 0 && !/[$`]/u.test(word) : pathOrPattern(word)));
+    // A sed script's possible file is LITERAL text: sed expands nothing in
+    // it, so it keeps its blanks, a `$`, a backtick or a glob character, and
+    // is placed exactly as written (follow-up review).
+    const literal = new Set(bin === "sed" ? readWriteTargets(bin, shape.args).filter((word) => word.length > 0) : []);
+    const readOutputs = bin === null ? [] : bin === "sed" ? [...literal] : readWriteTargets(bin, shape.args).filter(pathOrPattern);
     const named =
       reads || segment.rule === "redirect-write"
         ? readOutputs
@@ -561,6 +563,10 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
       // to on disk, or by its text when it cannot be expanded.
       const placed: { word: string; spelled: string }[] = [];
       for (const word of candidates) {
+        if (literal.has(word)) {
+          placed.push({ word, spelled: word });
+          continue;
+        }
         const spelled = word.startsWith("~/") && home !== undefined ? `${home}/${word.slice(2)}` : word;
         if (!isPattern(spelled)) {
           placed.push({ word, spelled });

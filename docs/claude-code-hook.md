@@ -979,7 +979,8 @@ that file: `sort -o` / `--output`, `uniq`'s second operand and `tree -o`;
 its class is otherwise a read. A sed script is not parsed, since every
 hand-written reading differs from BSD's or GNU's somewhere: a script with a
 `w` or `W` anywhere may write, and the rest of each such line and every
-word of the script are possible targets under the same rules. This Mac's
+word of the script are possible targets under the same rules, each judged
+as its literal text, since sed expands nothing in a `w` name. This Mac's
 sed has no `e` command (GNU sed's runs a shell command); a script holding
 one is judged by the same text rule and is otherwise a read.
 A read whose only write is its redirection writes nothing through its own

@@ -4545,6 +4545,30 @@ function lineSpellsGitIndirectly(segments: readonly LexSegment[]): boolean {
   });
 }
 
+/**
+ * A sed script's possible file names judged as sed reads them: LITERALLY
+ * (sed expands no glob, brace, `~` or variable in a `w` name), so `.gi?`
+ * names a directory called `.gi?`, never `.git`. A name with a `.git`
+ * segment, or a relative one that lands in `.git` after the line's `cd`s,
+ * is `git-dir-write`; and on a line that spells `.git` indirectly (S3), a
+ * name the SHELL still expands (`$D` inside double quotes) or a relative
+ * one after a `cd` the text cannot place is too.
+ */
+function sedLiteralGitWrite(
+  words: readonly string[],
+  dir: ShellDir | null | undefined,
+  lineNamesGit: boolean,
+): { class: string; rule: string; path: string } | null {
+  const literalGit = (path: string): boolean => pathSegments(path).some((segment) => segment.toLowerCase() === ".git");
+  const hit = words.find(
+    (word) =>
+      literalGit(word) ||
+      (dir !== null && dir !== undefined && dir.segments.length > 0 && !word.startsWith("/") && literalGit(joinShellPath(dir.segments, word.split("/")).join("/"))) ||
+      (lineNamesGit && (/[$`]/u.test(word) || (dir === null && !word.startsWith("/")))),
+  );
+  return hit === undefined ? null : { class: "vcs.history.rewrite", rule: GIT_DIR_WRITE_RULE, path: hit };
+}
+
 /** `git branch` reads until it is asked to delete, rename or force-set one. */
 function refineGitBranch(ctx: RuleContext): Refinement {
   const mutating =
@@ -8359,13 +8383,20 @@ function classifySegment(
     // nothing through its own words (`cat .git/HEAD > /tmp/x` reads `.git`
     // and writes `/tmp/x`), so only the redirection targets and the outputs
     // the read names itself (item B) are judged.
+    // sed does not expand its `w` file name: those candidates are judged as
+    // their literal text ({@link sedLiteralGitWrite}).
+    const sedLiteral = basename === "sed" && readBeforeRedirect;
     const named =
       basename === "git"
         ? gitWriteTargets(args)
         : readBeforeRedirect
-          ? readOutputs
+          ? sedLiteral
+            ? []
+            : readOutputs
           : [...positionals, ...flagValues, ...attached, ...operandValues];
-    const gitWrite = gitWriteRefinement(writeTargets, named, context.shellDir, true, context.lineNamesGit === true);
+    const gitWrite =
+      gitWriteRefinement(writeTargets, named, context.shellDir, true, context.lineNamesGit === true) ??
+      (sedLiteral ? sedLiteralGitWrite(readOutputs, context.shellDir, context.lineNamesGit === true) : null);
     if (gitWrite !== null) {
       return { ok: true, ...gitWrite, ...(sandbox === null ? {} : { sandbox }) };
     }

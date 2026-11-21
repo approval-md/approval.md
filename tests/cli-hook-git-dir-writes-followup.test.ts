@@ -194,6 +194,20 @@ test("B review hook: a sed write through a link to .git, a name with blanks kept
   assert.deepEqual(hook('sed -n "w out.txt" x', repo), ["read.shell sed-read"]);
 });
 
+test("B review: sed expands nothing in a w name, so the name is judged as its literal text", { skip }, () => {
+  // `.gi?` is a directory named `.gi?` to sed, never `.git`.
+  assert.deepEqual(pure("sed -n 'w .gi?/config' x"), ["read.shell sed-read"]);
+  const repo = checkout();
+  assert.deepEqual(hook("sed -n 'w .gi?/config' x", repo), ["read.shell sed-read"]);
+  // A directory literally named so, linked to .git, is followed exactly.
+  symlinkSync(".git", join(repo, "l$x"));
+  assert.deepEqual(hook("sed -n 'w l$x/config' x", repo), [DIR_WRITE]);
+  symlinkSync(".git", join(repo, ".gi?"));
+  assert.deepEqual(hook("sed -n 'w .gi?/config' x", repo), [DIR_WRITE]);
+  // The shell still expands `$D` inside double quotes before sed sees it (S3).
+  assert.deepEqual(pure('D=.git; sed -n "w $D/config" x'), ["read.shell assignment", DIR_WRITE]);
+});
+
 test("review: wget's long output options are read by any prefix, on disk too", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "g"));
