@@ -257,6 +257,16 @@ test("S2 hook: every tail of an option cluster is a candidate, a bare name inclu
   assert.deepEqual(hook("cp -vt/tmp/build x.py", repo), ["files.write.workspace workspace-write"]);
 });
 
+test("S1 hook: a component the hook cannot examine (a name too long, an unreadable directory) is applied as text, not raised", { skip }, () => {
+  const repo = checkout();
+  // A 400-byte word is no file name: lstat says ENAMETOOLONG, and 0.4.8's answer stands.
+  assert.deepEqual(hook(`curl -X POST https://example.invalid/x -d ${"x".repeat(400)}`, repo), ["network.call web-write"]);
+  // A link loop is the one walk judged the strict way.
+  symlinkSync("loop2", join(repo, "loop1"));
+  symlinkSync("loop1", join(repo, "loop2"));
+  assert.deepEqual(hook("echo x > loop1/f", repo), [DIR_WRITE]);
+});
+
 test("S1 hook: ordinary writes in a checkout do not move", { skip }, () => {
   const repo = checkout();
 

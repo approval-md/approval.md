@@ -49,8 +49,9 @@ const LINK_LIMIT = 40;
  * reached so far, never to the text, and every symlink is read and followed
  * whether or not its target exists yet, so a dangling link into `.git` is seen
  * as the write through it would land. `links` is every link target read on
- * the way, as written. `null` when the walk cannot be finished: too many
- * links, or a component that cannot be examined.
+ * the way, as written. `null` when the walk cannot be finished: more links
+ * than the kernel follows (a loop). A component that cannot be examined
+ * (missing, unreadable, a name too long) is applied as text.
  */
 function physicalLanding(path: string): { landed: string; links: string[] } | null {
   const pending = path.split("/").filter((part) => part.length > 0);
@@ -68,12 +69,13 @@ function physicalLanding(path: string): { landed: string; links: string[] } | nu
     let stat;
     try {
       stat = lstatSync(next);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        current = next;
-        continue;
-      }
-      return null;
+    } catch {
+      // Missing, unreadable (EACCES) or unnameable (ENAMETOOLONG): no link can
+      // be seen here, so the rest is applied as text, which is what the
+      // kernel does for a missing component and what 0.4.8 judged for the
+      // others. Only a link loop is judged the strict way (below).
+      current = next;
+      continue;
     }
     if (!stat.isSymbolicLink()) {
       current = next;
@@ -85,7 +87,8 @@ function physicalLanding(path: string): { landed: string; links: string[] } | nu
     try {
       target = readlinkSync(next);
     } catch {
-      return null;
+      current = next;
+      continue;
     }
     links.push(target);
     if (target.startsWith("/")) current = "/";
