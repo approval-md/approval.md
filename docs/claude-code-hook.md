@@ -1016,11 +1016,31 @@ as its line's. The backtick forms were refused before and still are. The
 hook adds nothing here: the pure classifier already answers these lines,
 and the disk pass leaves a segment it has raised alone.
 
+Two more spellings count the same way. An ANSI-C quoted string whose
+escapes decode to `.git` (`$'\x2egit'`, `$'.\147it/config'`), and a
+substitution body whose escapes `printf` or `echo -e` may decode to it
+(`"$(printf '\x2egit')/config"`). And the word a parameter expansion may
+expand to (`${VAR:-.git}`, `${VAR-.git}`, `${VAR:=.git}`, `${VAR:+.git}`),
+judged as an assignment's value is. `${VAR:?.git}` carries no value and does
+not count, nor does a word with no `.git` (`${OUT:-build}`, `${TMPDIR:-/tmp}`).
+
+The cost of reading a line is bounded. Each word and each glob pattern is
+walked once against the four characters of `.git` (or a file name), so a word
+of 10,000 substitutions or a run of 1,000 `*` takes well under a second of
+CPU. Past 1,024 glob characters one pattern segment is judged to name
+`.git`. Substitution bodies are read for `.git` to 64 levels of nesting, and
+a deeper body counts as naming it. Past 128 levels of nesting the line is
+refused (`opaque`), where it used to run until the call stack gave out.
+
 Known limits: a variable set in an EARLIER call, or a value built from
 several expansions on the line (`A=.g; B=it; cd $A$B`), cannot be seen, so
 `cd $VAR && echo x >> config` with `VAR` set before the call stays the
 unknown-`cd` limit above; `git rev-parse` with its option passed in a
-variable (`git rev-parse $OPT`) is read as a revision; an
+variable (`git rev-parse $OPT`) is read as a revision; two substitutions
+whose outputs only together spell `.git` (`"$(printf .g)$(printf
+it)/config"`) are not read, nor is an encoding a command decodes (`base64
+-d`); a parameter expansion's pattern operators (`${G%x}`, `${G/x/.}`) are
+not read; an
 archive unpacked into the checkout (`tar -xf`, `unzip`) is judged by its
 named directory only, not by what the archive holds; a git include file
 (`~/.gitconfig.local`, a path named by `include.path`) is judged as an
