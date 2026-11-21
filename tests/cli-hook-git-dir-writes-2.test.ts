@@ -114,6 +114,9 @@ test("S1: ordinary glob and brace lines do not move", () => {
   assert.deepEqual(pure("cd * && echo x > f"), [READ_SHELL, "files.write.workspace redirect-write"]);
   assert.deepEqual(pure("echo x > ?git/config"), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure("rm -f .*.swp"), ["files.delete.out_of_scope rm-unreadable-path"]);
+  // A `?` beside a `-` (a URL's query) is an ordinary pattern, never an error read as a match.
+  assert.deepEqual(pure("echo x > out?a-b.txt"), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(pure('curl -s --url "${B:-https://x.example/v1}/venues?id=3fa85f64-5717&limit=100"'), ["network.call web-write"]);
 });
 
 test("S1 hook: a pattern is expanded on disk and each match walked; one it cannot expand is judged by its text", { skip: skip || (process.getuid?.() === 0 ? "root reads a mode-000 directory" : false) }, () => {

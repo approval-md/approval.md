@@ -4058,7 +4058,7 @@ export function globSegmentMatches(pattern: string, name: string): boolean {
     const char = pattern[at] as string;
     if (char === "\\" && at + 1 < pattern.length) {
       at += 1;
-      source += (pattern[at] as string).replace(/[.*+?^${}()|[\]\\/-]/gu, "\\$&");
+      source += (pattern[at] as string).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
     } else if (char === "*") {
       source += "[^/]*";
     } else if (char === "?") {
@@ -4106,7 +4106,7 @@ export function globSegmentMatches(pattern: string, name: string): boolean {
       source += `[${negated ? "^" : ""}${body.replace(/[\\\]^]/gu, "\\$&")}]`;
       at = close;
     } else {
-      source += char.replace(/[.*+?^${}()|[\]\\/-]/gu, "\\$&");
+      source += char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
     }
   }
   try {
