@@ -531,16 +531,17 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
     const gitWrites = bin === "git" ? gitWriteTargets(shape.args).filter(pathOrPattern) : [];
     // A sed script's possible file is LITERAL text: sed expands nothing in
     // it, so it keeps its blanks, a `$`, a backtick or a glob character, and
-    // is placed exactly as written (follow-up review).
-    const literal = new Set(bin === "sed" ? readWriteTargets(bin, shape.args).filter((word) => word.length > 0) : []);
-    const readOutputs = bin === null ? [] : bin === "sed" ? [...literal] : readWriteTargets(bin, shape.args).filter(pathOrPattern);
-    const named =
-      reads || segment.rule === "redirect-write"
-        ? readOutputs
-        : bin === "git"
-          ? gitWrites
-          : writeWords(shape.args).filter(pathOrPattern);
-    const candidates = [...shape.writes.filter(pathOrPattern), ...named];
+    // is placed exactly as written (follow-up review). Literal-ness belongs
+    // to the candidate, never to its text: a redirection spelled the same
+    // (`sed -n 'w .g*t/x' f > .g*t/x`) is still a shell pattern.
+    const readsOnly = reads || segment.rule === "redirect-write";
+    const sedNames = bin === "sed" && readsOnly ? readWriteTargets(bin, shape.args).filter((word) => word.length > 0) : [];
+    const readOutputs = bin === null || bin === "sed" ? [] : readWriteTargets(bin, shape.args).filter(pathOrPattern);
+    const named = readsOnly ? readOutputs : bin === "git" ? gitWrites : writeWords(shape.args).filter(pathOrPattern);
+    const candidates: { word: string; literal: boolean }[] = [
+      ...[...shape.writes.filter(pathOrPattern), ...named].map((word) => ({ word, literal: false })),
+      ...sedNames.map((word) => ({ word, literal: true })),
+    ];
     // The words the segment surely writes: its redirection targets, and every
     // word of a segment the classifier already calls a file write. A word of
     // any other segment (a `curl -d` payload, a script argument) is only a
@@ -562,8 +563,9 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
       // Each candidate where it is placed: a pattern by each name it expands
       // to on disk, or by its text when it cannot be expanded.
       const placed: { word: string; spelled: string }[] = [];
-      for (const word of candidates) {
-        if (literal.has(word)) {
+      for (const candidate of candidates) {
+        const { word } = candidate;
+        if (candidate.literal) {
           placed.push({ word, spelled: word });
           continue;
         }
@@ -657,7 +659,7 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
       // repository's policy, so the strict answer would move ordinary lines).
       // A relative write after a directory change this step cannot place is
       // judged from the places it can name, as 0.4.8 judges it, and said so.
-      const relative = candidates.find((word) => !word.startsWith("/") && !word.startsWith("~/"));
+      const relative = candidates.map((candidate) => candidate.word).find((word) => !word.startsWith("/") && !word.startsWith("~/"));
       if (unknownBefore !== null && relative !== undefined) {
         notes.push(
           `git-dir-write: \`${segment.text}\` writes ${relative} after ${unknownBefore}, which this hook cannot place; it is judged from the directories it can name (known limit), and stays ${segment.class}`,

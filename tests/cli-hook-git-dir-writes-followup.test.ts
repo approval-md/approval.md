@@ -204,6 +204,13 @@ test("B review: sed expands nothing in a w name, so the name is judged as its li
   assert.deepEqual(hook("sed -n 'w l$x/config' x", repo), [DIR_WRITE]);
   symlinkSync(".git", join(repo, ".gi?"));
   assert.deepEqual(hook("sed -n 'w .gi?/config' x", repo), [DIR_WRITE]);
+  // Literal-ness is the sed name's, not its text's: a redirection spelled the
+  // same is a shell pattern, a hit when .git matches it ...
+  assert.deepEqual(hook("sed -n 'w .g*t/x' f > .g*t/x", repo), [DIR_WRITE]);
+  // ... and expanded on disk otherwise, while the sed name alone is literal.
+  symlinkSync(".git", join(repo, "link"));
+  assert.deepEqual(hook("sed -n 'w l*k/x' f > l*k/x", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("sed -n 'w l*k/x' f", repo), ["read.shell sed-read"]);
   // The shell still expands `$D` inside double quotes before sed sees it (S3).
   assert.deepEqual(pure('D=.git; sed -n "w $D/config" x'), ["read.shell assignment", DIR_WRITE]);
 });
