@@ -1023,6 +1023,18 @@ substitution body whose escapes `printf` or `echo -e` may decode to it
 expand to (`${VAR:-.git}`, `${VAR-.git}`, `${VAR:=.git}`, `${VAR:+.git}`),
 judged as an assignment's value is. `${VAR:?.git}` carries no value and does
 not count, nor does a word with no `.git` (`${OUT:-build}`, `${TMPDIR:-/tmp}`).
+These readings fail closed. A word holding `$'…'` is read quote by quote as
+the shell reads it, its pieces decoded and joined (`$'\x2e'"g""i""t"`), and a
+quote that does not close counts. What `printf` or `echo` prints is read from
+the body's words with quotes removed: the format filled from its arguments,
+escapes decoded, an argument the text cannot read an unknown output, and a
+body's segments printed in turn (`$(printf .g; printf it)`). A replacement
+expansion's new text counts as text between unknown runs (`${G/x/.}`);
+removal and substring count on a line that holds `.git` (`G=.gitx;
+${G%x}`); `@E` and `@P` count; an operator this reader does not know, or a
+`${` that does not close, counts. Inside an operator's word a nested
+expansion is an unknown output, and a default word stands for its expansion
+(`.g${A:-i}t`).
 
 The cost of reading a line is bounded. Each word and each glob pattern is
 walked once against the four characters of `.git` (or a file name), so a word
@@ -1039,8 +1051,8 @@ unknown-`cd` limit above; `git rev-parse` with its option passed in a
 variable (`git rev-parse $OPT`) is read as a revision; two substitutions
 whose outputs only together spell `.git` (`"$(printf .g)$(printf
 it)/config"`) are not read, nor is an encoding a command decodes (`base64
--d`); a parameter expansion's pattern operators (`${G%x}`, `${G/x/.}`) are
-not read; an
+-d`); a plain variable beside literal text (`.g$X`, `${!REF}`) is not read;
+an
 archive unpacked into the checkout (`tar -xf`, `unzip`) is judged by its
 named directory only, not by what the archive holds; a git include file
 (`~/.gitconfig.local`, a path named by `include.path`) is judged as an

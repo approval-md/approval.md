@@ -165,7 +165,12 @@ on the change above.
   an escape that decodes to `.git`, in an ANSI-C quoted string
   (`$'\x2egit'`) or a substitution body (`$(printf '\x2egit')`), and the
   word a parameter expansion may carry (`${VAR:-.git}`, `${VAR=.git}`,
-  `${VAR:+.git}`).
+  `${VAR:+.git}`). After a security review both fail closed: a word with
+  `$'…'` is read quote by quote and joined, an unclosed quote counts, what
+  `printf` and `echo` print is rendered from their words (`$(printf .g;
+  printf it)`), a replacement (`${G/x/.}`), `@E`, an unknown operator or an
+  unclosed `${` counts, and removal or substring counts on a line that
+  holds `.git`.
 - **A line cannot be built to make the classifier slow.** A hook past its
   timeout lets the call through, so the cost of reading a line is bounded.
   The split-spelling reader tried every window of a word as its own
@@ -185,7 +190,7 @@ on the change above.
   config` stays; a `git rev-parse` option passed in a variable (`git
   rev-parse $OPT`); two outputs that only together spell `.git`
   (`"$(printf .g)$(printf it)/config"`), an encoding a command decodes
-  (`base64 -d`) and a parameter expansion's pattern operators (`${G%x}`);
+  (`base64 -d`) and a plain variable beside literal text (`.g$X`);
   an archive unpacked into the
   checkout (`tar -xf`, `unzip`); a git include file (`~/.gitconfig.local`);
   a `sed -f` script file; the push pass does not read `core.hooksPath`; and,
