@@ -13,7 +13,8 @@
  * CPU time, not wall-clock time: this machine is shared. Each bound is about
  * ten times the slowest figure measured (0.7 s, a word of 10,000 brace
  * groups and outputs), and far under the 60 s a hook is given. Sizes run
- * smallest first, so a slow build fails on the first, not after hours.
+ * smallest first, and once one line passes the bound the larger ones fail
+ * at once, so a slow build fails in minutes, not after hours.
  * Hermetic: HOME is a fixture directory; git runs only to make a checkout,
  * and no line is run.
  */
@@ -61,13 +62,32 @@ function pure(command: string): string[] {
   return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [`refused ${result.code}`];
 }
 
+/**
+ * Set once a line has passed {@link BOUND}: the build is slow, that test has
+ * failed, and the larger lines after it fail at once rather than being timed
+ * for hours.
+ */
+let overBound: string | null = null;
+
+/** Fail at once when an earlier line already passed the bound. */
+function notAlreadyOver(label: string): void {
+  assert.equal(overBound, null, `${label}: not timed, an earlier line passed the bound (${String(overBound)})`);
+}
+
+/** Fail if `seconds` is over {@link BOUND}, and remember it. */
+function withinBound(seconds: number, label: string): void {
+  if (seconds >= BOUND) overBound = label;
+  assert.ok(seconds < BOUND, `${label}: ${seconds.toFixed(2)} CPU s, bound ${String(BOUND)}`);
+}
+
 /** Classify `command` (pure) and fail if it took more than {@link BOUND} CPU seconds. */
 function bounded(command: string, label: string): string[] {
+  notAlreadyOver(label);
   let answer: string[] = [];
   const seconds = cpuSeconds(() => {
     answer = pure(command);
   });
-  assert.ok(seconds < BOUND, `${label}: ${seconds.toFixed(2)} CPU s, bound ${String(BOUND)}`);
+  withinBound(seconds, label);
   return answer;
 }
 
@@ -121,11 +141,12 @@ test("cost: the answers of the bounded walk are the old window reading's", () =>
 test("cost: a run of glob characters in a target is bounded", () => {
   // A pattern of a few runs against a long name: the one expression took
   // about a minute here (`*a` six times and `b` against 150 `a`).
+  notAlreadyOver("*a runs against a long name");
   const seconds = cpuSeconds(() => {
     assert.equal(globSegmentMatches(`${"*a".repeat(6)}b`, "a".repeat(150)), false);
     assert.equal(globSegmentMatches(`${"*a".repeat(6)}`, "a".repeat(150)), true);
   });
-  assert.ok(seconds < BOUND, `*a runs against a long name: ${seconds.toFixed(2)} CPU s`);
+  withinBound(seconds, "*a runs against a long name");
   for (const n of [400, 1000, 1024]) {
     bounded(`git push --force && echo x > .${"*".repeat(n)}x`, `* run, n=${String(n)}`);
     bounded(`git push --force && echo x > .${"*a".repeat(n / 2)}x`, `*a run, n=${String(n)}`);
@@ -160,6 +181,11 @@ test("cost: deep nesting is read once, and refused past 128 levels", () => {
   assert.deepEqual(pure(nest(128)), [DIR_WRITE]);
   assert.deepEqual(pure(nest(129)), ["refused opaque"]);
   for (const n of [1000, 10000]) assert.deepEqual(bounded(nest(n), `nesting ${String(n)}`), ["refused opaque"]);
+  // Each level carrying a word of 1,024 brace alternatives: a body the
+  // line's reading already went through is not read again by its own
+  // classification (13 s at 64 levels when it was).
+  const fat = `${"{a,b}".repeat(10)}x`;
+  for (const n of [64, 100]) bounded(`echo x > "${`$(echo ${fat} `.repeat(n)}x${")".repeat(n)}"`, `nesting ${String(n)}, wide words`);
 });
 
 test("cost: through the hook, in a checkout, the same lines are bounded", { skip }, () => {
@@ -176,9 +202,10 @@ test("cost: through the hook, in a checkout, the same lines are bounded", { skip
     ["*a run against a long name on disk", `git push --force && echo x > ${"*a".repeat(6)}b/f`],
     ["nesting", `git push --force && echo x > "${"$(echo ".repeat(10000)}x${")".repeat(10000)}"`],
   ] as const) {
+    notAlreadyOver(`hook, ${label}`);
     const seconds = cpuSeconds(() => {
       classifyForHook(command, [], repo);
     });
-    assert.ok(seconds < BOUND, `hook, ${label}: ${seconds.toFixed(2)} CPU s, bound ${String(BOUND)}`);
+    withinBound(seconds, `hook, ${label}`);
   }
 });
