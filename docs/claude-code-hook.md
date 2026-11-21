@@ -931,11 +931,19 @@ redirection (`> .git/config`) takes the same rule. An option value attached
 to its letter names a target as surely as a separate word: `curl
 -o.git/config`, `wget -O.git/hooks/pre-push`, `cp -t.git/hooks`, `tar -C.git`
 and their `--long=` forms. Before any other pass, the hook resolves every
-write target where the disk lands it, from its own directory and each
-followed `cd`, through symlinks that exist (`g -> .git`), and against the
-checkout's git directory as its `.git` file names it (a linked worktree, a
-`--separate-git-dir`): a landing inside a git directory is `git-dir-write`,
-and so is a relative write from a hook whose own directory is inside one.
+write target where the disk lands it, from its own directory and every place
+a `cd`, `chdir` or `pushd` before it may lead (a bare name is tried from each
+directory and from each `CDPATH` entry of the hook's environment). It walks
+the path one component at a time as the kernel does: `..` is applied to the
+physical directory, and every symlink is followed whether or not its target
+exists yet, so a dangling link into `.git/hooks` counts. A landing inside a
+git directory, the checkout's own as its `.git` file names it (a linked
+worktree, a `--separate-git-dir`) included, is `git-dir-write`, and so is a
+relative write from a hook whose own directory is inside one. Known limit: a
+`cd` whose target the text does not give (`cd "$D"`, `cd -`, one behind
+`HOME=` or `CDPATH=`) adds no directory, so a relative write after it is
+judged from the other directories only, as the write-scope pass judges every
+write from the hook's own.
 
 **The hook reads the checkout before it answers a push.** After the pure
 classifier, `refinePushRepo` (`src/cli/push-repo.ts`) re-reads every `git push`
@@ -977,6 +985,11 @@ origin main:refs/tags/rel2 && git push origin rel2` published a tag while it
 read as a branch push. A word that is a local branch keeps its answer, because
 git refuses a source that is both a branch and a tag, and `HEAD` and `@` are
 unaffected, so `git fetch && git push -u origin lane` is still a branch push.
+The same holds for the source of a `src:dst` whose destination is not under
+`refs/`: git gives such a destination the kind of its source (on git 2.50.1
+`git push origin v1:plain` with a local tag `v1` created `refs/tags/plain`), so
+a source that is a local tag, or no local branch after a segment that can
+create a tag, makes the push at least `release.publish`.
 
 Destinations are read the way git's ref DWIM reads them, in the pure
 classifier too: `heads/main` is `refs/heads/main` (git tries `refs/<name>`

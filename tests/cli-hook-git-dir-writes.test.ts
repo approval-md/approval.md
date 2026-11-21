@@ -152,6 +152,11 @@ test("S2: -t, -C and their long forms, attached and separate", () => {
   assert.deepEqual(pure("cp -t ~/.config/git x"), [CONFIG_WRITE]);
 });
 
+test("S2: an operand's `key=value` value is read for the path it names", () => {
+  assert.deepEqual(pure("make DESTDIR=.git/hooks install"), [DIR_WRITE]);
+  assert.deepEqual(pure("npm test -- outfile=.git/hooks/pre-push"), [DIR_WRITE]);
+});
+
 test("S2 (P69): commands with no row stay refused, whatever their options", () => {
   for (const command of ["install -m 755 /tmp/x .git/hooks/pre-push", "install -t .git/hooks x", "dd of=.git/config"]) {
     const result = classifyCommand(command, []);
@@ -184,8 +189,8 @@ test("S1 hook: a symlink to .git that exists beforehand is followed", { skip }, 
   assert.deepEqual(hook("echo x >> g/config", repo), [DIR_WRITE]);
   assert.deepEqual(hook("cp /tmp/x g/hooks/pre-push", repo), [DIR_WRITE]);
   assert.deepEqual(hook("cd ./g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
-  // A bare name goes through CDPATH, which the hook does not follow, as the push pass does not.
-  assert.deepEqual(hook("cd g && echo x >> config", repo), ["read.shell read-shell", "files.write.workspace redirect-write"]);
+  // A bare name is tried from the hook's directory (and each CDPATH entry), so it is followed too.
+  assert.deepEqual(hook("cd g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
 });
 
 test("S1 hook: a separate git directory and a linked worktree's git directory are git directories", { skip }, () => {
@@ -212,6 +217,55 @@ test("S1 hook: ordinary writes in a checkout do not move", { skip }, () => {
   assert.deepEqual(hook("mkdir -p build && cp src.txt build/", repo), ["files.write.workspace workspace-write", "files.write.workspace workspace-write"]);
   // A cd the hook cannot follow adds no directory: the write is judged from the hook's own.
   assert.deepEqual(hook('cd "$D" && echo x > config', repo), ["read.shell read-shell", "files.write.workspace redirect-write"]);
+});
+
+// ---------------------------------------------------------------------------
+// The security review of the fold: four ways past the hook's disk reading
+// ---------------------------------------------------------------------------
+
+test("review 1: a dangling symlink into .git is written through, so the write is git-dir-write", { skip }, () => {
+  const repo = checkout();
+  // The link exists; its target does not yet. A redirect creates the target.
+  symlinkSync(".git/hooks/pre-push", join(repo, "hookfile"));
+  assert.deepEqual(hook("printf '#!/bin/sh' > hookfile", repo), [DIR_WRITE]);
+  symlinkSync(join(repo, ".git", "hooks", "nope", "x"), join(repo, "deep"));
+  assert.deepEqual(hook("cp /tmp/x deep", repo), [DIR_WRITE]);
+  // A dangling link elsewhere is an ordinary write.
+  symlinkSync("build/out.txt", join(repo, "outlink"));
+  assert.deepEqual(hook("echo x > outlink", repo), ["files.write.workspace redirect-write"]);
+});
+
+test("review 2: a bare-name cd is followed from the hook's directory and each CDPATH entry; an unknown cd is a known limit", { skip }, () => {
+  const repo = checkout();
+  symlinkSync(".git", join(repo, "g"));
+  const elsewhere = join(repo, "..", "elsewhere");
+  mkdirSync(elsewhere);
+  const saved = process.env["CDPATH"];
+  process.env["CDPATH"] = repo;
+  try {
+    assert.deepEqual(hook("cd g && echo x >> config", elsewhere), ["read.shell read-shell", DIR_WRITE]);
+  } finally {
+    if (saved === undefined) delete process.env["CDPATH"];
+    else process.env["CDPATH"] = saved;
+  }
+  assert.deepEqual(hook("cd -L .git && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
+  // Known limit: a target the text cannot give adds no directory, and the
+  // write is judged from the others (the write-scope pass ignores every cd).
+  assert.deepEqual(hook('cd "$D" && echo x >> config', repo), ["read.shell read-shell", "files.write.workspace redirect-write"]);
+  assert.deepEqual(hook("cd - && echo x >> config", repo), ["read.shell read-shell", "files.write.workspace redirect-write"]);
+});
+
+test("review 3: `..` after a symlink is applied to the physical directory, as the kernel applies it", { skip }, () => {
+  const repo = checkout();
+  symlinkSync(".git/hooks", join(repo, "l"));
+  // Textually `l/../config` is `config`; physically it is `.git/config`.
+  assert.deepEqual(pure("echo x >> l/../config"), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(hook("echo x >> l/../config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cd l/.. && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
+  // And the other way: textually inside .git, physically not.
+  mkdirSync(join(repo, "real"));
+  symlinkSync(join(repo, "real"), join(repo, ".git", "out"));
+  assert.deepEqual(hook("echo x > sub/notes.txt", repo), ["files.write.workspace redirect-write"]);
 });
 
 // ---------------------------------------------------------------------------

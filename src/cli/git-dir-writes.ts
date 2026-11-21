@@ -27,8 +27,8 @@
  * write-scope pass, so a segment it raises is not narrowed again.
  */
 
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { existsSync, lstatSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { dirname, join, sep } from "node:path";
 
 import {
   commandSegmentShapes,
@@ -36,28 +36,67 @@ import {
   type ClassifiedSegment,
   type CommandClassification,
 } from "../core/command-class.js";
-import { cdTarget } from "./push-repo.js";
 
 const REWRITE_CLASS = "vcs.history.rewrite";
 const GIT_DIR_WRITE_RULE = "git-dir-write";
 
-/** `path` with its existing prefix resolved through symlinks, or `null`. */
+/** Symlinks followed while resolving one path, past which it is unresolvable. */
+const LINK_LIMIT = 40;
+
+/**
+ * Where the kernel lands `path`, walked one component at a time the way the
+ * kernel walks it (review fold): `..` is applied to the PHYSICAL directory
+ * reached so far, never to the text, and every symlink is read and followed
+ * whether or not its target exists yet, so a dangling link into `.git` is seen
+ * as the write through it would land. `links` is every link target read on
+ * the way, as written. `null` when the walk cannot be finished: too many
+ * links, or a component that cannot be examined.
+ */
+function physicalLanding(path: string): { landed: string; links: string[] } | null {
+  const pending = path.split("/").filter((part) => part.length > 0);
+  let current = "/";
+  const links: string[] = [];
+  let followed = 0;
+  while (pending.length > 0) {
+    const part = pending.shift() as string;
+    if (part === ".") continue;
+    if (part === "..") {
+      current = dirname(current);
+      continue;
+    }
+    const next = current === "/" ? `/${part}` : `${current}/${part}`;
+    let stat;
+    try {
+      stat = lstatSync(next);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        current = next;
+        continue;
+      }
+      return null;
+    }
+    if (!stat.isSymbolicLink()) {
+      current = next;
+      continue;
+    }
+    followed += 1;
+    if (followed > LINK_LIMIT) return null;
+    let target: string;
+    try {
+      target = readlinkSync(next);
+    } catch {
+      return null;
+    }
+    links.push(target);
+    if (target.startsWith("/")) current = "/";
+    pending.unshift(...target.split("/").filter((piece) => piece.length > 0));
+  }
+  return { landed: current, links };
+}
+
+/** {@link physicalLanding}'s place alone, or `null`. */
 function landing(path: string): string | null {
-  let existing = path;
-  const tail: string[] = [];
-  for (let depth = 0; depth < 64; depth += 1) {
-    if (existsSync(existing)) break;
-    const up = dirname(existing);
-    if (up === existing) return null;
-    tail.unshift(basename(existing));
-    existing = up;
-  }
-  try {
-    const real = realpathSync(existing);
-    return tail.length === 0 ? real : join(real, ...tail);
-  } catch {
-    return null;
-  }
+  return physicalLanding(path)?.landed ?? null;
 }
 
 /** Does this absolute path have a `.git` segment, in any case? */
@@ -83,15 +122,20 @@ function gitDirectoriesOf(dir: string): string[] {
     const entry = join(at, ".git");
     if (existsSync(entry)) {
       try {
-        if (statSync(entry).isDirectory()) return [realpathSync(entry)];
+        if (statSync(entry).isDirectory()) {
+          const real = landing(entry);
+          return real === null ? [] : [real];
+        }
         const named = /^gitdir:\s*(.+)$/mu.exec(readFileSync(entry, "utf8"));
         if (named === null) return [];
-        const gitdir = landing(resolve(at, (named[1] as string).trim()));
+        const text = (named[1] as string).trim();
+        const gitdir = landing(text.startsWith("/") ? text : `${at}/${text}`);
         if (gitdir === null) return [];
         const found = [gitdir];
         const commonFile = join(gitdir, "commondir");
         if (existsSync(commonFile)) {
-          const common = landing(resolve(gitdir, readFileSync(commonFile, "utf8").trim()));
+          const commonText = readFileSync(commonFile, "utf8").trim();
+          const common = landing(commonText.startsWith("/") ? commonText : `${gitdir}/${commonText}`);
           if (common !== null) found.push(common);
         }
         return found;
@@ -129,6 +173,42 @@ function literalPath(word: string): boolean {
   return word.length > 0 && !/[\s$`*?[\]{}~]/u.test(word.replace(/^~\//u, ""));
 }
 
+/** The command words that change the shell's directory, followed alike here. */
+const DIRECTORY_CHANGERS: ReadonlySet<string> = new Set(["cd", "chdir", "pushd", "popd"]);
+
+/**
+ * Every directory a `cd` / `chdir` / `pushd` word may lead to from `dir`, as
+ * text. A bare name is tried from `dir` and from every `CDPATH` entry of the
+ * hook's own environment (an assignment on the segment itself counts as
+ * unknown). A target the text cannot give (`cd "$D"`, `cd -`, `~user`, a
+ * glob, `popd`, a `HOME=` or `CDPATH=` prefix) yields nothing: KNOWN LIMIT,
+ * such a line keeps the hook's other directories, exactly as the write-scope
+ * pass judges every write from the hook's own directory, and is not raised
+ * for the unknown one.
+ */
+function directoryTargets(args: readonly string[], assignments: readonly string[], dir: string): string[] {
+  if (assignments.length > 0) return [];
+  const words = args.filter((word) => !/^-[LPe@]+$/u.test(word));
+  const operands = words[0] === "--" ? words.slice(1) : words;
+  const home = process.env["HOME"];
+  if (operands.length === 0) return home === undefined ? [] : [home];
+  if (operands.length !== 1) return [];
+  const word = operands[0] as string;
+  if (word === "-" || word.startsWith("-") || /[$`*?[\]{}\\]/u.test(word)) return [];
+  if (word === "~") return home === undefined ? [] : [home];
+  if (word.startsWith("~/")) return home === undefined ? [] : [`${home}/${word.slice(2)}`];
+  if (word.startsWith("~")) return [];
+  if (word.startsWith("/")) return [word];
+  const targets = [`${dir}/${word}`];
+  if (!word.startsWith("./") && !word.startsWith("../") && word !== "." && word !== "..") {
+    for (const entry of (process.env["CDPATH"] ?? "").split(":")) {
+      if (entry.length === 0) continue;
+      targets.push(entry.startsWith("/") ? `${entry}/${word}` : `${dir}/${entry}/${word}`);
+    }
+  }
+  return targets;
+}
+
 /** A classification plus one note per segment this step raised. */
 export interface GitDirWriteRefinement {
   result: CommandClassification;
@@ -155,22 +235,23 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
     }
     return known;
   };
-  let dirs = [cwd];
+  // Every directory a segment may run in, as TEXT (joined, never normalised,
+  // so the physical walk applies each `..`): the hook's own and every place a
+  // directory change before it may lead. A failed `cd` leaves the shell where
+  // it was, so the set only grows, and `popd` returns to a directory already
+  // in it.
   const home = process.env["HOME"];
+  let dirs = [cwd];
   for (const [index, segment] of result.segments.entries()) {
     const shapes = commandSegmentShapes(segment.text);
     if (shapes === null) continue;
     const before = dirs;
     for (const shape of shapes) {
       const bin = shape.bin === null ? null : (shape.bin.split("/").pop() ?? shape.bin);
-      if (bin === "cd" && shape.assignments.length === 0) {
-        const next: string[] = [];
-        for (const dir of dirs) {
-          const target = cdTarget(shape.args, dir);
-          if (target !== null) next.push(target);
-        }
-        dirs = [...new Set([...dirs, ...next])];
-      }
+      if (bin === null || !DIRECTORY_CHANGERS.has(bin)) continue;
+      const next: string[] = [];
+      for (const dir of dirs) next.push(...directoryTargets(shape.args, shape.assignments, dir));
+      dirs = [...new Set([...dirs, ...next])];
     }
     if (segment.class === REWRITE_CLASS || segment.class === GATE_SELF_CLASS) continue;
     const shape = shapes[0];
@@ -188,10 +269,16 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
     for (const dir of before) {
       const inGit = gitDirsOf(dir);
       for (const word of candidates) {
-        const spelled = word.startsWith("~/") && home !== undefined ? join(home, word.slice(2)) : word;
-        const landed = landing(isAbsolute(spelled) ? spelled : resolve(dir, spelled));
-        if (landed === null) continue;
-        if (hasGitSegment(landed) || inGit.some((root) => within(landed, root))) {
+        const spelled = word.startsWith("~/") && home !== undefined ? `${home}/${word.slice(2)}` : word;
+        const walked = physicalLanding(spelled.startsWith("/") ? spelled : `${dir}/${spelled}`);
+        // A path whose walk cannot be finished (a link loop) is judged the
+        // stricter way.
+        if (walked === null) {
+          hit = { word, landed: "an unresolvable path" };
+          break;
+        }
+        const { landed, links } = walked;
+        if (hasGitSegment(landed) || inGit.some((root) => within(landed, root)) || links.some((link) => hasGitSegment(link))) {
           hit = { word, landed };
           break;
         }

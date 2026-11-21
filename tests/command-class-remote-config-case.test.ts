@@ -475,3 +475,36 @@ test("S3: after anything that can create a tag, a push word that is no local bra
   // Without such a segment, a word no ref names keeps today's answer.
   assert.equal(pushClassOf("git status && git push origin rel9", clone), "vcs.push.branch");
 });
+
+test("real git, review 4: `git push origin <tag>:<plain name>` writes refs/tags/<name>: the source decides the kind", { skip: GIT ? false : "no git binary" }, (t) => {
+  const { remote, clone } = fixture();
+  const command = "git push origin v1:plain";
+  const got = pushClassOf(command, clone);
+  const before = refsOf(remote);
+  const pushed = git(clone, ["push", "origin", "v1:plain"]);
+  const { floor, effect } = floorOf(before, refsOf(remote));
+  t.diagnostic(`${command} (v1 a local tag): class ${got}; git exit ${String(pushed.status)}; effect: ${effect.join(", ") || "none"}`);
+  assert.equal(floor, "release.publish", "git published a tag");
+  assert.equal(got, "release.publish", command);
+});
+
+test("review 4: after a fetch, a src:dst whose source is no local branch and whose destination is not under refs/ is at least release.publish", { skip: GIT ? false : "no git binary" }, (t) => {
+  const { remote, clone } = fixture();
+  for (const command of [
+    "git fetch origin main:refs/tags/rel2 && git push origin rel2:rel2",
+    "git fetch origin main:refs/tags/rel2 && git push origin rel2:foo",
+    "git fetch && git push origin +rel2:foo",
+  ]) {
+    const got = pushClassOf(command, clone);
+    assert.ok(ORDER.indexOf(got) <= ORDER.indexOf("release.publish"), `${command}: ${got}`);
+  }
+  // A branch source, HEAD, or a destination under refs/ keeps its answer.
+  for (const command of ["git fetch && git push origin lane:lane", "git fetch && git push origin HEAD:lane", "git fetch && git push origin HEAD~1:lane"]) {
+    assert.equal(pushClassOf(command, clone), "vcs.push.branch", command);
+  }
+  const before = refsOf(remote);
+  ok(clone, ["fetch", "-q", "origin", "main:refs/tags/rel2"]);
+  const pushed = git(clone, ["push", "origin", "rel2:foo"]);
+  const { effect } = floorOf(before, refsOf(remote));
+  t.diagnostic(`git fetch origin main:refs/tags/rel2 && git push origin rel2:foo: git exit ${String(pushed.status)}; effect: ${effect.join(", ") || "none"}`);
+});

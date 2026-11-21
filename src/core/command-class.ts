@@ -2964,20 +2964,30 @@ function gitPushClass(
   // APFS refused `git push origin V1` beside a tag `v1`, so this costs nothing
   // there.
   const foldedTags = new Set([...facts.tags].map((tag) => tag.toLowerCase()));
-  const localTags = named
-    .map((refspec) => refspec.replace(/^\+/u, ""))
-    .filter((name) => foldedTags.has(name.toLowerCase()));
+  // The words whose SOURCE decides what kind of ref the push writes: a
+  // colon-less word, and the source of a `src:dst` whose destination does not
+  // start with `refs/` (git gives such a destination the kind of its source:
+  // a tag source goes to `refs/tags/<dst>`; review fold, proven on git 2.50.1).
+  // A source spelled from `HEAD` / `@` or under `refs/` names no tag here.
+  const sourced = [
+    ...named.map((refspec) => refspec.replace(/^\+/u, "")),
+    ...refspecs
+      .filter((refspec) => refspec.includes(":"))
+      .map((refspec) => refspec.replace(/^\+/u, ""))
+      .filter((refspec) => !refspec.slice(refspec.indexOf(":") + 1).startsWith("refs/"))
+      .map((refspec) => refspec.slice(0, refspec.indexOf(":")))
+      .filter((source) => source.length > 0 && !/^(?:head|@)(?:[~^].*)?$/iu.test(source) && !source.startsWith("refs/")),
+  ];
+  const localTags = sourced.filter((name) => foldedTags.has(name.toLowerCase()));
   if (localTags.length > 0) {
     candidates.push({ class: "release.publish", rule: "git-push-local-tag", path: localTags.join(" ") });
   }
   // S3: a tag an earlier segment creates is not among `facts.tags`, which were
-  // read before the line ran. A colon-less word that is no local branch may be
+  // read before the line ran. A source word that is no local branch may be
   // that tag; one that IS a local branch cannot be pushed if a tag of its name
   // appears (git 2.50.1 refuses an ambiguous source), so it keeps its answer.
   if (view.tagsMayAppear === true && !reading.remove) {
-    const fresh = named
-      .map((refspec) => refspec.replace(/^\+/u, ""))
-      .filter((name) => !(facts.branches?.has(name) ?? false));
+    const fresh = sourced.filter((name) => !(facts.branches?.has(name) ?? false));
     if (fresh.length > 0) {
       candidates.push({ class: "release.publish", rule: GIT_PUSH_NEW_TAG_RULE, path: fresh.join(" ") });
     }
