@@ -148,6 +148,9 @@ test("B: the same commands writing elsewhere, or not writing, do not move", () =
   assert.deepEqual(pure('sed -n "w out.txt" x'), ["read.shell sed-read"]);
   assert.deepEqual(pure('sed -n "/word/p" x'), ["read.shell sed-read"]);
   assert.deepEqual(pure('sed "s/w/v/" x'), ["read.shell sed-read"]);
+  // A `w` inside an address or a pattern is no write command, even before `.git`.
+  assert.deepEqual(pure('sed -n "/w .git/p" x'), ["read.shell sed-read"]);
+  assert.deepEqual(pure('sed "s/w .git/x/" y'), ["read.shell sed-read"]);
   assert.deepEqual(pure("sort -t, -k1 x"), [READ_SHELL]);
   assert.deepEqual(pure("sed -f s.sed x"), ["read.shell sed-read"]);
 });
