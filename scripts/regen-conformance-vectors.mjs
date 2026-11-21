@@ -2082,6 +2082,94 @@ const commandClassVectors = [
     description: "the control for the push grammar: `-u` alone is still an ordinary branch push",
     input: { command: "git push -u origin lane" },
   },
+  // --- git remote writes, and HEAD/@ pushes (APRV-518) ----------------------
+  {
+    id: "remote-add-mirror-arms-a-mirror-push",
+    description:
+      "`git remote add --mirror=push` makes every later refspec-less push to that remote a mirror push, which forces and deletes; it takes the class of the push it arms, vcs.history.rewrite",
+    input: { command: "git remote add --mirror=push m ../r.git" },
+  },
+  {
+    id: "remote-set-url-writes",
+    description:
+      "`git remote set-url` points a remote's configured mirror or push refspecs at another repository; every writing `git remote` form is vcs.history.rewrite",
+    input: { command: "git remote set-url origin https://example.invalid/x.git" },
+  },
+  {
+    id: "remote-rename-writes",
+    description: "`git remote rename` carries a mirror or push refspec onto another name, such as origin",
+    input: { command: "git remote rename m origin" },
+  },
+  {
+    id: "remote-update-prune-writes",
+    description:
+      "`git remote update` is a fetch and reads; with `--prune` (or any other option) it deletes refs and is a write",
+    input: { command: "git remote update --prune" },
+  },
+  {
+    id: "remote-list-reads",
+    description: "the control for the remote writes: `git remote -v` lists and is still read.vcs.remote",
+    input: { command: "git remote -v" },
+  },
+  {
+    id: "remote-show-get-url-read",
+    description: "`git remote show -n` and `git remote get-url --push` print and are still read.vcs.remote",
+    input: { command: "git remote show -n origin && git remote get-url --push origin" },
+  },
+  {
+    id: "push-head-may-be-the-trunk",
+    description:
+      "a colon-less HEAD pushes the current branch, which the text cannot show is not main, so it reads as the trunk push (rule git-push-head)",
+    input: { command: "git push origin HEAD" },
+  },
+  {
+    id: "push-at-may-be-the-trunk",
+    description: "`@` is HEAD under another name, and takes the same reading",
+    input: { command: "git push -u origin @" },
+  },
+  {
+    id: "push-head-explicit-destination-unmoved",
+    description: "the control for HEAD: with an explicit `:refs/heads/lane` the destination is on the line, an ordinary branch push",
+    input: { command: "git push origin HEAD:refs/heads/lane" },
+  },
+  {
+    id: "git-dir-write-arms-a-push",
+    description:
+      "a shell write into .git/config can carry a deleting or mirror push setting the push after it obeys; any write into a .git directory takes the class of the strictest push it can arm, vcs.history.rewrite",
+    input: { command: "printf '[remote \"origin\"]\\n\\tpush = :refs/heads/lane\\n' >> .git/config && git push origin" },
+  },
+  {
+    id: "push-destination-dwim-trunk",
+    description:
+      "git resolves a short destination through refs/<name> first, so `lane:heads/main` updates refs/heads/main: the trunk push",
+    input: { command: "git push origin lane:heads/main" },
+  },
+  {
+    id: "push-tags-prefix-is-a-tag",
+    description: "`tags/t1` is refs/tags/t1 under the same DWIM, a release act",
+    input: { command: "git push origin tags/t1" },
+  },
+  {
+    id: "git-dir-write-after-cd",
+    description:
+      "a relative write after a literal cd into .git lands in .git: git-dir-write, while the cd itself reads (APRV-518 review fold, S1)",
+    input: { command: "cd .git && printf x >> config" },
+  },
+  {
+    id: "git-dir-write-bare-redirect",
+    description: "a bare redirection is a write to its target and takes the same rule (S1)",
+    input: { command: "> .git/config" },
+  },
+  {
+    id: "git-dir-write-attached-option",
+    description: "an attached option value names the write target as surely as a separate word: curl -o.git/config (S2)",
+    input: { command: "curl -o.git/config https://example.invalid/x" },
+  },
+  {
+    id: "git-dir-write-after-cd-out-unmoved",
+    description: "a relative write after cd .git/.. lands outside it: an ordinary workspace write (S1 control)",
+    input: { command: "cd .git/.. && echo x > notes.txt" },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",
@@ -5407,7 +5495,28 @@ const SUITES = [
     // first numbered 1.8.0 and takes the next MINOR by the claimed-at-merge
     // rule. Draft PR #650 also claims 1.9.0 and renumbers when it lands after
     // this one.
-    vectors_version: "1.9.0",
+    //
+    // 1.10.0 (APRV-518): MINOR again. Twelve new vectors. Every writing `git
+    // remote` form (`add --mirror=push`, `set-url`, `rename`, `update
+    // --prune`) is `vcs.history.rewrite`, the class of the mirror push it can
+    // arm; the read forms (`-v`, `show -n`, `get-url`) are pinned unmoved. A
+    // colon-less `HEAD` or `@` push is the trunk push (`git-push-head`), with an
+    // explicit-destination control. A shell write into `.git/config` is
+    // `vcs.history.rewrite` (`git-dir-write`), a destination git's ref DWIM
+    // resolves to the trunk (`lane:heads/main`) is the trunk push, and
+    // `tags/t1` is a tag. No committed expectation moves: no earlier vector
+    // names `git remote`, a HEAD refspec, a `.git` path or a `heads/` or `tags/`
+    // short name. First numbered 1.9.0; APRV-511 (in 0.4.6) merged first and
+    // took 1.9.0, so by the 1.4.0 rule (the number is claimed at merge) this set
+    // takes 1.10.0. Regenerating over 0.4.6 leaves every earlier vector,
+    // APRV-511's 1.9.0 set included, byte-identical. Rebuilt on 0.4.8, whose
+    // command-class file is still 1.9.0 (354 vectors): regenerating there
+    // leaves all 354 byte-identical and adds these twelve. The letter-case
+    // and no-rule abstain checks added on 0.4.8 move no vector. The review
+    // fold adds four more (sixteen in all, 370 vectors): a relative write after
+    // `cd .git`, a bare redirection, an attached `-o` value, and the
+    // `cd .git/..` control. Still 1.10.0: the number is claimed at merge.
+    vectors_version: "1.10.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:

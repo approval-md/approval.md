@@ -106,7 +106,7 @@ an addition).
 | `git-tag` | git | tag | read.shell for a listing (`-l`, `--list`, `-n`, `--contains`, `--points-at`, `--merged`, `--sort`, `--format`, or no argument), rule `git-tag-read`; release.publish for every creation, deletion, force-move and signature, for a bare tag name, and for any flag the listing allowlist does not name (APRV-397) |
 | `git-clone` | git | clone | network.call |
 | `git-write` | git | add \| apply \| checkout \| cherry-pick \| merge \| mv \| pull \| restore \| revert \| rm \| stash \| switch \| worktree | vcs.commit.branch |
-| `git-remote-read` | git | fetch \| ls-remote \| remote | read.vcs.remote |
+| `git-remote-read` | git | fetch \| ls-remote \| remote | read.vcs.remote; vcs.history.rewrite for every `git remote` form outside the read list (`-v`, `show [-n]`, `get-url`, `update` without `--prune`), rule `git-remote-write` (APRV-518) |
 | `git-read` | git | blame \| describe \| diff \| grep \| log \| ls-files \| reflog \| rev-list \| rev-parse \| shortlog \| show \| status | read.shell |
 | `gh-release` | gh | release | release.publish |
 | `gh-api` | gh | api \| auth \| gist \| secret \| workflow | read.vcs.remote for a `gh api` with no method flag (or `GET`) and no `-f`/`-F`/`--field`/`--raw-field`/`--input`; vcs.remote.meta § for `gh api graphql` on the checkout's own repository whose document carries no `mutation`; every other call, and every other subcommand on the row, network.call |

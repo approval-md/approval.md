@@ -216,6 +216,8 @@ import {
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
+import { refineGitDirWrites } from "./git-dir-writes.js";
+import { refinePushRepo } from "./push-repo.js";
 import { HOOK_GROK_HELP, HOOK_HELP, HOOK_HERMES_HELP, HOOK_MUSE_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
@@ -4068,12 +4070,14 @@ export function refineSkillScripts(
 }
 
 /**
- * The classifier, its context, and all five impure refinements, in the one
- * order every caller must use.
+ * The classifier, its context, and all eight impure refinements, in the one
+ * order every caller must use: git-directory writes (APRV-518), the push
+ * repository (APRV-518), the history rewrite, scratch deletes, the read scope, the
+ * write scope, skill scripts and credential reads.
  *
  * `hook classify` printing a different class from the one `hook claude-code`
  * decides would make the explainer a different program (APRV-108's note), and
- * that stays true now there are five refinements in the chain.
+ * that stays true now there are eight refinements in the chain.
  *
  * `readRoots` is the one argument whose ABSENCE is the loose answer rather than
  * the strict one (APRV-347), so it is passed explicitly at every call site: an
@@ -4109,7 +4113,21 @@ export function classifyForHook(
     ...(execCode ? { execCode: true } : {}),
     ...(noRuleSegments ? { noRuleSegments: true, noRuleCwds: [cwd, ...credentialCwds] } : {}),
   });
-  const rewritten = refineRewrite(classified, cwd);
+  // APRV-518. A `git push` whose refs its remote configuration or its current
+  // branch decides is answered from the checkout it runs in. First, because it
+  // reads only push segments, which no pass below changes. It runs on the
+  // classification `noRuleSegments` shaped: a no-rule stand-in
+  // (`NO_RULE_CLASS`, `defaults.unclassified_command: abstain`) is not a
+  // `read.*` class, so the pass counts it as a segment that may change what
+  // git reads, and a push on the same line is answered as unreadable.
+  // APRV-518 review fold (S1). A write judged where the disk lands it: the
+  // hook's own directory, each literal `cd` before it, symlinks, and a git
+  // directory not named `.git`. First, so the push pass below sees a segment
+  // it raises as the write it is, and the history-rewrite and write-scope
+  // passes do not lower or narrow it again.
+  const gitWrites = refineGitDirWrites(classified, cwd);
+  const pushed = refinePushRepo(gitWrites.result, cwd, command);
+  const rewritten = refineRewrite(pushed.result, cwd);
   const scratched = refineScratchDelete(rewritten.result, roots);
   const scoped = refineReadScope(scratched.result, readRoots, cwd);
   // APRV-402. Its roots are not `readRoots`: a read scope is a read notion and
@@ -4127,6 +4145,8 @@ export function classifyForHook(
   return {
     result: credentialed.result,
     notes: [
+      ...gitWrites.notes,
+      ...pushed.notes,
       ...rewritten.notes,
       ...scratched.notes,
       ...scoped.notes,

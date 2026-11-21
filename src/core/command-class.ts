@@ -49,7 +49,7 @@
  */
 
 import { isDateDisplay, isZoneValue } from "./date-argv.js";
-import { parseGitPushArgv, splitGitPush } from "./git-push-argv.js";
+import { isUnreadablePushWord, parseGitPushArgv, splitGitPush } from "./git-push-argv.js";
 import {
   isBareInfo,
   isDfDisplay,
@@ -2329,6 +2329,13 @@ export interface ClassifierContext {
    * and every word is also judged resolved against each of them.
    */
   noRuleCwds?: readonly string[];
+  /**
+   * Where literal `cd` / `pushd` / `popd` segments earlier on the same line
+   * moved the shell (APRV-518, S1), or `null` when one of them cannot be
+   * followed from the text. Set by {@link classifyCommand} for each segment it
+   * classifies; a caller leaves it unset, which is the line's own start.
+   */
+  shellDir?: ShellDir | null;
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -2476,11 +2483,60 @@ function isUnknownValue(word: string): boolean {
 /** A bare release tag: the conventional `v` plus a semantic-version-shaped value. */
 const V_PREFIXED_SEMVER = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 
-/** Does one side of a push refspec explicitly name a tag? */
+/**
+ * Does one side of a push refspec explicitly name a tag?
+ *
+ * The `refs/`, `tags/` and `heads/` prefixes are compared without case
+ * (APRV-518): on a case-insensitive filesystem `refs/TAGS/t1` and
+ * `refs/tags/t1` may name one loose file, so such a spelling is read as a tag.
+ * git 2.50.1 on APFS refused `git push origin TAGS/v1`, so this costs nothing
+ * there (tests/command-class-remote-config-case.test.ts).
+ */
 function isTagRef(name: string): boolean {
-  if (name.startsWith("refs/tags/")) return true;
-  if (name.startsWith("refs/heads/")) return false;
+  const folded = name.toLowerCase();
+  if (folded.startsWith("refs/tags/")) return true;
+  if (folded.startsWith("refs/heads/")) return false;
+  // APRV-518: git's ref DWIM tries `refs/<name>` first, so `tags/t1` is
+  // `refs/tags/t1` wherever that tag exists (a local source always, a remote
+  // destination when the remote has it).
+  if (folded.startsWith("tags/")) return true;
   return V_PREFIXED_SEMVER.test(name);
+}
+
+/**
+ * The branch a push destination names, the way git's ref DWIM reads it
+ * (APRV-518), or `null` when it names no branch. `refs/heads/x` and `x` are
+ * `x`; so is `heads/x`, because git matches a short destination against the
+ * remote's refs through `refs/%s` first, and `git push origin lane:heads/main`
+ * moved the remote trunk on git 2.50.1. Any other `refs/…` or `tags/…` /
+ * `remotes/…` is not a branch.
+ *
+ * The prefixes are compared without case, like the branch name itself
+ * ({@link isTrunkBranch}): on a case-insensitive filesystem a remote's loose
+ * `refs/HEADS/main` and `refs/heads/main` may be one file, so
+ * `lane:refs/HEADS/main` and `lane:HEADS/MAIN` read as the trunk wherever
+ * their lower-case spelling does. git 2.50.1 on APFS refused the first and
+ * created a branch `HEADS/MAIN` for the second, so this costs nothing there.
+ */
+function destinationBranch(destination: string): string | null {
+  const folded = destination.toLowerCase();
+  if (folded.startsWith("refs/heads/")) return destination.slice("refs/heads/".length);
+  if (folded.startsWith("refs/")) return null;
+  if (folded.startsWith("heads/")) return destination.slice("heads/".length);
+  if (folded.startsWith("tags/") || folded.startsWith("remotes/")) return null;
+  return destination;
+}
+
+/** The branch names every push reading treats as a trunk. */
+const TRUNK_BRANCHES: readonly string[] = ["main", "master"];
+
+/**
+ * Is this branch a trunk? Compared without case: on a case-insensitive
+ * filesystem a remote's loose `refs/heads/MAIN` is its `refs/heads/main`.
+ */
+function isTrunkBranch(branch: string, trunks: readonly string[]): boolean {
+  const lower = branch.toLowerCase();
+  return trunks.some((trunk) => trunk.toLowerCase() === lower);
 }
 
 /** Does either source or destination of this refspec explicitly name a tag? */
@@ -2539,6 +2595,30 @@ interface PushFacts {
   /** Pushes every branch (`--all`, `--mirror`, a submodule push): the trunk among them. */
   all: boolean;
   refspecs: string[];
+  /**
+   * What a colon-less `HEAD` or `@` refspec pushes to (APRV-518). Absent: the
+   * word is read as a branch of that name, which is the answer this row gave
+   * before and is the floor. Present: the branch it stands for, `main` when
+   * the current branch is the trunk or cannot be known.
+   */
+  headAs?: string;
+  /**
+   * Branch names that are trunks beside main and master (APRV-518): the
+   * branch `refs/remotes/origin/HEAD` names, when the hook could read it.
+   */
+  trunks?: readonly string[];
+}
+
+/**
+ * A refspec that pushes the current branch to the branch of the same name
+ * (APRV-518): `HEAD` or `@` with no `:dst`. Which branch that is, is a fact
+ * about the checkout, so the text alone cannot say it is not the trunk. Any
+ * case, because on a case-insensitive filesystem `git push origin head`
+ * resolves the file `.git/HEAD` and pushes the current branch too (git 2.50.1
+ * on macOS, proven in tests/git-push-remote-config.test.ts).
+ */
+export function isCurrentBranchRefspec(refspec: string): boolean {
+  return /^(?:head|@)$/iu.test(refspec);
 }
 
 /**
@@ -2616,20 +2696,35 @@ function pushFactsClass(facts: PushFacts): Refinement & { class: string } {
     return { class: REF_DELETE_CLASS, rule: "git-ref-delete", path: deleted.join(" ") };
   }
   let sawMain = facts.all;
+  // Did the trunk come ONLY from a `HEAD`/`@` that stands for it (APRV-518)?
+  // Then the rule says so, and the repository-reading pass in the hook knows
+  // which segments a current branch could answer.
+  let headMain = false;
+  const trunks = [...TRUNK_BRANCHES, ...(facts.trunks ?? [])];
   for (const refspec of refspecs) {
     const colon = refspec.indexOf(":");
-    const destination = colon === -1 ? refspec : refspec.slice(colon + 1);
+    if (facts.headAs !== undefined && isCurrentBranchRefspec(refspec)) {
+      const branch = destinationBranch(facts.headAs);
+      if (branch !== null && isTrunkBranch(branch, trunks)) headMain = true;
+      continue;
+    }
+    // A colon-less refspec pushes to the ref its source names, so `heads/main`
+    // alone is the trunk too. A leading `+` has already answered above.
+    const destination = (colon === -1 ? refspec : refspec.slice(colon + 1)).replace(/^\+/u, "");
     if (isUnknownValue(destination)) {
       sawMain = true;
       continue;
     }
-    const branch = destination.replace(/^refs\/heads\//u, "");
-    if (branch === "main" || branch === "master") sawMain = true;
+    const branch = destinationBranch(destination);
+    if (branch !== null && isTrunkBranch(branch, trunks)) sawMain = true;
   }
-  return sawMain
-    ? { class: "vcs.push.main", rule: "git-push-main" }
-    : { class: "vcs.push.branch", rule: "git-push-branch" };
+  if (sawMain) return { class: "vcs.push.main", rule: "git-push-main" };
+  if (headMain) return { class: "vcs.push.main", rule: GIT_PUSH_HEAD_RULE_ID };
+  return { class: "vcs.push.branch", rule: "git-push-branch" };
 }
+
+/** A `git push` whose `HEAD`/`@` may be the trunk (APRV-518). */
+const GIT_PUSH_HEAD_RULE_ID = "git-push-head";
 
 /**
  * `git push`, read twice and answered by the stricter reading (APRV-517).
@@ -2650,24 +2745,312 @@ function pushFactsClass(facts: PushFacts): Refinement & { class: string } {
  * refs are the ones git will act on.
  */
 function refineGitPush(ctx: RuleContext): Refinement {
-  const floor = pushFactsClass(wordPushFacts(ctx.args.slice(1)));
-  const split = splitGitPush(ctx.args);
+  return gitPushClass(ctx.args, ctx.assignments, ctx.substituted, { kind: "text" });
+}
+
+// ---------------------------------------------------------------------------
+// What the repository says about a push (APRV-518)
+// ---------------------------------------------------------------------------
+
+/**
+ * The facts of a checkout that decide what a `git push` sends when its text
+ * does not (APRV-518). `src/cli/hook.ts` reads them with plumbing and hands
+ * them in; this file never touches the disk.
+ *
+ * Four things the command line alone cannot show, each proven against git
+ * 2.50.1 on a bare local remote in tests/git-push-remote-config.test.ts:
+ *
+ * - `remote.<name>.mirror` turns a refspec-less push to that remote into
+ *   `--mirror`: every remote branch the checkout lacks is deleted and every
+ *   other one is force-updated. `--tags` and `--all` do not stop it.
+ * - `remote.<name>.push` is the refspec list of a refspec-less push, so
+ *   `:refs/heads/x` there deletes and `+…` there forces; and a colon-less
+ *   refspec on the command line (`git push origin lane`) takes its
+ *   destination AND its force from the configured refspec that maps it, so
+ *   `+refs/heads/lane:refs/heads/main` makes `git push origin lane` a forced
+ *   update of the trunk.
+ * - `HEAD` and `@` push the current branch, which may be the trunk. They do
+ *   not take a configured mapping.
+ * - A colon-less word naming a local tag (`git push origin t1`) publishes the
+ *   tag; `push.followTags` publishes tags beside any push, and
+ *   `push.recurseSubmodules` (or `submodule.recurse`) pushes submodule
+ *   branches, which may be their trunks.
+ */
+export interface PushRepoFacts {
+  /** The current branch's short name, or `null` when HEAD is detached or names no branch. */
+  head: string | null;
+  /** Is `head` a trunk: `main`, `master`, or the branch `refs/remotes/origin/HEAD` names? */
+  headIsDefault: boolean;
+  /** The branch `refs/remotes/origin/HEAD` names, or `null`; a trunk beside main and master. */
+  defaultBranch: string | null;
+  /**
+   * Every remote configuration names a `mirror` or `push` key for, by its
+   * subsection name verbatim (a URL can be one: `[remote "../r.git"]` applies
+   * to `git push ../r.git`).
+   */
+  remotes: ReadonlyMap<string, { mirror: boolean; push: readonly string[] }>;
+  /**
+   * Names with a legacy `$GIT_DIR/remotes/<name>` or `branches/<name>` file.
+   * Those files can carry `Push:` lines this pass does not parse, so a push
+   * that may use one is read as unreadable.
+   */
+  legacyRemotes: readonly string[];
+  /** Short names under `refs/tags/`. */
+  tags: ReadonlySet<string>;
+  /**
+   * Short names under `refs/heads/` (APRV-518 review fold, S3). Absent: not
+   * read, and no word is known to be a local branch.
+   */
+  branches?: ReadonlySet<string>;
+  /** `push.followTags` is on. */
+  followTags: boolean;
+  /** `push.recurseSubmodules` (or, unset, `submodule.recurse`) pushes submodules. */
+  submodules: boolean;
+}
+
+/** How much a `git push` reading may know beyond its text. */
+type PushRepoView =
+  /** The pure classifier: no repository, a `HEAD` may be the trunk. */
+  | { kind: "text" }
+  /** The hook tried and could not read the checkout the push runs in. */
+  | { kind: "unreadable" }
+  | {
+      kind: "read";
+      facts: PushRepoFacts;
+      /**
+       * An earlier segment on the line can create a local tag before the push
+       * runs (APRV-518 review fold, S3): `git fetch` follows tags, and `git
+       * tag`, `git pull` and `git remote update` can make one.
+       */
+      tagsMayAppear?: boolean;
+    };
+
+/** The rule a push takes when the configuration that decides it cannot be read. */
+const GIT_PUSH_CONFIG_UNREADABLE_RULE = "git-push-config-unreadable";
+
+/**
+ * The rule ids the `git-push` row answers with, so the repository pass in the
+ * hook can find the segments it may need to re-read.
+ */
+export const GIT_PUSH_RULES: readonly string[] = [
+  "git-push-force",
+  "git-push-tag",
+  "git-ref-delete",
+  "git-push-prune",
+  "git-push-implicit",
+  "git-push-main",
+  GIT_PUSH_HEAD_RULE_ID,
+  "git-push-branch",
+  "git-push-unreadable",
+];
+
+/** The rule a push takes when its word may be a tag an earlier segment creates (APRV-518 review fold, S3). */
+export const GIT_PUSH_NEW_TAG_RULE = "git-push-new-tag";
+
+/** The strictest of several push answers; on a tie the earliest is kept. */
+function strictestPush(candidates: readonly (Refinement & { class: string })[]): Refinement & { class: string } {
+  let best = candidates[0] as Refinement & { class: string };
+  for (const candidate of candidates.slice(1)) {
+    if (PUSH_CLASS_ORDER.indexOf(candidate.class) < PUSH_CLASS_ORDER.indexOf(best.class)) best = candidate;
+  }
+  return best;
+}
+
+/**
+ * `git push` under one {@link PushRepoView}. `args` are the words after the
+ * `git` binary, `push` and any global options in front of it included.
+ *
+ * Every view keeps APRV-517's two readings (the git grammar and the old word
+ * scan, stricter wins), so nothing here answers looser than the classifier
+ * did before this task. What the view adds:
+ *
+ * - `text`: a colon-less `HEAD`/`@` may be the trunk, so it reads as one.
+ * - `unreadable`: a push whose refs or remote configuration decides (no
+ *   refspec, or a colon-less refspec other than `HEAD`/`@`) is
+ *   `vcs.history.rewrite`, because configuration can make either a mirror or
+ *   a forced update; a `HEAD`/`@` alone, which takes no configured mapping,
+ *   reads as the trunk.
+ * - `read`: the current branch answers `HEAD`/`@`, and mirror, configured
+ *   refspecs, local tags, `push.followTags` and submodule recursion each add
+ *   the class they imply.
+ */
+function gitPushClass(
+  args: readonly string[],
+  assignments: readonly string[],
+  substituted: boolean,
+  view: PushRepoView,
+): Refinement {
+  const floor = pushFactsClass(wordPushFacts(args.slice(1)));
+  const split = splitGitPush(args);
   if (split === null) return { opaque: "git push: the push subcommand is not where the classifier found it" };
-  const parsed = parseGitPushArgv(split.words, ctx.assignments, ctx.substituted, split.globals);
+  const parsed = parseGitPushArgv(split.words, assignments, substituted, split.globals);
   if (!parsed.ok) {
     if (parsed.kind === "unreadable") return { class: "vcs.history.rewrite", rule: "git-push-unreadable" };
     return { opaque: parsed.detail };
   }
   const { reading } = parsed;
-  const exact = pushFactsClass({
+  const refspecs = reading.positionals.slice(1);
+  const base = {
     force: reading.force,
     tags: reading.tags,
     remove: reading.remove,
     prune: reading.prune,
     all: reading.all,
-    refspecs: reading.positionals.slice(1),
-  });
-  return PUSH_CLASS_ORDER.indexOf(floor.class) < PUSH_CLASS_ORDER.indexOf(exact.class) ? floor : exact;
+    refspecs,
+  };
+  // Colon-less refspecs other than `HEAD`/`@`: their destination, and their
+  // force, come from a configured refspec when one maps them. A deletion's
+  // refs do not (`--delete x` removes `x` whatever `remote.*.push` says).
+  const named = refspecs.filter((refspec) => !refspec.includes(":") && !isCurrentBranchRefspec(refspec));
+  const configDecides = !reading.remove && (refspecs.length === 0 || named.length > 0);
+
+  if (view.kind === "text") return strictestPush([pushFactsClass({ ...base, headAs: "main" }), floor]);
+  if (view.kind === "unreadable") {
+    if (configDecides) return { class: "vcs.history.rewrite", rule: GIT_PUSH_CONFIG_UNREADABLE_RULE };
+    // The refs are on the line, but `push.followTags` (or submodule
+    // recursion) may add a tag publication the configuration alone decides.
+    // A push that only deletes pushes no tags.
+    const pushesRefs = !reading.remove && refspecs.some((refspec) => deletedRef(refspec) === null);
+    const configured: (Refinement & { class: string })[] = pushesRefs
+      ? [{ class: "release.publish", rule: GIT_PUSH_CONFIG_UNREADABLE_RULE }]
+      : [];
+    return strictestPush([pushFactsClass({ ...base, headAs: "main" }), floor, ...configured]);
+  }
+
+  const { facts } = view;
+  const remoteWord = reading.positionals[0];
+  // No repository word (`git push`, `git push --repo=m`): the push may use any
+  // configured remote, so every one of them is in play.
+  const inPlay = remoteWord === undefined ? [...facts.remotes.keys()] : [remoteWord];
+  // A legacy file is opened by its name, so on a case-insensitive filesystem
+  // `git push OLD` reads `remotes/old` (git 2.50.1 on APFS deleted a remote
+  // branch through it): the name is compared without case.
+  const legacy =
+    remoteWord === undefined
+      ? facts.legacyRemotes.length > 0
+      : facts.legacyRemotes.some((name) => name.toLowerCase() === remoteWord.toLowerCase());
+  if (legacy) return { class: "vcs.history.rewrite", rule: GIT_PUSH_CONFIG_UNREADABLE_RULE };
+
+  const headAs = facts.head === null || facts.headIsDefault ? "main" : `refs/heads/${facts.head}`;
+  const trunks = facts.defaultBranch === null ? [] : [facts.defaultBranch];
+  const candidates: (Refinement & { class: string })[] = [pushFactsClass({ ...base, headAs, trunks }), floor];
+  const mirrored = inPlay.filter((name) => facts.remotes.get(name)?.mirror === true);
+  if (mirrored.length > 0) {
+    // A mirror push forces and deletes. With a refspec on the line git refuses
+    // to run at all, which the stricter reading costs nothing to cover.
+    candidates.push({ class: "vcs.history.rewrite", rule: "git-push-config-mirror", path: mirrored.join(" ") });
+  }
+  if (configDecides) {
+    const configured = inPlay.flatMap((name) => facts.remotes.get(name)?.push ?? []);
+    if (configured.length > 0) {
+      const answer = pushFactsClass({
+        force: false,
+        tags: false,
+        remove: false,
+        prune: false,
+        all: false,
+        refspecs: [...configured],
+        trunks,
+      });
+      candidates.push({
+        class: answer.class,
+        rule: "git-push-config-refspec",
+        ...("path" in answer && answer.path !== undefined ? { path: answer.path } : {}),
+      });
+    }
+  }
+  // Compared without case, as the stricter reading: on a case-insensitive
+  // filesystem a loose `refs/tags/v1` and `V1` may be one file. git 2.50.1 on
+  // APFS refused `git push origin V1` beside a tag `v1`, so this costs nothing
+  // there.
+  const foldedTags = new Set([...facts.tags].map((tag) => tag.toLowerCase()));
+  // The words whose SOURCE decides what kind of ref the push writes: a
+  // colon-less word, and the source of a `src:dst` whose destination does not
+  // start with `refs/` (git gives such a destination the kind of its source:
+  // a tag source goes to `refs/tags/<dst>`; review fold, proven on git 2.50.1).
+  // A source spelled from `HEAD` / `@` or under `refs/` names no tag here.
+  const sourced = [
+    ...named.map((refspec) => refspec.replace(/^\+/u, "")),
+    ...refspecs
+      .filter((refspec) => refspec.includes(":"))
+      .map((refspec) => refspec.replace(/^\+/u, ""))
+      .filter((refspec) => !refspec.slice(refspec.indexOf(":") + 1).startsWith("refs/"))
+      .map((refspec) => refspec.slice(0, refspec.indexOf(":")))
+      .filter((source) => source.length > 0 && !/^(?:head|@)(?:[~^].*)?$/iu.test(source) && !source.startsWith("refs/")),
+  ];
+  const localTags = sourced.filter((name) => foldedTags.has(name.toLowerCase()));
+  if (localTags.length > 0) {
+    candidates.push({ class: "release.publish", rule: "git-push-local-tag", path: localTags.join(" ") });
+  }
+  // S3: a tag an earlier segment creates is not among `facts.tags`, which were
+  // read before the line ran. A source word that is no local branch may be
+  // that tag; one that IS a local branch cannot be pushed if a tag of its name
+  // appears (git 2.50.1 refuses an ambiguous source), so it keeps its answer.
+  if (view.tagsMayAppear === true && !reading.remove) {
+    const fresh = sourced.filter((name) => !(facts.branches?.has(name) ?? false));
+    if (fresh.length > 0) {
+      candidates.push({ class: "release.publish", rule: GIT_PUSH_NEW_TAG_RULE, path: fresh.join(" ") });
+    }
+  }
+  if (!reading.remove && facts.followTags) {
+    candidates.push({ class: "release.publish", rule: "git-push-config-tags" });
+  }
+  if (!reading.remove && facts.submodules) {
+    candidates.push({ class: "vcs.push.main", rule: "git-push-config-submodules" });
+  }
+  return strictestPush(candidates);
+}
+
+/**
+ * One `git push` segment re-read under what the checkout says (APRV-518).
+ *
+ * `segmentText` is a {@link ClassifiedSegment.text} the classifier answered
+ * with one of {@link GIT_PUSH_RULES}; it is lexed again by the SAME lexer, and
+ * a sandbox wrapper is opened the same way {@link classifySegment} opens it,
+ * so the argv judged here is the argv the classifier judged. `facts` holds
+ * one entry per directory the push may run in (the strictest answer wins),
+ * and is `null` when the hook could not read one of them.
+ *
+ * Returns `null` when the text is not exactly one direct `git push` (the
+ * caller then fails closed), and never an answer looser than the pure
+ * classifier's except one: a `HEAD`/`@` the current branch shows is not the
+ * trunk, which is the `vcs.push.branch` the classifier gave before APRV-518.
+ */
+export function gitPushSegmentClass(
+  segmentText: string,
+  facts: readonly PushRepoFacts[] | null,
+  options: { tagsMayAppear?: boolean } = {},
+): { class: string; rule: string; path?: string } | null {
+  const lexed = lex(segmentText);
+  if (!lexed.ok || lexed.segments.length !== 1) return null;
+  const segment = lexed.segments[0] as LexSegment;
+  if (segment.opaque !== null) return null;
+  const words = segment.words.map((word) => word.text);
+  let cursor = 0;
+  while (cursor < words.length && ASSIGNMENT.test(words[cursor] as string)) cursor += 1;
+  const assignments = words.slice(0, cursor);
+  for (let depth = 0; depth < SANDBOX_WRAPPER_DEPTH; depth += 1) {
+    const found = sandboxWrapper(words, cursor);
+    if (found === null) break;
+    if (found.kind === "unreadable") return null;
+    cursor += found.skip;
+  }
+  const bin = words[cursor];
+  if (bin === undefined || (pathSegments(bin).slice(-1)[0] ?? bin) !== "git") return null;
+  const substituted = segment.words.slice(cursor + 1).some((word) => word.substitutions.length > 0);
+  const views: PushRepoView[] =
+    facts === null
+      ? [{ kind: "unreadable" }]
+      : facts.map((one) => ({ kind: "read", facts: one, ...(options.tagsMayAppear === true ? { tagsMayAppear: true } : {}) }));
+  const answers: (Refinement & { class: string })[] = [];
+  for (const view of views) {
+    const answer = gitPushClass(words.slice(cursor + 1), assignments, substituted, view);
+    if ("opaque" in answer) return null;
+    answers.push(answer);
+  }
+  if (answers.length === 0) return null;
+  const { class: cls, rule, path } = strictestPush(answers) as { class: string; rule: string; path?: string };
+  return { class: cls, rule, ...(path === undefined ? {} : { path }) };
 }
 
 /**
@@ -3502,6 +3885,218 @@ function refineGitReset(ctx: RuleContext): Refinement {
   return hasFlag(ctx.args, ["--hard"])
     ? { class: "vcs.history.rewrite", rule: "git-reset-hard" }
     : { class: "vcs.commit.branch", rule: "git-reset" };
+}
+
+/**
+ * `git remote` that only reads (APRV-518). A closed list; every other form,
+ * and every form whose words the text cannot read, writes.
+ *
+ * `git remote add --mirror=push m <url>` used to be `read.vcs.remote`, and a
+ * following `git push m` read as an implicit `vcs.push.main`. It is a mirror
+ * push: on git 2.50.1 it deleted every remote branch the checkout lacked. The
+ * other writing subcommands move the same configuration around: `rename`
+ * carries a mirror or push refspec onto another name (`origin`), `set-url`
+ * points one at another repository, `set-head` changes the branch
+ * `refs/remotes/origin/HEAD` names (which is how a trunk other than main is
+ * recognised), and `remove`, `prune`, `set-branches` and `update --prune`
+ * delete or re-scope the refs and keys a later reading relies on.
+ *
+ * So a writing form takes the class of the push it can arm, the strictest the
+ * push row answers: a mirror push is `vcs.history.rewrite` (APRV-517 reads
+ * `--mirror` as a force). No narrower existing class fits: `vcs.ref.delete`
+ * is below a mirror push, and `policy.*` is the gate's own surface.
+ *
+ * What reads, and why it is safe to keep reading:
+ *
+ * - `git remote`, `git remote -v` / `--verbose`: lists.
+ * - `show [-n] <name>…`: prints, asking the remote (`-n` asks nothing).
+ * - `get-url [--push] [--all] <name>`: prints a configured URL.
+ * - `update [--no-prune] [<group>|<remote>…]`: `git fetch` of those remotes,
+ *   which is what `git fetch` is everywhere in this table. With `-p` /
+ *   `--prune` (or any other option) it writes.
+ */
+const GIT_REMOTE_WRITE: Refinement = { class: "vcs.history.rewrite", rule: "git-remote-write" };
+const GIT_REMOTE_READ: Refinement = { class: "read.vcs.remote", rule: "git-remote-read" };
+
+function refineGitRemote(ctx: RuleContext): Refinement {
+  if (ctx.sub !== "remote") return GIT_REMOTE_READ;
+  // A word that came out of a substitution may be the subcommand.
+  if (ctx.substituted) return GIT_REMOTE_WRITE;
+  const at = ctx.args.findIndex((word) => !isFlag(word));
+  const rest = ctx.args.slice(at + 1);
+  let index = 0;
+  while (index < rest.length && (rest[index] === "-v" || rest[index] === "--verbose")) index += 1;
+  const sub = rest[index];
+  if (sub === undefined) return GIT_REMOTE_READ;
+  const tail = rest.slice(index + 1);
+  const only = (flags: readonly string[]): boolean =>
+    tail.every((word) => (isFlag(word) ? flags.includes(word) : true));
+  switch (sub) {
+    case "show":
+      return only(["-n"]) ? GIT_REMOTE_READ : GIT_REMOTE_WRITE;
+    case "get-url":
+      return only(["--push", "--all", "--no-push", "--no-all"]) ? GIT_REMOTE_READ : GIT_REMOTE_WRITE;
+    case "update":
+      // A word the shell may expand could be `--prune`.
+      return only(["--no-prune"]) && !tail.some(isUnreadablePushWord) ? GIT_REMOTE_READ : GIT_REMOTE_WRITE;
+    default:
+      return GIT_REMOTE_WRITE;
+  }
+}
+
+/** The rule a write into a git directory takes (APRV-518). */
+const GIT_DIR_WRITE_RULE = "git-dir-write";
+
+/** Does this path have a `.git` segment (the directory, or a worktree's `.git` file)? */
+function namesGitDirectory(word: string): boolean {
+  return pathSegments(word).some((segment) => segment.toLowerCase() === ".git");
+}
+
+/** The rule a write to a git configuration file outside a repository takes (APRV-518). */
+const GIT_CONFIG_FILE_WRITE_RULE = "git-config-file-write";
+
+/**
+ * Is this path one of git's own configuration files outside a repository:
+ * a `.gitconfig` (the user file and its usual include targets), anything
+ * under `.config/git/` (the XDG user directory), or `/etc/gitconfig`? Each
+ * is read by every push, so a write to one arms a push exactly as a write to
+ * `.git/config` does.
+ */
+function namesGitConfigFile(word: string): boolean {
+  const segments = pathSegments(word).map((segment) => segment.toLowerCase());
+  const last = segments[segments.length - 1];
+  if (last === ".gitconfig" || last === "gitconfig") return true;
+  // The directory itself too: `cp -t ~/.config/git x` writes into it.
+  for (let at = 0; at + 1 < segments.length; at += 1) {
+    if (segments[at] === ".config" && segments[at + 1] === "git") return true;
+  }
+  return false;
+}
+
+/**
+ * Where the shell stands, as path segments, after the literal `cd`s earlier
+ * on a line (APRV-518, S1). `segments` start from the directory the line
+ * started in, unless the first is `/` (absolute) or `~` (the home); `..`
+ * that climbs above the start stays as `..`. `stack` is `pushd`'s.
+ */
+export interface ShellDir {
+  segments: readonly string[];
+  stack: readonly (readonly string[])[];
+}
+
+const SHELL_DIR_START: ShellDir = { segments: [], stack: [] };
+
+/** `base` and then `parts`, with `.` dropped and `..` taking back a name. */
+function joinShellPath(base: readonly string[], parts: readonly string[]): string[] {
+  const out = [...base];
+  for (const part of parts) {
+    if (part === "" || part === ".") continue;
+    const last = out[out.length - 1];
+    if (part === ".." && last !== undefined && last !== ".." && last !== "/" && last !== "~") {
+      out.pop();
+      continue;
+    }
+    if (part === ".." && last === "/") continue;
+    out.push(part);
+  }
+  return out;
+}
+
+/**
+ * The directory a `cd`/`pushd` word moves to, from `from`, or `null` when the
+ * text cannot say: an option, an expansion, a glob, `-`, or `~user`. A bare
+ * relative name may go through `CDPATH`; it still ends in the name's own
+ * segments, so it is followed as relative, which can only ever find a `.git`
+ * the name itself spells.
+ */
+function shellDirTarget(word: string, from: readonly string[] | null): string[] | null {
+  if (word.startsWith("-") || /[$`*?[\]{}\\]/u.test(word)) return null;
+  if (word === "~") return ["~"];
+  if (word.startsWith("~/")) return joinShellPath(["~"], word.slice(2).split("/"));
+  if (word.startsWith("~")) return null;
+  if (word.startsWith("/")) return joinShellPath(["/"], word.split("/"));
+  return from === null ? null : joinShellPath(from, word.split("/"));
+}
+
+/**
+ * The shell's directory after `segment` (APRV-518, S1): `cd`, `chdir`,
+ * `pushd` and `popd` followed from their literal words, every other segment
+ * leaving it where it was. A directory change behind an assignment
+ * (`HOME=… cd`, `CDPATH=… cd`) or a word the shell may still change cannot be
+ * followed, and gives `null`.
+ */
+function nextShellDir(segment: LexSegment, dir: ShellDir | null): ShellDir | null {
+  const cursor = bashAssignmentCount(segment.words);
+  const command = segment.words[cursor];
+  if (command === undefined) return dir;
+  const name = command.text.split("/").pop() ?? command.text;
+  if (!["cd", "chdir", "pushd", "popd"].includes(name)) return dir;
+  const rest = segment.words.slice(cursor + 1);
+  if (cursor > 0 || !command.exact || rest.some((word) => !word.exact || word.substitutions.length > 0)) return null;
+  const words = rest.map((word) => word.text);
+  const args = words[0] === "--" ? words.slice(1) : words;
+  if (name === "popd") {
+    if (dir === null || args.length > 0 || dir.stack.length === 0) return null;
+    return { segments: dir.stack[dir.stack.length - 1] as readonly string[], stack: dir.stack.slice(0, -1) };
+  }
+  if (args.length > 1 || (name === "pushd" && args.length === 0)) return null;
+  const target = args.length === 0 ? ["~"] : shellDirTarget(args[0] as string, dir === null ? null : dir.segments);
+  if (target === null) return null;
+  const stack = dir === null ? [] : dir.stack;
+  return name === "pushd" && dir !== null
+    ? { segments: target, stack: [...stack, dir.segments] }
+    : { segments: target, stack: name === "pushd" ? [] : stack };
+}
+
+/**
+ * Does a write to `word`, made after the shell moved to `dir`, land in a
+ * `.git` directory (APRV-518, S1)? Only a relative word is resolved here; an
+ * absolute or home word is judged as written by {@link namesGitDirectory}.
+ */
+function relativeLandsInGitDir(word: string, dir: ShellDir | null | undefined): boolean {
+  if (dir === null || dir === undefined || dir.segments.length === 0) return false;
+  if (word.startsWith("/") || word.startsWith("~") || /[$`]/u.test(word) || /\s/u.test(word)) return false;
+  return joinShellPath(dir.segments, word.split("/")).some((part) => part.toLowerCase() === ".git");
+}
+
+/**
+ * The value an attached short option carries (APRV-518, S2): every tail of a
+ * single-dash word after its first option letter, so `-o.git/config`,
+ * `-O.git/hooks/pre-push`, `-t.git/hooks`, `-C.git` and a cluster such as
+ * `-xfC.git` are each read for the path they may name. Every tail rather than
+ * a table of which letter takes a value: a tail that is not a path can only
+ * make a segment stricter, and no option table can drift out of date.
+ */
+function attachedOptionValues(word: string): string[] {
+  if (!word.startsWith("-") || word.startsWith("--") || word.length < 3) return [];
+  const tails: string[] = [];
+  for (let at = 2; at < word.length; at += 1) tails.push(word.slice(at));
+  return tails;
+}
+
+/**
+ * The `.git` or git configuration file write a segment makes, if any
+ * (APRV-518): its write targets, and the words it may write through
+ * (`named`), each judged as written and, when relative, from the directory
+ * earlier `cd`s moved the shell to (S1). `namedWrites` is false for a read
+ * whose only write is its redirection (`echo x > f`): its words are judged as
+ * written, never resolved from the shell's directory, since it writes none.
+ */
+function gitWriteRefinement(
+  writeTargets: readonly string[],
+  named: readonly string[],
+  dir: ShellDir | null | undefined,
+  namedWrites = true,
+): { class: string; rule: string; path: string } | null {
+  const spelled = named.filter((word) => !/\s/u.test(word));
+  const words = [...writeTargets, ...spelled];
+  const resolvable = namedWrites ? words : writeTargets;
+  const gitDir =
+    words.find((word) => namesGitDirectory(word)) ?? resolvable.find((word) => relativeLandsInGitDir(word, dir));
+  if (gitDir !== undefined) return { class: "vcs.history.rewrite", rule: GIT_DIR_WRITE_RULE, path: gitDir };
+  const gitConfig = words.find(namesGitConfigFile);
+  if (gitConfig !== undefined) return { class: "vcs.history.rewrite", rule: GIT_CONFIG_FILE_WRITE_RULE, path: gitConfig };
+  return null;
 }
 
 /** `git branch` reads until it is asked to delete, rename or force-set one. */
@@ -4926,6 +5521,11 @@ export const COMMAND_RULES: readonly CommandRule[] = [
     bins: ["git"],
     subs: ["fetch", "ls-remote", "remote"],
     class: "read.vcs.remote",
+    // APRV-518: `git remote` reads only in the forms {@link refineGitRemote}
+    // names; every other `git remote` writes the configuration a later push
+    // reads.
+    emits: ["vcs.history.rewrite"],
+    refine: refineGitRemote,
   },
   {
     id: "git-read",
@@ -6511,6 +7111,12 @@ function isSteeringAssignment(word: string): boolean {
   if (["TZ", "TZDIR", "PATH", "LOCPATH", "GCONV_PATH", "LANG", "LANGUAGE", "HOME", "CDPATH"].includes(name)) {
     return true;
   }
+  // APRV-518's `GIT_CONFIG_GLOBAL=/tmp/g; git push origin` (a configuration
+  // the hook never read) and `XDG_CONFIG_HOME=/tmp/x; git push` (git's user
+  // config moved) are refused by APRV-521's bare-assignment rule below
+  // ({@link isGitInheritedName}, less {@link isHarmlessGitAssignment}) and by
+  // its line scan ({@link gitEnvironmentWrite}), not here: naming every
+  // `GIT_*` here would also refuse the harmless `GIT_PAGER=cat` APRV-521 admits.
   return name.startsWith("LC_") || name.startsWith("LD_");
 }
 
@@ -6850,8 +7456,11 @@ function classifySegment(
       };
     }
     // `VAR=value` alone, or a bare redirection. `> file` truncates, so it is a
-    // write; an assignment on its own touches nothing.
+    // write; an assignment on its own touches nothing. A bare redirection into
+    // `.git` or a git configuration file is that write (APRV-518, S1).
     if (writeTargets.length > 0) {
+      const gitWrite = gitWriteRefinement(writeTargets, [], context.shellDir);
+      if (gitWrite !== null) return { ok: true, ...gitWrite };
       return { ok: true, class: "files.write.workspace", rule: "redirect-write" };
     }
     // APRV-522 (S2): inside a substitution, a bare `<` redirection IS the
@@ -7259,9 +7868,44 @@ function classifySegment(
 
   // A read command with a write redirection writes. `ls > out.txt` creates a
   // file, and the class has to say so.
+  const readBeforeRedirect = cls.startsWith("read.") && basename !== "curl" && basename !== "wget";
   if (cls.startsWith("read.") && writeTargets.length > 0) {
     cls = "files.write.workspace";
     ruleId = "redirect-write";
+  }
+
+  // APRV-518. A write into a git directory can arm a push: `printf '[remote
+  // "origin"]\n\tpush = :refs/heads/lane\n' >> .git/config && git push origin`
+  // deleted `lane` on git 2.50.1 while it read as a workspace write and an
+  // implicit trunk push. The configuration is `.git/config`, and a hook under
+  // `.git/hooks/` runs on the next push, so ANY write whose target has a
+  // `.git` segment (any case: `.GIT/config` is the same file on a
+  // case-insensitive filesystem) takes the class of the strictest push it can
+  // arm. Redirection targets always; positionals (and `--flag=value` values)
+  // of a segment that is not a read, since the text cannot say which one the
+  // binary writes, except `git`'s own. A word with whitespace in it is prose,
+  // not a path.
+  // `curl -o` / `wget -O` write a file while reading as `read.web`, so their
+  // words are scanned too.
+  if ((!cls.startsWith("read.") || basename === "curl" || basename === "wget") && cls !== GATE_SELF_CLASS) {
+    const flagValues = args
+      .filter((arg) => isFlag(arg) && arg.includes("="))
+      .map((arg) => arg.slice(arg.indexOf("=") + 1));
+    // `git`'s own words are not file writes: `--git-dir=x/.git` names the
+    // repository it runs against, and the git rows classify what git writes
+    // (a `git config` write has no row and stays refused).
+    // S2: an attached short option's value (`-o.git/config`, `-t.git/hooks`,
+    // `-C.git`) and an operand's `key=value` value (`dd of=.git/config`) name
+    // where the binary writes as surely as a separate word does.
+    const attached = args.flatMap(attachedOptionValues);
+    const operandValues = args
+      .filter((arg) => !isFlag(arg) && arg.includes("="))
+      .map((arg) => arg.slice(arg.indexOf("=") + 1));
+    const named = basename === "git" ? [] : [...positionals, ...flagValues, ...attached, ...operandValues];
+    const gitWrite = gitWriteRefinement(writeTargets, named, context.shellDir, !readBeforeRedirect);
+    if (gitWrite !== null) {
+      return { ok: true, ...gitWrite, ...(sandbox === null ? {} : { sandbox }) };
+    }
   }
 
   // APRV-347, last because it is the narrowest: a read whose target the TEXT
@@ -7555,10 +8199,15 @@ export function classifyCommand(
   // substitution body included, fail closed on a word that is not a literal),
   // moves where a no-rule segment's words land, so no segment of it stands in.
   const movesDirectory = context.noRuleSegments === true && segmentsMayChangeDirectory(lexed.segments);
+  // APRV-518 (S1): where the line's literal `cd`s have moved the shell, so a
+  // relative write after `cd .git` is judged where it lands.
+  let shellDir: ShellDir | null = context.shellDir === undefined ? SHELL_DIR_START : context.shellDir;
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };
     }
+    execContext = { ...execContext, shellDir };
+    shellDir = nextShellDir(segment, shellDir);
     // APRV-380. A LOGIN-SHELL WRAPPER is classified by the script it runs.
     // `loginShellScript` states the exact shape and why this is not the second
     // parser `OPAQUE_BINS` refuses; the inner classification is run with
@@ -7574,6 +8223,7 @@ export function classifyCommand(
       // outer cd/pushd/popd/chdir no inner segment stands in.
       const inner = classifyCommand(script, protectedPaths, {
         ...context,
+        shellDir: execContext.shellDir ?? null,
         unwrapShell: false,
         execCode: false,
         noRuleSegments: context.noRuleSegments === true && !movesDirectory,
@@ -7702,6 +8352,12 @@ export interface CommandSegmentShape {
   writes: string[];
   /** Paths read through `<` (APRV-445 recheck 3, SF3c). */
   reads: string[];
+  /**
+   * Could the shell make a write target, or a word after the binary, into
+   * text this shape does not show (a `$`, a backtick, or a `$(…)` whose text
+   * the lexer set aside)? Read by the push-repository pass (APRV-518).
+   */
+  expands: { writes: boolean; args: boolean };
   /** Is this segment's stdin the previous segment's output? (APRV-522.) */
   stdinFed: boolean;
   /**
@@ -7731,11 +8387,16 @@ export interface CommandSegmentShape {
 export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
   const lexed = lex(command);
   if (!lexed.ok) return null;
+  const expands = (word: LexWord): boolean => word.substitutions.length > 0 || /[$`]/u.test(word.text);
   return lexed.segments.map((segment) => {
     const words = segment.words.map((word) => word.text);
     const cursor = bashAssignmentCount(segment.words);
     const script = loginShellScript(segment);
     return {
+      expands: {
+        writes: segment.redirects.some((redirect) => redirect.op !== "<" && expands(redirect.target)),
+        args: segment.words.slice(cursor + 1).some(expands),
+      },
       text: segment.text,
       bin: words[cursor] ?? null,
       args: words.slice(cursor + 1),
