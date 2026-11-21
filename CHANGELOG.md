@@ -139,6 +139,26 @@ ordinary workspace write.
   gains `--with-envelopes`: each mini-app manifest operation as the exact
   `village` call the hook sees, and every gated plugin tool with its registered
   input schema; without the flag its output is unchanged.
+- **NEW-CALLS sees what the review found it blind to (B-167N review fold).**
+  - The extractor reads a plugin tool registered through a local name bound
+    from `getattr(ctx, "register_tool")` or in a loop over a literal list, and
+    a pattern added to or removed from `APPROVAL_GATED_TOOLS` needs a declared
+    entry; a gated pattern that reaches no call the box runs fails closed.
+  - Every operation the `village` schema accepts is a call, with a manifest or
+    without; one in neither of the bridge's operation lists is unmapped.
+  - Every daemon `propose` in a plugin that owns a gated tool is extracted with
+    its class and the answers the code after it goes on with; an entry must
+    declare it (`propose.source`, `propose.class`, `propose.accepts`), and an
+    answer the plugin refuses is a refused call. For Kicks refuses an order the
+    daemon answers `autonomous` or `supervised`; Gold Stars refuses
+    `supervised`.
+  - An acceptance dated after the run, a member named twice in
+    `expected.json`, and two recipes with one key and other bytes fail; the
+    check's entry point compares real paths.
+  - `expected.json` declares the calls new since the previous release on
+    overlay main `255f9291` (twelve eci-volunteers operations,
+    `kismet.web_link`, `zzz.schedule_posts`) and Gold Stars' send propose; the
+    For Kicks propose cites where the code proposes today.
 - **CLASS-DIFF against the core the boxes run (B-167 release gate).**
   `overlay-recipes-check.mjs --diff <baseline core>` classifies the same corpus
   at a baseline core and at this one, over every recipe plus every `tools:`
