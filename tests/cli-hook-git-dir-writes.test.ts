@@ -52,11 +52,23 @@ function pure(command: string): string[] {
   return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [];
 }
 
-/** Every segment as `class rule`, through the hook's refinements, in `cwd`. */
+/**
+ * Every segment as `class rule`, through the hook's refinements, in `cwd`.
+ * The disk pass ADDS a `git-dir-write` entry beside the segment it raises
+ * (same text); this shows that entry in the segment's place, and the test
+ * "the disk pass adds its class beside the segment's own" pins the pair.
+ */
 function hook(command: string, cwd: string): string[] {
   const result = classifyForHook(command, [], cwd).result;
   assert.equal(result.ok, true, `${command}: ${JSON.stringify(result)}`);
-  return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [];
+  if (!result.ok) return [];
+  const shown: string[] = [];
+  for (const [at, segment] of result.segments.entries()) {
+    const next = result.segments[at + 1];
+    if (next !== undefined && next.text === segment.text && next.rule === "git-dir-write") continue;
+    shown.push(`${segment.class} ${segment.rule}`);
+  }
+  return shown;
 }
 
 const DIR_WRITE = "vcs.history.rewrite git-dir-write";
@@ -182,6 +194,26 @@ test("S1 hook: a hook whose own directory is inside .git makes every relative wr
   assert.deepEqual(hook("cd .. && printf x >> config", hooks), ["read.shell read-shell", DIR_WRITE]);
 });
 
+test("S1 hook: the disk pass adds its class beside the segment's own, so later passes still judge the segment", { skip }, () => {
+  const repo = checkout();
+  symlinkSync(".git", join(repo, "g"));
+  const result = classifyForHook("echo x >> g/config", [], repo).result;
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(
+    result.segments.map((segment) => `${segment.class} ${segment.rule}`),
+    ["files.write.workspace redirect-write", DIR_WRITE],
+  );
+  // From a hook directory inside .git, the segment keeps its own class beside the added one.
+  const deleted = classifyForHook("rm -rf old", [], join(repo, ".git", "hooks")).result;
+  assert.equal(deleted.ok, true);
+  if (!deleted.ok) return;
+  assert.deepEqual(
+    deleted.segments.map((segment) => `${segment.class} ${segment.rule}`),
+    ["files.write.workspace rm-workspace", DIR_WRITE],
+  );
+});
+
 test("S1 hook: a symlink to .git that exists beforehand is followed", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "g"));
@@ -211,6 +243,10 @@ test("S1 hook: a separate git directory and a linked worktree's git directory ar
 
 test("S1 hook: ordinary writes in a checkout do not move", { skip }, () => {
   const repo = checkout();
+  // A cluster's bare tail is no path: the `l` that ends `-t…/av-approval` is not the link `l`.
+  symlinkSync(".git/hooks", join(repo, "l"));
+  assert.deepEqual(hook("cp -vt/tmp/av-approval x.py", repo), ["files.write.workspace workspace-write"]);
+  assert.deepEqual(hook("cp -vt./l x.py", repo), [DIR_WRITE]);
   assert.deepEqual(hook("cd sub && echo x > notes.txt", repo), ["read.shell read-shell", "files.write.workspace redirect-write"]);
   assert.deepEqual(hook("> out.log", repo), ["files.write.workspace redirect-write"]);
   assert.deepEqual(hook("cp a b", repo), ["files.write.workspace workspace-write"]);

@@ -163,7 +163,18 @@ function writeWords(args: readonly string[]): string[] {
     }
     const equals = arg.indexOf("=");
     if (equals !== -1) words.push(arg.slice(equals + 1));
-    if (!arg.startsWith("--")) for (let at = 2; at < arg.length; at += 1) words.push(arg.slice(at));
+    // An attached short-option value: the text after the first letter, and,
+    // for a cluster (`-vt/dir`, `-xfC.git`), each later tail that looks like a
+    // path (has a `/`, or starts with `.` or `~`). A bare tail such as the `l`
+    // of `…/av-approval` is no value, and judged on disk it could name any
+    // file of the checkout.
+    if (!arg.startsWith("--") && arg.length > 2) {
+      words.push(arg.slice(2));
+      for (let at = 3; at < arg.length; at += 1) {
+        const tail = arg.slice(at);
+        if (tail.includes("/") || tail.startsWith(".") || tail.startsWith("~")) words.push(tail);
+      }
+    }
   }
   return words;
 }
@@ -274,7 +285,7 @@ export interface GitDirWriteRefinement {
 export function refineGitDirWrites(result: CommandClassification, cwd: string): GitDirWriteRefinement {
   if (!result.ok) return { result, notes: [] };
   const notes: string[] = [];
-  const segments = [...result.segments];
+  const added = new Map<number, ClassifiedSegment>();
   const gitDirs = new Map<string, string[]>();
   const gitDirsOf = (dir: string): string[] => {
     let known = gitDirs.get(dir);
@@ -358,13 +369,23 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
       }
       continue;
     }
-    const { path: _dropped, ...rest } = segment as ClassifiedSegment;
-    segments[index] = { ...rest, class: REWRITE_CLASS, rule: GIT_DIR_WRITE_RULE, path: hit.word };
+    // ADDED beside the segment, never in its place: the passes after this one
+    // (scratch deletes, the read and write scopes, credential reads) still
+    // judge the segment as it was, and a policy sees both classes, so no
+    // policy can find the line looser than before (one that holds
+    // `files.delete.out_of_scope` stricter than `vcs.history.rewrite` keeps it).
+    added.set(index, { text: segment.text, class: REWRITE_CLASS, rule: GIT_DIR_WRITE_RULE, path: hit.word });
     notes.push(
-      `git-dir-write: \`${segment.text}\` writes ${hit.word}, which lands at ${hit.landed}, inside a git directory; it is ${REWRITE_CLASS}, was ${segment.class} (${segment.rule})`,
+      `git-dir-write: \`${segment.text}\` writes ${hit.word}, which lands at ${hit.landed}, inside a git directory; it is also ${REWRITE_CLASS} (was ${segment.class} alone)`,
     );
   }
-  if (notes.length === 0) return { result, notes };
+  if (added.size === 0) return { result, notes };
+  const segments: ClassifiedSegment[] = [];
+  for (const [index, segment] of result.segments.entries()) {
+    segments.push(segment);
+    const extra = added.get(index);
+    if (extra !== undefined) segments.push(extra);
+  }
   const classes: string[] = [];
   for (const segment of segments) {
     if (!classes.includes(segment.class)) classes.push(segment.class);
