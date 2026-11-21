@@ -3959,7 +3959,7 @@ function namesGitDirectory(word: string): boolean {
 }
 
 /** Past this many brace alternatives a word is judged as naming `.git`. */
-const BRACE_LIMIT = 64;
+const BRACE_LIMIT = 1024;
 
 /**
  * The words brace expansion makes of `word` (second review, S1): `.g{i,}t`
@@ -4020,7 +4020,10 @@ function braceGroup(word: string): { start: number; end: number; parts: string[]
     if (sequence !== null) {
       const [first, last] = [sequence[1] as string, sequence[2] as string];
       const numeric = /\d/u.test(first) && /\d/u.test(last);
-      if (!numeric && (first.length !== 1 || last.length !== 1)) continue;
+      // Every alternative of a numeric sequence holds a digit, and `.git`
+      // holds none, so one stands for them all (`touch f{1..300}` is no `.git`).
+      if (numeric) return { start, end, parts: ["0"] };
+      if (first.length !== 1 || last.length !== 1) continue;
       const from = numeric ? Number(first) : first.charCodeAt(0);
       const to = numeric ? Number(last) : last.charCodeAt(0);
       if (Math.abs(to - from) > BRACE_LIMIT) return { start, end, parts: Array.from({ length: BRACE_LIMIT + 1 }, () => "") };

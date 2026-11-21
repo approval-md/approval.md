@@ -2170,6 +2170,21 @@ const commandClassVectors = [
     description: "a relative write after cd .git/.. lands outside it: an ordinary workspace write (S1 control)",
     input: { command: "cd .git/.. && echo x > notes.txt" },
   },
+  {
+    id: "git-dir-write-glob-target",
+    description: "a glob segment that .git matches is read as naming .git: git-dir-write (APRV-518 second review, S1)",
+    input: { command: "echo x >> .gi?/config" },
+  },
+  {
+    id: "git-dir-write-git-output-option",
+    description: "git's own --output writes a file, so a read verb writing into .git is git-dir-write (APRV-518 second review, S2)",
+    input: { command: "git diff --output=.git/hooks/pre-push" },
+  },
+  {
+    id: "git-dir-write-through-line-variable",
+    description: "a line that sets a variable to .git and writes through it is git-dir-write (APRV-518 second review, S3)",
+    input: { command: "D=.git; echo x >> $D/config" },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",
@@ -5515,7 +5530,10 @@ const SUITES = [
     // and no-rule abstain checks added on 0.4.8 move no vector. The review
     // fold adds four more (sixteen in all, 370 vectors): a relative write after
     // `cd .git`, a bare redirection, an attached `-o` value, and the
-    // `cd .git/..` control. Still 1.10.0: the number is claimed at merge.
+    // `cd .git/..` control. The second review fold adds three (nineteen in
+    // all, 373 vectors): a glob target, git's own `--output`, and a write
+    // through a variable the line sets to `.git`. Still 1.10.0: the number is
+    // claimed at merge.
     vectors_version: "1.10.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
