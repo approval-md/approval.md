@@ -211,6 +211,9 @@ test("B review: a sed name is judged both as literal text and as a shell word; e
   // ... and expanded on disk otherwise.
   symlinkSync(".git", join(repo, "link"));
   assert.deepEqual(hook("sed -n 'w l*k/x' f > l*k/x", repo), [DIR_WRITE]);
+  // The sed name as a shell word is expanded on disk too: only the hook sees this.
+  assert.deepEqual(pure("sed -n 'w l*k/config' x"), ["read.shell sed-read"]);
+  assert.deepEqual(hook("sed -n 'w l*k/config' x", repo), [DIR_WRITE]);
   // The shell still expands `$D` inside double quotes before sed sees it (S3).
   assert.deepEqual(pure('D=.git; sed -n "w $D/config" x'), ["read.shell assignment", DIR_WRITE]);
 });
