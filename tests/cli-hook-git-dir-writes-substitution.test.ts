@@ -462,3 +462,10 @@ test("security review n: an expansion that assigns makes a name unknown", () => 
   // strict even where the evaluator works it out to no .git.
   assert.deepEqual(pure("G=x.gitx; echo x >> ${G#x}/config"), [ASSIGNMENT, DIR_WRITE]);
 });
+
+test("security review o: any bracket expression in a pattern is strict", () => {
+  assert.deepEqual(pure('f=notes.txt; echo x > "${f%[]a-z].txt}.log"'), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure('f=notes.txt; echo x > "${f%[.]txt}.log"'), [ASSIGNMENT, DIR_WRITE]);
+  // `*` and `?` are still worked out.
+  assert.deepEqual(pure('f=notes.txt; echo x > "${f%.t?t}.log"'), [ASSIGNMENT, REDIRECT]);
+});

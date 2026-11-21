@@ -5130,15 +5130,15 @@ const EXPANSION_EVALUATION_LIMIT = 256;
 
 /**
  * Does the shell pattern `pattern` (`*` any run, `/` included, `?` one
- * character, a bracket expression one of a set) match all of `text`? `null`
- * when it holds what this reader does not work out (a POSIX class, an
- * escape, a quote), which the caller judges the strict way. A walk over the
- * text as a set of positions.
+ * character, anything else itself) match all of `text`? `null` when it holds
+ * what {@link patternUnmodelled} names, which the caller judges the strict
+ * way. A walk over the text as a set of positions.
  */
 function patternUnmodelled(pattern: string): boolean {
-  // Ranges follow the locale's collation, and extglob forms (`@( )`, `+( )`,
-  // `!( )`, `|`) are another language; escapes and quotes are not read.
-  return /[\\'"()|!@+]|\[[:=.]/u.test(pattern) || /\[[^\]]*-[^\]]/u.test(pattern);
+  // Bracket expressions (ranges follow the locale's collation, and `[]a-z]`
+  // hides one), extglob forms (`@( )`, `+( )`, `!( )`, `|`), escapes and
+  // quotes are not worked out (points m and o).
+  return /[\\'"()|!@+[]/u.test(pattern);
 }
 
 /**
@@ -5158,29 +5158,7 @@ function shellPatternMatches(pattern: string, text: string): boolean | null {
       live = next;
       continue;
     }
-    let test: (c: string) => boolean = (c) => c === char;
-    if (char === "?") test = () => true;
-    if (char === "[") {
-      let close = at + 1;
-      const negated = pattern[close] === "!" || pattern[close] === "^";
-      if (negated) close += 1;
-      if (pattern[close] === "]") close += 1;
-      close = pattern.indexOf("]", close);
-      if (close !== -1) {
-        const body = pattern.slice(at + 1 + (negated ? 1 : 0), close);
-        const inSet = (c: string): boolean => {
-          for (let i = 0; i < body.length; i += 1) {
-            if (body[i + 1] === "-" && i + 2 < body.length) {
-              if (c >= (body[i] as string) && c <= (body[i + 2] as string)) return true;
-              i += 2;
-            } else if (body[i] === c) return true;
-          }
-          return false;
-        };
-        test = (c) => inSet(c) !== negated;
-        at = close;
-      }
-    }
+    const test = (c: string): boolean => char === "?" || c === char;
     for (let p = 0; p < text.length; p += 1) if (live[p] === 1 && test(text[p] as string)) next[p + 1] = 1;
     live = next;
   }
