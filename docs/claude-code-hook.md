@@ -971,7 +971,7 @@ expands a pattern on disk and walks each matching directory or link. Past
 judged the strict way. git's own options that write a file are write
 targets: `--output` of `diff`, `log`, `show` and every verb that takes it,
 `apply --directory` and `--build-fake-ancestor`, `worktree add <path>`, and
-`clone <dir>` and `--separate-git-dir`, read by any prefix of two letters or
+`clone <dir>` and `--separate-git-dir`, read by any prefix of one letter or
 more, as git's option parser reads `apply` and `clone`. `format-patch`,
 `archive`, `bundle`, `init` and `config --file` have no row and stay refused.
 A read-class command that names a file it writes takes the same rules for

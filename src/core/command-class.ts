@@ -4259,7 +4259,7 @@ function attachedOptionValues(word: string): string[] {
 /**
  * The files a READ-class command writes through its own words (follow-up,
  * item B), read from this Mac's manual pages: `sort -o <file>` /
- * `--output=<file>` (any prefix of two letters or more), `uniq`'s second
+ * `--output=<file>` (any prefix of one letter or more), `uniq`'s second
  * operand, `sed`'s `w` command and the `w` flag of `s` in a script given on
  * the line, and `tree -o <file>`. Every other command the table reads
  * (`cat`, `grep`, `head`, `cut`, `jq`, `diff`, `ls`, `wc` and the rest) names
@@ -4284,9 +4284,17 @@ export function readWriteTargets(bin: string, args: readonly string[]): string[]
 }
 
 /**
+ * The outputs {@link readWriteTargets} is SURE of: every one but the words of
+ * a sed script this step could not read, which are only possible targets.
+ */
+export function readWriteSureTargets(bin: string, args: readonly string[]): string[] {
+  return bin === "sed" ? sedScripts(args).flatMap((script) => readSedScript(script).files) : readWriteTargets(bin, args);
+}
+
+/**
  * The values of an output option: a short `letter` in a cluster takes the
  * rest of the word or the next word; a letter in `valued` takes a value
- * that is not an output and ends the cluster; a long option of two letters
+ * that is not an output and ends the cluster; a long option of one letter
  * or more that is a prefix of one in `outputs` takes its `=` value or the
  * next word, and one in `skipping` consumes the next word.
  */
@@ -4304,7 +4312,7 @@ function optionOutputs(
     if (arg.startsWith("--")) {
       const equals = arg.indexOf("=");
       const name = equals === -1 ? arg : arg.slice(0, equals);
-      if (name.length >= 4 && outputs.some((option) => option.startsWith(name))) {
+      if (name.length >= 3 && outputs.some((option) => option.startsWith(name))) {
         const value = equals === -1 ? args[at + 1] : arg.slice(equals + 1);
         if (value !== undefined) values.push(value);
         if (equals === -1) at += 1;
@@ -4376,22 +4384,164 @@ function sedScripts(args: readonly string[]): string[] {
   return scripts;
 }
 
-/** One sed address: a line number, `$`, or a `/regex/` (`\cregexc` is left out). */
-const SED_ADDRESS = String.raw`(?:\d+|\$|\/(?:[^/\\\n]|\\.)*\/I?)`;
-/** The `w` (or GNU `W`) command at a command's position, with its file to the end of the line. */
-const SED_WRITE_COMMAND = new RegExp(String.raw`(?:^|[;\n{}])\s*(?:${SED_ADDRESS}(?:\s*,\s*${SED_ADDRESS})?)?\s*!?\s*[wW]\s*([^\n]+)`, "gu");
-/** The `w` flag of an `s` command, with its file to the end of the line. */
-const SED_WRITE_FLAG = new RegExp(
-  String.raw`(?:^|[;\n{}])\s*(?:${SED_ADDRESS}(?:\s*,\s*${SED_ADDRESS})?)?\s*!?\s*s([^\\\n])(?:(?!\1)[^\\\n]|\\.)*\1(?:(?!\1)[^\\\n]|\\.)*\1[gpiImMe0-9]*w\s*([^\n]+)`,
-  "gu",
-);
-
-/** The files a sed script writes with `w` or `s///w`. */
-function sedWriteFiles(script: string): string[] {
+/**
+ * A sed script read command by command (follow-up, item B, and the review
+ * of it): the files its `w` / `W` commands and the `w` flag of `s` write,
+ * and whether some part could not be read. Addresses: a line number,
+ * `first~step`, `$`, `/re/` or `\cREc` with `I` / `M`, and a second one
+ * after `,` (also `+N` and `~N`), then `!`. Commands: `{` `}`, `#`, `:label`,
+ * `b` / `t` / `T` with a label, `a` / `i` / `c` text, `r` / `R` / `w` / `W`
+ * with a file, `s` and `y` with their delimited parts, and the one-letter
+ * commands. Anything else (GNU's `e`, which this Mac's sed does not have, a
+ * form not listed) makes the rest unreadable.
+ */
+function readSedScript(script: string): { files: string[]; unreadable: boolean } {
   const files: string[] = [];
-  for (const found of script.matchAll(SED_WRITE_COMMAND)) files.push((found[1] as string).trim());
-  for (const found of script.matchAll(SED_WRITE_FLAG)) files.push((found[2] as string).trim());
-  return files.filter((file) => file.length > 0);
+  let at = 0;
+  const length = script.length;
+  const peek = (): string => script[at] ?? "";
+  const space = (): void => {
+    while (at < length && (peek() === " " || peek() === "\t")) at += 1;
+  };
+  const toLineEnd = (): string => {
+    const end = script.indexOf("\n", at);
+    const text = script.slice(at, end === -1 ? length : end);
+    at = end === -1 ? length : end;
+    return text;
+  };
+  /** Past a delimited part closed by `delimiter`, escapes and brackets read; false if it never closes. */
+  const delimited = (delimiter: string): boolean => {
+    while (at < length) {
+      const char = peek();
+      if (char === "\\") {
+        at += 2;
+        continue;
+      }
+      if (char === "\n") return false;
+      at += 1;
+      if (char === delimiter) return true;
+    }
+    return false;
+  };
+  const address = (second: boolean): boolean | null => {
+    const char = peek();
+    if (/\d/u.test(char)) {
+      while (/\d/u.test(peek())) at += 1;
+      if (peek() === "~") {
+        at += 1;
+        while (/\d/u.test(peek())) at += 1;
+      }
+      return true;
+    }
+    if (second && (char === "+" || char === "~")) {
+      at += 1;
+      if (!/\d/u.test(peek())) return null;
+      while (/\d/u.test(peek())) at += 1;
+      return true;
+    }
+    if (char === "$") {
+      at += 1;
+      return true;
+    }
+    if (char === "/" || char === "\\") {
+      let delimiter = "/";
+      if (char === "\\") {
+        delimiter = script[at + 1] ?? "";
+        if (delimiter === "" || delimiter === "\n") return null;
+        at += 1;
+      }
+      at += 1;
+      if (!delimited(delimiter)) return null;
+      while (peek() === "I" || peek() === "M") at += 1;
+      return true;
+    }
+    return false;
+  };
+  const ONE_LETTER = "=dDgGhHlnNpPqQxzF";
+  while (at < length) {
+    while (at < length && /[\s;]/u.test(peek())) at += 1;
+    if (at >= length) break;
+    const first = address(false);
+    if (first === null) return { files, unreadable: true };
+    if (first) {
+      space();
+      if (peek() === ",") {
+        at += 1;
+        space();
+        if (address(true) !== true) return { files, unreadable: true };
+      }
+    }
+    space();
+    while (peek() === "!") {
+      at += 1;
+      space();
+    }
+    const command = peek();
+    at += 1;
+    if (command === "{" || command === "}") continue;
+    if (command === "#" || command === ":" || command === "a" || command === "i" || command === "c") {
+      // A comment, a label, or text: to the end of the line, and a text's
+      // lines that end in a backslash carry on.
+      let line = toLineEnd();
+      while ((command === "a" || command === "i" || command === "c") && line.endsWith("\\") && at < length) {
+        at += 1;
+        line = toLineEnd();
+      }
+      continue;
+    }
+    if (command === "b" || command === "t" || command === "T") {
+      space();
+      while (at < length && !/[;\n}]/u.test(peek())) at += 1;
+      continue;
+    }
+    if (command === "r" || command === "R" || command === "w" || command === "W") {
+      space();
+      const file = toLineEnd().trim();
+      if (command === "w" || command === "W") {
+        if (file.length === 0) return { files, unreadable: true };
+        files.push(file);
+      }
+      continue;
+    }
+    if (command === "s" || command === "y") {
+      const delimiter = peek();
+      if (delimiter === "" || delimiter === "\\" || delimiter === "\n") return { files, unreadable: true };
+      at += 1;
+      if (!delimited(delimiter) || !delimited(delimiter)) return { files, unreadable: true };
+      if (command === "s") {
+        while (/[gpiImMe0-9]/u.test(peek())) at += 1;
+        if (peek() === "w") {
+          at += 1;
+          space();
+          const file = toLineEnd().trim();
+          if (file.length === 0) return { files, unreadable: true };
+          files.push(file);
+          continue;
+        }
+      }
+    } else if (ONE_LETTER.includes(command) && command !== "") {
+      if (command === "q" || command === "Q" || command === "l") while (/\d/u.test(peek())) at += 1;
+    } else {
+      return { files, unreadable: true };
+    }
+    space();
+    // A command ends at `;`, a newline, `}`, `#` or the end; anything else
+    // is a form this reader does not know.
+    if (at < length && !/[;\n}#]/u.test(peek())) return { files, unreadable: true };
+  }
+  return { files, unreadable: false };
+}
+
+/**
+ * The files a sed script writes, or, when some of it cannot be read and a
+ * `w` or `W` stands in what is left, every word of it as a POSSIBLE target
+ * (judged by the same `.git` rules): it may write a file this reader cannot
+ * name.
+ */
+function sedWriteFiles(script: string): string[] {
+  const read = readSedScript(script);
+  if (!read.unreadable) return read.files;
+  return /[wW]/u.test(script) ? [...read.files, ...script.split(/[\s;{}]+/u).filter((word) => word.length > 0)] : read.files;
 }
 
 /**
@@ -4422,9 +4572,8 @@ export function gitWriteTargets(args: readonly string[]): string[] {
   );
   // git takes any unambiguous prefix of a long option (`--outp=f`, `--out f`
   // write as `--output` does), and this reader cannot know every verb's
-  // full option list, so ANY long option of two letters or more that is a
-  // prefix of a write option's name is read as that option (review of the
-  // second fold).
+  // full option list, so ANY long option of one letter or more that is a
+  // prefix of a write option's name is read as that option.
   const writeOptions = [
     "--output",
     ...(verb === "apply" ? ["--directory", "--build-fake-ancestor"] : []),
@@ -4439,7 +4588,7 @@ export function gitWriteTargets(args: readonly string[]): string[] {
     if (arg.startsWith("--")) {
       const equals = arg.indexOf("=");
       const name = equals === -1 ? arg : arg.slice(0, equals);
-      if (name.length >= 4 && writeOptions.some((option) => option.startsWith(name))) {
+      if (name.length >= 3 && writeOptions.some((option) => option.startsWith(name))) {
         const value = equals === -1 ? rest[at + 1] : arg.slice(equals + 1);
         if (value !== undefined) values.push(value);
         if (equals === -1) at += 1;

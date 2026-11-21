@@ -38,6 +38,7 @@ import {
   globSegmentMatches,
   isPatternSegment,
   mayNameGitDirectory,
+  readWriteSureTargets,
   readWriteTargets,
   type ClassifiedSegment,
   type CommandClassification,
@@ -211,7 +212,9 @@ function fetchOutputValues(bin: string, args: readonly string[]): string[] {
     if (arg.startsWith("--")) {
       const equals = arg.indexOf("=");
       const name = equals === -1 ? arg : arg.slice(0, equals);
-      if (!long.includes(name)) continue;
+      // A long option may be given by any prefix of it (wget's getopt
+      // takes an unambiguous one): read every prefix as the option.
+      if (name.length < 3 || !long.some((option) => option.startsWith(name))) continue;
       if (equals !== -1) values.push(arg.slice(equals + 1));
       else if (next !== undefined) values.push(next);
       continue;
@@ -545,7 +548,7 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
       ...(segment.class.startsWith("files.") ? named : []),
       ...(bin === null ? [] : fetchOutputValues(bin, shape.args)),
       ...gitWrites,
-      ...readOutputs,
+      ...(bin === null ? [] : readWriteSureTargets(bin, shape.args)),
     ]);
     const sources = bin === null ? [] : treeSources(bin, shape.args).filter(pathOrPattern);
     if (candidates.length === 0 && sources.length === 0) continue;

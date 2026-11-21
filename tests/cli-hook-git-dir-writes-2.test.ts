@@ -233,6 +233,13 @@ test("S2 review: a long write option is read by any prefix git may take", () => 
     "git apply --directo .git/hooks p.patch",
     "git apply --build=.git/index p.patch",
     "git clone --sep=.git/x /x/r.git y",
+    "git log --o=.git/config",
+    "git log --o .git/config",
+    "git apply --d=.git/hooks p.patch",
+    "git apply --b=.git/index p.patch",
+    "git clone --s=.git/x /x/r.git y",
+    "sort --o .git/config x",
+    "sort --o=.git/config x",
   ]) {
     assert.ok(pure(command).includes(DIR_WRITE), command);
   }
@@ -268,11 +275,14 @@ test("real git, S2 review: which abbreviations of --output git 2.50.1 writes thr
   // an abbreviation is either taken or refused as an unknown option.
   for (const args of [
     ["apply", "--dire=sub", "--check", "/dev/null"],
+    ["apply", "--d=sub", "--check", "/dev/null"],
     ["apply", "--build=fake", "--check", "/dev/null"],
+    ["apply", "--b=fake", "--check", "/dev/null"],
     ["clone", "--sep=sepdir", join(repo, "no-such-repo"), "cl"],
+    ["clone", "--s=sepdir", join(repo, "no-such-repo"), "cl"],
   ]) {
     const ran = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: process.env });
-    const refused = /unknown option|unrecognized/u.test(ran.stderr);
+    const refused = /unknown option|unrecognized|ambiguous option/u.test(ran.stderr);
     tried.push(`${args.slice(0, 2).join(" ")}: exit ${String(ran.status)}, ${refused ? "option refused" : "option taken"} (${ran.stderr.trim().split("\n")[0] ?? ""})`);
   }
   for (const line of tried) t.diagnostic(line);
