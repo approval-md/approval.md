@@ -164,6 +164,8 @@ test("S1 review: an entry whose own name holds a glob character is a real match"
   const repo = checkout();
   symlinkSync(".git", join(repo, "a*b"));
   assert.deepEqual(hook("cd a*b && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
+  // Matched by another pattern, so only the real listing names it.
+  assert.deepEqual(hook("cd a?b && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
   assert.deepEqual(hook("echo x >> a*b/config", repo), [DIR_WRITE]);
   // A pattern that matches nothing, under a listing that is not empty, is
   // never "no target and nothing unknown": the hook says it cannot place it.
