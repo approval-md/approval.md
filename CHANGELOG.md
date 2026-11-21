@@ -103,7 +103,13 @@ ordinary workspace write.
   known limit. A write whose sure target cannot be placed (an unreadable
   directory, an over-long name, a link loop) is judged the strict way; a
   word that only may be a target is then judged by its text. curl's
-  `--output-dir` and wget's log file options count as write targets.
+  `--output-dir` and wget's log file options count as write targets. After
+  the second review: a glob or brace target that `.git` matches
+  (`.gi?/config`, `.g{i,}t/config`), expanded on disk by the hook; git's own
+  write options (`--output`, `apply --directory`, `worktree add <path>`,
+  `clone <dir>`, by any prefix); a write through a variable or a
+  substitution that the same line sets to `.git`; and a copy of a tree that
+  carries `.git` at its top.
 - **What it costs.** Where `vcs.history.rewrite` is human-only (this
   repository), a push on a line with an earlier non-read segment (`git add -A
   && git commit -m x && git push -u origin lane`), every mutating `git remote`

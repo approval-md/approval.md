@@ -962,6 +962,31 @@ write after an unknown change is judged from the places the hook can name, as
 move ordinary lines (`cd "$D" && echo x > f` is autonomous today), so it waits
 for the owner.
 
+Since the second review, three more ways to `.git` count. A glob or brace
+target is read as a pattern: `.gi?/config`, `.[g]it/config` and
+`.g{i,}t/config` name `.git` (a POSIX class in brackets may match anything,
+and `*` or `?` never match a leading dot, so `cd *` does not), and the hook
+expands a pattern on disk and walks each matching directory or link. Past
+100,000 entries, or under a directory it cannot list, a sure target is
+judged the strict way. git's own options that write a file are write
+targets: `--output` of `diff`, `log`, `show` and every verb that takes it,
+`apply --directory` and `--build-fake-ancestor`, `worktree add <path>`, and
+`clone <dir>` and `--separate-git-dir`, read by any prefix of two letters or
+more, as git's option parser reads `apply` and `clone`. `format-patch`,
+`archive`, `bundle`, `init` and `config --file` have no row and stay refused.
+On a line that spells `.git` in an assignment's value (a pattern counts), a
+command substitution or a quoted string, a target that expands, or a
+relative one after a directory change the text cannot place, is
+`git-dir-write`. At hook level a copy or move whose source is a tree with
+a `.git` entry at its top (`cp -R /x/. .`, `rsync -a /x/ .`) is too.
+
+Known limits: a variable set in an EARLIER call, or a value built from
+several expansions on the line (`A=.g; B=it; cd $A$B`), cannot be seen; an
+archive unpacked into the checkout (`tar -xf`, `unzip`) is judged by its
+named directory only, not by what the archive holds; and a git include file
+(`~/.gitconfig.local`, a path named by `include.path`) is judged as an
+ordinary file. The push pass does not read `core.hooksPath`.
+
 **The hook reads the checkout before it answers a push.** After the pure
 classifier, `refinePushRepo` (`src/cli/push-repo.ts`) re-reads every `git push`
 segment under what the checkout says: `git rev-parse --git-common-dir`, `git
