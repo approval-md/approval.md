@@ -267,7 +267,21 @@ test("S1 hook: a sure write target the hook cannot place is judged the strict wa
     assert.deepEqual(hook("echo x > locked/f", repo), [DIR_WRITE]);
     assert.deepEqual(hook("cp a locked/f", repo), [DIR_WRITE]);
     assert.deepEqual(hook("curl -o locked/f https://example.invalid/x", repo), [DIR_WRITE]);
-    // A word that is only a possible target (a wget header value) is applied as text.
+    // Every curl and wget option that names a file it writes is a sure target.
+    for (const command of [
+      "curl -so locked/f https://example.invalid/x",
+      "curl -sSo locked/f https://example.invalid/x",
+      "curl --output-dir locked/sub -O https://example.invalid/f",
+      "curl --output-dir=locked/sub -O https://example.invalid/f",
+      "wget -o locked/log https://example.invalid/x",
+      "wget -a locked/log https://example.invalid/x",
+      "wget -qo locked/log https://example.invalid/x",
+      "wget --output-file=locked/log https://example.invalid/x",
+      "wget --append-output locked/log https://example.invalid/x",
+    ]) {
+      assert.deepEqual(hook(command, repo), [DIR_WRITE], command);
+    }
+    // A word that is only a possible target (a wget header value) is judged by its text: no .git, no move.
     assert.deepEqual(hook("wget --header=locked/f https://example.invalid/x", repo), ["read.web web-read"]);
   } finally {
     chmodSync(locked, 0o755);
@@ -280,6 +294,25 @@ test("S1 hook: a sure write target the hook cannot place is judged the strict wa
   symlinkSync("loop2", join(repo, "loop1"));
   symlinkSync("loop1", join(repo, "loop2"));
   assert.deepEqual(hook("echo x > loop1/f", repo), [DIR_WRITE]);
+});
+
+test("S1 hook: a possible target that cannot be placed falls back to its text, against the known git directories too", { skip: skip || (process.getuid?.() === 0 ? "root reads a mode-000 directory" : false) }, () => {
+  cases += 1;
+  const root = join(scratch, `case-${String(cases)}`);
+  mkdirSync(root);
+  git(root, "init", "-q", "--separate-git-dir=store", "repo");
+  const repo = join(root, "repo");
+  const locked = join(repo, "locked");
+  mkdirSync(locked);
+  chmodSync(locked, 0o000);
+  try {
+    // The header value is no sure target, and `locked` cannot be walked; by its
+    // text it lies in the separate git directory, which the classifier cannot know.
+    assert.deepEqual(pure("wget --header=locked/../../store/config https://example.invalid/x"), ["read.web web-read"]);
+    assert.deepEqual(hook("wget --header=locked/../../store/config https://example.invalid/x", repo), [DIR_WRITE]);
+  } finally {
+    chmodSync(locked, 0o755);
+  }
 });
 
 test("S1 hook: ordinary writes in a checkout do not move", { skip }, () => {

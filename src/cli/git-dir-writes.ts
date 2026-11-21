@@ -182,19 +182,42 @@ function writeWords(args: readonly string[]): string[] {
 }
 
 /**
- * The output a `curl` or `wget` writes, from its own options: curl's `-o` /
- * `--output`, wget's `-O` / `--output-document` / `-P` / `--directory-prefix`,
- * separate, attached or `=`.
+ * The files a `curl` or `wget` writes, from its own options (review fold):
+ * curl's output (`-o`, `--output`) and output directory (`--output-dir`);
+ * wget's output document (`-O`, `--output-document`), directory prefix
+ * (`-P`, `--directory-prefix`) and log file (`-o`, `-a`, `--output-file`,
+ * `--append-output`). A value letter inside a short cluster takes the rest
+ * of the cluster, or the NEXT word when it ends the cluster (`curl -so f`);
+ * a long option takes its `=` value or the next word.
  */
 function fetchOutputValues(bin: string, args: readonly string[]): string[] {
-  const short = bin === "curl" ? ["-o"] : bin === "wget" ? ["-O", "-P"] : [];
-  const long = bin === "curl" ? ["--output"] : bin === "wget" ? ["--output-document", "--directory-prefix"] : [];
+  const letters = bin === "curl" ? "o" : bin === "wget" ? "OPoa" : "";
+  const long =
+    bin === "curl"
+      ? ["--output", "--output-dir"]
+      : bin === "wget"
+        ? ["--output-document", "--directory-prefix", "--output-file", "--append-output"]
+        : [];
   const values: string[] = [];
   for (const [at, arg] of args.entries()) {
     const next = args[at + 1];
-    if ((short.includes(arg) || long.includes(arg)) && next !== undefined) values.push(next);
-    for (const flag of short) if (arg.startsWith(flag) && arg.length > flag.length) values.push(arg.slice(flag.length));
-    for (const flag of long) if (arg.startsWith(`${flag}=`)) values.push(arg.slice(flag.length + 1));
+    if (arg === "--") break;
+    if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      const name = equals === -1 ? arg : arg.slice(0, equals);
+      if (!long.includes(name)) continue;
+      if (equals !== -1) values.push(arg.slice(equals + 1));
+      else if (next !== undefined) values.push(next);
+      continue;
+    }
+    if (!arg.startsWith("-") || letters.length === 0) continue;
+    for (let index = 1; index < arg.length; index += 1) {
+      if (!letters.includes(arg[index] as string)) continue;
+      const rest = arg.slice(index + 1);
+      if (rest.length > 0) values.push(rest);
+      else if (next !== undefined) values.push(next);
+      break;
+    }
   }
   return values;
 }
@@ -374,6 +397,13 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
         if ("unplaceable" in walked) {
           if (sure.has(word) || walked.unplaceable === "ELOOP") {
             hit = { word, landed: `a place this hook cannot determine (${walked.unplaceable})` };
+            break;
+          }
+          // A possible target: judged by its text, normalised, as before the
+          // disk was read (a `.git` segment, or a known git directory).
+          const text = normalize(spelled.startsWith("/") ? spelled : `${dir}/${spelled}`);
+          if (hasGitSegment(text) || inGit.some((root) => within(text, root))) {
+            hit = { word, landed: `${text} (by its text: ${walked.unplaceable})` };
             break;
           }
           continue;
