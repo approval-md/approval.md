@@ -2480,8 +2480,10 @@ const V_PREFIXED_SEMVER = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[
  * Does one side of a push refspec explicitly name a tag?
  *
  * The `refs/`, `tags/` and `heads/` prefixes are compared without case
- * (APRV-518): on a case-insensitive filesystem a loose `refs/TAGS/t1` is the
- * file `refs/tags/t1`, so a spelling git may resolve to a tag is read as one.
+ * (APRV-518): on a case-insensitive filesystem `refs/TAGS/t1` and
+ * `refs/tags/t1` may name one loose file, so such a spelling is read as a tag.
+ * git 2.50.1 on APFS refused `git push origin TAGS/v1`, so this costs nothing
+ * there (tests/command-class-remote-config-case.test.ts).
  */
 function isTagRef(name: string): boolean {
   const folded = name.toLowerCase();
@@ -2504,8 +2506,10 @@ function isTagRef(name: string): boolean {
  *
  * The prefixes are compared without case, like the branch name itself
  * ({@link isTrunkBranch}): on a case-insensitive filesystem a remote's loose
- * `refs/HEADS/main` is its `refs/heads/main`, so `lane:refs/HEADS/main` and
- * `lane:HEADS/MAIN` read as the trunk wherever their lower-case spelling does.
+ * `refs/HEADS/main` and `refs/heads/main` may be one file, so
+ * `lane:refs/HEADS/main` and `lane:HEADS/MAIN` read as the trunk wherever
+ * their lower-case spelling does. git 2.50.1 on APFS refused the first and
+ * created a branch `HEADS/MAIN` for the second, so this costs nothing there.
  */
 function destinationBranch(destination: string): string | null {
   const folded = destination.toLowerCase();
@@ -2895,7 +2899,8 @@ function gitPushClass(
   // configured remote, so every one of them is in play.
   const inPlay = remoteWord === undefined ? [...facts.remotes.keys()] : [remoteWord];
   // A legacy file is opened by its name, so on a case-insensitive filesystem
-  // `git push OLD` reads `remotes/old`: the name is compared without case.
+  // `git push OLD` reads `remotes/old` (git 2.50.1 on APFS deleted a remote
+  // branch through it): the name is compared without case.
   const legacy =
     remoteWord === undefined
       ? facts.legacyRemotes.length > 0
@@ -2930,8 +2935,10 @@ function gitPushClass(
       });
     }
   }
-  // Compared without case: a loose `refs/tags/v1` answers `git push origin V1`
-  // on a case-insensitive filesystem, and the remote then gets a tag.
+  // Compared without case, as the stricter reading: on a case-insensitive
+  // filesystem a loose `refs/tags/v1` and `V1` may be one file. git 2.50.1 on
+  // APFS refused `git push origin V1` beside a tag `v1`, so this costs nothing
+  // there.
   const foldedTags = new Set([...facts.tags].map((tag) => tag.toLowerCase()));
   const localTags = named
     .map((refspec) => refspec.replace(/^\+/u, ""))

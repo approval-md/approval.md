@@ -8,14 +8,17 @@
  * lower-case one, or refused, with the default options and under
  * `noRuleSegments` (`defaults.unclassified_command: abstain`).
  *
- * Four spellings were looser before this file's commit, and are fixed there:
- * a destination prefix in another case (`lane:refs/HEADS/main`,
+ * Four spellings classified looser than their lower-case line before this
+ * file's commit: a destination prefix in another case (`lane:refs/HEADS/main`,
  * `lane:HEADS/MAIN`), a tag prefix in another case (`TAGS/v1`,
  * `lane:refs/TAGS/v1`), a legacy remotes file named in another case
- * (`git push OLD` reads `remotes/old`), and a local tag named in another case
- * (`git push origin V1` pushes the loose `refs/tags/v1`). The last part runs
- * real git on a bare local remote and checks each case's class against what
- * git did, so the test says what this filesystem does rather than assuming it.
+ * (`git push OLD`), and a local tag named in another case (`git push origin
+ * V1` beside a tag `v1`). The last part runs real git on a bare local remote,
+ * checks each case's class against what git did, and prints what git did. On
+ * git 2.50.1 on APFS only the legacy remotes file was a live hole (`git push
+ * OLD` opened `remotes/old` and deleted a remote branch); git refused the tag
+ * and `refs/HEADS/` spellings and pushed `HEADS/MAIN` as a branch of that
+ * name, so reading those stricter costs nothing.
  */
 
 import assert from "node:assert/strict";
@@ -330,7 +333,7 @@ function floorOf(before: Map<string, string>, afterRefs: Map<string, string>): {
   return { floor, effect };
 }
 
-const CASES: readonly { name: string; setup?: (clone: string) => void; command: string; argv: readonly string[] }[] = [
+const CASES: readonly { name: string; setup?: (clone: string) => void; command: string; argv: readonly string[]; noEffect?: true }[] = [
   {
     name: "a legacy remotes file, named in another case",
     setup: (clone) => {
@@ -350,11 +353,12 @@ const CASES: readonly { name: string; setup?: (clone: string) => void; command: 
     setup: (clone) => ok(clone, ["remote", "add", "--mirror=push", "m", "../remote.git"]),
     command: "git push M",
     argv: ["push", "M"],
+    noEffect: true,
   },
 ];
 
 for (const each of CASES) {
-  test(`real git, letter case: ${each.name}: the hook's class is at least what git did`, { skip: GIT ? false : "no git binary" }, () => {
+  test(`real git, letter case: ${each.name}: the hook's class is at least what git did`, { skip: GIT ? false : "no git binary" }, (t) => {
     const { remote, clone } = fixture();
     each.setup?.(clone);
     const refined = classifyForHook(each.command, [], clone);
@@ -362,8 +366,11 @@ for (const each of CASES) {
     if (!refined.result.ok) return;
     const got = refined.result.segments[0]?.class ?? "";
     const before = refsOf(remote);
-    git(clone, each.argv);
+    const pushed = git(clone, each.argv);
     const { floor, effect } = floorOf(before, refsOf(remote));
+    t.diagnostic(`${each.command}: class ${got}; git exit ${String(pushed.status)}; effect: ${effect.length === 0 ? "none" : effect.join(", ")}`);
+    // The doc's claim that a remote's own name is compared exactly rests on this.
+    if (each.noEffect === true) assert.deepEqual(effect, [], `${each.command}: git changed the remote`);
     assert.ok(
       ORDER.indexOf(got) <= ORDER.indexOf(floor),
       `${each.command}: classified ${got}, but git did ${effect.join(", ")} (needs ${floor})`,

@@ -26,7 +26,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -467,6 +467,35 @@ test("a directory the push runs in that cannot be named: the push its configurat
   // A bare relative name goes through CDPATH, so it is not followed.
   assert.equal(classified("cd clone && git push origin lane", join(fixture.clone, "..")).rule, "git-push-config-unreadable");
 });
+
+test(
+  "a checkout whose push configuration cannot be read is unreadable: the push its configuration decides is vcs.history.rewrite",
+  { skip: GIT_VERSION === null || process.getuid?.() === 0 ? "needs git, and a user a mode-000 directory refuses" : false },
+  () => {
+    // A legacy `remotes/` directory the hook may not list: the pass cannot say
+    // whether a file there names the remote, so the checkout is unreadable
+    // rather than plain. (Added on 0.4.8: a mutant that skipped an unreadable
+    // directory survived every earlier test.)
+    const fixture = makeFixture();
+    const legacy = join(fixture.clone, ".git", "remotes");
+    mkdirSync(legacy);
+    chmodSync(legacy, 0o000);
+    try {
+      assert.deepEqual(classified("git push -u origin lane", fixture.clone), {
+        class: "vcs.history.rewrite",
+        rule: "git-push-config-unreadable",
+      });
+      assert.deepEqual(classified("git push", fixture.clone), { class: "vcs.history.rewrite", rule: "git-push-config-unreadable" });
+      // Refs on the line: at least release.publish.
+      assert.deepEqual(classified("git push origin lane:lane", fixture.clone), {
+        class: "release.publish",
+        rule: "git-push-config-unreadable",
+      });
+    } finally {
+      chmodSync(legacy, 0o755);
+    }
+  },
+);
 
 test("a cd to a literal path reads the checkout there, and the one it left", { skip: GIT_VERSION === null }, () => {
   const mirrored = makeFixture();

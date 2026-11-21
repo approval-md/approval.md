@@ -961,16 +961,20 @@ branch `refs/remotes/origin/HEAD` names is a trunk beside main and master when
 the hook can read it.
 
 Letter case never loosens any of these rules, because APFS and the default
-macOS volume fold case. The `refs/`, `heads/`, `tags/` and `remotes/`
-prefixes are compared without case (`lane:refs/HEADS/main` and
-`lane:HEADS/MAIN` are the trunk push, `TAGS/v1` is a tag), as are a legacy
-remotes file's name (`git push OLD` opens `remotes/old`), a local tag's name
-(`git push origin V1` pushes a loose `refs/tags/v1`), `HEAD` (`head` is the
-current branch), the `.git` segment of a write target and the names of git's
-configuration files. A command word in another case (`GIT push`, `git
-REMOTE add`, `CD sub`) has no row and is refused. A remote's own name is the
-one thing compared exactly, because git compares it exactly: `git push M`
-does not use a mirror configured for `m`.
+macOS volume fold case. Where git opens a file by the name on the line, the
+fold is real: `git push OLD` opens a legacy `remotes/old` (on git 2.50.1 it
+deleted a remote branch through it), and `git push origin head` pushes the
+current branch. So a legacy remotes file's name and `HEAD` are compared
+without case, as are the `.git` segment of a write target and the names of
+git's configuration files. The `refs/`, `heads/`, `tags/` and `remotes/`
+prefixes of a destination and a local tag's name are compared without case
+too (`lane:refs/HEADS/main` and `lane:HEADS/MAIN` read as the trunk push,
+`TAGS/v1`, and `V1` beside a local tag `v1`, as a tag); git 2.50.1 refused
+those spellings or pushed another ref, so the stricter reading costs nothing
+(`tests/command-class-remote-config-case.test.ts` prints what git did). A
+command word in another case (`GIT push`, `git REMOTE add`, `CD sub`) has no
+row and is refused. A remote's own name is compared exactly, because git
+compares it exactly: `git push M` does not use a mirror configured for `m`.
 
 | what the checkout shows | class | rule |
 |---|---|---|
