@@ -42,6 +42,7 @@ interface Entry {
   file: string;
   command: string;
   reason?: string;
+  scope?: string;
 }
 interface Row {
   where: string;
@@ -131,8 +132,8 @@ test("mutant: a stale allowlist entry and one with no reason both fail", () => {
   const verdict = run(corpus, {
     entries: [
       ...allowlist.entries,
-      { file: "skills/edgeos/SKILL.md", command: "curl -s https://h/never", reason: "gone" },
-      { file: "skills/x/SKILL.md", command: "true", reason: " " },
+      { file: "skills/edgeos/SKILL.md", command: "curl -s https://h/never", reason: "gone", scope: "neutral" },
+      { file: "skills/x/SKILL.md", command: "true", reason: " ", scope: "neutral" },
     ],
   });
   assert.deepEqual(
@@ -147,8 +148,10 @@ test("mutant: a stale allowlist entry and one with no reason both fail", () => {
 
 test("mutant: with the allowlist emptied, its listed recipes are unlisted held recipes again", () => {
   const verdict = run(corpus, { entries: [] });
-  assert.equal(verdict.unlisted.length, allowlist.entries.length);
-  for (const entry of allowlist.entries) {
+  // Entries scoped "box" are the real-hook box check's (B-167 fold 1), not this one's.
+  const neutral = allowlist.entries.filter((entry) => entry.scope !== "box");
+  assert.equal(verdict.unlisted.length, neutral.length);
+  for (const entry of neutral) {
     assert.ok(verdict.unlisted.some((row) => fileOf(row.where) === entry.file && row.command === entry.command), entry.command);
   }
 });
