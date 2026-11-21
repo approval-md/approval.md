@@ -270,6 +270,88 @@ test("S1: the answers a plugin goes on with are the code's; an answer outside th
   assert.equal(decideProposeCall(core, {}, { ...p, answer: "autonomous" }).decision, "auto");
 });
 
+// Review S1: a daemon propose in a plugin that owns no gated tool (the av-events intent publish, digest
+// share and village vote) is judged exactly like one behind a hooked call, by a propose-only entry.
+const ALL_ANSWERS = ["autonomous", "requested", "supervised"];
+const SHARE_SITE = { plugin: "av-events", file: "plugins/av-events/_share_vote.py", line: 1119, class: null, classes: ["digest.share", "village.vote"], accepts: ALL_ANSWERS, gated_plugin: false };
+const shareEntry = (cls: string, over: Json = {}): Json => ({
+  template: "village default",
+  reason: "a fixture share or vote that always asks",
+  owner: "fixture",
+  accepted_by: "human:carter",
+  accepted_at: "2026-10-21",
+  propose: {
+    class: cls,
+    key: cls === "digest.share" ? "digest.share:5b0c1f2e-0000-4000-8000-000000000001" : "village.vote:q1:t1",
+    summary: "Share a digest with the village",
+    payload: cls === "digest.share" ? { digest_id: "5b0c1f2e-0000-4000-8000-000000000001", scope: "village", text: "A fixture digest", expires_at: "2026-11-28T10:00:00Z" } : { question_id: "q1", answer: "yes" },
+    source: "plugins/av-events/_share_vote.py:1119",
+    accepts: ALL_ANSWERS,
+    decision: "card",
+    card_style: "minimal",
+    matrix: { ask: "card", autonomous: "auto", "supervised-retro": "auto", "supervised-live": "sampled", manual: "card" },
+    ...(over["propose"] as Json | undefined),
+  },
+  ...Object.fromEntries(Object.entries(over).filter(([k]) => k !== "propose")),
+});
+const unhooked = (proposes: unknown[]): Json => ({ recipes: [], envelopes: [], gated_tools: [], tools: [], proposes });
+const SHARE_ENTRIES = [shareEntry("digest.share"), shareEntry("village.vote")];
+
+test("S1: an unhooked daemon propose is judged: declared and unchanged it passes; one that appears with no entry fails", () => {
+  // The unchanged case: both classes of the held entry declared, nothing found.
+  assert.deepEqual(pureFindings(unhooked([SHARE_SITE]), unhooked([SHARE_SITE]), SHARE_ENTRIES), []);
+  // A new unhooked propose (a plugin with no gated tool, a literal class) and no entry.
+  const appeared = pureFindings(unhooked([SHARE_SITE, { ...SHARE_SITE, line: 1200, class: "digest.share", classes: undefined }]), unhooked([SHARE_SITE]), SHARE_ENTRIES).join("\n");
+  assert.match(appeared, /propose#plugins\/av-events\/_share_vote\.py:1200: a daemon propose \(class digest\.share\) that no expected\.json entry declares/u);
+  // One class of a held entry no entry declares.
+  assert.match(pureFindings(unhooked([SHARE_SITE]), unhooked([SHARE_SITE]), [shareEntry("digest.share")]).join("\n"), /\(class village\.vote, a class its plugin's held entries carry\) that no expected\.json entry declares/u);
+});
+
+test("S1: an unhooked daemon propose whose class moves, or whose accepted answers move, fails", () => {
+  // The module's guards now name another class (a manual share renamed, or a new class added).
+  const moved = pureFindings(unhooked([{ ...SHARE_SITE, classes: ["digest.publish", "village.vote"] }]), unhooked([SHARE_SITE]), SHARE_ENTRIES).join("\n");
+  assert.match(moved, /propose\.class digest\.share, but plugins\/av-events\/_share_vote\.py:1119 proposes one of digest\.publish, village\.vote/u);
+  assert.match(moved, /\(class digest\.publish, a class its plugin's held entries carry\) that no expected\.json entry declares/u);
+  // A literal class at an unhooked site that moves.
+  const literal = { ...SHARE_SITE, class: "digest.share", classes: undefined };
+  assert.deepEqual(pureFindings(unhooked([literal]), unhooked([literal]), [shareEntry("digest.share")]), []);
+  assert.match(pureFindings(unhooked([{ ...literal, class: "digest.publish" }]), unhooked([literal]), [shareEntry("digest.share")]).join("\n"), /propose\.class digest\.share, but .* proposes digest\.publish/u);
+  // The code after the propose now goes on with fewer answers (a manual share would lose its card).
+  const narrowed = pureFindings(unhooked([{ ...SHARE_SITE, accepts: ["autonomous", "supervised"] }]), unhooked([SHARE_SITE]), SHARE_ENTRIES).join("\n");
+  assert.match(narrowed, /propose\.accepts \["autonomous","requested","supervised"\], but the code after plugins\/av-events\/_share_vote\.py:1119 goes on with \["autonomous","supervised"\]/u);
+});
+
+test("S1: an unhooked propose deleted with its entry left is stale; an unread class or unread answers fail closed", () => {
+  assert.match(pureFindings(unhooked([]), unhooked([SHARE_SITE]), SHARE_ENTRIES).join("\n"), /propose\.source plugins\/av-events\/_share_vote\.py:1119 names no daemon propose the extractor found/u);
+  const unread = pureFindings(unhooked([{ ...SHARE_SITE, classes: undefined, why: "the class is a held entry's field, and the module compares that field with no class it can read" }]), unhooked([SHARE_SITE]), []).join("\n");
+  assert.match(unread, /propose#plugins\/av-events\/_share_vote\.py:1119: a daemon propose whose class cannot be read \(the class is a held entry's field/u);
+  // An empty class set is no reading either.
+  assert.match(pureFindings(unhooked([{ ...SHARE_SITE, classes: [] }]), unhooked([]), []).join("\n"), /whose class cannot be read/u);
+  assert.match(pureFindings(unhooked([{ ...SHARE_SITE, accepts: null }]), unhooked([SHARE_SITE]), SHARE_ENTRIES).join("\n"), /accepted answers cannot be read/u);
+  // A corpus from an extractor that still lists proposes apart fails: they were never judged.
+  assert.match(pureFindings({ ...unhooked([]), proposes_unhooked: [SHARE_SITE] }, unhooked([]), []).join("\n"), /proposes_unhooked: 1 daemon propose\(s\) listed apart/u);
+  assert.deepEqual(pureFindings({ ...unhooked([SHARE_SITE]), proposes_unhooked: [] }, unhooked([SHARE_SITE]), SHARE_ENTRIES), []);
+});
+
+test("S1: a propose-only entry has no hooked call, names one source line, and is limiting by its propose alone", () => {
+  assert.deepEqual(validateExpected({ entries: SHARE_ENTRIES }).errors, []);
+  const keys = validateExpected({ entries: SHARE_ENTRIES }).entries.map((v: { key: string; kind: string }) => `${v.kind} ${v.key}`);
+  assert.deepEqual(keys, ["propose propose#plugins/av-events/_share_vote.py:1119#digest.share", "propose propose#plugins/av-events/_share_vote.py:1119#village.vote"]);
+  assert.match(validateExpected({ entries: [shareEntry("digest.share", { class: "digest.share" })] }).errors[0].message, /a propose-only entry has no hooked call: class belongs in propose/u);
+  assert.match(validateExpected({ entries: [shareEntry("digest.share", { matrix: READ_MATRIX })] }).errors[0].message, /matrix belongs in propose/u);
+  assert.match(validateExpected({ entries: [shareEntry("digest.share", { propose: { source: "plugins/av-events/_share_vote.py:1077-1119" } })] }).errors[0].message, /names one line/u);
+  assert.match(validateExpected({ entries: [shareEntry("digest.share", { propose: { matrix: undefined } })] }).errors[0].message, /propose\.matrix is missing/u);
+  assert.match(validateExpected({ entries: [shareEntry("digest.share"), shareEntry("digest.share")] }).errors[0].message, /a second entry for this key/u);
+  const manual = (cls: string) => (cls === "digest.share" ? "manual" : "autonomous");
+  assert.deepEqual(limitingReasons(shareEntry("digest.share"), manual), ["propose decision card", "propose class digest.share defaults to manual"]);
+  assert.deepEqual(limitingReasons(shareEntry("digest.share", { propose: { decision: "auto", card_style: undefined } }), () => "autonomous"), []);
+  // Without Carter's acceptance a limiting propose-only entry fails, like any other.
+  const bare = shareEntry("digest.share", { accepted_by: undefined, accepted_at: undefined });
+  const validated = validateExpected({ entries: [bare, shareEntry("village.vote")] });
+  const r = judgeNewCalls({ corpus: unhooked([SHARE_SITE]), tagCorpus: unhooked([SHARE_SITE]), validated, head: { calls: [], proposed: [] }, autonomyOf: manual }) as { findings: { key: string; message: string }[] };
+  assert.match(r.findings.map((f) => `${f.key}: ${f.message}`).join("\n"), /propose#plugins\/av-events\/_share_vote\.py:1119#digest\.share: LIMITING \(propose decision card; propose class digest\.share defaults to manual\): awaiting acceptance/u);
+});
+
 test("N1, N2, N3: a future acceptance date, a member named twice, two recipes with one key and other bytes", () => {
   assert.match(acceptanceErrorsN(envelopeEntry({ accepted_at: "2999-12-31" })).join(";"), /is after today/u);
   assert.deepEqual(duplicateMembers('{"entries":[{"accepted_at":"2026-10-21","accepted_at":"YYYY-MM-DD"}]}').map((d: { name: string }) => d.name), ["accepted_at"]);
@@ -456,16 +538,104 @@ test("M3 + S1: daemon proposes are extracted with their class (literal, constant
   assert.equal(run.status, 0, run.err);
   const proposes = run.corpus["proposes"] as Json[];
   assert.deepEqual(
-    proposes.map((p) => [p["line"], p["class"], p["template"] ?? null, p["accepts"]]),
+    proposes.filter((p) => p["plugin"] === "village-bridge").map((p) => [p["line"], p["class"], p["template"] ?? null, p["accepts"], p["gated_plugin"]]),
     [
-      [6, "marketplace.app.action", null, ["requested"]],
-      [10, "marketplace.app.action.gold-stars.send", null, ["autonomous", "requested"]],
-      [15, null, "marketplace.app.action.{operation}", ["requested"]],
-      [22, null, null, null],
+      [6, "marketplace.app.action", null, ["requested"], true],
+      [10, "marketplace.app.action.gold-stars.send", null, ["autonomous", "requested"], true],
+      [15, null, "marketplace.app.action.{operation}", ["requested"], true],
+      [22, null, null, null, true],
     ],
   );
-  // A plugin with no gated tool proposes outside the hook: listed apart, never judged.
-  assert.deepEqual((run.corpus["proposes_unhooked"] as Json[]).map((p) => p["class"]), ["digest.share"]);
+  // A held entry's class field in a module that compares that field with no class: unread, so the check fails closed.
+  assert.match(String(proposes.find((p) => p["line"] === 22)?.["why"]), /held entry's field/u);
+  // Review S1: a plugin with no gated tool proposes outside the hook, and it is in the same list, judged
+  // like the others; nothing is listed apart.
+  assert.deepEqual(proposes.filter((p) => p["plugin"] === "other").map((p) => [p["file"], p["class"], p["gated_plugin"]]), [["plugins/other/_p.py", "digest.share", false]]);
+  assert.equal(run.corpus["proposes_unhooked"], undefined);
+});
+
+test("S1: a held entry's class is read from the module's guards, and the answers from a doc alias, a pair assignment and an if/elif chain", { skip: NO_BUN }, () => {
+  // The av-events shape (_share_vote.py, _intent_approval.py): the class is the held entry's field,
+  // the module's own guards name the classes it may carry, and the answer is read through `doc = answer.doc`.
+  const held = [
+    'SHARE = "digest.share"',
+    'VOTE = "village.vote"',
+    "def valid(entry):",
+    '    cls = entry.get("class")',
+    "    if cls == SHARE:",
+    "        return True",
+    "    return cls == VOTE",
+    "def cleared(ap, entry):",
+    '    answer = ap.propose(entry["class"], entry["key"], "s", entry["payload"])',
+    "    doc = answer.doc",
+    '    if doc.get("decision") not in ("autonomous", "supervised"):',
+    "        return False",
+    "    return True",
+    "def first(ap, entry):",
+    '    answer = ap.propose(entry["class"], entry["key"], "s", entry["payload"])',
+    "    doc = answer.doc",
+    '    decision, state = doc.get("decision"), doc.get("state")',
+    '    if state == "executed":',
+    "        x = 1",
+    '    elif decision == "requested":',
+    "        x = 2",
+    '    elif decision in ("autonomous", "supervised") and state is None:',
+    "        x = 3",
+    "    else:",
+    "        return None",
+    "    return x",
+    "def only_requested(ap, entry):",
+    '    answer = ap.propose(entry["class"], "k", "s", "{}")',
+    '    decision = answer.doc.get("decision")',
+    '    if decision == "requested":',
+    "        x = 1",
+    "    else:",
+    "        return None",
+    "    return x",
+    "def odd(ap, entry):",
+    '    answer = ap.propose(entry["class"], "k", "s", "{}")',
+    '    decision = answer.doc.get("decision")',
+    '    if decision != "requested" or answer.ok:',
+    "        x = 1",
+    "    else:",
+    "        return None",
+    "    return x",
+    "",
+  ].join("\n");
+  const run = extractFixture({ extra: { "plugins/av-events/_held.py": held } });
+  assert.equal(run.status, 0, run.err);
+  const sites = (run.corpus["proposes"] as Json[]).filter((p) => p["plugin"] === "av-events").sort((a, b) => Number(a["line"]) - Number(b["line"]));
+  assert.deepEqual(
+    sites.map((p) => [p["line"], p["class"], p["classes"], p["accepts"], p["gated_plugin"]]),
+    [
+      [9, null, ["digest.share", "village.vote"], ["autonomous", "supervised"], false],
+      [15, null, ["digest.share", "village.vote"], ["autonomous", "requested", "supervised"], false],
+      [28, null, ["digest.share", "village.vote"], ["requested"], false],
+      // A chain that tests the decision in a form not read (under `or`) is unread: the check fails closed.
+      [36, null, ["digest.share", "village.vote"], null, false],
+    ],
+  );
+});
+
+test("N1: every propose spelling is read: self.propose, a bare propose, a name imported as propose, a getattr alias", { skip: NO_BUN }, () => {
+  const spellings = [
+    "from ._approval import propose as file_it",
+    "class Client:",
+    "    def go(self):",
+    '        return self.propose("digest.share", "k", "s", "{}")',
+    "def bare():",
+    '    propose("digest.share", "k", "s", "{}")',
+    "def aliased():",
+    '    file_it("village.vote", "k", "s", "{}")',
+    "def via_getattr(ap):",
+    '    p = getattr(ap, "propose", None)',
+    '    p("village.vote", "k", "s", "{}")',
+    "",
+  ].join("\n");
+  const run = extractFixture({ extra: { "plugins/av-events/_spellings.py": spellings } });
+  assert.equal(run.status, 0, run.err);
+  const sites = (run.corpus["proposes"] as Json[]).filter((p) => p["plugin"] === "av-events");
+  assert.deepEqual(sites.map((p) => [p["line"], p["class"]]).sort((a, b) => Number(a[0]) - Number(b[0])), [[4, "digest.share"], [6, "digest.share"], [8, "village.vote"], [11, "village.vote"]]);
 });
 
 test("without --with-envelopes the corpus carries no envelope keys (the pinned corpus keeps its bytes)", { skip: NO_BUN }, () => {
@@ -746,4 +916,26 @@ test("S4 (M13): an entry input that drops a key of the manifest's derived call e
   const run = gate([recipeEntry(), envelopeEntry({ input: { operation: "forkicks.order.confirm" } })], { corpus });
   assert.equal(run.status, 1, run.err);
   assert.match(run.md, /input does not carry the manifest's call \(draftId\) \(P5\)/u);
+});
+
+// --- review S1: a daemon propose with no hooked call in front of it, run and judged in the box -----------
+
+test("S1 (box): a propose-only entry's propose runs in the box and in every cell; declared as it runs: exit 0; a cell other than declared: exit 1", BOX_TIMEOUT, () => {
+  const corpus = corpusFile([STAY], [ENVELOPE], BLOCK, { proposes: [FK_PROPOSE, SHARE_SITE] });
+  const control = gate([recipeEntry(), envelopeEntry(), ...SHARE_ENTRIES], { corpus });
+  assert.equal(control.status, 0, `${control.err}\n${control.md.slice(0, 3000)}`);
+  // The share and the vote each get the minimal card under the village default, and every cell is the daemon's answer as the plugin takes it.
+  assert.match(control.md, /\| `propose#plugins\/av-events\/_share_vote\.py:1119#digest\.share` \| new \(LIMITING\) \| \(no hooked call\) \| - \| digest\.share: card, minimal card \| digest\.share: card, minimal card \|/u);
+  assert.match(control.md, /\| `plugins\/av-events\/_share_vote\.py:1119` \| digest\.share or village\.vote \| autonomous, requested, supervised \| .*#digest\.share, .*#village\.vote \| no \| yes \|/u);
+  assert.match(control.md, /^digest\.share \| card \| minimal \| [0-9.]+ \| digest\.share:5b0c1f2e-0000-4000-8000-000000000001$/mu);
+  const cell = gate([recipeEntry(), envelopeEntry(), shareEntry("digest.share", { propose: { matrix: { ask: "auto", autonomous: "auto", "supervised-retro": "auto", "supervised-live": "sampled", manual: "card" } } }), shareEntry("village.vote")], { corpus });
+  assert.equal(cell.status, 1, cell.err);
+  assert.match(cell.md, /propose#plugins\/av-events\/_share_vote\.py:1119#digest\.share`: matrix ask: propose card, declared auto/u);
+});
+
+test("S1 (box): an unhooked propose no entry declares exits 1", BOX_TIMEOUT, () => {
+  const corpus = corpusFile([STAY], [ENVELOPE], BLOCK, { proposes: [FK_PROPOSE, SHARE_SITE] });
+  const run = gate([recipeEntry(), envelopeEntry()], { corpus });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.md, /propose#plugins\/av-events\/_share_vote\.py:1119`: a daemon propose \(class digest\.share, a class its plugin's held entries carry\) that no expected\.json entry declares/u);
 });

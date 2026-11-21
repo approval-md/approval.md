@@ -182,12 +182,17 @@ export function gatedPatterns(text) {
  * closed on it when a gated tool is involved, or when its name is unknown.
  *
  * The same pass reads, for the check:
- * - every `<x>.propose(<class>, ...)` daemon propose (review M3), with its file,
- *   line and class (a literal, a module constant, or the template a module
- *   function `return PREFIX + "." + param` makes), and the daemon answers the
- *   plugin goes on with after it (`accepts`, review S1: every
- *   `decision != "x"` / `decision not in (...)` on that answer in the same
- *   function);
+ * - every daemon propose (review M3), in every plugin (review S1: one whose
+ *   plugin owns no gated tool is judged all the same), spelled
+ *   `<x>.propose(<class>, ...)` (`self` included), a bare `propose(...)`, a
+ *   name imported as `propose` or bound from `getattr(<x>, "propose")` (review
+ *   N1), with its file, line and class (a literal, a module constant, the
+ *   template a module function `return PREFIX + "." + param` makes, or the
+ *   class field of a held entry read as the classes the module's guards
+ *   compare it with), and the daemon answers the plugin goes on with after it
+ *   (`accepts`, review S1: `decision != "x"` / `decision not in (...)` on that
+ *   answer in the same function, and an `if`/`elif` chain on it whose `else`
+ *   ends the flow); a class or answers it cannot read are reported unread;
  * - the village tool's READ_OPERATIONS, WRITE_OPERATIONS and
  *   APP_SCOPED_OPERATIONS (review M2), beside the module that registers it.
  */
@@ -316,27 +321,51 @@ def arg_of(call, kw, pos):
             return k.value
     return call.args[pos] if len(call.args) > pos else None
 
+ANSWERS = {"autonomous", "requested", "supervised"}
+
+def bound_pairs(fn):
+    """(name, value) for every 'name = value' in the function, and pairwise for 'a, b = x, y'."""
+    for n in ast.walk(fn):
+        if not (isinstance(n, ast.Assign) and len(n.targets) == 1):
+            continue
+        t = n.targets[0]
+        if isinstance(t, ast.Name):
+            yield t.id, n.value
+        elif isinstance(t, ast.Tuple) and isinstance(n.value, ast.Tuple) and len(t.elts) == len(n.value.elts):
+            for a, b in zip(t.elts, n.value.elts):
+                if isinstance(a, ast.Name):
+                    yield a.id, b
+
 def accepted_answers(m, par, call):
-    """S1: the daemon answers the plugin goes on with after this propose: every 'decision != "x"' or
-    'decision not in (...)' in the enclosing function, where decision is the propose's answer's
-    'doc.get("decision")' (direct, or a name bound from it). None when nothing narrows it."""
+    """S1: the daemon answers the plugin goes on with after this propose, read in the enclosing
+    function, where decision is the propose's answer's 'doc.get("decision")' (on 'answer.doc', or on
+    a name bound from it; direct, or a name bound from it, also as one member of 'a, b = x, y'):
+    - every 'decision != "x"' or 'decision not in (...)' narrows it to those answers;
+    - an if/elif chain that tests the decision and ends in an 'else' that returns or raises narrows
+      it to the answers its branches admit ('== "x"' or 'in (...)', alone or under 'and'; a test that
+      names no decision admits every answer); a chain testing the decision any other way is unread.
+    None (unread, the check fails closed) when nothing narrows it or a chain cannot be read."""
     fn = enclosing(par, call, (ast.FunctionDef, ast.AsyncFunctionDef))
     assign = par.get(call)
     if fn is None or not (isinstance(assign, ast.Assign) and len(assign.targets) == 1 and isinstance(assign.targets[0], ast.Name)):
         return None
     answer = assign.targets[0].id
+    pairs = list(bound_pairs(fn))
+    def is_answer_doc(n):
+        return isinstance(n, ast.Attribute) and n.attr == "doc" and isinstance(n.value, ast.Name) and n.value.id == answer
+    docs = {name for name, value in pairs if is_answer_doc(value)}
     def is_decision(n):
         return (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get" and n.args
                 and isinstance(n.args[0], ast.Constant) and n.args[0].value == "decision"
-                and isinstance(n.func.value, ast.Attribute) and n.func.value.attr == "doc"
-                and isinstance(n.func.value.value, ast.Name) and n.func.value.value.id == answer)
-    names = {n.targets[0].id for n in ast.walk(fn) if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and is_decision(n.value)}
+                and (is_answer_doc(n.func.value) or (isinstance(n.func.value, ast.Name) and n.func.value.id in docs)))
+    names = {name for name, value in pairs if is_decision(value)}
+    def names_decision(n):
+        return is_decision(n) or (isinstance(n, ast.Name) and n.id in names)
+    def mentions(n):
+        return any(names_decision(x) for x in ast.walk(n))
     allowed = None
     for n in ast.walk(fn):
-        if not (isinstance(n, ast.Compare) and len(n.ops) == 1):
-            continue
-        left = n.left
-        if not (is_decision(left) or (isinstance(left, ast.Name) and left.id in names)):
+        if not (isinstance(n, ast.Compare) and len(n.ops) == 1 and names_decision(n.left)):
             continue
         try:
             right = ev(m, n.comparators[0])
@@ -349,17 +378,86 @@ def accepted_answers(m, par, call):
         else:
             continue
         allowed = got if allowed is None else allowed & got
+    def admits(test):
+        """The answers one branch test admits; Unresolved when it tests the decision another way."""
+        if not mentions(test):
+            return set(ANSWERS)
+        parts = test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And) else [test]
+        got = set(ANSWERS)
+        for p in parts:
+            if not mentions(p):
+                continue
+            if not (isinstance(p, ast.Compare) and len(p.ops) == 1 and names_decision(p.left) and isinstance(p.ops[0], (ast.Eq, ast.In))):
+                raise Unresolved("a branch tests the decision in a form not read")
+            right = ev(m, p.comparators[0])
+            got &= {right} if isinstance(p.ops[0], ast.Eq) and isinstance(right, str) else (set(right) if isinstance(right, list) else set())
+        return got
+    for n in ast.walk(fn):
+        head = par.get(n)
+        if not isinstance(n, ast.If) or (isinstance(head, ast.If) and head.orelse == [n]):
+            continue  # not an if, or an elif inside a chain read from its head
+        tests, node = [], n
+        while True:
+            tests.append(node.test)
+            if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
+                node = node.orelse[0]
+                continue
+            break
+        final = node.orelse
+        if not any(mentions(t) for t in tests) or not final or not isinstance(final[-1], (ast.Return, ast.Raise)):
+            continue  # a chain that never tests the decision, or no else that ends the flow
+        try:
+            got = set().union(*(admits(t) for t in tests))
+        except Unresolved:
+            return None
+        allowed = got if allowed is None else allowed & got
     return sorted(allowed) if allowed is not None else None
+
+def is_class_field(n):
+    """'<x>["class"]' or '<x>.get("class")': the class field of an entry the plugin holds."""
+    if isinstance(n, ast.Subscript) and isinstance(n.slice, ast.Constant) and n.slice.value == "class":
+        return isinstance(n.value, ast.Name)
+    return (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get" and isinstance(n.func.value, ast.Name)
+            and len(n.args) == 1 and isinstance(n.args[0], ast.Constant) and n.args[0].value == "class")
+
+def held_classes(m):
+    """S1 (unhooked proposes): the classes a module's held entries may carry, read from the module's
+    own guards: every '<class field> == / != / in / not in <a module constant or literal>', where the
+    class field is '<x>["class"]', '<x>.get("class")' or a name bound from one in the same function.
+    A comparison with a value it cannot read (a parameter, another entry's field) adds nothing."""
+    out = set()
+    for fn in [m["tree"]] + [n for n in ast.walk(m["tree"]) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        names = set() if fn is m["tree"] else {name for name, value in bound_pairs(fn) if is_class_field(value)}
+        for n in ast.walk(fn):
+            if not (isinstance(n, ast.Compare) and len(n.ops) == 1 and isinstance(n.ops[0], (ast.Eq, ast.NotEq, ast.In, ast.NotIn))):
+                continue
+            if not (is_class_field(n.left) or (isinstance(n.left, ast.Name) and n.left.id in names)):
+                continue
+            try:
+                right = ev(m, n.comparators[0])
+            except Unresolved:
+                continue
+            for v in ([right] if isinstance(right, str) else right if isinstance(right, list) else []):
+                if isinstance(v, str):
+                    out.add(v)
+    return sorted(out)
 
 def propose_class(m, node):
     """M3: the class a propose names: a literal or module constant, or a module function returning
-    CONSTANT + "." + parameter called with a name (a class template, '<prefix>.{param}')."""
+    CONSTANT + "." + parameter called with a name (a class template, '<prefix>.{param}'), or the
+    class field of an entry the plugin holds, read as the set of classes the module's own guards
+    compare that field with (S1, the av-events approval maps). Anything else is unread."""
     try:
         v = ev(m, node)
         if isinstance(v, str):
             return {"class": v}
     except Unresolved:
         pass
+    if is_class_field(node):
+        classes = held_classes(m)
+        if classes:
+            return {"class": None, "classes": classes}
+        return {"class": None, "why": "the class is a held entry's field, and the module compares that field with no class it can read"}
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in m["funcs"] and len(node.args) == 1 and isinstance(node.args[0], ast.Name):
         fn = m["funcs"][node.func.id]
         params = [a.arg for a in fn.args.args]
@@ -389,16 +487,22 @@ for plugin in (sorted(os.listdir(root)) if os.path.isdir(root) else []):
             par = parents_of(tree)
             # M1: a local name bound from getattr(<x>, "register_tool"[, default]) registers too.
             aliases = {"register_tool"}
+            # Review N1: every spelling of a daemon propose is read: '<x>.propose(...)' on any object
+            # ('self' included), a bare 'propose(...)', a name imported as propose, or a local name bound
+            # from getattr(<x>, "propose"[, default]). Its class is then read or the site is unread.
+            proposers = {"propose"}
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
                         and node.value.func.id == "getattr" and len(node.value.args) >= 2
-                        and isinstance(node.value.args[1], ast.Constant) and node.value.args[1].value == "register_tool"):
-                    aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
+                        and isinstance(node.value.args[1], ast.Constant) and node.value.args[1].value in ("register_tool", "propose")):
+                    (aliases if node.value.args[1].value == "register_tool" else proposers).update(t.id for t in node.targets if isinstance(t, ast.Name))
+                elif isinstance(node, ast.ImportFrom):
+                    proposers.update(a.asname for a in node.names if a.name == "propose" and a.asname)
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue
                 fn = node.func
-                if isinstance(fn, ast.Attribute) and fn.attr == "propose" and not (isinstance(fn.value, ast.Name) and fn.value.id == "self"):
+                if (isinstance(fn, ast.Attribute) and fn.attr == "propose") or (isinstance(fn, ast.Name) and fn.id in proposers):
                     cls_node = arg_of(node, "cls", 0)
                     site = {"plugin": plugin, "file": rel, "line": node.lineno, "accepts": accepted_answers(m, par, node)}
                     site.update(propose_class(m, cls_node) if cls_node is not None else {"class": None, "why": "no class argument"})
@@ -552,11 +656,12 @@ if (process.argv.includes("--with-envelopes")) {
     }
     envelopes.push(...enumEnvelopes(village, found.village_ops, envelopes));
   }
-  // Review M3: the daemon proposes of every plugin that owns a gated tool; the
-  // others are not behind a hooked call and are listed apart.
+  // Review M3, S1: every daemon propose in every plugin, each judged by the
+  // check. `gated_plugin` says only whether its plugin owns a gated tool (the
+  // report shows it); a propose outside the hook is judged all the same, so
+  // there is no separate list a reader could take for "not judged".
   const gatedPlugins = new Set(tools.map((t) => t.plugin));
-  const proposes = found.proposes.filter((p) => gatedPlugins.has(p.plugin));
-  const proposesUnhooked = found.proposes.filter((p) => !gatedPlugins.has(p.plugin));
+  const proposes = found.proposes.map((p) => ({ ...p, gated_plugin: gatedPlugins.has(p.plugin) }));
   // A gated plugin tool no manifest reaches gets one bare envelope of its own.
   for (const t of tools) {
     if (!envelopes.some((e) => e.tool === t.name)) envelopes.push({ key: envelopeKey(t.name, {}), tool: t.name, input: {}, where: t.file });
@@ -576,7 +681,7 @@ if (process.argv.includes("--with-envelopes")) {
     for (const d of dups) process.stderr.write(`duplicate envelope key ${d}\n`);
     process.exit(1);
   }
-  envelopeScope = { gated, tools, unread, envelopes, proposes, proposesUnhooked };
+  envelopeScope = { gated, tools, unread, envelopes, proposes };
 }
 
 const corpus = {
@@ -613,7 +718,6 @@ if (envelopeScope !== undefined) {
   corpus.tools_unread = envelopeScope.unread;
   corpus.envelopes = envelopeScope.envelopes;
   corpus.proposes = envelopeScope.proposes;
-  corpus.proposes_unhooked = envelopeScope.proposesUnhooked;
 }
 
 writeFileSync(OUT, `${JSON.stringify(corpus, null, 2)}\n`, "utf8");

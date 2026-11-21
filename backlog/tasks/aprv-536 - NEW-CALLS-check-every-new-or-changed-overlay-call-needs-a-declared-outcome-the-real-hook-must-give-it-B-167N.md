@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-21 14:47'
-updated_date: '2026-11-21 11:38'
+updated_date: '2026-11-21 15:45'
 labels:
   - release-gate
   - overlay
@@ -38,4 +38,6 @@ Carter's rule (B-167N): approval.md must never limit existing functionality OR a
 Built in release lane R1 (B-167N). New module scripts/overlay-recipes-newcalls.mjs; box runner runs declared envelopes and daemon proposes; extractor --with-envelopes (3a manifests, 3b gated plugin tools via python3 ast, never an import); check --expected/--tag-corpus. ci.yml: gate-file pins only (+PIN_NEWCALLS). Global invariants touched: none weakened; the check fails closed on an unknown schema keyword, an unreadable gated registration, an unmapped new manifest operation and a propose that neither answers nor refuses (exit 2). Open: ask vs manual cell vocabulary; exec.local as an existing class; pinned corpus refresh with envelopes.
 
 Review fold (the B-167N refute at ce36c9d9, approval.md side): M1 register_tool by local name and loop, gated_tools diffed against the tag, every gated pattern must reach a call; M2 one envelope per village enum operation, unmapped when in neither list; M3 daemon proposes extracted (file, line, class or template) and required of an entry; S1 accepted answers extracted and declared, a refused answer is a refused call; S4 four box tests; N1, N2, N3, N5 folded. Declarations for overlay main 255f9291 against v2.1.27: 14 new calls and the Gold Stars send propose; the For Kicks propose source moved to _forkicks.py:345.
+
+Unhooked proposes (review S1, the fix left part-done at M3): every daemon propose is judged, in a plugin with a gated tool or without; a propose-only entry declares one with no hooked call; a held entry's class reads from the module's guards; N1 every propose spelling read; the four av-events sites declared, six of eight entries limiting and awaiting Carter's acceptance.
 <!-- SECTION:NOTES:END -->

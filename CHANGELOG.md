@@ -165,6 +165,20 @@ ordinary workspace write.
     n BLOCKING, k OTHER`) with each reason listed under it and in the JSON's
     `reasons` and `failed`, while a clean PASS and a blocking-only FAIL line are
     unchanged.
+  - A daemon `propose` in a plugin that owns no gated tool is judged too. The
+    extractor used to list those apart (`proposes_unhooked`) and nothing
+    checked them; every propose site is now in `proposes`, and `gated_plugin`
+    only labels the report. A propose with no hooked call in front of it is
+    declared by an entry that holds `propose` alone, its `source` one line. A
+    class taken from a held entry's `class` field reads as the classes the
+    module's own guards compare that field with; the answers also read through
+    `doc = answer.doc`, a pair assignment, or an `if`/`elif` chain whose `else`
+    ends the flow. What the extractor cannot read fails closed, and so does a
+    corpus that still lists proposes apart. `self.propose(...)`, a bare
+    `propose(...)`, a name imported as `propose` and a `getattr` alias are read
+    as proposes. `expected.json` declares the four av-events sites (intent
+    publish, digest share, village vote) as eight entries; six are limiting
+    and wait for Carter's acceptance.
 - **CLASS-DIFF against the core the boxes run (B-167 release gate).**
   `overlay-recipes-check.mjs --diff <baseline core>` classifies the same corpus
   at a baseline core and at this one, over every recipe plus every `tools:`

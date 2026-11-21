@@ -27,6 +27,13 @@
  * - optionally `propose`: the plugin's own daemon propose behind the call (a For
  *   Kicks order proposes marketplace.app.action from _forkicks.py), with its own
  *   class, action key, payload, decision, card_style and matrix;
+ * - or, for a daemon propose with no hooked call in front of it (review S1: the
+ *   av-events intent publish, digest share and village vote), `propose` ALONE
+ *   (no file, command, tool, input, class, decision, card_style or matrix of
+ *   its own), its `source` one line. Its matrix is the daemon's answer to that
+ *   propose under each resident setting for its class, as the plugin then
+ *   takes it: the box runs `approval propose` for it in every cell, and an
+ *   answer the code after the propose does not go on with is `refused`;
  * - `reason`, `owner`; and, when the entry is LIMITING (P1: any layer's decision
  *   stricter than auto under the village default, or any layer's class whose
  *   template default autonomy is manual), `accepted_by: "human:carter"` exactly
@@ -67,6 +74,8 @@ const fileOf = (where) => String(where).replace(/:\d+$/u, "");
 
 export function entryKind(entry) {
   if (typeof entry?.gated === "string" && entry.file === undefined && entry.tool === undefined) return "gated";
+  // Review S1: a daemon propose with no hooked call in front of it.
+  if (entry?.propose !== null && typeof entry?.propose === "object" && !Array.isArray(entry.propose) && ["gated", "file", "command", "tool", "input"].every((k) => entry[k] === undefined)) return "propose";
   if (typeof entry?.file === "string" && typeof entry?.command === "string" && entry.tool === undefined) return "recipe";
   if (typeof entry?.tool === "string" && entry?.input !== null && typeof entry?.input === "object" && !Array.isArray(entry.input) && entry.file === undefined) return "envelope";
   return null;
@@ -77,8 +86,14 @@ export function entryKey(entry) {
   if (kind === "recipe") return recipeKey(entry.file, entry.command);
   if (kind === "envelope") return envelopeKey(entry.tool, entry.input);
   if (kind === "gated") return gatedKey(entry.gated);
+  if (kind === "propose") return proposeKey(entry.propose);
   return null;
 }
+
+/** Review S1: the key of a propose-only entry, its source line and its class. */
+export const proposeKey = (p) => `propose#${String(p.source)}#${String(p.class)}`;
+/** The fields that describe a hooked call, which a propose-only entry has none of. */
+const HOOK_FIELDS = ["class", "decision", "card_style", "matrix"];
 
 /** Review M1: the key of a gated-tool pattern added to or removed from APPROVAL_GATED_TOOLS. */
 export const gatedKey = (pattern) => `gated#${String(pattern)}`;
@@ -128,7 +143,7 @@ export function validateExpected(doc) {
     const label = key === null ? `entries[${String(i)}]` : keyLabel(key);
     const err = (message) => errors.push({ key: label, message });
     if (kind === null) {
-      err("an entry names either file + command (a recipe) or tool + input (an envelope)");
+      err("an entry names either file + command (a recipe), tool + input (an envelope), gated (a gated pattern) or propose alone (a daemon propose with no hooked call)");
       return;
     }
     if (kind === "envelope" && key === null) {
@@ -145,7 +160,13 @@ export function validateExpected(doc) {
       entries.push({ entry, kind, key });
       return;
     }
-    for (const e of layerErrors(entry, "")) err(e);
+    if (kind === "propose") {
+      // Review S1: no hooked call, so nothing at the top describes one; the source is one line, so a
+      // second propose added next to this one is never claimed by it, and a deleted one leaves it stale.
+      for (const k of HOOK_FIELDS) if (entry[k] !== undefined) err(`a propose-only entry has no hooked call: ${k} belongs in propose`);
+      const span = typeof entry.propose.source === "string" ? sourceSpan(entry.propose.source) : null;
+      if (span !== null && span.from !== span.to) err("a propose-only entry's propose.source names one line (file:line)");
+    } else for (const e of layerErrors(entry, "")) err(e);
     if (entry.template !== VILLAGE_DEFAULT) err(`template must be "${VILLAGE_DEFAULT}"`);
     if (!reasonOk(entry.reason)) err(`its reason says nothing ("${String(entry.reason ?? "")}")`);
     if (typeof entry.owner !== "string" || entry.owner.trim() === "") err("owner (the PR that adds the call) is empty");
@@ -216,8 +237,8 @@ export function duplicateMembers(text) {
   return out;
 }
 
-/** The layers of an entry: the call the hook sees, then the plugin's own propose. */
-export const layersOf = (entry) => [{ name: "hook", layer: entry }, ...(entry.propose !== undefined ? [{ name: "propose", layer: entry.propose }] : [])];
+/** The layers of an entry: the call the hook sees, then the plugin's own propose (a propose-only entry has only that). */
+export const layersOf = (entry) => [...(entryKind(entry) === "propose" ? [] : [{ name: "hook", layer: entry }]), ...(entry.propose !== undefined ? [{ name: "propose", layer: entry.propose }] : [])];
 
 /**
  * P1: why an entry is LIMITING, from nothing the author declares but its
@@ -494,7 +515,7 @@ export function changeSet({ corpus, tagCorpus, movedKeys = new Set() }) {
   for (const g of tagGated) if (!headGated.has(g)) status.set(gatedKey(g), { kind: "gated", status: "removed (ungated)", where: "install/install_approval.ts", command: g });
   // Review M3: a daemon propose whose file and class (or class template) the
   // previous release did not have.
-  const siteId = (x) => `${String(x.file)}\u0000${String(x.class ?? x.template ?? "")}`;
+  const siteId = (x) => `${String(x.file)}\u0000${String(x.class ?? x.template ?? (Array.isArray(x.classes) ? x.classes.join("|") : ""))}`;
   const tagSites = new Set((tagCorpus.proposes ?? []).map(siteId));
   status.newProposes = (corpus.proposes ?? []).filter((x) => !tagSites.has(siteId(x)));
   status.duplicates = duplicates;
@@ -542,17 +563,24 @@ export function judgeNewCalls({ corpus, tagCorpus, validated, head, cells = {}, 
       }
     }
   }
-  // Review M3: every daemon propose the extractor found in a plugin that owns a
-  // gated tool is declared by an entry (propose.source covers its line, the
-  // class and the accepted answers are the code's), or fails closed.
+  // Review M3, S1: every daemon propose the extractor found, in any plugin,
+  // behind a gated tool or not, is declared by an entry (propose.source covers
+  // its line, the class and the accepted answers are the code's), or fails
+  // closed. A corpus that still lists proposes apart (an extractor from before
+  // S1) left them unjudged, so it fails too.
+  if (Array.isArray(corpus.proposes_unhooked) && corpus.proposes_unhooked.length > 0) {
+    find("proposes_unhooked", `${String(corpus.proposes_unhooked.length)} daemon propose(s) listed apart as unhooked, which this check would not judge: re-extract with this approval.md's extractor (review S1); fail closed`);
+  }
   const withPropose = validated.entries.filter((v) => v.entry.propose !== undefined && v.entry.propose !== null && typeof v.entry.propose === "object");
   const newSites = new Set((status.newProposes ?? []).map((x) => `${x.file}:${String(x.line)}`));
   const proposeRows = [];
   for (const site of corpus.proposes ?? []) {
     const at = `${site.file}:${String(site.line)}`;
     const claims = withPropose.filter((v) => covers(v.entry.propose.source, site));
-    proposeRows.push({ at, class: site.class ?? site.template ?? null, accepts: site.accepts, claimedBy: claims.map((v) => keyLabel(v.key)), isNew: newSites.has(at) });
-    if (site.class === null && site.template === undefined) {
+    // Review S1: a propose of a held entry's class field proposes any class the module's guards compare it with.
+    const held = Array.isArray(site.classes) && site.classes.length > 0 ? site.classes : null;
+    proposeRows.push({ at, class: site.class ?? site.template ?? (held === null ? null : held.join(" or ")), accepts: site.accepts, claimedBy: claims.map((v) => keyLabel(v.key)), isNew: newSites.has(at), gatedPlugin: site.gated_plugin ?? null });
+    if (site.class === null && site.template === undefined && held === null) {
       find(`propose#${at}`, `a daemon propose whose class cannot be read (${String(site.why)}); fail closed`);
       continue;
     }
@@ -560,14 +588,21 @@ export function judgeNewCalls({ corpus, tagCorpus, validated, head, cells = {}, 
     if (site.class !== null && site.class !== undefined && claims.length === 0) {
       find(`propose#${at}`, `a daemon propose (class ${site.class}) that no expected.json entry declares (review M3)`);
     }
+    for (const cls of held ?? []) {
+      if (!claims.some((v) => v.entry.propose.class === cls)) find(`propose#${at}`, `a daemon propose (class ${cls}, a class its plugin's held entries carry) that no expected.json entry declares (review S1)`);
+    }
     // A class template (`marketplace.app.action.{operation}`) proposes per catalog operation the
     // control plane serves; declared where an entry claims it, and a new template fails until one does.
     if (site.template !== undefined && claims.length === 0 && newSites.has(at)) {
       find(`propose#${at}`, `a new daemon propose class template ${site.template} that no expected.json entry declares (review M3)`);
     }
     for (const v of claims) {
-      const want = site.class ?? String(site.template).replace(/\{[^}]*\}/u, String(v.entry.input?.operation ?? ""));
-      if (v.entry.propose.class !== want) find(v.key, `propose.class ${String(v.entry.propose.class)}, but ${at} proposes ${want} (review M3)`);
+      if (held !== null) {
+        if (!held.includes(v.entry.propose.class)) find(v.key, `propose.class ${String(v.entry.propose.class)}, but ${at} proposes one of ${held.join(", ")} (review S1)`);
+      } else {
+        const want = site.class ?? String(site.template).replace(/\{[^}]*\}/u, String(v.entry.input?.operation ?? ""));
+        if (v.entry.propose.class !== want) find(v.key, `propose.class ${String(v.entry.propose.class)}, but ${at} proposes ${want} (review M3)`);
+      }
       if (site.accepts !== null && JSON.stringify(v.entry.propose.accepts) !== JSON.stringify(site.accepts)) {
         find(v.key, `propose.accepts ${JSON.stringify(v.entry.propose.accepts ?? null)}, but the code after ${at} goes on with ${JSON.stringify(site.accepts)} (review S1)`);
       }
@@ -577,6 +612,13 @@ export function judgeNewCalls({ corpus, tagCorpus, validated, head, cells = {}, 
     if (!(corpus.proposes ?? []).some((site) => covers(v.entry.propose.source, site))) {
       find(v.key, `propose.source ${String(v.entry.propose.source)} names no daemon propose the extractor found (review M3)`);
     }
+  }
+
+  // Review S1: a propose-only entry is a call of its own: new with its site, moved with the core.
+  for (const v of validated.entries) {
+    if (v.kind !== "propose") continue;
+    const isNewSite = (status.newProposes ?? []).some((site) => covers(v.entry.propose.source, site));
+    status.set(v.key, { kind: "propose", status: isNewSite ? "new" : movedKeys.has(v.key) ? "changed (core move)" : "unchanged", where: String(v.entry.propose.source), command: v.key });
   }
 
   const rows = [];
@@ -599,8 +641,9 @@ export function judgeNewCalls({ corpus, tagCorpus, validated, head, cells = {}, 
     const { entry } = v;
     const blocks = [];
     if (st.status === "unchanged" && entry.propose && (status.newProposes ?? []).some((site) => covers(entry.propose.source, site))) st.status = "changed (propose)";
-    // Default cell, every layer.
-    const hookActual = v.kind === "recipe" ? recipeCalls(key, head.calls).filter((c) => REAL_COLUMNS.includes(c.column)) : [envelopeCall(key, head.calls)];
+    // Default cell, every layer (a propose-only entry has no hooked call).
+    const hookOf = (calls) => (v.kind === "recipe" ? recipeCalls(key, calls).filter((c) => REAL_COLUMNS.includes(c.column)) : v.kind === "propose" ? [] : [envelopeCall(key, calls)]);
+    const hookActual = hookOf(head.calls);
     for (const a of hookActual) for (const b of judgeLayer(entry, a)) blocks.push(`${a?.column ?? "envelope"}: ${b}`);
     if (v.kind === "recipe" && hookActual.length === 0) blocks.push("the box ran no such recipe");
     if (entry.propose !== undefined) for (const b of judgeLayer(entry.propose, proposeOf(key, head.proposed))) blocks.push(`propose: ${b}`);
@@ -621,8 +664,8 @@ export function judgeNewCalls({ corpus, tagCorpus, validated, head, cells = {}, 
     for (const cell of CELLS) {
       const run = cells[cell];
       if (run === undefined) continue;
-      const cellCalls = v.kind === "recipe" ? recipeCalls(key, run.calls).filter((c) => REAL_COLUMNS.includes(c.column)) : [envelopeCall(key, run.calls)];
-      matrix[cell] = { hook: cellCalls.map(outcomeText).filter((x, i, a) => a.indexOf(x) === i).join(" / ") };
+      const cellCalls = hookOf(run.calls);
+      matrix[cell] = v.kind === "propose" ? {} : { hook: cellCalls.map(outcomeText).filter((x, i, a) => a.indexOf(x) === i).join(" / ") };
       for (const a of cellCalls) if (a === undefined || !decisionMeets(entry.matrix?.[cell], a.decision)) blocks.push(`matrix ${cell}: ${a?.column ?? "envelope"} ${a === undefined ? "not run" : String(a.decision)}, declared ${String(entry.matrix?.[cell])}`);
       if (entry.propose !== undefined) {
         const p = proposeOf(key, run.proposed);
@@ -638,15 +681,16 @@ export function judgeNewCalls({ corpus, tagCorpus, validated, head, cells = {}, 
       where: st.where,
       entry: true,
       limiting,
-      outcome: v.kind === "recipe" ? hookActual.map(outcomeText).filter((x, i, a) => a.indexOf(x) === i).join(" / ") : outcomeText(hookActual[0]),
+      outcome: v.kind === "recipe" ? hookActual.map(outcomeText).filter((x, i, a) => a.indexOf(x) === i).join(" / ") : v.kind === "propose" ? "-" : outcomeText(hookActual[0]),
       propose: entry.propose !== undefined ? outcomeText(proposeOf(key, head.proposed)) : null,
-      declared: `${entry.class}: ${entry.decision}${entry.card_style ? `, ${entry.card_style} card` : ""}`,
+      declared: v.kind === "propose" ? "(no hooked call)" : `${entry.class}: ${entry.decision}${entry.card_style ? `, ${entry.card_style} card` : ""}`,
       declaredPropose: entry.propose !== undefined ? `${entry.propose.class}: ${entry.propose.decision}${entry.propose.card_style ? `, ${entry.propose.card_style} card` : ""}` : null,
       matrix,
       blocks,
     });
   }
-  // P4: an entry whose call no longer exists.
+  // P4: an entry whose call no longer exists (a propose-only entry: its source
+  // names no propose, or none of its class, both judged above).
   for (const v of validated.entries) {
     if (!status.has(v.key)) find(v.key, "stale: no recipe or envelope with this key in the corpus any more; delete the entry (P4: a re-added call never inherits an old acceptance)");
   }
@@ -706,13 +750,13 @@ export function renderNewCalls(meta, result, validated) {
     out.push("");
   }
   if ((result.proposes ?? []).length > 0) {
-    out.push("### Daemon proposes in plugins that own a gated tool (review M3, S1)", "", "| propose | class | answers it goes on with | declared by | new since the base |", "|---|---|---|---|---|");
-    for (const p of result.proposes) out.push(`| \`${cellText(p.at)}\` | ${cellText(p.class ?? "(unread)")} | ${cellText(p.accepts === null ? "(unread)" : p.accepts.join(", "))} | ${cellText(p.claimedBy.join(", ") || "-")} | ${p.isNew ? "yes" : "no"} |`);
+    out.push("### Daemon proposes, every plugin, each judged (review M3, S1)", "", "| propose | class | answers it goes on with | declared by | its plugin owns a gated tool | new since the base |", "|---|---|---|---|---|---|");
+    for (const p of result.proposes) out.push(`| \`${cellText(p.at)}\` | ${cellText(p.class ?? "(unread)")} | ${cellText(p.accepts === null ? "(unread)" : p.accepts.join(", "))} | ${cellText(p.claimedBy.join(", ") || "-")} | ${p.gatedPlugin === null ? "-" : p.gatedPlugin ? "yes" : "no"} | ${p.isNew ? "yes" : "no"} |`);
     out.push("");
   }
   out.push("### Expected live decision lines (P7: `class | decision | card_style | core version | tool/command key`)", "", "```");
-  for (const { entry, key } of validated.entries.filter((v) => v.kind !== "gated")) {
-    out.push(decisionLine(entry.class, entry.decision, entry.card_style ?? null, meta.core, entry.command ?? key));
+  for (const { entry, key, kind } of validated.entries.filter((v) => v.kind !== "gated")) {
+    if (kind !== "propose") out.push(decisionLine(entry.class, entry.decision, entry.card_style ?? null, meta.core, entry.command ?? key));
     if (entry.propose !== undefined) out.push(decisionLine(entry.propose.class, entry.propose.decision, entry.propose.card_style ?? null, meta.core, entry.propose.key));
   }
   out.push("```", "");
