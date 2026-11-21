@@ -4064,12 +4064,40 @@ export function globSegmentMatches(pattern: string, name: string): boolean {
     } else if (char === "?") {
       source += "[^/]";
     } else if (char === "[") {
+      // A bracket expression: a leading `!` or `^` negates it and a leading
+      // `]` is a member; a POSIX class, equivalence class or collating
+      // element (`[:alpha:]`, `[=g=]`, `[.g.]`) is skipped to its own close
+      // and makes the expression match ANY one character, the strict side
+      // (review of the second fold). Unclosed, the `[` is a literal.
       let close = at + 1;
       if (pattern[close] === "!" || pattern[close] === "^") close += 1;
       if (pattern[close] === "]") close += 1;
-      while (close < pattern.length && pattern[close] !== "]") close += 1;
+      let posix = false;
+      while (close < pattern.length && pattern[close] !== "]") {
+        const kind = pattern[close + 1];
+        if (pattern[close] === "[" && (kind === ":" || kind === "=" || kind === ".")) {
+          const end = pattern.indexOf(`${kind}]`, close + 2);
+          if (end === -1) {
+            posix = true;
+            close = pattern.length;
+            break;
+          }
+          posix = true;
+          close = end + 2;
+          continue;
+        }
+        close += 1;
+      }
       if (close >= pattern.length) {
-        source += "\\[";
+        // Unclosed: a literal `[`, unless a class inside it left the reading
+        // uncertain, which the strict side reads as any characters.
+        source += posix ? "[^/]*" : "\\[";
+        if (posix) break;
+        continue;
+      }
+      if (posix) {
+        source += "[^/]";
+        at = close;
         continue;
       }
       let body = pattern.slice(at + 1, close);
@@ -4228,13 +4256,6 @@ function attachedOptionValues(word: string): string[] {
   return tails;
 }
 
-/** The value of `--name=value` or `--name value` at `at`, or `undefined`. */
-function longOptionValue(args: readonly string[], at: number, name: string): string | undefined {
-  const arg = args[at] as string;
-  if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1);
-  return arg === name ? args[at + 1] : undefined;
-}
-
 /**
  * The files and directories git ITSELF writes, from its own options
  * (second review, S2), read from git 2.50.1's manual pages: the diff
@@ -4261,26 +4282,34 @@ export function gitWriteTargets(args: readonly string[]): string[] {
         ? ["-b", "-B", "--reason"]
         : [],
   );
+  // git takes any unambiguous prefix of a long option (`--outp=f`, `--out f`
+  // write as `--output` does), and this reader cannot know every verb's
+  // full option list, so ANY long option of two letters or more that is a
+  // prefix of a write option's name is read as that option (review of the
+  // second fold).
+  const writeOptions = [
+    "--output",
+    ...(verb === "apply" ? ["--directory", "--build-fake-ancestor"] : []),
+    ...(verb === "clone" ? ["--separate-git-dir"] : []),
+  ];
   for (let at = 0; at < rest.length; at += 1) {
     const arg = rest[at] as string;
     if (arg === "--") {
       positionals.push(...rest.slice(at + 1));
       break;
     }
-    const output = longOptionValue(rest, at, "--output");
-    if (output !== undefined) values.push(output);
-    if (verb === "apply") {
-      for (const name of ["--directory", "--build-fake-ancestor"]) {
-        const value = longOptionValue(rest, at, name);
+    if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      const name = equals === -1 ? arg : arg.slice(0, equals);
+      if (name.length >= 4 && writeOptions.some((option) => option.startsWith(name))) {
+        const value = equals === -1 ? rest[at + 1] : arg.slice(equals + 1);
         if (value !== undefined) values.push(value);
+        if (equals === -1) at += 1;
+        continue;
       }
     }
-    if (verb === "clone") {
-      const value = longOptionValue(rest, at, "--separate-git-dir");
-      if (value !== undefined) values.push(value);
-    }
     if (arg.startsWith("-")) {
-      if (skipNext.has(arg) || arg === "--output" || (verb === "apply" && ["--directory", "--build-fake-ancestor"].includes(arg))) at += 1;
+      if (skipNext.has(arg)) at += 1;
       continue;
     }
     positionals.push(arg);
@@ -4336,16 +4365,26 @@ const GIT_SEGMENT_IN_TEXT = /(?:^|[^A-Za-z0-9_.-])\.git(?:$|[^A-Za-z0-9_.-])/iu;
  * is judged where it stands and does not count.
  */
 function lineSpellsGitIndirectly(segments: readonly LexSegment[]): boolean {
+  // A substitution body's words, each read as a path the shell may still
+  // expand (`$(echo .gi?)`).
+  const bodyNamesGit = (body: string): boolean =>
+    GIT_SEGMENT_IN_TEXT.test(body) || body.split(/[\s;&|()]+/u).some((token) => mayNameGitDirectory(token.replace(/["']/gu, "")));
   return segments.some((segment) => {
     const assignments = bashAssignmentCount(segment.words);
     const words = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
     return (
-      segment.bodySubstitutions.some((body) => GIT_SEGMENT_IN_TEXT.test(body)) ||
-      words.some(
-        (word, index) =>
-          word.substitutions.some((body) => GIT_SEGMENT_IN_TEXT.test(body)) ||
-          ((index < assignments || word.quoted) && GIT_SEGMENT_IN_TEXT.test(word.text)),
-      )
+      segment.bodySubstitutions.some(bodyNamesGit) ||
+      words.some((word, index) => {
+        if (word.substitutions.some(bodyNamesGit)) return true;
+        // An assignment's VALUE is judged as a target is, patterns and braces
+        // included (`D=.gi?`, `D=.g{i,}t`, `D='.[g]it'`): an unquoted `$D`
+        // later expands it. Its words after `:` (a PATH-like list) too.
+        if (index < assignments) {
+          const value = word.text.slice(word.text.indexOf("=") + 1);
+          return GIT_SEGMENT_IN_TEXT.test(value) || value.split(":").some(mayNameGitDirectory);
+        }
+        return word.quoted && GIT_SEGMENT_IN_TEXT.test(word.text);
+      })
     );
   });
 }

@@ -135,11 +135,42 @@ test("S1 hook: a pattern is expanded on disk and each match walked; one it canno
   mkdirSync(join(locked, "in"), { recursive: true });
   chmodSync(locked, 0o000);
   try {
-    assert.deepEqual(hook("echo x > locked/*/config", repo), ["files.write.workspace redirect-write"]);
+    // A SURE target that cannot be expanded is judged the strict way; a
+    // possible one (a header value) by its text, which names no .git.
+    assert.deepEqual(hook("echo x > locked/*/config", repo), [DIR_WRITE]);
     assert.deepEqual(hook("echo x > locked/*/.g?t/config", repo), [DIR_WRITE]);
+    assert.ok(!hook("wget --header=locked/*/x https://example.invalid/x", repo).includes(DIR_WRITE));
   } finally {
     chmodSync(locked, 0o755);
   }
+});
+
+test("S1 review: a directory listing is read whole; thousands of matches do not move an ordinary line", { skip }, () => {
+  const repo = checkout();
+  const logs = join(repo, "logs");
+  mkdirSync(logs);
+  for (let at = 0; at < 5000; at += 1) writeFileSync(join(logs, `f${String(at)}.log`), "");
+  assert.deepEqual(hook("rm logs/*.log", repo), ["files.delete.out_of_scope rm-unreadable-path"]);
+  assert.deepEqual(hook("cp /tmp/x logs/*.log", repo), ["files.write.workspace workspace-write"]);
+  // Among them, one link into .git is still found.
+  symlinkSync("../.git/config", join(logs, "zz.log"));
+  assert.deepEqual(hook("cp /tmp/x logs/*.log", repo), [DIR_WRITE]);
+});
+
+test("S1 review: a bracket expression with a POSIX class, an equivalence class or a collating element may match", () => {
+  for (const command of [
+    "echo x > .[[:alpha:]]it/config",
+    "echo x > [[:punct:]]git/config",
+    "echo x > .[=g=]it/config",
+    "echo x > .[.g.]it/config",
+    "echo x > .[]g]it/config",
+    "echo x > .[!x]it/config",
+    "echo x > .[[:alpha:]/config",
+  ]) {
+    assert.deepEqual(pure(command), [DIR_WRITE], command);
+  }
+  assert.deepEqual(pure("echo x > out[1].txt"), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(pure("echo x > [[:alpha:]]*.txt"), ["files.write.workspace redirect-write"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -164,6 +195,61 @@ test("S2: git's own write options are write targets; the verbs without a row sta
   }
   assert.deepEqual(pure("git format-patch -o .git/hooks x"), ["refused unclassified"]);
   assert.deepEqual(pure("git archive -o .git/x.tar HEAD"), ["refused unclassified"]);
+});
+
+test("S2 review: a long write option is read by any prefix git may take", () => {
+  for (const command of [
+    "git log --outp=.git/config",
+    "git log --out .git/config",
+    "git diff --ou=.git/hooks/pre-push",
+    "git apply --dir=.git/hooks p.patch",
+    "git apply --directo .git/hooks p.patch",
+    "git apply --build=.git/index p.patch",
+    "git clone --sep=.git/x /x/r.git y",
+  ]) {
+    assert.ok(pure(command).includes(DIR_WRITE), command);
+  }
+  assert.deepEqual(pure("git diff --output-indicator-new=x"), ["read.shell git-read"]);
+  assert.deepEqual(pure("git log --out=out.txt"), ["read.shell git-read"]);
+});
+
+test("real git, S2 review: which abbreviations of --output git 2.50.1 writes through", { skip }, (t) => {
+  const repo = checkout();
+  const tried: string[] = [];
+  for (const [spelling, file] of [
+    ["--output=", "a0"],
+    ["--outpu=", "a1"],
+    ["--outp=", "a2"],
+    ["--out=", "a3"],
+    ["--ou=", "a4"],
+    ["--o=", "a5"],
+  ] as const) {
+    const ran = spawnSync("git", ["log", "-1", `${spelling}${file}`], { cwd: repo, encoding: "utf8", env: process.env });
+    const wrote = existsSync(join(repo, file));
+    tried.push(`${spelling}${file}: exit ${String(ran.status)}, ${wrote ? "wrote the file" : "no file"}${ran.stderr.trim() === "" ? "" : ` (${ran.stderr.trim().split("\n")[0] ?? ""})`}`);
+  }
+  const separate = spawnSync("git", ["log", "-1", "--out", "a6"], { cwd: repo, encoding: "utf8", env: process.env });
+  tried.push(`log --out a6: exit ${String(separate.status)}, ${existsSync(join(repo, "a6")) ? "wrote the file" : "no file"}`);
+  for (const [verb, spelling, file] of [
+    ["diff", "--outp=", "b1"],
+    ["show", "--outp=", "b2"],
+  ] as const) {
+    const ran = spawnSync("git", [verb, `${spelling}${file}`], { cwd: repo, encoding: "utf8", env: process.env });
+    tried.push(`${verb} ${spelling}${file}: exit ${String(ran.status)}, ${existsSync(join(repo, file)) ? "wrote the file" : "no file"}`);
+  }
+  // `git apply` and `git clone` parse their options with git's option parser:
+  // an abbreviation is either taken or refused as an unknown option.
+  for (const args of [
+    ["apply", "--dire=sub", "--check", "/dev/null"],
+    ["apply", "--build=fake", "--check", "/dev/null"],
+    ["clone", "--sep=sepdir", join(repo, "no-such-repo"), "cl"],
+  ]) {
+    const ran = spawnSync("git", args, { cwd: repo, encoding: "utf8", env: process.env });
+    const refused = /unknown option|unrecognized/u.test(ran.stderr);
+    tried.push(`${args.slice(0, 2).join(" ")}: exit ${String(ran.status)}, ${refused ? "option refused" : "option taken"} (${ran.stderr.trim().split("\n")[0] ?? ""})`);
+  }
+  for (const line of tried) t.diagnostic(line);
+  assert.ok(existsSync(join(repo, "a0")), tried.join(" | "));
 });
 
 test("S2: ordinary git lines do not move", () => {
@@ -194,6 +280,15 @@ test("S3: a line that spells .git indirectly makes an expanding or unplaceable r
   assert.deepEqual(pure("D=.git; echo x >> $D/config"), ["read.shell assignment", DIR_WRITE]);
   assert.deepEqual(pure("D=.git; cd $D; cp /tmp/x hooks/pre-push"), ["read.shell assignment", READ_SHELL, DIR_WRITE]);
   assert.deepEqual(pure('D=$PWD/.GIT/hooks; echo x > "$D/pre-push"'), ["read.shell assignment", DIR_WRITE]);
+});
+
+test("S3 review: an assignment's value is judged as a pattern", () => {
+  assert.deepEqual(pure("D=.gi?; cd $D && echo x >> config"), ["read.shell assignment", READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure("D=.g{i,}t; cd $D && echo x >> config"), ["read.shell assignment", READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure("D='.[g]it'; cd $D && echo x >> config"), ["read.shell assignment", READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure('echo x >> "$(echo .gi?)/config"'), [DIR_WRITE]);
+  // Known limit: a value built from several expansions cannot be judged.
+  assert.deepEqual(pure("A=.g; B=it; cd $A$B && echo x >> config"), ["read.shell assignment", "read.shell assignment", READ_SHELL, "files.write.workspace redirect-write"]);
 });
 
 test("S3: lines that do not spell .git, or carry it only in a payload to a literal target, do not move", () => {

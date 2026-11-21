@@ -27,7 +27,7 @@
  * write-scope pass, so a segment it raises is not narrowed again.
  */
 
-import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync, type Dirent } from "node:fs";
 import { dirname, join, normalize, sep } from "node:path";
 
 import {
@@ -240,47 +240,65 @@ function isPattern(word: string): boolean {
   return word.includes("{") || word.split("/").some(isPatternSegment);
 }
 
-/** Past this many names a pattern is not expanded here. */
-const GLOB_LIMIT = 64;
+/** Directory entries one expansion may visit, in all; past it, it gives up. */
+const ENTRY_LIMIT = 100_000;
+
+/** The paths a pattern stands for, or why this step could not expand it. */
+type Expansion = { paths: string[] } | { giveUp: string };
+
+/** Keep every entry that is a directory or a link (one that may be descended or followed). */
+const DIRECTORY_OR_LINK = (entry: Dirent): boolean => entry.isDirectory() || entry.isSymbolicLink();
 
 /**
  * The paths a glob or brace word names on disk from `base` (second review,
- * S1): braces expanded first, then each pattern segment matched against its
- * parent directory's entries with the classifier's own matcher. A segment
- * that matches nothing ends that branch, as the shell passes the pattern
- * through as a name that is no `.git`. `null` past {@link GLOB_LIMIT} or when
- * a parent cannot be read, which the caller judges by the text.
+ * S1), for walking: braces expanded first, then each pattern segment matched
+ * against its parent's entries with the classifier's own matcher. Every
+ * entry of a listing is read; an inner segment descends each matching
+ * directory or link, and the LAST segment keeps only the matching entries
+ * `keepLast` says matter, plus the pattern itself under its parent, which
+ * stands for every plain entry (a plain file lands where its parent does).
+ * It gives up past {@link ENTRY_LIMIT} entries visited in all, or when a
+ * parent cannot be read; the caller then judges a sure target the strict way
+ * and a possible one by its text (review of the second fold).
  */
-function expandOnDisk(base: string, word: string): string[] | null {
+function expandOnDisk(base: string, word: string, keepLast: (entry: Dirent) => boolean): Expansion {
   const words = word.includes("{") ? expandBraces(word) : [word];
-  if (words === null) return null;
+  if (words === null) return { giveUp: "more brace alternatives than this hook expands" };
+  const join2 = (place: string, name: string): string => (place === "/" ? `/${name}` : `${place}/${name}`);
   const found: string[] = [];
+  let visited = 0;
   for (const each of words) {
+    const segments = each.split("/").filter((part) => part.length > 0);
     let places = [each.startsWith("/") ? "/" : base];
-    for (const segment of each.split("/").filter((part) => part.length > 0)) {
-      const join2 = (place: string, name: string): string => (place === "/" ? `/${name}` : `${place}/${name}`);
+    for (const [index, segment] of segments.entries()) {
       if (!isPatternSegment(segment)) {
         places = places.map((place) => join2(place, segment));
         continue;
       }
+      const last = index === segments.length - 1;
       const next: string[] = [];
       for (const place of places) {
-        let names: string[];
+        let entries: Dirent[];
         try {
-          names = readdirSync(place);
+          entries = readdirSync(place, { withFileTypes: true });
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-          return null;
+          const code = (error as NodeJS.ErrnoException).code ?? "an error";
+          if (code === "ENOENT" || code === "ENOTDIR") continue;
+          return { giveUp: `${place} cannot be listed (${code})` };
         }
-        for (const name of names) if (globSegmentMatches(segment, name)) next.push(join2(place, name));
-        if (next.length > GLOB_LIMIT) return null;
+        visited += entries.length;
+        if (visited > ENTRY_LIMIT) return { giveUp: `more than ${String(ENTRY_LIMIT)} entries to read` };
+        if (last) next.push(join2(place, segment));
+        for (const entry of entries) {
+          if (!globSegmentMatches(segment, entry.name)) continue;
+          if (last ? keepLast(entry) || entry.name.toLowerCase() === ".git" : DIRECTORY_OR_LINK(entry)) next.push(join2(place, entry.name));
+        }
       }
       places = next;
     }
     found.push(...places);
-    if (found.length > GLOB_LIMIT) return null;
   }
-  return found;
+  return { paths: found };
 }
 
 /** The commands that copy or move a whole tree, `.git` entry included. */
@@ -365,8 +383,10 @@ function directoryTargets(
   if (isPattern(word)) {
     // Second review, S1: a glob or brace directory is expanded on disk; one
     // match is certain, several or none readable are not.
-    const matches = expandOnDisk(dir, word);
-    if (matches === null) return { targets: [], unknown: `\`${bin} ${word}\` (a pattern this hook cannot expand)` };
+    const expanded = expandOnDisk(dir, word, DIRECTORY_OR_LINK);
+    if ("giveUp" in expanded) return { targets: [], unknown: `\`${bin} ${word}\` (a pattern this hook cannot expand: ${expanded.giveUp})` };
+    // The pattern itself under its parent is no directory a `cd` lands in.
+    const matches = expanded.paths.filter((path) => !isPattern(path.slice(dir.length)));
     return {
       targets: matches.flatMap(both),
       unknown: matches.length > 1 ? `\`${bin} ${word}\` (a pattern with ${String(matches.length)} matches)` : envChanged ? "a relative `cd` after the line may have changed PWD or CDPATH" : null,
@@ -507,8 +527,17 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
           hit = { word, landed: `${text} (a pattern that names .git)` };
           break;
         }
-        const matches = expandOnDisk(dir, spelled);
-        for (const match of matches ?? []) placed.push({ word, spelled: match });
+        const expanded = expandOnDisk(dir, spelled, (entry) => entry.isSymbolicLink());
+        if ("giveUp" in expanded) {
+          // Cannot be expanded: a sure target the strict way; a possible one
+          // was judged by its text just above.
+          if (sure.has(word)) {
+            hit = { word, landed: `a place this hook cannot determine (${expanded.giveUp})` };
+            break;
+          }
+          continue;
+        }
+        for (const match of expanded.paths) placed.push({ word, spelled: match });
       }
       if (hit !== null) break;
       for (const { word, spelled } of placed) {
@@ -539,7 +568,18 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
       // git directory, its hooks and its config where it lands.
       for (const word of sources) {
         const spelled = word.startsWith("~/") && home !== undefined ? `${home}/${word.slice(2)}` : word;
-        const paths = isPattern(spelled) ? (expandOnDisk(dir, spelled) ?? []) : [spelled.startsWith("/") ? spelled : `${dir}/${spelled}`];
+        let paths = [spelled.startsWith("/") ? spelled : `${dir}/${spelled}`];
+        if (isPattern(spelled)) {
+          const expanded = expandOnDisk(dir, spelled, DIRECTORY_OR_LINK);
+          if ("giveUp" in expanded) {
+            if (sure.has(word)) {
+              hit = { word, landed: `a tree this hook cannot list (${expanded.giveUp})` };
+              break;
+            }
+            continue;
+          }
+          paths = expanded.paths;
+        }
         for (const path of paths) {
           const last = path.replace(/(?:\/\.?)+$/u, "").split("/").pop() ?? "";
           let carries = last.toLowerCase() === ".git";
