@@ -377,3 +377,101 @@ for (const each of CASES) {
     );
   });
 }
+
+// ---------------------------------------------------------------------------
+// A tag created earlier on the same line (APRV-518 review fold, S3): what git
+// does, then what the hook answers
+// ---------------------------------------------------------------------------
+
+/** The push segment's class of a whole line, classified in `clone` as the hook would. */
+function pushClassOf(command: string, clone: string): string {
+  const refined = classifyForHook(command, [], clone);
+  assert.equal(refined.result.ok, true, JSON.stringify(refined.result));
+  if (!refined.result.ok) return "";
+  const push = refined.result.segments.find((segment) => segment.text.startsWith("git push"));
+  assert.ok(push !== undefined, command);
+  return push.class;
+}
+
+/** Another clone puts commit c2 and a lightweight tag `rel3` on it into the remote. */
+function remoteGainsTag(remote: string): void {
+  const other = join(remote, "..", "other");
+  ok(join(remote, ".."), ["clone", "-q", remote, other]);
+  ok(other, ["commit", "-q", "--allow-empty", "-m", "c2"]);
+  ok(other, ["tag", "rel3"]);
+  ok(other, ["push", "-q", "origin", "main", "rel3"]);
+}
+
+test("real git, fact (a): a plain `git fetch` follows tags, so it can create a local tag", { skip: GIT ? false : "no git binary" }, (t) => {
+  const { remote, clone } = fixture();
+  remoteGainsTag(remote);
+  assert.equal(git(clone, ["rev-parse", "-q", "--verify", "refs/tags/rel3"]).status, 1, "no local rel3 before the fetch");
+  const fetched = git(clone, ["fetch"]);
+  const after = git(clone, ["rev-parse", "-q", "--verify", "refs/tags/rel3"]);
+  t.diagnostic(`git fetch: exit ${String(fetched.status)}; local refs/tags/rel3 afterwards: ${after.status === 0 ? "present" : "absent"}`);
+  assert.equal(after.status, 0, "git fetch created the local tag rel3");
+});
+
+test("real git, fact (b): a push word that is both a local branch and a local tag is refused by git", { skip: GIT ? false : "no git binary" }, (t) => {
+  const { remote, clone } = fixture();
+  ok(clone, ["tag", "lane"]);
+  const before = refsOf(remote);
+  const pushed = git(clone, ["push", "origin", "lane"]);
+  const { effect } = floorOf(before, refsOf(remote));
+  t.diagnostic(`git push origin lane (branch and tag): exit ${String(pushed.status)}; effect: ${effect.length === 0 ? "none" : effect.join(", ")}; ${pushed.stderr.trim().split("\n")[0] ?? ""}`);
+  assert.notEqual(pushed.status, 0, "git refuses an ambiguous source");
+  assert.deepEqual(effect, []);
+});
+
+test("real git, S3: a fetch into refs/tags/ then a push of that name publishes a tag, and is classified so", { skip: GIT ? false : "no git binary" }, (t) => {
+  const { remote, clone } = fixture();
+  const command = "git fetch origin main:refs/tags/rel2 && git push origin rel2";
+  const got = pushClassOf(command, clone);
+  const before = refsOf(remote);
+  ok(clone, ["fetch", "-q", "origin", "main:refs/tags/rel2"]);
+  const pushed = git(clone, ["push", "origin", "rel2"]);
+  const { floor, effect } = floorOf(before, refsOf(remote));
+  t.diagnostic(`${command}: class ${got}; git exit ${String(pushed.status)}; effect: ${effect.join(", ") || "none"}`);
+  assert.equal(floor, "release.publish", "git published the tag");
+  assert.ok(ORDER.indexOf(got) <= ORDER.indexOf(floor), `${command}: classified ${got}, needs ${floor}`);
+});
+
+test("real git, S3: a plain fetch then a push of a tag the fetch created is at least release.publish", { skip: GIT ? false : "no git binary" }, (t) => {
+  const { remote, clone } = fixture();
+  remoteGainsTag(remote);
+  const command = "git fetch && git push origin rel3";
+  const got = pushClassOf(command, clone);
+  assert.equal(got, "release.publish", command);
+  ok(clone, ["fetch", "-q"]);
+  const pushed = git(clone, ["push", "origin", "rel3"]);
+  t.diagnostic(`${command}: class ${got}; git exit ${String(pushed.status)} (the remote already had rel3)`);
+});
+
+test("S3: the ordinary fetch then push of the current branch is unchanged, as is HEAD", { skip: GIT ? false : "no git binary" }, () => {
+  const { clone } = fixture();
+  for (const command of ["git fetch && git push -u origin lane", "git fetch origin && git push origin lane", "git fetch && git push origin HEAD", "git fetch --tags && git push -u origin @"]) {
+    assert.equal(pushClassOf(command, clone), "vcs.push.branch", command);
+  }
+  // A word that is a local branch keeps its answer after a fetch: if the fetch
+  // brought a tag of the same name, git refuses the ambiguous source (fact b).
+  // (A tag of that name already present is the local-tag rule's, before any fetch.)
+  ok(clone, ["tag", "lane"]);
+  assert.equal(pushClassOf("git push -u origin lane", clone), "release.publish");
+});
+
+test("S3: after anything that can create a tag, a push word that is no local branch is at least release.publish", { skip: GIT ? false : "no git binary" }, () => {
+  const { clone } = fixture();
+  for (const command of [
+    "git fetch && git push origin rel9",
+    "git fetch --tags && git push origin rel9",
+    "git remote update && git push origin rel9",
+    "git fetch origin main:refs/tags/rel9; git push -u origin rel9",
+    "git tag v9 && git push origin v9",
+    "git pull && git push origin rel9",
+  ]) {
+    const got = pushClassOf(command, clone);
+    assert.ok(ORDER.indexOf(got) <= ORDER.indexOf("release.publish"), `${command}: ${got}`);
+  }
+  // Without such a segment, a word no ref names keeps today's answer.
+  assert.equal(pushClassOf("git status && git push origin rel9", clone), "vcs.push.branch");
+});

@@ -53,8 +53,10 @@ import { isAbsolute, join, resolve } from "node:path";
 import { childEnvironment } from "../core/child-env.js";
 import {
   commandSegmentShapes,
+  GIT_PUSH_NEW_TAG_RULE,
   GIT_PUSH_RULES,
   gitPushSegmentClass,
+  gitVerbIndex,
   type ClassifiedSegment,
   type CommandClassification,
   type PushRepoFacts,
@@ -174,9 +176,10 @@ export function readPushRepoFacts(dir: string, budget: Budget = { deadline: Date
       ? submoduleRecurse
       : recurse === null || !["check", "no", "false", "off", "0"].includes(recurse.trim().toLowerCase());
 
-  const refs = runGit(dir, ["for-each-ref", "--format=%(refname)%00%(symref)", "refs/tags", "refs/remotes/origin/HEAD"], budget);
+  const refs = runGit(dir, ["for-each-ref", "--format=%(refname)%00%(symref)", "refs/tags", "refs/heads", "refs/remotes/origin/HEAD"], budget);
   if (refs.failed || refs.status !== 0) return { kind: "unreadable" };
   const tags = new Set<string>();
+  const branches = new Set<string>();
   let originDefault: string | null = null;
   for (const line of refs.stdout.split("\n")) {
     if (line.length === 0) continue;
@@ -184,6 +187,10 @@ export function readPushRepoFacts(dir: string, budget: Budget = { deadline: Date
     if (refname === undefined) continue;
     if (refname.startsWith("refs/tags/")) {
       tags.add(refname.slice("refs/tags/".length));
+      continue;
+    }
+    if (refname.startsWith("refs/heads/")) {
+      branches.add(refname.slice("refs/heads/".length));
       continue;
     }
     if (refname === "refs/remotes/origin/HEAD" && symref !== undefined && symref.startsWith("refs/remotes/origin/")) {
@@ -204,6 +211,7 @@ export function readPushRepoFacts(dir: string, budget: Budget = { deadline: Date
       remotes,
       legacyRemotes: [...legacyRemotes, ...legacyBranches],
       tags,
+      branches,
       followTags,
       submodules,
     },
@@ -211,7 +219,7 @@ export function readPushRepoFacts(dir: string, budget: Budget = { deadline: Date
 }
 
 /** A `cd` target the shell would reach, or `null` when this step cannot say. */
-function cdTarget(args: readonly string[], from: string): string | null {
+export function cdTarget(args: readonly string[], from: string): string | null {
   const words = args[0] === "--" ? args.slice(1) : [...args];
   if (words.length === 0) return homedir();
   if (words.length !== 1) return null;
@@ -270,14 +278,16 @@ function directoriesFor(
   index: number,
   cwd: string,
   concurrent: boolean,
-): { dirs: string[] } | { why: string } {
+): { dirs: string[]; tagsMayAppear: boolean } | { why: string } {
   const pushText = (segments[index] as ClassifiedSegment).text;
+  let tagsMayAppear = false;
   if (concurrent) {
     for (const [at, segment] of segments.entries()) {
       if (at === index || segment.text === pushText) continue;
       if (!segment.class.startsWith("read.")) {
         return { why: `\`${segment.text}\` runs alongside it and may change what git reads` };
       }
+      if (mayCreateTag(segment.text)) tagsMayAppear = true;
     }
   }
   let dirs = [cwd];
@@ -286,6 +296,7 @@ function directoriesFor(
     if (!segment.class.startsWith("read.") || segment.rule === "assignment") {
       return { why: `\`${segment.text}\` runs first and may change what git reads` };
     }
+    if (mayCreateTag(segment.text)) tagsMayAppear = true;
     const shapes = commandSegmentShapes(segment.text);
     if (shapes === null) {
       if (DIRECTORY_WORD.test(segment.text)) return { why: "a directory change before it cannot be followed" };
@@ -298,6 +309,9 @@ function directoriesFor(
       const bin = shape.bin === null ? null : (shape.bin.split("/").pop() ?? shape.bin);
       if (bin === "pushd" || bin === "popd") return { why: "a directory change before it cannot be followed" };
       if (bin !== "cd") continue;
+      // `HOME=… cd` or `CDPATH=… cd` lands where the assignment says, which is
+      // not where this step would look.
+      if (shape.assignments.length > 0) return { why: "a directory change before it cannot be followed" };
       const next: string[] = [];
       for (const dir of dirs) {
         const target = cdTarget(shape.args, dir);
@@ -307,7 +321,27 @@ function directoriesFor(
       dirs = [...new Set([...dirs, ...next])];
     }
   }
-  return { dirs };
+  return { dirs, tagsMayAppear };
+}
+
+/**
+ * Can this segment create a local tag before a later push runs (APRV-518
+ * review fold, S3)? `git fetch` follows tags by default (git 2.50.1 created
+ * one from a plain `git fetch`), and a fetch refspec can write `refs/tags/`
+ * outright; `git pull`, `git tag` and `git remote update` can too. Read from
+ * the segment's git verb; a segment that cannot be shaped answers yes.
+ */
+function mayCreateTag(text: string): boolean {
+  const shapes = commandSegmentShapes(text);
+  if (shapes === null) return true;
+  return shapes.some((shape) => {
+    const bin = shape.bin === null ? null : (shape.bin.split("/").pop() ?? shape.bin);
+    if (bin !== "git") return false;
+    const at = gitVerbIndex(shape.args);
+    const verb = at === null ? undefined : shape.args[at];
+    if (verb === "fetch" || verb === "pull" || verb === "tag") return true;
+    return verb === "remote" && shape.args.slice((at ?? 0) + 1).some((word) => word === "update");
+  });
 }
 
 /** A classification plus one note per segment this step re-read. */
@@ -347,6 +381,7 @@ export function refinePushRepo(result: CommandClassification, cwd: string, comma
     const walked = directoriesFor(result.segments, index, cwd, concurrent);
     let facts: PushRepoFacts[] | null = [];
     let why = "";
+    const tagsMayAppear = "tagsMayAppear" in walked && walked.tagsMayAppear;
     if ("why" in walked) {
       facts = null;
       why = walked.why;
@@ -364,7 +399,8 @@ export function refinePushRepo(result: CommandClassification, cwd: string, comma
       // No directory is a repository: git refuses this push wherever it runs.
       if (facts !== null && facts.length === 0) continue;
     }
-    const answer = gitPushSegmentClass(segment.text, facts) ?? { class: REWRITE_CLASS, rule: UNREADABLE_RULE };
+    const answer = gitPushSegmentClass(segment.text, facts, { tagsMayAppear }) ?? { class: REWRITE_CLASS, rule: UNREADABLE_RULE };
+    if (answer.rule === GIT_PUSH_NEW_TAG_RULE && why.length === 0) why = "an earlier segment can create a local tag of that name";
     if (answer.rule === UNREADABLE_RULE && why.length === 0) why = "the segment could not be re-read as one git push";
     if (answer.class === segment.class && answer.rule === segment.rule && answer.path === segment.path) continue;
     const { path: _dropped, ...rest } = segment;

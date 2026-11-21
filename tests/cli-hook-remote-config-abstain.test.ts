@@ -262,7 +262,7 @@ test("(ii) a no-rule stand-in running alongside a push (|, &) makes the push unr
   assert.equal(later.class, "vcs.push.branch", JSON.stringify(later));
 });
 
-test("(ii) the push-repository pass runs first in the chain under noRuleSegments, and its note leads", { skip }, () => {
+test("(ii) the push-repository pass runs ahead of the rewrite and scope passes under noRuleSegments, and its note leads", { skip }, () => {
   const dir = checkout();
   const refined = classifyForHook(`${NO_RULE} && git push origin`, [], dir, [], false, [], true);
   assert.equal(refined.result.ok, true);

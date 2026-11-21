@@ -2329,6 +2329,13 @@ export interface ClassifierContext {
    * and every word is also judged resolved against each of them.
    */
   noRuleCwds?: readonly string[];
+  /**
+   * Where literal `cd` / `pushd` / `popd` segments earlier on the same line
+   * moved the shell (APRV-518, S1), or `null` when one of them cannot be
+   * followed from the text. Set by {@link classifyCommand} for each segment it
+   * classifies; a caller leaves it unset, which is the line's own start.
+   */
+  shellDir?: ShellDir | null;
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -2790,6 +2797,11 @@ export interface PushRepoFacts {
   legacyRemotes: readonly string[];
   /** Short names under `refs/tags/`. */
   tags: ReadonlySet<string>;
+  /**
+   * Short names under `refs/heads/` (APRV-518 review fold, S3). Absent: not
+   * read, and no word is known to be a local branch.
+   */
+  branches?: ReadonlySet<string>;
   /** `push.followTags` is on. */
   followTags: boolean;
   /** `push.recurseSubmodules` (or, unset, `submodule.recurse`) pushes submodules. */
@@ -2802,7 +2814,16 @@ type PushRepoView =
   | { kind: "text" }
   /** The hook tried and could not read the checkout the push runs in. */
   | { kind: "unreadable" }
-  | { kind: "read"; facts: PushRepoFacts };
+  | {
+      kind: "read";
+      facts: PushRepoFacts;
+      /**
+       * An earlier segment on the line can create a local tag before the push
+       * runs (APRV-518 review fold, S3): `git fetch` follows tags, and `git
+       * tag`, `git pull` and `git remote update` can make one.
+       */
+      tagsMayAppear?: boolean;
+    };
 
 /** The rule a push takes when the configuration that decides it cannot be read. */
 const GIT_PUSH_CONFIG_UNREADABLE_RULE = "git-push-config-unreadable";
@@ -2822,6 +2843,9 @@ export const GIT_PUSH_RULES: readonly string[] = [
   "git-push-branch",
   "git-push-unreadable",
 ];
+
+/** The rule a push takes when its word may be a tag an earlier segment creates (APRV-518 review fold, S3). */
+export const GIT_PUSH_NEW_TAG_RULE = "git-push-new-tag";
 
 /** The strictest of several push answers; on a tie the earliest is kept. */
 function strictestPush(candidates: readonly (Refinement & { class: string })[]): Refinement & { class: string } {
@@ -2946,6 +2970,18 @@ function gitPushClass(
   if (localTags.length > 0) {
     candidates.push({ class: "release.publish", rule: "git-push-local-tag", path: localTags.join(" ") });
   }
+  // S3: a tag an earlier segment creates is not among `facts.tags`, which were
+  // read before the line ran. A colon-less word that is no local branch may be
+  // that tag; one that IS a local branch cannot be pushed if a tag of its name
+  // appears (git 2.50.1 refuses an ambiguous source), so it keeps its answer.
+  if (view.tagsMayAppear === true && !reading.remove) {
+    const fresh = named
+      .map((refspec) => refspec.replace(/^\+/u, ""))
+      .filter((name) => !(facts.branches?.has(name) ?? false));
+    if (fresh.length > 0) {
+      candidates.push({ class: "release.publish", rule: GIT_PUSH_NEW_TAG_RULE, path: fresh.join(" ") });
+    }
+  }
   if (!reading.remove && facts.followTags) {
     candidates.push({ class: "release.publish", rule: "git-push-config-tags" });
   }
@@ -2973,6 +3009,7 @@ function gitPushClass(
 export function gitPushSegmentClass(
   segmentText: string,
   facts: readonly PushRepoFacts[] | null,
+  options: { tagsMayAppear?: boolean } = {},
 ): { class: string; rule: string; path?: string } | null {
   const lexed = lex(segmentText);
   if (!lexed.ok || lexed.segments.length !== 1) return null;
@@ -2992,7 +3029,9 @@ export function gitPushSegmentClass(
   if (bin === undefined || (pathSegments(bin).slice(-1)[0] ?? bin) !== "git") return null;
   const substituted = segment.words.slice(cursor + 1).some((word) => word.substitutions.length > 0);
   const views: PushRepoView[] =
-    facts === null ? [{ kind: "unreadable" }] : facts.map((one) => ({ kind: "read", facts: one }));
+    facts === null
+      ? [{ kind: "unreadable" }]
+      : facts.map((one) => ({ kind: "read", facts: one, ...(options.tagsMayAppear === true ? { tagsMayAppear: true } : {}) }));
   const answers: (Refinement & { class: string })[] = [];
   for (const view of views) {
     const answer = gitPushClass(words.slice(cursor + 1), assignments, substituted, view);
@@ -3917,10 +3956,137 @@ function namesGitConfigFile(word: string): boolean {
   const segments = pathSegments(word).map((segment) => segment.toLowerCase());
   const last = segments[segments.length - 1];
   if (last === ".gitconfig" || last === "gitconfig") return true;
-  for (let at = 0; at + 2 < segments.length; at += 1) {
+  // The directory itself too: `cp -t ~/.config/git x` writes into it.
+  for (let at = 0; at + 1 < segments.length; at += 1) {
     if (segments[at] === ".config" && segments[at + 1] === "git") return true;
   }
   return false;
+}
+
+/**
+ * Where the shell stands, as path segments, after the literal `cd`s earlier
+ * on a line (APRV-518, S1). `segments` start from the directory the line
+ * started in, unless the first is `/` (absolute) or `~` (the home); `..`
+ * that climbs above the start stays as `..`. `stack` is `pushd`'s.
+ */
+export interface ShellDir {
+  segments: readonly string[];
+  stack: readonly (readonly string[])[];
+}
+
+const SHELL_DIR_START: ShellDir = { segments: [], stack: [] };
+
+/** `base` and then `parts`, with `.` dropped and `..` taking back a name. */
+function joinShellPath(base: readonly string[], parts: readonly string[]): string[] {
+  const out = [...base];
+  for (const part of parts) {
+    if (part === "" || part === ".") continue;
+    const last = out[out.length - 1];
+    if (part === ".." && last !== undefined && last !== ".." && last !== "/" && last !== "~") {
+      out.pop();
+      continue;
+    }
+    if (part === ".." && last === "/") continue;
+    out.push(part);
+  }
+  return out;
+}
+
+/**
+ * The directory a `cd`/`pushd` word moves to, from `from`, or `null` when the
+ * text cannot say: an option, an expansion, a glob, `-`, or `~user`. A bare
+ * relative name may go through `CDPATH`; it still ends in the name's own
+ * segments, so it is followed as relative, which can only ever find a `.git`
+ * the name itself spells.
+ */
+function shellDirTarget(word: string, from: readonly string[] | null): string[] | null {
+  if (word.startsWith("-") || /[$`*?[\]{}\\]/u.test(word)) return null;
+  if (word === "~") return ["~"];
+  if (word.startsWith("~/")) return joinShellPath(["~"], word.slice(2).split("/"));
+  if (word.startsWith("~")) return null;
+  if (word.startsWith("/")) return joinShellPath(["/"], word.split("/"));
+  return from === null ? null : joinShellPath(from, word.split("/"));
+}
+
+/**
+ * The shell's directory after `segment` (APRV-518, S1): `cd`, `chdir`,
+ * `pushd` and `popd` followed from their literal words, every other segment
+ * leaving it where it was. A directory change behind an assignment
+ * (`HOME=… cd`, `CDPATH=… cd`) or a word the shell may still change cannot be
+ * followed, and gives `null`.
+ */
+function nextShellDir(segment: LexSegment, dir: ShellDir | null): ShellDir | null {
+  const cursor = bashAssignmentCount(segment.words);
+  const command = segment.words[cursor];
+  if (command === undefined) return dir;
+  const name = command.text.split("/").pop() ?? command.text;
+  if (!["cd", "chdir", "pushd", "popd"].includes(name)) return dir;
+  const rest = segment.words.slice(cursor + 1);
+  if (cursor > 0 || !command.exact || rest.some((word) => !word.exact || word.substitutions.length > 0)) return null;
+  const words = rest.map((word) => word.text);
+  const args = words[0] === "--" ? words.slice(1) : words;
+  if (name === "popd") {
+    if (dir === null || args.length > 0 || dir.stack.length === 0) return null;
+    return { segments: dir.stack[dir.stack.length - 1] as readonly string[], stack: dir.stack.slice(0, -1) };
+  }
+  if (args.length > 1 || (name === "pushd" && args.length === 0)) return null;
+  const target = args.length === 0 ? ["~"] : shellDirTarget(args[0] as string, dir === null ? null : dir.segments);
+  if (target === null) return null;
+  const stack = dir === null ? [] : dir.stack;
+  return name === "pushd" && dir !== null
+    ? { segments: target, stack: [...stack, dir.segments] }
+    : { segments: target, stack: name === "pushd" ? [] : stack };
+}
+
+/**
+ * Does a write to `word`, made after the shell moved to `dir`, land in a
+ * `.git` directory (APRV-518, S1)? Only a relative word is resolved here; an
+ * absolute or home word is judged as written by {@link namesGitDirectory}.
+ */
+function relativeLandsInGitDir(word: string, dir: ShellDir | null | undefined): boolean {
+  if (dir === null || dir === undefined || dir.segments.length === 0) return false;
+  if (word.startsWith("/") || word.startsWith("~") || /[$`]/u.test(word) || /\s/u.test(word)) return false;
+  return joinShellPath(dir.segments, word.split("/")).some((part) => part.toLowerCase() === ".git");
+}
+
+/**
+ * The value an attached short option carries (APRV-518, S2): every tail of a
+ * single-dash word after its first option letter, so `-o.git/config`,
+ * `-O.git/hooks/pre-push`, `-t.git/hooks`, `-C.git` and a cluster such as
+ * `-xfC.git` are each read for the path they may name. Every tail rather than
+ * a table of which letter takes a value: a tail that is not a path can only
+ * make a segment stricter, and no option table can drift out of date.
+ */
+function attachedOptionValues(word: string): string[] {
+  if (!word.startsWith("-") || word.startsWith("--") || word.length < 3) return [];
+  const tails: string[] = [];
+  for (let at = 2; at < word.length; at += 1) tails.push(word.slice(at));
+  return tails;
+}
+
+/**
+ * The `.git` or git configuration file write a segment makes, if any
+ * (APRV-518): its write targets, and the words it may write through
+ * (`named`), each judged as written and, when relative, from the directory
+ * earlier `cd`s moved the shell to (S1). `namedWrites` is false for a read
+ * whose only write is its redirection (`echo x > f`): its words are judged as
+ * written, never resolved from the shell's directory, since it writes none.
+ */
+function gitWriteRefinement(
+  writeTargets: readonly string[],
+  named: readonly string[],
+  dir: ShellDir | null | undefined,
+  namedWrites = true,
+): { class: string; rule: string; path: string } | null {
+  const spelled = named.filter((word) => !/\s/u.test(word));
+  const words = [...writeTargets, ...spelled];
+  const resolvable = namedWrites ? words : writeTargets;
+  const gitDir =
+    words.find((word) => namesGitDirectory(word)) ?? resolvable.find((word) => relativeLandsInGitDir(word, dir));
+  if (gitDir !== undefined) return { class: "vcs.history.rewrite", rule: GIT_DIR_WRITE_RULE, path: gitDir };
+  const gitConfig = words.find(namesGitConfigFile);
+  if (gitConfig !== undefined) return { class: "vcs.history.rewrite", rule: GIT_CONFIG_FILE_WRITE_RULE, path: gitConfig };
+  return null;
 }
 
 /** `git branch` reads until it is asked to delete, rename or force-set one. */
@@ -7280,8 +7446,11 @@ function classifySegment(
       };
     }
     // `VAR=value` alone, or a bare redirection. `> file` truncates, so it is a
-    // write; an assignment on its own touches nothing.
+    // write; an assignment on its own touches nothing. A bare redirection into
+    // `.git` or a git configuration file is that write (APRV-518, S1).
     if (writeTargets.length > 0) {
+      const gitWrite = gitWriteRefinement(writeTargets, [], context.shellDir);
+      if (gitWrite !== null) return { ok: true, ...gitWrite };
       return { ok: true, class: "files.write.workspace", rule: "redirect-write" };
     }
     // APRV-522 (S2): inside a substitution, a bare `<` redirection IS the
@@ -7689,6 +7858,7 @@ function classifySegment(
 
   // A read command with a write redirection writes. `ls > out.txt` creates a
   // file, and the class has to say so.
+  const readBeforeRedirect = cls.startsWith("read.") && basename !== "curl" && basename !== "wget";
   if (cls.startsWith("read.") && writeTargets.length > 0) {
     cls = "files.write.workspace";
     ruleId = "redirect-write";
@@ -7714,30 +7884,17 @@ function classifySegment(
     // `git`'s own words are not file writes: `--git-dir=x/.git` names the
     // repository it runs against, and the git rows classify what git writes
     // (a `git config` write has no row and stays refused).
-    const named = basename === "git" ? [] : [...positionals, ...flagValues];
-    const gitDir =
-      writeTargets.find(namesGitDirectory) ??
-      named.find((word) => !/\s/u.test(word) && namesGitDirectory(word));
-    if (gitDir !== undefined) {
-      return {
-        ok: true,
-        class: "vcs.history.rewrite",
-        rule: GIT_DIR_WRITE_RULE,
-        path: gitDir,
-        ...(sandbox === null ? {} : { sandbox }),
-      };
-    }
-    const gitConfig =
-      writeTargets.find(namesGitConfigFile) ??
-      named.find((word) => !/\s/u.test(word) && namesGitConfigFile(word));
-    if (gitConfig !== undefined) {
-      return {
-        ok: true,
-        class: "vcs.history.rewrite",
-        rule: GIT_CONFIG_FILE_WRITE_RULE,
-        path: gitConfig,
-        ...(sandbox === null ? {} : { sandbox }),
-      };
+    // S2: an attached short option's value (`-o.git/config`, `-t.git/hooks`,
+    // `-C.git`) and an operand's `key=value` value (`dd of=.git/config`) name
+    // where the binary writes as surely as a separate word does.
+    const attached = args.flatMap(attachedOptionValues);
+    const operandValues = args
+      .filter((arg) => !isFlag(arg) && arg.includes("="))
+      .map((arg) => arg.slice(arg.indexOf("=") + 1));
+    const named = basename === "git" ? [] : [...positionals, ...flagValues, ...attached, ...operandValues];
+    const gitWrite = gitWriteRefinement(writeTargets, named, context.shellDir, !readBeforeRedirect);
+    if (gitWrite !== null) {
+      return { ok: true, ...gitWrite, ...(sandbox === null ? {} : { sandbox }) };
     }
   }
 
@@ -8032,10 +8189,15 @@ export function classifyCommand(
   // substitution body included, fail closed on a word that is not a literal),
   // moves where a no-rule segment's words land, so no segment of it stands in.
   const movesDirectory = context.noRuleSegments === true && segmentsMayChangeDirectory(lexed.segments);
+  // APRV-518 (S1): where the line's literal `cd`s have moved the shell, so a
+  // relative write after `cd .git` is judged where it lands.
+  let shellDir: ShellDir | null = context.shellDir === undefined ? SHELL_DIR_START : context.shellDir;
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };
     }
+    execContext = { ...execContext, shellDir };
+    shellDir = nextShellDir(segment, shellDir);
     // APRV-380. A LOGIN-SHELL WRAPPER is classified by the script it runs.
     // `loginShellScript` states the exact shape and why this is not the second
     // parser `OPAQUE_BINS` refuses; the inner classification is run with
@@ -8051,6 +8213,7 @@ export function classifyCommand(
       // outer cd/pushd/popd/chdir no inner segment stands in.
       const inner = classifyCommand(script, protectedPaths, {
         ...context,
+        shellDir: execContext.shellDir ?? null,
         unwrapShell: false,
         execCode: false,
         noRuleSegments: context.noRuleSegments === true && !movesDirectory,

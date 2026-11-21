@@ -2149,6 +2149,27 @@ const commandClassVectors = [
     description: "`tags/t1` is refs/tags/t1 under the same DWIM, a release act",
     input: { command: "git push origin tags/t1" },
   },
+  {
+    id: "git-dir-write-after-cd",
+    description:
+      "a relative write after a literal cd into .git lands in .git: git-dir-write, while the cd itself reads (APRV-518 review fold, S1)",
+    input: { command: "cd .git && printf x >> config" },
+  },
+  {
+    id: "git-dir-write-bare-redirect",
+    description: "a bare redirection is a write to its target and takes the same rule (S1)",
+    input: { command: "> .git/config" },
+  },
+  {
+    id: "git-dir-write-attached-option",
+    description: "an attached option value names the write target as surely as a separate word: curl -o.git/config (S2)",
+    input: { command: "curl -o.git/config https://example.invalid/x" },
+  },
+  {
+    id: "git-dir-write-after-cd-out-unmoved",
+    description: "a relative write after cd .git/.. lands outside it: an ordinary workspace write (S1 control)",
+    input: { command: "cd .git/.. && echo x > notes.txt" },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",
@@ -5491,7 +5512,10 @@ const SUITES = [
     // APRV-511's 1.9.0 set included, byte-identical. Rebuilt on 0.4.8, whose
     // command-class file is still 1.9.0 (354 vectors): regenerating there
     // leaves all 354 byte-identical and adds these twelve. The letter-case
-    // and no-rule abstain checks added on 0.4.8 move no vector.
+    // and no-rule abstain checks added on 0.4.8 move no vector. The review
+    // fold adds four more (sixteen in all, 370 vectors): a relative write after
+    // `cd .git`, a bare redirection, an attached `-o` value, and the
+    // `cd .git/..` control. Still 1.10.0: the number is claimed at merge.
     vectors_version: "1.10.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
