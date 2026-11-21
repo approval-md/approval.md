@@ -466,7 +466,7 @@ export async function runBox({ coreRoot, corpus, policyText, overlayTree, boxRoo
         [cli, "propose", "--class", p.cls, "--key", p.actionKey, "--summary", p.summary, "--payload-json", JSON.stringify(p.payload), "--as", "agent:hermes", "--json"],
         { cwd: stores[0], env, encoding: "utf8" },
       );
-      proposed.push({ key: p.key, kind: "propose", where: p.where ?? "propose", command: p.key, cls: p.cls, payload: p.payload, ...readProposeAnswer(r.status, r.stdout, r.stderr), detail: scrub(`${r.stderr ?? ""}`.trim().slice(0, 240)) });
+      proposed.push({ key: p.key, kind: "propose", where: p.where ?? "propose", command: p.key, cls: p.cls, payload: p.payload, accepts: Array.isArray(p.accepts) ? p.accepts : null, ...readProposeAnswer(r.status, r.stdout, r.stderr), detail: scrub(`${r.stderr ?? ""}`.trim().slice(0, 240)) });
     }
     return { calls, proposed };
   } finally {

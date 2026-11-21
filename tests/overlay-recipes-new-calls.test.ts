@@ -38,6 +38,9 @@ import {
 import {
   acceptanceErrorsN,
   changeSet,
+  decideProposeCall,
+  duplicateMembers,
+  judgeNewCalls,
   judgeLayer,
   limitingReasons,
   recipeKey,
@@ -71,6 +74,10 @@ const recipeEntry = (over: Json = {}): Json => ({
   owner: "fixture",
   ...over,
 });
+/** The For Kicks propose the fixture corpora carry (review M3): its file, line, class and accepted answers. */
+const FK_PROPOSE = { plugin: "village-bridge", file: "plugins/village-bridge/_forkicks.py", line: 130, class: "marketplace.app.action", accepts: ["requested"] };
+// supervised-live draws this key on the skip side: the daemon answers "supervised", which For Kicks refuses.
+const PROPOSE_MATRIX = { ask: "card", autonomous: "refused", "supervised-retro": "refused", "supervised-live": "refused", manual: "card" };
 const PAYLOAD = { appId: "forkicks", operation: "forkicks.order.confirm", preview: { appId: "forkicks", draftId: "fk-draft-0001" } };
 const envelopeEntry = (over: Json = {}): Json => ({
   tool: "village",
@@ -88,9 +95,11 @@ const envelopeEntry = (over: Json = {}): Json => ({
     summary: "For Kicks order",
     payload: PAYLOAD,
     source: "plugins/village-bridge/_forkicks.py:127-140",
+    accepts: ["requested"],
     decision: "card",
     card_style: "minimal",
-    matrix: { ask: "card", autonomous: "auto", "supervised-retro": "auto", "supervised-live": "sampled", manual: "card" },
+    // Review S1: For Kicks goes on only with "requested"; an "autonomous" or "supervised" answer is a refused order.
+    matrix: PROPOSE_MATRIX,
   },
   accepted_by: "human:carter",
   accepted_at: "2026-10-21",
@@ -191,6 +200,84 @@ test("P2: a settings cell rewrites the class row (other flags kept), names the f
   assert.ok("error" in variantBlock("classes:\n", ["a"], "manual"));
 });
 
+// --- review folds: M1 (gated patterns), M3 (proposes), S1 (accepted answers), N1, N2, N3 ---------------
+
+/** A pure judge run over a corpus with no box calls: the findings the corpus and expected.json alone decide. */
+function pureFindings(corpus: Json, tag: Json, entries: unknown[], harness: { names: string[]; matches: string[] } | null = null): string[] {
+  const validated = validateExpected({ entries });
+  const r = judgeNewCalls({ corpus, tagCorpus: tag, validated, head: { calls: [], proposed: [] }, autonomyOf: () => "autonomous", harness }) as { findings: { key: string; message: string }[] };
+  // No box ran: the per-call layer findings are the box tests' business.
+  return r.findings.map((f) => `${f.key}: ${f.message}`).filter((f) => !/the box ran no such call/u.test(f));
+}
+const GATED_ENTRY = (over: Json = {}): Json => ({ gated: "pray", change: "added", reason: "the pray tool now reaches the hook", owner: "fixture", ...over });
+
+test("M1: a pattern added to or removed from APPROVAL_GATED_TOOLS needs a declared entry; a declared one passes", () => {
+  const tag = { recipes: [], envelopes: [], gated_tools: ["village", "old_tool"] };
+  const head = { recipes: [], envelopes: [], gated_tools: ["village", "pray"] };
+  const undeclared = pureFindings(head, tag, []).join("\n");
+  assert.match(undeclared, /gated#pray: a gated pattern added to APPROVAL_GATED_TOOLS with no declared entry/u);
+  assert.match(undeclared, /gated#old_tool: a gated pattern removed from APPROVAL_GATED_TOOLS with no declared entry/u);
+  const declared = pureFindings(head, tag, [GATED_ENTRY(), GATED_ENTRY({ gated: "old_tool", change: "removed", reason: "old_tool is gone from the plugins" })]);
+  assert.deepEqual(declared, []);
+  assert.match(pureFindings(head, tag, [GATED_ENTRY({ change: "removed" })]).join("\n"), /declared as removed, but the pattern was added/u);
+  // An entry for a pattern that did not move is stale.
+  assert.match(pureFindings(tag, tag, [GATED_ENTRY()]).join("\n"), /gated#pray: stale/u);
+  assert.match(validateExpected({ entries: [GATED_ENTRY({ change: "moved" })] }).errors[0].message, /change must be "added" or "removed"/u);
+});
+
+test("M1: every gated pattern reaches an envelope, a core Hermes tool or a tools line, or fails closed", () => {
+  const corpus = { recipes: [], envelopes: [{ key: "village#a", tool: "village", input: { operation: "a" } }], gated_tools: ["village", "terminal", "browser_.*", "mcp__index__archive_intent", "pray"] };
+  const harness = { names: ["terminal", "browser_probe"], matches: ["mcp__index__*", "browser_*"] };
+  const found = pureFindings(corpus, corpus, [], harness);
+  assert.deepEqual(found, ["gated#pray: a gated pattern that reaches no envelope, core Hermes tool or tools line the box runs; fail closed (review M1)"]);
+});
+
+const SITE = { plugin: "village-bridge", file: "plugins/village-bridge/_forkicks.py", line: 130, class: "marketplace.app.action", accepts: ["requested"] };
+const ORDER = { key: "village#forkicks.order.confirm", tool: "village", input: { operation: "forkicks.order.confirm" } };
+const propCorpus = (proposes: unknown[]): Json => ({ recipes: [], envelopes: [ORDER], gated_tools: [], tools: [{ name: "village", schema: { type: "object" } }], proposes });
+
+test("M3: a daemon propose no entry declares fails, and so does an entry whose propose names another class or no propose", () => {
+  // Review failure 2: the order entry without its propose.
+  const noPropose = pureFindings(propCorpus([SITE]), propCorpus([SITE]), [envelopeEntry({ propose: undefined })]);
+  assert.match(noPropose.join("\n"), /propose#plugins\/village-bridge\/_forkicks\.py:130: a daemon propose \(class marketplace\.app\.action\) that no expected\.json entry declares/u);
+  assert.deepEqual(pureFindings(propCorpus([SITE]), propCorpus([SITE]), [envelopeEntry()]).filter((f) => !/LIMITING/u.test(f)), []);
+  // Review failure 1: the code now proposes a read class.
+  const reclassed = { ...SITE, class: "marketplace.app.read" };
+  assert.match(pureFindings(propCorpus([reclassed]), propCorpus([SITE]), [envelopeEntry()]).join("\n"), /propose\.class marketplace\.app\.action, but plugins\/village-bridge\/_forkicks\.py:130 proposes marketplace\.app\.read/u);
+  // The source names a line with no propose.
+  assert.match(pureFindings(propCorpus([{ ...SITE, line: 300 }]), propCorpus([SITE]), [envelopeEntry()]).join("\n"), /names no daemon propose the extractor found/u);
+  // A class the extractor cannot read fails closed.
+  assert.match(pureFindings(propCorpus([{ ...SITE, class: null, why: "x" }]), propCorpus([]), []).join("\n"), /whose class cannot be read/u);
+  // A new class template no entry declares fails; an old one is the control plane catalog's.
+  const tmpl = { ...SITE, file: "plugins/village-bridge/_mini_app_card.py", line: 424, class: null, template: "marketplace.app.action.{operation}" };
+  assert.match(pureFindings(propCorpus([tmpl]), propCorpus([]), []).join("\n"), /a new daemon propose class template/u);
+  assert.deepEqual(pureFindings(propCorpus([tmpl]), propCorpus([tmpl]), []), []);
+  assert.match(validateExpected({ entries: [envelopeEntry({ propose: { ...(envelopeEntry().propose as Json), accepts: ["requested", "maybe"] } })] }).errors[0].message, /propose\.accepts must list/u);
+});
+
+test("S1: the answers a plugin goes on with are the code's; an answer outside them is a refused call", () => {
+  assert.match(pureFindings(propCorpus([{ ...SITE, accepts: ["autonomous", "requested"] }]), propCorpus([SITE]), [envelopeEntry()]).join("\n"), /propose\.accepts \["requested"\], but the code after .* goes on with \["autonomous","requested"\]/u);
+  assert.match(pureFindings(propCorpus([{ ...SITE, accepts: null }]), propCorpus([SITE]), [envelopeEntry()]).join("\n"), /accepted answers cannot be read/u);
+  const core = { resolve: () => ({ autonomy: "autonomous", supervision: null }), promptStyleFor: () => "minimal", promptSayFor: () => ({}) };
+  const p = { key: "k", cls: "marketplace.app.action", verdict: "answered", payload: {} };
+  // For Kicks: "autonomous" is refused (the order never runs without a card).
+  assert.equal(decideProposeCall(core, {}, { ...p, answer: "autonomous", accepts: ["requested"] }).decision, "refused");
+  assert.equal(decideProposeCall(core, {}, { ...p, answer: "autonomous", accepts: ["requested"] }).code, "plugin-refuses:autonomous");
+  // Gold Stars, the inverse: "autonomous" runs, "supervised" is refused.
+  assert.equal(decideProposeCall(core, {}, { ...p, answer: "autonomous", accepts: ["autonomous", "requested"] }).decision, "auto");
+  assert.equal(decideProposeCall(core, {}, { ...p, answer: "supervised", accepts: ["autonomous", "requested"] }).decision, "refused");
+  // No accepts (an entry from before the fold): the daemon's answer, as before.
+  assert.equal(decideProposeCall(core, {}, { ...p, answer: "autonomous" }).decision, "auto");
+});
+
+test("N1, N2, N3: a future acceptance date, a member named twice, two recipes with one key and other bytes", () => {
+  assert.match(acceptanceErrorsN(envelopeEntry({ accepted_at: "2999-12-31" })).join(";"), /is after today/u);
+  assert.deepEqual(duplicateMembers('{"entries":[{"accepted_at":"2026-10-21","accepted_at":"YYYY-MM-DD"}]}').map((d: { name: string }) => d.name), ["accepted_at"]);
+  assert.deepEqual(duplicateMembers('{"a":{"a":1},"b":[{"a":1},{"a":2}]}'), []);
+  const st = changeSet({ corpus: { recipes: [{ where: "a.md:1", command: "x  y" }, { where: "a.md:2", command: "x y" }], envelopes: [] }, tagCorpus: { recipes: [], envelopes: [] } });
+  assert.match(st.duplicates[0].why, /a second recipe with this normalised key and other bytes/u);
+});
+
 // --- extractor scope (3a, 3b): the envelopes come from the manifests and the plugins' own code ---------
 
 const EXTRACT = join(ROOT, "scripts", "overlay-recipes-extract.mjs");
@@ -206,6 +293,9 @@ const PLUGIN_PY = [
   '        "draftId": {"type": ["string", "null"]},',
   '    }, "required": ["operation"], "additionalProperties": False},',
   "}",
+  'READ_OPERATIONS = frozenset({"mini-app.read", "mini-app.context.read", "forkicks.menu"})',
+  'WRITE_OPERATIONS = frozenset({"mini-app.context.write", "forkicks.order.confirm"})',
+  'APP_SCOPED_OPERATIONS = frozenset({"mini-app.read", "mini-app.context.read", "mini-app.context.write"})',
   "def register(ctx):",
   '    ctx.register_tool(name="village", toolset="village", schema=SCHEMA, handler=None)',
   "",
@@ -265,7 +355,7 @@ test("3a/3b (P5, P6): manifest operations become the exact village call, relay t
   assert.match(String(envelopes[1]?.unmapped), /no village operation/u);
   const tools = run.corpus["tools"] as { name: string; file: string; schema: Json }[];
   assert.deepEqual(tools.map((t) => t.name), ["village"], "only the gated tool; tests/ never read");
-  assert.equal(tools[0]?.file, "plugins/village-bridge/__init__.py:9");
+  assert.equal(tools[0]?.file, "plugins/village-bridge/__init__.py:12");
   const schema = tools[0]?.schema ?? {};
   assert.deepEqual((schema["properties"] as Json)["draftId"], { type: ["string", "null"] });
   assert.deepEqual(run.corpus["tools_unread"], []);
@@ -282,9 +372,100 @@ test("security fold: the extractor exits 1 on a duplicate envelope key or a mani
 
 test("3b fails closed: no gated list exits 1; a gated registration whose schema is not a literal is reported unread", { skip: NO_BUN }, () => {
   assert.equal(extractFixture({ gated: null }).status, 1);
-  const computed = extractFixture({ plugin: 'def register(ctx):\n    ctx.register_tool(name="village", schema=make_schema())\n' });
+  const lists = PLUGIN_PY.split("\n").filter((l) => /_OPERATIONS = /u.test(l)).join("\n");
+  const computed = extractFixture({ plugin: `${lists}\ndef register(ctx):\n    ctx.register_tool(name="village", schema=make_schema())\n` });
   assert.equal(computed.status, 0, computed.err);
-  assert.match(JSON.stringify(computed.corpus["tools_unread"]), /schema is not a module-level dict literal/u);
+  assert.match(JSON.stringify(computed.corpus["tools_unread"]), /schema is not a dict literal or module constant/u);
+});
+
+test("M1: a tool registered through a local name bound from getattr(ctx, \"register_tool\"), or in a loop over a literal list, is read; an unknown name is unread", { skip: NO_BUN }, () => {
+  const house = [
+    'TOOL_NAME = "pray"',
+    'TOOL_SCHEMA = {"name": "pray", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}}}',
+    'A_SCHEMA = {"type": "object"}',
+    "def register(ctx):",
+    '    register_tool = getattr(ctx, "register_tool", None)',
+    "    try:",
+    "        register_tool(name=TOOL_NAME, toolset=\"t\", schema=TOOL_SCHEMA, handler=None, description=\"d\")",
+    "    except TypeError:",
+    "        register_tool(name=TOOL_NAME, toolset=\"t\", schema=TOOL_SCHEMA, handler=None)",
+    "    wanted = [(\"share_a\", A_SCHEMA, None), (\"share_b\", A_SCHEMA, None)]",
+    "    for name, schema, handler in wanted:",
+    "        register_tool(name=name, schema=schema, handler=handler)",
+    "",
+  ].join("\n");
+  const gated = 'export const APPROVAL_GATED_TOOLS = [\n  "terminal",\n  "village",\n  "pray",\n  "share_.*",\n] as const;\n';
+  const run = extractFixture({ gated, extra: { "plugins/av-events/_pray.py": house } });
+  assert.equal(run.status, 0, run.err);
+  const tools = run.corpus["tools"] as { name: string; file: string; schema: Json | null }[];
+  assert.deepEqual(tools.map((t) => t.name).sort(), ["pray", "share_a", "share_b", "village"]);
+  assert.deepEqual(tools.find((t) => t.name === "pray")?.schema, { type: "object", properties: { text: { type: "string" } } });
+  const envelopes = run.corpus["envelopes"] as { key: string }[];
+  for (const k of ["pray", "share_a", "share_b"]) assert.ok(envelopes.some((e) => e.key === k), `${k} has its bare envelope`);
+  assert.deepEqual(run.corpus["gated_tools"], ["terminal", "village", "pray", "share_.*"]);
+  // A name read from nowhere is unread with no name, which the check fails closed on.
+  const unknown = extractFixture({ gated, extra: { "plugins/av-events/_x.py": 'def register(ctx):\n    r = getattr(ctx, "register_tool")\n    r(name=compute(), schema={})\n' } });
+  assert.equal(unknown.status, 0, unknown.err);
+  assert.match(JSON.stringify(unknown.corpus["tools_unread"]), /name is not a literal or module constant/u);
+});
+
+test("M2: every village schema operation is a call, manifest or not; one in neither operation list is unmapped; the lists are required", { skip: NO_BUN }, () => {
+  const plugin = PLUGIN_PY.replace('"forkicks.order.confirm"]}', '"forkicks.order.confirm", "wallet.transfer", "ghost.op"]}').replace('WRITE_OPERATIONS = frozenset({"mini-app.context.write", "forkicks.order.confirm"})', 'WRITE_OPERATIONS = frozenset({"mini-app.context.write", "forkicks.order.confirm", "wallet.transfer"})');
+  assert.notEqual(plugin, PLUGIN_PY);
+  const run = extractFixture({ plugin });
+  assert.equal(run.status, 0, run.err);
+  const envelopes = run.corpus["envelopes"] as { key: string; input: Json | null; rw?: string; unmapped?: string }[];
+  const wallet = envelopes.find((e) => e.key === "village#wallet.transfer");
+  assert.deepEqual(wallet?.input, { operation: "wallet.transfer" });
+  assert.equal(wallet?.rw, "write");
+  assert.match(String(envelopes.find((e) => e.key === 'unmapped#["village","ghost.op"]')?.unmapped), /neither READ_OPERATIONS nor WRITE_OPERATIONS/u);
+  // A manifest operation is not repeated from the enum.
+  assert.equal(envelopes.filter((e) => e.key === "village#forkicks.menu").length, 1);
+  const noLists = extractFixture({ plugin: PLUGIN_PY.split("\n").filter((l) => !/_OPERATIONS = /u.test(l)).join("\n") });
+  assert.equal(noLists.status, 1);
+  assert.match(noLists.err, /village operation lists cannot be read/u);
+});
+
+test("M3 + S1: daemon proposes are extracted with their class (literal, constant or template) and the answers the code goes on with", { skip: NO_BUN }, () => {
+  const bridge = [
+    'APPROVAL_CLASS = "marketplace.app.action"',
+    'PARENT = "marketplace.app.action"',
+    "def member_class(operation):",
+    '    return PARENT + "." + operation',
+    "def order(ap, key, held):",
+    '    answer = ap.propose(APPROVAL_CLASS, key, "s", held)',
+    '    if not answer.ok or answer.doc.get("decision") != "requested":',
+    "        return None",
+    "def send(ap, key, held):",
+    '    answer = ap.propose("marketplace.app.action.gold-stars.send", key, "s", held)',
+    '    decision = answer.doc.get("decision")',
+    '    if decision not in ("requested", "autonomous"):',
+    "        return None",
+    "def card(ap, operation, key, held):",
+    "    answer = ap.propose(member_class(operation), key, \"s\", held)",
+    '    decision = answer.doc.get("decision")',
+    '    if decision == "autonomous":',
+    "        return None",
+    '    if decision != "requested":',
+    "        return None",
+    "def dyn(ap, entry):",
+    '    answer = ap.propose(entry["class"], "k", "s", "{}")',
+    "",
+  ].join("\n");
+  const run = extractFixture({ extra: { "plugins/village-bridge/_flows.py": bridge, "plugins/other/_p.py": 'def f(ap):\n    ap.propose("digest.share", "k", "s", "{}")\n' } });
+  assert.equal(run.status, 0, run.err);
+  const proposes = run.corpus["proposes"] as Json[];
+  assert.deepEqual(
+    proposes.map((p) => [p["line"], p["class"], p["template"] ?? null, p["accepts"]]),
+    [
+      [6, "marketplace.app.action", null, ["requested"]],
+      [10, "marketplace.app.action.gold-stars.send", null, ["autonomous", "requested"]],
+      [15, null, "marketplace.app.action.{operation}", ["requested"]],
+      [22, null, null, null],
+    ],
+  );
+  // A plugin with no gated tool proposes outside the hook: listed apart, never judged.
+  assert.deepEqual((run.corpus["proposes_unhooked"] as Json[]).map((p) => p["class"]), ["digest.share"]);
 });
 
 test("without --with-envelopes the corpus carries no envelope keys (the pinned corpus keeps its bytes)", { skip: NO_BUN }, () => {
@@ -343,20 +524,21 @@ before(() => {
   writeFileSync(join(overlay, "skills", "edgeos", "scripts", "events.ts"), "console.log(1);\n");
 });
 
-function corpusFile(recipes: unknown[], envelopes: unknown[], block = BLOCK): string {
+function corpusFile(recipes: unknown[], envelopes: unknown[], block = BLOCK, extra: Json = {}): string {
   const path = join(scratch, `corpus-${String(Math.random()).slice(2)}.json`);
   const tools = [{ name: "village", plugin: "village-bridge", file: "plugins/village-bridge/__init__.py:1141", schema: VILLAGE_SCHEMA }];
-  writeFileSync(path, JSON.stringify({ ...baseCorpus, policy: { ...baseCorpus.policy, block }, recipes, envelopes, tools, tools_unread: [], gated_tools: ["village"] }));
+  writeFileSync(path, JSON.stringify({ ...baseCorpus, policy: { ...baseCorpus.policy, block }, recipes, envelopes, tools, tools_unread: [], gated_tools: ["village"], proposes: [FK_PROPOSE], proposes_unhooked: [], ...extra }));
   return path;
 }
 
 function gate(
   entries: unknown[],
-  opts: { corpus?: string; tag?: string; core?: string; diff?: boolean; env?: Record<string, string>; pinned?: string } = {},
+  opts: { corpus?: string; tag?: string; core?: string; diff?: boolean; env?: Record<string, string>; pinned?: string | null } = {},
 ): { status: number | null; md: string; err: string } {
   const expected = join(scratch, `expected-${String(Math.random()).slice(2)}.json`);
   writeFileSync(expected, JSON.stringify({ entries }));
-  writeFileSync(PINNED, opts.pinned ?? JSON.stringify({ entries }));
+  if (opts.pinned === null) rmSync(PINNED, { force: true });
+  else writeFileSync(PINNED, opts.pinned ?? JSON.stringify({ entries }));
   const allowlist = join(scratch, "allowlist.json");
   writeFileSync(allowlist, JSON.stringify({ entries: [] }));
   const corpus = opts.corpus ?? corpusFile([STAY], [ENVELOPE]);
@@ -406,11 +588,12 @@ test("a class other than declared exits 1", BOX_TIMEOUT, () => {
   assert.match(run.md, /class exec\.local, declared network\.call/u);
 });
 
-test("hazard B: marketplace.app.action flipped to on-its-own makes the order's expected card run auto: exit 1", BOX_TIMEOUT, () => {
+test("hazard B: marketplace.app.action flipped to on-its-own: the daemon answers autonomous, which For Kicks refuses (S1): exit 1", BOX_TIMEOUT, () => {
   const corpus = corpusFile([STAY], [ENVELOPE], HAZARD_B);
   const run = gate([recipeEntry(), envelopeEntry()], { corpus });
   assert.equal(run.status, 1, run.err);
-  assert.match(run.md, /propose: an expected card runs auto \(hazard B/u);
+  // Before the S1 fold this read "an expected card runs auto"; the order that never runs is the capability loss.
+  assert.match(run.md, /propose: denied \(refused, plugin-refuses:autonomous\) and not declared so/u);
 });
 
 test("P1: the limiting entry accepted by another human, or with the date left for Carter, exits 1", BOX_TIMEOUT, () => {
@@ -490,3 +673,4 @@ test("P2: a supervised-live draw is deterministic both ways (known-sample and kn
     assert.equal(by["village#forkicks.schedule.skip"], "sampled:skip", `run ${String(i)}`);
   }
 });
+

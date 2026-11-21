@@ -74,13 +74,13 @@
  * unaccepted allowlist entry), 2 an input could not be read.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { probeName, runBox } from "./overlay-recipes-box.mjs";
-import { CELLS, decideProposeCall, judgeNewCalls, recipeKey, renderNewCalls, newCallsLine, validateExpected, variantBlock } from "./overlay-recipes-newcalls.mjs";
+import { harnessCalls, probeName, runBox } from "./overlay-recipes-box.mjs";
+import { CELLS, decideProposeCall, duplicateMembers, judgeNewCalls, recipeKey, renderNewCalls, newCallsLine, validateExpected, variantBlock } from "./overlay-recipes-newcalls.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 
@@ -612,7 +612,7 @@ export function newCallJobs(c, validated, onlyDeclared = false) {
   }
   const proposals = validated.entries
     .filter((v) => v.entry.propose !== undefined && v.entry.propose !== null && typeof v.entry.propose === "object")
-    .map((v) => ({ key: `${v.key}#propose`, cls: v.entry.propose.class, actionKey: v.entry.propose.key, summary: v.entry.propose.summary, payload: v.entry.propose.payload, where: v.entry.propose.source }));
+    .map((v) => ({ key: `${v.key}#propose`, cls: v.entry.propose.class, actionKey: v.entry.propose.key, summary: v.entry.propose.summary, payload: v.entry.propose.payload, where: v.entry.propose.source, accepts: Array.isArray(v.entry.propose.accepts) ? v.entry.propose.accepts : null }));
   return { envelopes, proposals };
 }
 
@@ -715,6 +715,8 @@ async function main() {
     if (!Array.isArray(corpus.envelopes) || !Array.isArray(tagCorpus.envelopes)) fail("--expected needs corpora extracted with --with-envelopes (3a/3b)");
     if (!existsSync(expectedPath)) fail(`no expected.json at ${expectedPath}`);
     validated = validateExpected(readJson(expectedPath, "expected.json"));
+    // Review N2: JSON.parse keeps the last of two members with one name, while a reader sees the first.
+    for (const d of duplicateMembers(readFileSync(expectedPath, "utf8"))) validated.errors.push({ key: "(file)", message: `expected.json names member "${d.name}" twice in one object (at offset ${String(d.at)}); one name, one value` });
     // P1, security fold: accepted_by is text the PR author writes, so it is not
     // the control. The control is this pin: the overlay's expected.json must be
     // byte for byte the copy approval.md holds (scripts/overlay-recipes/expected.json,
@@ -840,7 +842,9 @@ async function main() {
           cells[cell] = run;
         }
       }
-      const result = judgeNewCalls({ corpus, tagCorpus, validated, head: after, cells, movedKeys, autonomyOf: (cls) => core.resolve(after.load, cls).autonomy });
+      // Review M1: the calls a gated pattern may reach besides the corpus envelopes.
+      const harness = { names: harnessCalls(toolsCandidate).map((c) => c.tool), matches: toolsCandidate.map((l) => String(l.match)) };
+      const result = judgeNewCalls({ corpus, tagCorpus, validated, head: after, cells, movedKeys, autonomyOf: (cls) => core.resolve(after.load, cls).autonomy, harness });
       const meta = { core: core.version, tagLabel: arg("--tag-label") ?? `overlay ${tagCorpus.overlay.sha.slice(0, 12)}` };
       const nmd = renderNewCalls(meta, result, validated);
       if (!json) process.stdout.write(`\n${nmd}`);
@@ -866,4 +870,13 @@ async function main() {
   process.exit(bad ? 1 : 0);
 }
 
-if (process.argv[1] !== undefined && pathToFileURL(resolvePath(process.argv[1])).href === import.meta.url) await main();
+// Review N5: compared by real path, so a run through a symlinked directory (the
+// macOS /var -> /private/var temp dir) runs main instead of exiting 0 silently.
+const realOrSelf = (p) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+};
+if (process.argv[1] !== undefined && realOrSelf(resolvePath(process.argv[1])) === realOrSelf(fileURLToPath(import.meta.url))) await main();
