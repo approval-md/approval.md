@@ -5232,7 +5232,8 @@ function expansionWordNamesGit(text: string, cut: boolean): boolean {
 function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): boolean {
   // Removal and substring expansions count on a line that holds `.git`
   // anywhere: its raw text, that text with escapes decoded, or a word's or
-  // target's text with quotes removed (security review, point g).
+  // target's text with quotes removed (security review, point g); and on a
+  // line that assigns a value that is no plain literal (point h).
   const holdsGit = (text: string): boolean => /\.git/iu.test(text);
   const cut = segments.some(
     (segment) =>
@@ -5240,7 +5241,14 @@ function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): bo
       (segment.text.includes("\\") &&
         (holdsGit(decodeBackslashEscapes(segment.text, false)) || holdsGit(decodeBackslashEscapes(segment.text, true)))) ||
       segment.words.some((word) => holdsGit(word.text)) ||
-      segment.redirects.some((redirect) => holdsGit(redirect.target.text)),
+      segment.redirects.some((redirect) => holdsGit(redirect.target.text)) ||
+      // Point h: or an assignment-shaped word (`D=…`, `export D=…`) whose
+      // value is no plain literal: a glob (`D=.gi?x`, so `${D%x}` is `.gi?`)
+      // or an expansion the text cannot read.
+      segment.words.some((word) => {
+        const assignment = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u.exec(word.text);
+        return assignment !== null && /[?*[$`]/u.test(word.text.slice(assignment[0].length));
+      }),
   );
   // A substitution body's words, each read as a path the shell may still
   // expand (`$(echo .gi?)`); its own segments read as a line of their own
