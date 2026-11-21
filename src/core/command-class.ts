@@ -5169,11 +5169,13 @@ function expansionWordNamesGit(text: string, cut: boolean): boolean {
     const rest = name === null ? null : inner.slice(name[0].length);
     if (`\${${inner}}` === SUBSTITUTION_SENTINEL) {
       standIn = SUBSTITUTION_SENTINEL;
-    } else if (/^(?:#|!)[A-Za-z_0-9@*#?$!-]/u.test(inner) || rest === "") {
-      // A plain expansion, a length, an indirection: an unknown value.
-      standIn = unknownValue;
     } else if (rest === null) {
       return true;
+    } else if (rest === "" || /^[!#](?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?|[0-9]+|[@*#?$!-])$/u.test(inner)) {
+      // A plain expansion, a length, an indirection (`${#X}`, `${!X}`, read
+      // only when that is ALL it is, so `${!-.git}`, the default of `$!`,
+      // is the operator it is): an unknown value.
+      standIn = unknownValue;
     } else if (/^:?[-=+]/u.test(rest)) {
       const value = rest.replace(/^:?[-=+]/u, "");
       if (valueNamesGit(value)) return true;
@@ -5228,8 +5230,18 @@ function expansionWordNamesGit(text: string, cut: boolean): boolean {
  * reading's cost and its depth on the call stack stay bounded.
  */
 function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): boolean {
-  // Removal and substring expansions count on a line whose text holds `.git`.
-  const cut = segments.some((segment) => /\.git/iu.test(segment.text));
+  // Removal and substring expansions count on a line that holds `.git`
+  // anywhere: its raw text, that text with escapes decoded, or a word's or
+  // target's text with quotes removed (security review, point g).
+  const holdsGit = (text: string): boolean => /\.git/iu.test(text);
+  const cut = segments.some(
+    (segment) =>
+      holdsGit(segment.text) ||
+      (segment.text.includes("\\") &&
+        (holdsGit(decodeBackslashEscapes(segment.text, false)) || holdsGit(decodeBackslashEscapes(segment.text, true)))) ||
+      segment.words.some((word) => holdsGit(word.text)) ||
+      segment.redirects.some((redirect) => holdsGit(redirect.target.text)),
+  );
   // A substitution body's words, each read as a path the shell may still
   // expand (`$(echo .gi?)`); its own segments read as a line of their own
   // (a nested substitution, an assignment in it, a split spelling); and a
