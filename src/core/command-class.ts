@@ -8383,8 +8383,11 @@ function classifySegment(
     // nothing through its own words (`cat .git/HEAD > /tmp/x` reads `.git`
     // and writes `/tmp/x`), so only the redirection targets and the outputs
     // the read names itself (item B) are judged.
-    // sed does not expand its `w` file name: those candidates are judged as
-    // their literal text ({@link sedLiteralGitWrite}).
+    // A sed name is judged BOTH ways, a hit from either counting: as its
+    // literal text, since sed expands nothing in a `w` name
+    // ({@link sedLiteralGitWrite}), and as a shell word, since the shell
+    // expands an unquoted script word before sed sees it (`-e
+    // w.g{i,}t/config` reaches sed as `w.git/config`).
     const sedLiteral = basename === "sed" && readBeforeRedirect;
     const named =
       basename === "git"
@@ -8396,7 +8399,10 @@ function classifySegment(
           : [...positionals, ...flagValues, ...attached, ...operandValues];
     const gitWrite =
       gitWriteRefinement(writeTargets, named, context.shellDir, true, context.lineNamesGit === true) ??
-      (sedLiteral ? sedLiteralGitWrite(readOutputs, context.shellDir, context.lineNamesGit === true) : null);
+      (sedLiteral
+        ? (sedLiteralGitWrite(readOutputs, context.shellDir, context.lineNamesGit === true) ??
+          gitWriteRefinement([], readOutputs, context.shellDir, true, context.lineNamesGit === true))
+        : null);
     if (gitWrite !== null) {
       return { ok: true, ...gitWrite, ...(sandbox === null ? {} : { sandbox }) };
     }

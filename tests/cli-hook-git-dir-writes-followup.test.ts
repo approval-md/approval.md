@@ -194,25 +194,42 @@ test("B review hook: a sed write through a link to .git, a name with blanks kept
   assert.deepEqual(hook('sed -n "w out.txt" x', repo), ["read.shell sed-read"]);
 });
 
-test("B review: sed expands nothing in a w name, so the name is judged as its literal text", { skip }, () => {
-  // `.gi?` is a directory named `.gi?` to sed, never `.git`.
-  assert.deepEqual(pure("sed -n 'w .gi?/config' x"), ["read.shell sed-read"]);
+test("B review: a sed name is judged both as literal text and as a shell word; either finding .git is a hit", { skip }, () => {
+  // As a shell word: an unquoted script word is expanded before sed sees it.
+  assert.deepEqual(pure("sed -n -e w.g{i,}t/config x"), [DIR_WRITE]);
+  // `.gi?` as a shell pattern names .git: the strict answer, kept.
+  assert.deepEqual(pure("sed -n 'w .gi?/config' x"), [DIR_WRITE]);
   const repo = checkout();
-  assert.deepEqual(hook("sed -n 'w .gi?/config' x", repo), ["read.shell sed-read"]);
-  // A directory literally named so, linked to .git, is followed exactly.
+  assert.deepEqual(hook("sed -n -e w.g{i,}t/config x", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("sed -n 'w .gi?/config' x", repo), [DIR_WRITE]);
+  // As literal text: a directory literally named `l$x`, linked to .git.
   symlinkSync(".git", join(repo, "l$x"));
   assert.deepEqual(hook("sed -n 'w l$x/config' x", repo), [DIR_WRITE]);
-  symlinkSync(".git", join(repo, ".gi?"));
-  assert.deepEqual(hook("sed -n 'w .gi?/config' x", repo), [DIR_WRITE]);
-  // Literal-ness is the sed name's, not its text's: a redirection spelled the
-  // same is a shell pattern, a hit when .git matches it ...
+  // The tag is the sed name's, not its text's: a redirection spelled the same
+  // is a shell pattern, a hit when .git matches it ...
   assert.deepEqual(hook("sed -n 'w .g*t/x' f > .g*t/x", repo), [DIR_WRITE]);
-  // ... and expanded on disk otherwise, while the sed name alone is literal.
+  // ... and expanded on disk otherwise.
   symlinkSync(".git", join(repo, "link"));
   assert.deepEqual(hook("sed -n 'w l*k/x' f > l*k/x", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("sed -n 'w l*k/x' f", repo), ["read.shell sed-read"]);
   // The shell still expands `$D` inside double quotes before sed sees it (S3).
   assert.deepEqual(pure('D=.git; sed -n "w $D/config" x'), ["read.shell assignment", DIR_WRITE]);
+});
+
+test("B review: ordinary sed lines do not move, pure and in a plain checkout", { skip }, () => {
+  const repo = checkout();
+  for (const command of [
+    'sed "s/w/v/" x',
+    'sed -n "/word/p" x',
+    'sed "y/abc/xyw/" x',
+    'sed -n "5,10p" x',
+    'sed "s/www/x/" file',
+    'sed "s/{a,b}/x/" f',
+    'sed "s/*w*/x/" f',
+  ]) {
+    assert.deepEqual(pure(command), ["read.shell sed-read"], command);
+    assert.deepEqual(hook(command, repo), ["read.shell sed-read"], command);
+  }
+  assert.deepEqual(pure('sed -i "" "s/old/new/" src/w.ts'), ["files.write.workspace sed-in-place"]);
 });
 
 test("review: wget's long output options are read by any prefix, on disk too", { skip }, () => {

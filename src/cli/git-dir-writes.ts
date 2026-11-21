@@ -529,11 +529,13 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
     // itself (`sort -o`, `uniq in out`, sed's `w`: follow-up, item B);
     // `git`'s own words are file writes only where git writes through them.
     const gitWrites = bin === "git" ? gitWriteTargets(shape.args).filter(pathOrPattern) : [];
-    // A sed script's possible file is LITERAL text: sed expands nothing in
-    // it, so it keeps its blanks, a `$`, a backtick or a glob character, and
-    // is placed exactly as written (follow-up review). Literal-ness belongs
-    // to the candidate, never to its text: a redirection spelled the same
-    // (`sed -n 'w .g*t/x' f > .g*t/x`) is still a shell pattern.
+    // A sed script's possible file is judged both as LITERAL text (sed
+    // expands nothing in it, so it keeps its blanks, a `$`, a backtick or a
+    // glob character, and is placed exactly as written) and as the shell
+    // word it may also be (an unquoted script word is expanded before sed
+    // sees it). The tag belongs to the candidate, never to its text: a
+    // redirection spelled the same (`sed -n 'w .g*t/x' f > .g*t/x`) is only
+    // a shell word.
     const readsOnly = reads || segment.rule === "redirect-write";
     const sedNames = bin === "sed" && readsOnly ? readWriteTargets(bin, shape.args).filter((word) => word.length > 0) : [];
     const readOutputs = bin === null || bin === "sed" ? [] : readWriteTargets(bin, shape.args).filter(pathOrPattern);
@@ -565,10 +567,9 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
       const placed: { word: string; spelled: string }[] = [];
       for (const candidate of candidates) {
         const { word } = candidate;
-        if (candidate.literal) {
-          placed.push({ word, spelled: word });
-          continue;
-        }
+        // A sed name: placed as its literal text, AND judged below as the
+        // shell word it may also be (a hit from either counts).
+        if (candidate.literal) placed.push({ word, spelled: word });
         const spelled = word.startsWith("~/") && home !== undefined ? `${home}/${word.slice(2)}` : word;
         if (!isPattern(spelled)) {
           placed.push({ word, spelled });
