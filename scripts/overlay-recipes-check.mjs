@@ -2,8 +2,8 @@
 /**
  * Release check: the overlay's shipped recipes against this core
  * (0.4.7, EDGEOS-BLOCK, brief item D), and the CLASS-DIFF of the overlay's
- * shipped calls against a baseline core (B-167, lead ruling CLAIMS L15681 (1);
- * fold 1 after review-b's refute).
+ * shipped calls against a baseline core (B-167, the release ruling; fold 1
+ * after review-b's refute).
  *
  * The lesson of EDGEOS-BLOCK: 0.4.6's `fetch-output-unknown` rule was right,
  * and every `skills/edgeos/SKILL.md` curl recipe the fleet shipped landed in
@@ -467,7 +467,7 @@ export function renderDiff(meta, diff, extra = {}) {
   out.push(`- candidate: core ${meta.core} (${meta.coreLabel}), overlay ${meta.overlayRepo}@${meta.overlay}`);
   out.push(
     "- every call through each core's real `approval hook hermes` in a box layout; recipes as terminal calls at $HERMES_HOME, $HOME, $HERMES_HOME/workspace and unset; harness calls as Hermes tool envelopes",
-    "- BLOCKING: an existing call that ran and now runs with less autonomy or not at all, or whose card falls from minimal to technical (CLAIMS L15681 (1); S-4)",
+    "- BLOCKING: an existing call that ran and now runs with less autonomy or not at all, or whose card falls from minimal to technical (B-167; S-4)",
     "",
   );
   for (const s of extra.shadowed ?? []) {

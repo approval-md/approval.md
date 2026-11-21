@@ -1,5 +1,5 @@
 // Planted core moves for the CLASS-DIFF tests (B-167 fold 1). Vendored from
-// claude-review-b's refute tool (lanes-review-b/B167-tools/plant.mjs), unchanged
+// review-b's refute tool (its plant.mjs), unchanged
 // but for this header: it patches a scratch COPY of a build with env-switched
 // one-condition moves in resolve, classifyForHook and the Hermes tool table, so
 // a test can prove each one fails the gate. Never run against a real build.

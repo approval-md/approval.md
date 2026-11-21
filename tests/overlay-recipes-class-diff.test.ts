@@ -1,5 +1,5 @@
 /**
- * The CLASS-DIFF release gate (B-167, lead ruling CLAIMS L15681 (1)), after
+ * The CLASS-DIFF release gate (B-167, the release ruling), after
  * fold 1 of review-b's refute.
  *
  * Pure half: the allowlist's acceptance rule (M-3 (b): `reason: "ok"` and an

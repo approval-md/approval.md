@@ -238,8 +238,8 @@ jobs:
     # Every event and every tier, as protected-paths runs: it is cheap, and the
     # tag is cut from a main this job has passed on.
     #
-    # CLASS-DIFF and box check (B-167, lead ruling CLAIMS L15681 (1); fold 1
-    # after review-b's refute). Every shipped call goes through the REAL
+    # CLASS-DIFF and box check (B-167, the release ruling; fold 1 after
+    # review-b's refute). Every shipped call goes through the REAL
     # `approval hook hermes` of this build and of BASELINE_CORE (the core the
     # boxes run: the control plane's APPROVAL_MD_VERSION; move this pin in the
     # PR that follows a roll), each in a box layout (HOME/.hermes with a dummy
@@ -280,7 +280,7 @@ jobs:
       CORPUS_RECIPES: "63"
       PIN_CORPUS: "069cae876367a6c65613a645bbece0212583dde3d6e186454d5d4a9f287cb1c4"
       PIN_ALLOWLIST: "408a7e3b6b0f86900e7e3b94cd724445a84910580316d2a1c718074adb4f526d"
-      PIN_CHECK: "765d059c2996d431f909ec6e9d0a523af0a7168e37c8f3a2abc652c25d051b04"
+      PIN_CHECK: "d4297064bbecef8ed56eb2adbe93915713b814b431e6d54bf2fd806dd407a5e8"
       PIN_BOX: "c7b4c00b2e41e2ae7294d67c76ba7cd086c2f35a3b796c064714475fd47fa3ca"
       PIN_EXTRACT: "d20bad05e8a81408fa3ee2a69bd14212f01170553a8a27c3e992908df9accfa6"
     steps:
