@@ -5135,10 +5135,19 @@ const EXPANSION_EVALUATION_LIMIT = 256;
  * escape, a quote), which the caller judges the strict way. A walk over the
  * text as a set of positions.
  */
+function patternUnmodelled(pattern: string): boolean {
+  // Ranges follow the locale's collation, and extglob forms (`@( )`, `+( )`,
+  // `!( )`, `|`) are another language; escapes and quotes are not read.
+  return /[\\'"()|!@+]|\[[:=.]/u.test(pattern) || /\[[^\]]*-[^\]]/u.test(pattern);
+}
+
+/**
+ * Does the shell pattern `pattern` match all of `text`, or `null` when it
+ * holds what {@link patternUnmodelled} names (shared with the replacement
+ * branch of {@link evaluateExpansion}, so both refuse the same forms)?
+ */
 function shellPatternMatches(pattern: string, text: string): boolean | null {
-  // Ranges follow the locale's collation and extglob forms are another
-  // language: neither is worked out here.
-  if (/[\\'"()]|\[[:=.]/u.test(pattern) || /\[[^\]]*-[^\]]/u.test(pattern)) return null;
+  if (patternUnmodelled(pattern)) return null;
   let live = new Uint8Array(text.length + 1);
   live[0] = 1;
   for (let at = 0; at < pattern.length; at += 1) {
@@ -5227,7 +5236,7 @@ function evaluateExpansion(value: string, rest: string): string | null {
     const [mode, pattern, replacement] = [replace[1] as string, replace[2] as string, replace[3] ?? ""];
     // An empty pattern is no no-op for `/#` and `/%` (`${D/#/.g}` prepends):
     // any empty pattern is left to the strict side (point j).
-    if (pattern === "" || /[*?[(]/u.test(pattern) || replacement.includes("&")) return null;
+    if (pattern === "" || /[*?[]/u.test(pattern) || patternUnmodelled(pattern) || replacement.includes("&")) return null;
     if (mode === "/") return value.split(pattern).join(replacement);
     if (mode === "#") return value.startsWith(pattern) ? `${replacement}${value.slice(pattern.length)}` : value;
     if (mode === "%") return value.endsWith(pattern) ? `${value.slice(0, value.length - pattern.length)}${replacement}` : value;
@@ -5289,8 +5298,12 @@ function knownLiteralValues(segments: readonly LexSegment[], inherited: Readonly
     if (inherited.has(name) && !assigned.has(name)) continue;
     let elsewhere = 0;
     for (const found of raw.matchAll(new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`, "gu"))) {
-      const before = raw.slice(Math.max(0, (found.index ?? 0) - 3), found.index ?? 0);
-      if (!/(?:\$|\$\{|\$\{[!#])$/u.test(before)) elsewhere += 1;
+      const at = found.index ?? 0;
+      const before = raw.slice(Math.max(0, at - 3), at);
+      // A use is `$NAME` or `${NAME…}`, but `${NAME:=…}`, `${NAME=…}` and
+      // `${NAME[i]=…}` assign it (point n): those count as setting it again.
+      const assigns = before.endsWith("${") && /^(?:\[[^\]]*\])?:?=/u.test(raw.slice(at + name.length));
+      if (!/(?:\$|\$\{|\$\{[!#])$/u.test(before) || assigns) elsewhere += 1;
     }
     if (elsewhere !== 1 || assigned.get(name) !== 1) known.delete(name);
   }
@@ -5307,15 +5320,17 @@ function knownLiteralValues(segments: readonly LexSegment[], inherited: Readonly
  * - `:?`, `?`, a length (`${#X}`) and an indirection (`${!X}`) carry no
  *   new text, and stand as an unknown value as `$V` does;
  * - every other operator transforms the value (removal, substring,
- *   replacement, case, `@`; points f to i): it counts unless the value is a
- *   known plain literal ({@link knownLiteralValues}) and the result, worked
- *   out exactly ({@link evaluateExpansion}), is no `.git`, and then the
- *   result stands for the expansion in the word around it;
+ *   replacement, case, `@`; points f to n): it counts on a line `cut` marks
+ *   (one that holds `.git` or assigns a value that is no plain literal), and
+ *   otherwise unless the value is a known plain literal
+ *   ({@link knownLiteralValues}) and the result, worked out exactly
+ *   ({@link evaluateExpansion}), is no `.git`; then the result stands for the
+ *   expansion in the word around it;
  * - a `${` that does not close counts.
  * A nested expansion stands, inside another's word, as the text it may
  * carry or as an unknown output.
  */
-function expansionWordNamesGit(text: string, known: ReadonlyMap<string, string> = new Map()): boolean {
+function expansionWordNamesGit(text: string, cut: boolean, known: ReadonlyMap<string, string> = new Map()): boolean {
   if (!text.includes("${")) return false;
   const valueNamesGit = (value: string): boolean =>
     GIT_SEGMENT_IN_TEXT.test(value.split(SUBSTITUTION_SENTINEL).join("/")) ||
@@ -5366,7 +5381,7 @@ function expansionWordNamesGit(text: string, known: ReadonlyMap<string, string> 
       // no `.git` (security review, point i). Positionals, special
       // parameters and array elements are never known.
       const value = known.get((name as RegExpExecArray)[0]);
-      const result = value === undefined ? null : evaluateExpansion(value, rest);
+      const result = cut || value === undefined ? null : evaluateExpansion(value, rest);
       if (result === null || valueNamesGit(result)) return true;
       standIn = result;
       rewritten = true;
@@ -5402,6 +5417,24 @@ function lineSpellsGitIndirectly(
 ): boolean {
   // The variables whose value is a known plain literal (point i).
   const known = knownLiteralValues(segments, inherited);
+  // Defence in depth under that evaluator (points g and h, kept): a
+  // transforming expansion also counts on a line that holds `.git` anywhere,
+  // in its raw text, that text with escapes decoded, or a word's or target's
+  // text with quotes removed, and on a line that assigns a value that is no
+  // plain literal. The evaluator only adds strictness on top of this.
+  const holdsGit = (text: string): boolean => /\.git/iu.test(text);
+  const cut = segments.some(
+    (segment) =>
+      holdsGit(segment.text) ||
+      (segment.text.includes("\\") &&
+        (holdsGit(decodeBackslashEscapes(segment.text, false)) || holdsGit(decodeBackslashEscapes(segment.text, true)))) ||
+      segment.words.some((word) => holdsGit(word.text)) ||
+      segment.redirects.some((redirect) => holdsGit(redirect.target.text)) ||
+      segment.words.some((word) => {
+        const assignment = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u.exec(word.text);
+        return assignment !== null && /[?*[$`]/u.test(word.text.slice(assignment[0].length));
+      }),
+  );
   // A substitution body's words, each read as a path the shell may still
   // expand (`$(echo .gi?)`); its own segments read as a line of their own
   // (a nested substitution, an assignment in it, a split spelling); and a
@@ -5435,7 +5468,7 @@ function lineSpellsGitIndirectly(
       words.some((word, index) => {
         if (word.substitutions.some(bodyNamesGit)) return true;
         if (wordJoinsGitAcrossSubstitution(word.text)) return true;
-        if (expansionWordNamesGit(word.text, known)) return true;
+        if (expansionWordNamesGit(word.text, cut, known)) return true;
         // An assignment's VALUE is judged as a target is, patterns and braces
         // included (`D=.gi?`, `D=.g{i,}t`, `D='.[g]it'`): an unquoted `$D`
         // later expands it. Its words after `:` (a PATH-like list) too.
