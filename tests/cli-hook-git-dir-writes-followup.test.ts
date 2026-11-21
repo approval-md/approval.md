@@ -218,7 +218,7 @@ test("B review: a sed name is judged both as literal text and as a shell word; e
   symlinkSync(".git", join(repo, "{a,b}"));
   assert.deepEqual(hook("sed -n 'w {a,b}/config' x", repo), [DIR_WRITE]);
   // ... and, with no disk, a relative name with a `$` after `cd .git`.
-  assert.deepEqual(pure("cd .git && sed -n 'w co$nfig' x"), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure("cd .git && sed -n 'wco$nfig' x"), [READ_SHELL, DIR_WRITE]);
   // Only the script's words (rule 3b) see `l/config` in `w out;l/config`.
   symlinkSync(".git", join(repo, "l"));
   assert.deepEqual(hook('sed -n "w out;l/config" x', repo), [DIR_WRITE]);
