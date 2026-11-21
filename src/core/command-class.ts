@@ -4819,6 +4819,134 @@ const SUBSTITUTION_NESTING_LIMIT = 128;
 const SUBSTITUTION_READ_DEPTH = 64;
 
 /**
+ * `text` with its backslash escapes decoded (review of the substitution
+ * fold, S1), as bash's `$'…'` and `printf` read them: `\xHH`, `\uHHHH`,
+ * `\UHHHHHHHH`, `\cX`, the letter escapes, and octal, read as `\NNN` (bash,
+ * a `printf` format) or, with `zeroOctal`, as `\0NNN` (`echo -e`, `printf
+ * %b`). An escape it does not know is kept as written.
+ */
+function decodeBackslashEscapes(text: string, zeroOctal: boolean): string {
+  const letters: Readonly<Record<string, string>> = {
+    a: "\u0007",
+    b: "\b",
+    e: "\u001B",
+    E: "\u001B",
+    f: "\f",
+    n: "\n",
+    r: "\r",
+    t: "\t",
+    v: "\v",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "?": "?",
+  };
+  let out = "";
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at] as string;
+    const next = text[at + 1];
+    if (char !== "\\" || next === undefined) {
+      out += char;
+      continue;
+    }
+    const digits = (from: number, pattern: RegExp, most: number): string => {
+      let end = from;
+      while (end < text.length && end - from < most && pattern.test(text[end] as string)) end += 1;
+      return text.slice(from, end);
+    };
+    let code: number | null = null;
+    let used = 0;
+    if (next === "x" || next === "u" || next === "U") {
+      const hex = digits(at + 2, /[0-9A-Fa-f]/u, next === "x" ? 2 : next === "u" ? 4 : 8);
+      if (hex.length > 0) [code, used] = [Number.parseInt(hex, 16), 1 + hex.length];
+    } else if (zeroOctal ? next === "0" : /[0-7]/u.test(next)) {
+      const octal = zeroOctal ? digits(at + 2, /[0-7]/u, 3) : digits(at + 1, /[0-7]/u, 3);
+      [code, used] = [Number.parseInt(octal === "" ? "0" : octal, 8), zeroOctal ? 1 + octal.length : octal.length];
+    } else if (next === "c" && text[at + 2] !== undefined) {
+      [code, used] = [(text.charCodeAt(at + 2) & 0x1f), 2];
+    } else if (letters[next] !== undefined) {
+      out += letters[next];
+      at += 1;
+      continue;
+    }
+    if (code === null || code > 0x10ffff) {
+      out += char;
+      continue;
+    }
+    out += String.fromCodePoint(code);
+    at += used;
+  }
+  return out;
+}
+
+/**
+ * Does an ANSI-C quoted string of this raw segment text (`$'\x2egit'`,
+ * `$'.\147it/config'`, `.g$'\x69'it`) decode to a `.git` segment, read with
+ * up to five characters of the word on either side (review of the
+ * substitution fold, S1)? The lexer keeps such a string's text undecoded, so
+ * no other reading sees the `.git` it spells. Its decoded text is quoted, so
+ * no glob in it expands. Read from the raw text, quotes around it included:
+ * a `$'` inside double quotes, which the shell leaves as written, is read
+ * too, the strict side.
+ */
+function ansiCQuotingSpellsGit(raw: string): boolean {
+  const delimiter = /[\s;&|()<>]/u;
+  let close = -1;
+  for (let open = raw.indexOf("$'"); open !== -1; open = raw.indexOf("$'", close + 1)) {
+    close = open + 2;
+    while (close < raw.length && raw[close] !== "'") close += raw[close] === "\\" ? 2 : 1;
+    if (close >= raw.length) return false;
+    let from = open;
+    while (from > 0 && open - from < 5 && !delimiter.test(raw[from - 1] as string)) from -= 1;
+    let to = close + 1;
+    while (to < raw.length && to - close <= 5 && !delimiter.test(raw[to] as string)) to += 1;
+    const before = raw.slice(from, open).replace(/["']/gu, "");
+    const after = raw.slice(close + 1, to).replace(/["']/gu, "");
+    const body = raw.slice(open + 2, close);
+    if (GIT_SEGMENT_IN_TEXT.test(`${before}${decodeBackslashEscapes(body, false)}${after}`)) return true;
+    if (GIT_SEGMENT_IN_TEXT.test(`${before}${decodeBackslashEscapes(body, true)}${after}`)) return true;
+  }
+  return false;
+}
+
+/**
+ * Does a parameter expansion in this word carry a `.git` segment in the word
+ * it may expand to (review of the substitution fold, S2): `${VAR:-.git}`,
+ * `${VAR-.git}`, `${VAR:=.git}`, `${VAR=.git}`, `${VAR:+.git}`,
+ * `${VAR+.git}`? That word is judged as an assignment's value is (a `.git`
+ * segment, a pattern or brace that may make one, a split spelling across a
+ * substitution). One walk of the word: a nested expansion stands as an
+ * unknown value in the word around it, and is judged on its own.
+ */
+function expansionWordNamesGit(text: string): boolean {
+  if (!text.includes("${")) return false;
+  const open: string[] = [];
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at] as string;
+    if (char === "$" && text[at + 1] === "{") {
+      open.push("");
+      at += 1;
+      continue;
+    }
+    if (open.length === 0) continue;
+    if (char !== "}") {
+      open[open.length - 1] += char;
+      continue;
+    }
+    const inner = open.pop() as string;
+    const standIn = `\${${inner}}` === SUBSTITUTION_SENTINEL ? SUBSTITUTION_SENTINEL : "$V";
+    if (open.length > 0) open[open.length - 1] += standIn;
+    const operator = /^(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?|[0-9]+|[@*#?$!-]):?[-=+]/u.exec(inner);
+    if (operator === null) continue;
+    const value = inner.slice(operator[0].length);
+    if (GIT_SEGMENT_IN_TEXT.test(value) || value.split(":").some(mayNameGitDirectory) || wordJoinsGitAcrossSubstitution(value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Does the line spell a `.git` segment where the shell may carry it to a
  * later word (second review, S3): an assignment's value, the body of a
  * command substitution, or a quoted string? A literal unquoted `.git` word
@@ -4826,6 +4954,12 @@ const SUBSTITUTION_READ_DEPTH = 64;
  * two spellings: a body that asks git for its directory
  * ({@link asksGitForItsDirectory}), and a word whose literal text and
  * substitution output join into `.git` ({@link wordJoinsGitAcrossSubstitution}).
+ * The review of that fold adds two more: an ANSI-C quoted string or a
+ * substitution body whose backslash escapes decode to `.git`
+ * ({@link ansiCQuotingSpellsGit}, {@link decodeBackslashEscapes}), and the
+ * word a parameter expansion may carry (`${VAR:-.git}`,
+ * {@link expansionWordNamesGit}).
+ *
  * Substitution bodies are read this way to {@link SUBSTITUTION_READ_DEPTH}
  * levels; a deeper one counts as naming `.git`, the strict side, so the
  * reading's cost and its depth on the call stack stay bounded.
@@ -4841,6 +4975,11 @@ function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): bo
     if (GIT_SEGMENT_IN_TEXT.test(body) || body.split(/[\s;&|()]+/u).some((token) => mayNameGitDirectory(token.replace(/["']/gu, "")))) {
       return true;
     }
+    // `printf '\x2egit'`, `echo -e '\0056git'`: escapes a command in the body
+    // may decode, read both ways octal is written.
+    if (body.includes("\\") && (GIT_SEGMENT_IN_TEXT.test(decodeBackslashEscapes(body, false)) || GIT_SEGMENT_IN_TEXT.test(decodeBackslashEscapes(body, true)))) {
+      return true;
+    }
     const lexed = lex(body);
     if (!lexed.ok) return true;
     return lexed.segments.some(asksGitForItsDirectory) || lineSpellsGitIndirectly(lexed.segments, depth + 1);
@@ -4849,10 +4988,12 @@ function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): bo
     const assignments = bashAssignmentCount(segment.words);
     const words = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
     return (
+      ansiCQuotingSpellsGit(segment.text) ||
       segment.bodySubstitutions.some(bodyNamesGit) ||
       words.some((word, index) => {
         if (word.substitutions.some(bodyNamesGit)) return true;
         if (wordJoinsGitAcrossSubstitution(word.text)) return true;
+        if (expansionWordNamesGit(word.text)) return true;
         // An assignment's VALUE is judged as a target is, patterns and braces
         // included (`D=.gi?`, `D=.g{i,}t`, `D='.[g]it'`): an unquoted `$D`
         // later expands it. Its words after `:` (a PATH-like list) too.
