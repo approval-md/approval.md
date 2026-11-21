@@ -14,7 +14,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -214,6 +214,14 @@ test("B review: a sed name is judged both as literal text and as a shell word; e
   // The sed name as a shell word is expanded on disk too: only the hook sees this.
   assert.deepEqual(pure("sed -n 'w l*k/config' x"), ["read.shell sed-read"]);
   assert.deepEqual(hook("sed -n 'w l*k/config' x", repo), [DIR_WRITE]);
+  // Only the literal reading sees a directory literally named `{a,b}` ...
+  symlinkSync(".git", join(repo, "{a,b}"));
+  assert.deepEqual(hook("sed -n 'w {a,b}/config' x", repo), [DIR_WRITE]);
+  // ... and, with no disk, a relative name with a `$` after `cd .git`.
+  assert.deepEqual(pure("cd .git && sed -n 'w co$nfig' x"), [READ_SHELL, DIR_WRITE]);
+  // Only the script's words (rule 3b) see `l/config` in `w out;l/config`.
+  symlinkSync(".git", join(repo, "l"));
+  assert.deepEqual(hook('sed -n "w out;l/config" x', repo), [DIR_WRITE]);
   // The shell still expands `$D` inside double quotes before sed sees it (S3).
   assert.deepEqual(pure('D=.git; sed -n "w $D/config" x'), ["read.shell assignment", DIR_WRITE]);
 });
@@ -241,6 +249,18 @@ test("review: wget's long output options are read by any prefix, on disk too", {
   assert.deepEqual(hook("wget --output-doc=g/config https://example.invalid/x", repo), [DIR_WRITE]);
   assert.deepEqual(hook("wget --output-f g/log https://example.invalid/x", repo), [DIR_WRITE]);
   assert.ok(!hook("wget --output-doc=out.html https://example.invalid/x", repo).includes(DIR_WRITE));
+  // An abbreviated output option is a SURE target: one under a directory
+  // that cannot be read is judged the strict way.
+  if (process.getuid?.() !== 0) {
+    const locked = join(repo, "locked");
+    mkdirSync(locked);
+    chmodSync(locked, 0o000);
+    try {
+      assert.deepEqual(hook("wget --output-doc=locked/sub/f https://example.invalid/x", repo), [DIR_WRITE]);
+    } finally {
+      chmodSync(locked, 0o755);
+    }
+  }
 });
 
 test("B hook: a read's output word is walked on disk", { skip }, () => {
