@@ -129,8 +129,15 @@ const scopeOf = (entry) => entry.scope ?? "any";
  * Does an allowlist entry name this call: its file, its command (or "*"), and,
  * when the entry lists `columns`, the box column the call ran in?
  */
+/**
+ * A whole-file entry ("*") is for an operator README only (gate review N1): a
+ * README is read by a human, while any other file ships recipes an agent runs,
+ * each of which must be listed by its own command.
+ */
+export const wholeFileAllowed = (file) => /(^|\/)README\.md$/u.test(String(file));
+
 export function entryMatches(entry, file, command, column) {
-  if (entry.file !== file || (entry.command !== command && entry.command !== "*")) return false;
+  if (entry.file !== file || (entry.command !== command && !(entry.command === "*" && wholeFileAllowed(entry.file)))) return false;
   if (column !== undefined && Array.isArray(entry.columns) && !entry.columns.includes(column)) return false;
   return true;
 }
@@ -187,6 +194,7 @@ export function acceptanceErrors(entry) {
     errors.push("accepted_at is not a YYYY-MM-DD date");
   }
   if (!["neutral", "box", "any"].includes(scopeOf(entry))) errors.push(`scope "${entry.scope}" is not neutral, box or any`);
+  if (entry.command === "*" && !wholeFileAllowed(entry.file)) errors.push(`a whole-file entry ("*") is allowed only on a README.md, not on ${String(entry.file)}`);
   if (entry.columns !== undefined && (!Array.isArray(entry.columns) || entry.columns.some((c) => !["hermes-home", "home", "workspace", "harness"].includes(c)))) {
     errors.push("columns names a column other than hermes-home, home, workspace or harness");
   }

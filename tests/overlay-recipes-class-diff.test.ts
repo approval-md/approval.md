@@ -110,7 +110,17 @@ test("entries scoped to columns match only there; '*' matches a whole file", () 
   const e = { file: "a.md", command: "x", columns: ["hermes-home"] };
   assert.equal(entryMatches(e, "a.md", "x", "hermes-home"), true);
   assert.equal(entryMatches(e, "a.md", "x", "home"), false);
-  assert.equal(entryMatches({ file: "a.md", command: "*" }, "a.md", "anything", "home"), true);
+  assert.equal(entryMatches({ file: "skills/x/README.md", command: "*" }, "skills/x/README.md", "anything", "home"), true);
+});
+
+test("gate review N1: a whole-file entry ('*') counts on a README.md only; on any other file it is an error and matches nothing", () => {
+  const skill = { file: "skills/x/SKILL.md", command: "*", scope: "box", reason: "a whole skill file, which must never ride a wildcard", ...ACCEPTED };
+  assert.match(acceptanceErrors(skill).join(";"), /allowed only on a README\.md/u);
+  assert.equal(entryMatches(skill, "skills/x/SKILL.md", "anything", "home"), false);
+  const shipped = JSON.parse(readFileSync(join(ROOT, "scripts", "overlay-recipes", "allowlist.json"), "utf8")) as { entries: { file: string; command: string }[] };
+  const readmes = shipped.entries.filter((e) => e.command === "*");
+  assert.equal(readmes.length, 4);
+  for (const e of readmes) assert.deepEqual(acceptanceErrors({ ...e, ...ACCEPTED }), [], e.file);
 });
 
 const call = (key: string, side: Side, column = "hermes-home") => ({
