@@ -936,7 +936,15 @@ a `cd`, `chdir` or `pushd` before it may lead (a bare name is tried from each
 directory and from each `CDPATH` entry of the hook's environment). It walks
 the path one component at a time as the kernel does: `..` is applied to the
 physical directory, and every symlink is followed whether or not its target
-exists yet, so a dangling link into `.git/hooks` counts. A landing inside a
+exists yet, so a dangling link into `.git/hooks` counts. A missing component
+is applied as text, as the kernel applies it; any other failure (an
+unreadable directory, a name over 255 bytes, a link loop) leaves the landing
+unknown, and a sure write target (a redirection, any word of a file-write
+segment, `curl -o`, `wget -O`) whose landing is unknown is `git-dir-write`,
+while a word that is only a possible target (a `curl -d` payload) is applied
+as text. The pass adds its class beside the segment's own rather than in
+its place, and every tail of an option cluster (`-vthooks`) is a candidate.
+A landing inside a
 git directory, the checkout's own as its `.git` file names it (a linked
 worktree, a `--separate-git-dir`) included, is `git-dir-write`, and so is a
 relative write from a hook whose own directory is inside one. A directory
