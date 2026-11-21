@@ -86,6 +86,24 @@ ordinary workspace write.
   a `.git` or git config file write, or a push keeps the deny (`railway status
   && git remote add --mirror=push m <url>` abstained on 0.4.8); `git config
   remote.…` / `push.…` writes stay refused, since `git` is a known binary.
+- **Past the literal text (review fold).** A write into `.git` is judged
+  where it lands: after a literal `cd .git` on the same line, as a bare
+  redirection, through an attached option value (`curl -o.git/config`, `cp
+  -t.git/hooks`, `tar -C.git`), and, in the hook, from its own directory,
+  through symlinks and against a worktree's or a separate git directory. A
+  push word that is no local branch, after a segment that can create a tag
+  (`git fetch` follows tags), is at least `release.publish`: `git fetch
+  origin main:refs/tags/rel2 && git push origin rel2` published a tag as a
+  branch push, and so did a `src:dst` whose source is a tag
+  (`git push origin v1:plain` created `refs/tags/plain`). The hook walks a
+  write's path as the kernel does (`..` on the physical directory, dangling
+  links followed) and follows a `cd` only where its landing is certain, at
+  its logical and physical landings; a relative write after a change it
+  cannot place (`cd "$D"`, `cd -`) is judged as 0.4.8 judges it, a stated
+  known limit. A write whose sure target cannot be placed (an unreadable
+  directory, an over-long name, a link loop) is judged the strict way; a
+  word that only may be a target is then judged by its text. curl's
+  `--output-dir` and wget's log file options count as write targets.
 - **What it costs.** Where `vcs.history.rewrite` is human-only (this
   repository), a push on a line with an earlier non-read segment (`git add -A
   && git commit -m x && git push -u origin lane`), every mutating `git remote`
