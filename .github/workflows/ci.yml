@@ -292,7 +292,7 @@ jobs:
       PIN_EXPECTED: "e2037ae13f5948d0db1c431043dad44b96c098fac9fd838784483f3390bb0c73"
       PIN_CHECK: "322e7c86d0fbafc0953b18719ab8b2aab8dc0b60532d290559e3ccd2833fd4d3"
       PIN_BOX: "b9ab914808913bef08a22e0225e2024898be72a775fa34b9a85e0b5c60bb29cb"
-      PIN_EXTRACT: "05348c0d2f0a3b61b001991c7c3a630798abb7bdb07d8915576bafa97a081c93"
+      PIN_EXTRACT: "3105e11558c6e4c04af104728c6d1316057fd3dc9d6ecf510dbce6b7d2ba4a22"
       PIN_NEWCALLS: "125d7d2363583666659890417c4f489b4e5b8cfefb6a051339c7eec751cbdb2e"
     steps:
       # Depth 2: HEAD^1 is the base the change is measured against (a pull
