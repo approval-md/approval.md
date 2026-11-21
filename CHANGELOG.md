@@ -17,12 +17,13 @@ before a tag.
 
 ### Security
 
-**Two more push holes in 0.4.5, closed here (APRV-518).** `git remote add
---mirror=push m <url>` classified `read.vcs.remote` (autonomous), and the
-`git push m` after it read as an implicit `vcs.push.main` while it was a
-mirror push that deleted remote branches: a two-step way around
-`vcs.ref.delete` and `vcs.history.rewrite`. And `git push origin HEAD` (or `@`)
-was `vcs.push.branch` even on main.
+**Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
+remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),
+and the `git push m` after it read as an implicit `vcs.push.main` while it was
+a mirror push that deleted remote branches: a two-step way around
+`vcs.ref.delete` and `vcs.history.rewrite`. `git push origin HEAD` (or `@`)
+was `vcs.push.branch` even on main, and `rm -f .git/index.lock` was an
+ordinary workspace write.
 
 - **Writing `git remote` is `vcs.history.rewrite` (rule `git-remote-write`).**
   Only a closed list still reads: `git remote`, `-v` / `--verbose`, `show
@@ -71,13 +72,36 @@ was `vcs.push.branch` even on main.
   filesystem) as the trunk push, rule `git-push-head`. The hook resolves it:
   main, master, the `origin/HEAD` branch or a detached HEAD stay
   `vcs.push.main`; any other branch is `vcs.push.branch`, the answer it had.
-- **Every verdict that moved, moved stricter.** Against #649's head, 0 looser
-  under the class order and under this repository's APPROVAL.md: over 24,696
-  pure command lines (4,528 `git push`, 2,344 `git remote` and 20
-  configuration-write lines stricter), and over 3,735 hook-level command lines
-  in nine checkout states (1,147 stricter). Real-git tests on a bare local remote prove each
-  case's effect. Conformance: `command-class` 1.10.0, twelve new vectors; no
-  existing expectation moved.
+- **Letter case never loosens a rule.** APFS folds case: `git push OLD` opens
+  a legacy `remotes/old`, and on git 2.50.1 it deleted a remote branch while
+  the name check was exact, so a legacy remotes file's name is now compared
+  without case. The `refs/`, `heads/`, `tags/` and `remotes/` prefixes of a
+  destination (`lane:refs/HEADS/main`, `TAGS/v1`) and a local tag's name
+  (`V1` beside `v1`) are compared without case too, which costs nothing: git
+  2.50.1 refused those spellings or pushed another ref. A command word in
+  another case (`GIT push`, `git REMOTE add`) has no row and is refused.
+- **The no-rule abstain cannot open any of this.** Under
+  `defaults.unclassified_command: abstain`, a no-rule stand-in is not a read,
+  so a push on its line is unreadable; a line holding a mutating `git remote`,
+  a `.git` or git config file write, or a push keeps the deny (`railway status
+  && git remote add --mirror=push m <url>` abstained on 0.4.8); `git config
+  remote.…` / `push.…` writes stay refused, since `git` is a known binary.
+- **What it costs.** Where `vcs.history.rewrite` is human-only (this
+  repository), a push on a line with an earlier non-read segment (`git add -A
+  && git commit -m x && git push -u origin lane`), every mutating `git remote`
+  and any write into `.git` (`rm -f .git/index.lock`) need a person. An agent
+  pushes in its own Bash call instead, which keeps `vcs.push.branch` on a
+  feature branch.
+- **Every verdict that moved, moved stricter.** Against 0.4.8's build, 0
+  looser under this repository's APPROVAL.md and under the overlay's template
+  policy, a refusal counted strictest: 22,925 command lines classified pure
+  with the default options, with `exec.code` open and under the no-rule
+  abstain (137,550 comparisons, 12,881 stricter), and 1,628 lines through the
+  hook in eleven checkout states, with and without the abstain (71,632
+  comparisons, 7,758 stricter). Real-git tests on a bare local remote prove
+  each case's effect. Conformance:
+  `command-class` 1.10.0 (from 1.9.0), twelve new vectors; main's 354 are
+  byte-identical. The fleet's 63 overlay recipes are unmoved.
 
 ## 0.4.8 — 2026-11-20
 
