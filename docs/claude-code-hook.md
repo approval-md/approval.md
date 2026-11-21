@@ -1030,9 +1030,11 @@ the body's words with quotes removed: the format filled from its arguments,
 escapes decoded, an argument the text cannot read an unknown output, and a
 body's segments printed in turn (`$(printf .g; printf it)`). A replacement
 expansion's new text counts as text between unknown runs (`${G/x/.}`);
-removal and substring count on a line that holds `.git` (`G=.gitx;
-${G%x}`); `@E` and `@P` count; an operator this reader does not know, or a
-`${` that does not close, counts. Inside an operator's word a nested
+removal and substring count on a line that holds `.git`, in its text,
+its decoded escapes or a word with quotes removed (`G=.gitx; ${G%x}`,
+`G='.gi''tx'`); `@E` and `@P` count; `${!-.git}` is the default word of
+`$!`, read as the operator it is; an operator this reader does not know, or
+a `${` that does not close, counts. Inside an operator's word a nested
 expansion is an unknown output, and a default word stands for its expansion
 (`.g${A:-i}t`).
 
