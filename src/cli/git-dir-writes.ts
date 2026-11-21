@@ -49,11 +49,11 @@ const LINK_LIMIT = 40;
  * reached so far, never to the text, and every symlink is read and followed
  * whether or not its target exists yet, so a dangling link into `.git` is seen
  * as the write through it would land. `links` is every link target read on
- * the way, as written. `null` when the walk cannot be finished: more links
- * than the kernel follows (a loop). A component that cannot be examined
- * (missing, unreadable, a name too long) is applied as text.
+ * the way, as written. A missing component is applied as text, as the
+ * kernel applies it. Any other failure (EACCES, ENAMETOOLONG, a link loop,
+ * an unreadable link) is `unplaceable`, with its code.
  */
-function physicalLanding(path: string): { landed: string; links: string[] } | null {
+function physicalLanding(path: string): { landed: string; links: string[] } | { unplaceable: string } {
   const pending = path.split("/").filter((part) => part.length > 0);
   let current = "/";
   const links: string[] = [];
@@ -69,26 +69,29 @@ function physicalLanding(path: string): { landed: string; links: string[] } | nu
     let stat;
     try {
       stat = lstatSync(next);
-    } catch {
-      // Missing, unreadable (EACCES) or unnameable (ENAMETOOLONG): no link can
-      // be seen here, so the rest is applied as text, which is what the
-      // kernel does for a missing component and what 0.4.8 judged for the
-      // others. Only a link loop is judged the strict way (below).
-      current = next;
-      continue;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? "an error";
+      // A missing component: the kernel sees nothing there either, so the
+      // rest applies as text. Anything else (EACCES, ENAMETOOLONG, ELOOP, …)
+      // hides whether a link is there: the path cannot be placed.
+      if (code === "ENOENT") {
+        current = next;
+        continue;
+      }
+      return { unplaceable: code };
     }
     if (!stat.isSymbolicLink()) {
       current = next;
       continue;
     }
     followed += 1;
-    if (followed > LINK_LIMIT) return null;
+    if (followed > LINK_LIMIT) return { unplaceable: "ELOOP" };
     let target: string;
     try {
       target = readlinkSync(next);
-    } catch {
-      current = next;
-      continue;
+    } catch (error) {
+      // A confirmed link whose target cannot be read cannot be placed.
+      return { unplaceable: (error as NodeJS.ErrnoException).code ?? "an unreadable link" };
     }
     links.push(target);
     if (target.startsWith("/")) current = "/";
@@ -99,7 +102,8 @@ function physicalLanding(path: string): { landed: string; links: string[] } | nu
 
 /** {@link physicalLanding}'s place alone, or `null`. */
 function landing(path: string): string | null {
-  return physicalLanding(path)?.landed ?? null;
+  const walked = physicalLanding(path);
+  return "landed" in walked ? walked.landed : null;
 }
 
 /** Does this absolute path have a `.git` segment, in any case? */
@@ -175,6 +179,24 @@ function writeWords(args: readonly string[]): string[] {
     if (!arg.startsWith("--")) for (let at = 2; at < arg.length; at += 1) words.push(arg.slice(at));
   }
   return words;
+}
+
+/**
+ * The output a `curl` or `wget` writes, from its own options: curl's `-o` /
+ * `--output`, wget's `-O` / `--output-document` / `-P` / `--directory-prefix`,
+ * separate, attached or `=`.
+ */
+function fetchOutputValues(bin: string, args: readonly string[]): string[] {
+  const short = bin === "curl" ? ["-o"] : bin === "wget" ? ["-O", "-P"] : [];
+  const long = bin === "curl" ? ["--output"] : bin === "wget" ? ["--output-document", "--directory-prefix"] : [];
+  const values: string[] = [];
+  for (const [at, arg] of args.entries()) {
+    const next = args[at + 1];
+    if ((short.includes(arg) || long.includes(arg)) && next !== undefined) values.push(next);
+    for (const flag of short) if (arg.startsWith(flag) && arg.length > flag.length) values.push(arg.slice(flag.length));
+    for (const flag of long) if (arg.startsWith(`${flag}=`)) values.push(arg.slice(flag.length + 1));
+  }
+  return values;
 }
 
 /** A word whose text is the path, with nothing the shell would still change. */
@@ -329,10 +351,19 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
     const reads = segment.class.startsWith("read.") && bin !== "curl" && bin !== "wget";
     // A read writes nothing but its redirection; `git`'s own words are not
     // file writes (its rows classify what git writes).
-    const candidates = [
+    const named = reads || segment.rule === "redirect-write" || bin === "git" ? [] : writeWords(shape.args).filter(literalPath);
+    const candidates = [...shape.writes.filter(literalPath), ...named];
+    // The words the segment surely writes: its redirection targets, and every
+    // word of a segment the classifier already calls a file write. A word of
+    // any other segment (a `curl -d` payload, a script argument) is only a
+    // POSSIBLE target. A path that cannot be placed is judged the strict way
+    // for a sure target and as text for a possible one, so a long payload or
+    // an argument under an unreadable directory moves nothing.
+    const sure = new Set([
       ...shape.writes,
-      ...(reads || segment.rule === "redirect-write" || bin === "git" ? [] : writeWords(shape.args)),
-    ].filter(literalPath);
+      ...(segment.class.startsWith("files.") ? named : []),
+      ...(bin === null ? [] : fetchOutputValues(bin, shape.args)),
+    ]);
     if (candidates.length === 0) continue;
     let hit: { word: string; landed: string } | null = null;
     for (const dir of before) {
@@ -340,11 +371,12 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
       for (const word of candidates) {
         const spelled = word.startsWith("~/") && home !== undefined ? `${home}/${word.slice(2)}` : word;
         const walked = physicalLanding(spelled.startsWith("/") ? spelled : `${dir}/${spelled}`);
-        // A path whose walk cannot be finished (a link loop) is judged the
-        // stricter way.
-        if (walked === null) {
-          hit = { word, landed: "an unresolvable path" };
-          break;
+        if ("unplaceable" in walked) {
+          if (sure.has(word) || walked.unplaceable === "ELOOP") {
+            hit = { word, landed: `a place this hook cannot determine (${walked.unplaceable})` };
+            break;
+          }
+          continue;
         }
         const { landed, links } = walked;
         if (hasGitSegment(landed) || inGit.some((root) => within(landed, root)) || links.some((link) => hasGitSegment(link))) {

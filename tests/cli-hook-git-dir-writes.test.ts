@@ -17,7 +17,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -257,11 +257,26 @@ test("S2 hook: every tail of an option cluster is a candidate, a bare name inclu
   assert.deepEqual(hook("cp -vt/tmp/build x.py", repo), ["files.write.workspace workspace-write"]);
 });
 
-test("S1 hook: a component the hook cannot examine (a name too long, an unreadable directory) is applied as text, not raised", { skip }, () => {
+test("S1 hook: a sure write target the hook cannot place is judged the strict way; a possible one as text", { skip: skip || (process.getuid?.() === 0 ? "root reads a mode-000 directory" : false) }, () => {
   const repo = checkout();
-  // A 400-byte word is no file name: lstat says ENAMETOOLONG, and 0.4.8's answer stands.
+  // A mode-000 directory: lstat below it says EACCES, so whether a link to .git is there cannot be known.
+  const locked = join(repo, "locked");
+  mkdirSync(locked);
+  chmodSync(locked, 0o000);
+  try {
+    assert.deepEqual(hook("echo x > locked/f", repo), [DIR_WRITE]);
+    assert.deepEqual(hook("cp a locked/f", repo), [DIR_WRITE]);
+    assert.deepEqual(hook("curl -o locked/f https://example.invalid/x", repo), [DIR_WRITE]);
+    // A word that is only a possible target (a wget header value) is applied as text.
+    assert.deepEqual(hook("wget --header=locked/f https://example.invalid/x", repo), ["read.web web-read"]);
+  } finally {
+    chmodSync(locked, 0o755);
+  }
+  // A name over 255 bytes: ENAMETOOLONG. A redirection target is sure ...
+  assert.deepEqual(hook(`echo x > ${"a".repeat(300)}`, repo), [DIR_WRITE]);
+  // ... a curl -d payload is not: the ordinary long-payload line does not move.
   assert.deepEqual(hook(`curl -X POST https://example.invalid/x -d ${"x".repeat(400)}`, repo), ["network.call web-write"]);
-  // A link loop is the one walk judged the strict way.
+  // A link loop cannot be placed, whatever names it.
   symlinkSync("loop2", join(repo, "loop1"));
   symlinkSync("loop1", join(repo, "loop2"));
   assert.deepEqual(hook("echo x > loop1/f", repo), [DIR_WRITE]);
