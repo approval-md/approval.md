@@ -163,18 +163,13 @@ function writeWords(args: readonly string[]): string[] {
     }
     const equals = arg.indexOf("=");
     if (equals !== -1) words.push(arg.slice(equals + 1));
-    // An attached short-option value: the text after the first letter, and,
-    // for a cluster (`-vt/dir`, `-xfC.git`), each later tail that looks like a
-    // path (has a `/`, or starts with `.` or `~`). A bare tail such as the `l`
-    // of `…/av-approval` is no value, and judged on disk it could name any
-    // file of the checkout.
-    if (!arg.startsWith("--") && arg.length > 2) {
-      words.push(arg.slice(2));
-      for (let at = 3; at < arg.length; at += 1) {
-        const tail = arg.slice(at);
-        if (tail.includes("/") || tail.startsWith(".") || tail.startsWith("~")) words.push(tail);
-      }
-    }
+    // An attached short-option value: EVERY tail of a single-dash word from
+    // its second letter on (`-o.git/config`, `-vthooks`, `-xfC.git`), since
+    // which letter takes a value differs per command. The strict side: a
+    // tail that is no value costs something only when it resolves into a git
+    // directory (the `l` ending `-t…/av-approval`, with a link `l -> .git/hooks`
+    // in the checkout, is read as that link).
+    if (!arg.startsWith("--")) for (let at = 2; at < arg.length; at += 1) words.push(arg.slice(at));
   }
   return words;
 }

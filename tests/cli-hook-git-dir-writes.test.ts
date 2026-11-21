@@ -241,12 +241,25 @@ test("S1 hook: a separate git directory and a linked worktree's git directory ar
   assert.deepEqual(hook(`printf x >> ${join(main, ".git", "worktrees", "wt", "config.worktree")}`, wt), [DIR_WRITE]);
 });
 
+test("S2 hook: every tail of an option cluster is a candidate, a bare name included", { skip }, () => {
+  const repo = checkout();
+  symlinkSync(".git/hooks", join(repo, "hooks"));
+  // `-vthooks`: the value of -t is the bare name `hooks`, the link into .git/hooks.
+  assert.deepEqual(hook("cp /tmp/x -vthooks", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("tar -xf a.tar -Chooks", repo), [DIR_WRITE]);
+  // Inside .git, a bare tail lands there too.
+  assert.deepEqual(pure("cd .git && cp /tmp/x -vthooks"), ["read.shell read-shell", DIR_WRITE]);
+  assert.ok(hook("cd .git && cp /tmp/x -vthooks", repo).includes(DIR_WRITE));
+  // The accepted cost of the strict side: a tail that is no value but names such a link.
+  symlinkSync(".git/hooks", join(repo, "l"));
+  assert.deepEqual(hook("cp -vt/tmp/av-approval x.py", repo), [DIR_WRITE]);
+  // A cluster none of whose tails lands in a git directory does not move.
+  assert.deepEqual(hook("cp -vt/tmp/build x.py", repo), ["files.write.workspace workspace-write"]);
+});
+
 test("S1 hook: ordinary writes in a checkout do not move", { skip }, () => {
   const repo = checkout();
-  // A cluster's bare tail is no path: the `l` that ends `-t…/av-approval` is not the link `l`.
-  symlinkSync(".git/hooks", join(repo, "l"));
-  assert.deepEqual(hook("cp -vt/tmp/av-approval x.py", repo), ["files.write.workspace workspace-write"]);
-  assert.deepEqual(hook("cp -vt./l x.py", repo), [DIR_WRITE]);
+
   assert.deepEqual(hook("cd sub && echo x > notes.txt", repo), ["read.shell read-shell", "files.write.workspace redirect-write"]);
   assert.deepEqual(hook("> out.log", repo), ["files.write.workspace redirect-write"]);
   assert.deepEqual(hook("cp a b", repo), ["files.write.workspace workspace-write"]);
