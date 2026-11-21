@@ -5122,6 +5122,9 @@ function bodyPrintsGit(segments: readonly LexSegment[]): boolean {
   );
 }
 
+/** Any character outside ASCII. */
+const NON_ASCII = /[\u0080-\u{10FFFF}]/u;
+
 /** The longest variable value or pattern an expansion is worked out for. */
 const EXPANSION_EVALUATION_LIMIT = 256;
 
@@ -5133,7 +5136,9 @@ const EXPANSION_EVALUATION_LIMIT = 256;
  * text as a set of positions.
  */
 function shellPatternMatches(pattern: string, text: string): boolean | null {
-  if (/[\\'"]|\[[:=.]/u.test(pattern)) return null;
+  // Ranges follow the locale's collation and extglob forms are another
+  // language: neither is worked out here.
+  if (/[\\'"()]|\[[:=.]/u.test(pattern) || /\[[^\]]*-[^\]]/u.test(pattern)) return null;
   let live = new Uint8Array(text.length + 1);
   live[0] = 1;
   for (let at = 0; at < pattern.length; at += 1) {
@@ -5183,6 +5188,9 @@ function shellPatternMatches(pattern: string, text: string): boolean | null {
  */
 function evaluateExpansion(value: string, rest: string): string | null {
   if (value.length > EXPANSION_EVALUATION_LIMIT || rest.length > EXPANSION_EVALUATION_LIMIT || /[$`\\'"]/u.test(rest)) return null;
+  // The shell works on the locale's characters, and its case mapping is not
+  // JavaScript's: any character outside ASCII is the strict side (point l).
+  if (NON_ASCII.test(value) || NON_ASCII.test(rest)) return null;
   const removal = /^(##?|%%?)([\s\S]*)$/u.exec(rest);
   if (removal !== null) {
     const [op, pattern] = [removal[1] as string, removal[2] as string];
@@ -5199,7 +5207,10 @@ function evaluateExpansion(value: string, rest: string): string | null {
     }
     return value;
   }
-  const substring = /^:\s*(-?\d+)\s*(?::\s*(-?\d+)\s*)?$/u.exec(rest);
+  // Offsets and lengths are arithmetic to the shell (`010` is 8, `0x10`,
+  // `1+1` and names too): only a plain decimal is worked out (point k).
+  const substring = /^:\s*(-?(?:0|[1-9]\d*))\s*(?::\s*(-?(?:0|[1-9]\d*))\s*)?$/u.exec(rest);
+  if (/^:\s*[-0-9]/u.test(rest) && substring === null) return null;
   if (substring !== null) {
     let start = Number(substring[1]);
     if (start < 0) start = value.length + start;
@@ -5214,8 +5225,9 @@ function evaluateExpansion(value: string, rest: string): string | null {
   const replace = /^\/([#%/]?)([^/]*)(?:\/([\s\S]*))?$/u.exec(rest);
   if (replace !== null) {
     const [mode, pattern, replacement] = [replace[1] as string, replace[2] as string, replace[3] ?? ""];
-    if (/[*?[]/u.test(pattern) || replacement.includes("&")) return null;
-    if (pattern === "") return value;
+    // An empty pattern is no no-op for `/#` and `/%` (`${D/#/.g}` prepends):
+    // any empty pattern is left to the strict side (point j).
+    if (pattern === "" || /[*?[(]/u.test(pattern) || replacement.includes("&")) return null;
     if (mode === "/") return value.split(pattern).join(replacement);
     if (mode === "#") return value.startsWith(pattern) ? `${replacement}${value.slice(pattern.length)}` : value;
     if (mode === "%") return value.endsWith(pattern) ? `${value.slice(0, value.length - pattern.length)}${replacement}` : value;
@@ -5240,12 +5252,16 @@ function evaluateExpansion(value: string, rest: string): string | null {
  * value free of globs, expansions, `~` and escapes, and the name written
  * nowhere else in the text but as `$NAME` or `${NAME…}` (so `read`, `for`,
  * `printf -v`, `declare`, a second assignment and the like make it unknown).
- * Positionals, special parameters and array elements are never known.
+ * Positionals, special parameters and array elements are never known, and
+ * nothing is known on a line that may change a shell option.
  */
 function knownLiteralValues(segments: readonly LexSegment[], inherited: ReadonlyMap<string, string>): Map<string, string> {
+  const raw = segments.map((segment) => segment.text).join("\n");
+  // Shell options change how patterns match (extglob, nocasematch,
+  // globasciiranges): a line that may set one knows no value (point m).
+  if (/\bshopt\b|\bset\s+[-+]o\b|BASHOPTS|SHELLOPTS/u.test(raw)) return new Map();
   const known = new Map(inherited);
   const assigned = new Map<string, number>();
-  const raw = segments.map((segment) => segment.text).join("\n");
   let leading = true;
   for (const [index, segment] of segments.entries()) {
     const only =
@@ -5264,7 +5280,9 @@ function knownLiteralValues(segments: readonly LexSegment[], inherited: Readonly
       assigned.set(name, (assigned.get(name) ?? 0) + 1);
       known.delete(name);
       const value = word.text.slice(assignment[0].length);
-      if (leading && only && word.substitutions.length === 0 && !/[$`?*[\]~\\{}]/u.test(value) && assigned.size <= 64) known.set(name, value);
+      if (leading && only && word.substitutions.length === 0 && !/[$`?*[\]~\\{}]/u.test(value) && !NON_ASCII.test(value) && assigned.size <= 64) {
+        known.set(name, value);
+      }
     }
   }
   for (const name of known.keys()) {
