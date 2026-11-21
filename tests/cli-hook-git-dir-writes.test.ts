@@ -306,10 +306,14 @@ test("S1 hook: a possible target that cannot be placed falls back to its text, a
   mkdirSync(locked);
   chmodSync(locked, 0o000);
   try {
-    // The header value is no sure target, and `locked` cannot be walked; by its
-    // text it lies in the separate git directory, which the classifier cannot know.
-    assert.deepEqual(pure("wget --header=locked/../../store/config https://example.invalid/x"), ["read.web web-read"]);
-    assert.deepEqual(hook("wget --header=locked/../../store/config https://example.invalid/x", repo), [DIR_WRITE]);
+    // The header value is no sure target, and nothing below `locked` can be
+    // walked (EACCES); by its text it lies in the separate git directory,
+    // which the classifier cannot know, or has a `.git` segment.
+    assert.deepEqual(pure("wget --header=locked/x/../../../store/config https://example.invalid/x"), ["read.web web-read"]);
+    assert.deepEqual(hook("wget --header=locked/x/../../../store/config https://example.invalid/x", repo), [DIR_WRITE]);
+    assert.deepEqual(hook("wget --header=locked/x/../../.git/config https://example.invalid/x", repo), [DIR_WRITE]);
+    // By its text elsewhere: no move.
+    assert.deepEqual(hook("wget --header=locked/x/../../notes https://example.invalid/x", repo), ["read.web web-read"]);
   } finally {
     chmodSync(locked, 0o755);
   }
