@@ -2219,6 +2219,24 @@ const commandClassVectors = [
       "a substitution inside a word whose literal text cannot join into .git leaves the write a workspace write (APRV-518 substitution fold control)",
     input: { command: "echo x > out/$(date +%F).txt" },
   },
+  {
+    id: "git-dir-write-ansi-c-quoting",
+    description:
+      "an ANSI-C quoted string whose escapes decode to .git makes the write git-dir-write (APRV-518, review of the substitution fold, S1)",
+    input: { command: "echo x >> $'\\x2egit'/config" },
+  },
+  {
+    id: "git-dir-write-parameter-expansion-word",
+    description:
+      "a parameter expansion whose word may be .git makes the write git-dir-write (APRV-518, review of the substitution fold, S2)",
+    input: { command: "echo x >> ${VAR:-.git}/config" },
+  },
+  {
+    id: "git-dir-parameter-expansion-word-unmoved",
+    description:
+      "a parameter expansion whose word is no .git leaves the write a workspace write (APRV-518, review of the substitution fold, S2 control)",
+    input: { command: 'echo x > "${OUT:-build}/log.txt"' },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",
@@ -5576,7 +5594,10 @@ const SUITES = [
     // "$(git rev-parse --git-dir)"`, a write through `.g$(printf it)`, and two
     // controls, `cd "$(git rev-parse --show-toplevel)"` and `out/$(date
     // +%F).txt`, which stay workspace writes. Regenerating over the
-    // follow-up's 1.11.0 leaves all 375 byte-identical.
+    // follow-up's 1.11.0 leaves all 375 byte-identical. The review of that
+    // fold adds three more in the same unreleased 1.12.0: a write through
+    // `$'\x2egit'` and one through `${VAR:-.git}`, and a control,
+    // `"${OUT:-build}/log.txt"`, which stays a workspace write.
     vectors_version: "1.12.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
