@@ -5122,6 +5122,163 @@ function bodyPrintsGit(segments: readonly LexSegment[]): boolean {
   );
 }
 
+/** The longest variable value or pattern an expansion is worked out for. */
+const EXPANSION_EVALUATION_LIMIT = 256;
+
+/**
+ * Does the shell pattern `pattern` (`*` any run, `/` included, `?` one
+ * character, a bracket expression one of a set) match all of `text`? `null`
+ * when it holds what this reader does not work out (a POSIX class, an
+ * escape, a quote), which the caller judges the strict way. A walk over the
+ * text as a set of positions.
+ */
+function shellPatternMatches(pattern: string, text: string): boolean | null {
+  if (/[\\'"]|\[[:=.]/u.test(pattern)) return null;
+  let live = new Uint8Array(text.length + 1);
+  live[0] = 1;
+  for (let at = 0; at < pattern.length; at += 1) {
+    const char = pattern[at] as string;
+    const next = new Uint8Array(text.length + 1);
+    if (char === "*") {
+      for (let p = 0; p <= text.length; p += 1) next[p] = live[p] === 1 || (p > 0 && next[p - 1] === 1) ? 1 : 0;
+      live = next;
+      continue;
+    }
+    let test: (c: string) => boolean = (c) => c === char;
+    if (char === "?") test = () => true;
+    if (char === "[") {
+      let close = at + 1;
+      const negated = pattern[close] === "!" || pattern[close] === "^";
+      if (negated) close += 1;
+      if (pattern[close] === "]") close += 1;
+      close = pattern.indexOf("]", close);
+      if (close !== -1) {
+        const body = pattern.slice(at + 1 + (negated ? 1 : 0), close);
+        const inSet = (c: string): boolean => {
+          for (let i = 0; i < body.length; i += 1) {
+            if (body[i + 1] === "-" && i + 2 < body.length) {
+              if (c >= (body[i] as string) && c <= (body[i + 2] as string)) return true;
+              i += 2;
+            } else if (body[i] === c) return true;
+          }
+          return false;
+        };
+        test = (c) => inSet(c) !== negated;
+        at = close;
+      }
+    }
+    for (let p = 0; p < text.length; p += 1) if (live[p] === 1 && test(text[p] as string)) next[p + 1] = 1;
+    live = next;
+  }
+  return live[text.length] === 1;
+}
+
+/**
+ * The value `${NAME<rest>}` takes when NAME holds `value`, worked out exactly
+ * (security review, point i): removal (`#`, `##`, `%`, `%%`), substring
+ * (`:offset`, `:offset:length`, plain integers), replacement of a literal
+ * (`/`, `//`, `/#`, `/%`, no `&` in the new text) and case changes without a
+ * pattern. `null` for anything else, or anything this reader cannot work out
+ * exactly, which the caller judges the strict way.
+ */
+function evaluateExpansion(value: string, rest: string): string | null {
+  if (value.length > EXPANSION_EVALUATION_LIMIT || rest.length > EXPANSION_EVALUATION_LIMIT || /[$`\\'"]/u.test(rest)) return null;
+  const removal = /^(##?|%%?)([\s\S]*)$/u.exec(rest);
+  if (removal !== null) {
+    const [op, pattern] = [removal[1] as string, removal[2] as string];
+    const fromStart = op.startsWith("#");
+    const longest = op.length === 2;
+    for (let step = 0; step <= value.length; step += 1) {
+      // `#` tries the shortest prefix first, `##` the longest; `%` the
+      // shortest suffix first, `%%` the longest.
+      const length = longest ? value.length - step : step;
+      const piece = fromStart ? value.slice(0, length) : value.slice(value.length - length);
+      const matched = shellPatternMatches(pattern, piece);
+      if (matched === null) return null;
+      if (matched) return fromStart ? value.slice(length) : value.slice(0, value.length - length);
+    }
+    return value;
+  }
+  const substring = /^:\s*(-?\d+)\s*(?::\s*(-?\d+)\s*)?$/u.exec(rest);
+  if (substring !== null) {
+    let start = Number(substring[1]);
+    if (start < 0) start = value.length + start;
+    if (start < 0 || start > value.length) return "";
+    if (substring[2] === undefined) return value.slice(start);
+    let length = Number(substring[2]);
+    const end = length < 0 ? value.length + length : start + length;
+    if (end < start) return null;
+    length = end - start;
+    return value.slice(start, start + length);
+  }
+  const replace = /^\/([#%/]?)([^/]*)(?:\/([\s\S]*))?$/u.exec(rest);
+  if (replace !== null) {
+    const [mode, pattern, replacement] = [replace[1] as string, replace[2] as string, replace[3] ?? ""];
+    if (/[*?[]/u.test(pattern) || replacement.includes("&")) return null;
+    if (pattern === "") return value;
+    if (mode === "/") return value.split(pattern).join(replacement);
+    if (mode === "#") return value.startsWith(pattern) ? `${replacement}${value.slice(pattern.length)}` : value;
+    if (mode === "%") return value.endsWith(pattern) ? `${value.slice(0, value.length - pattern.length)}${replacement}` : value;
+    return value.replace(pattern, () => replacement);
+  }
+  const caseChange = /^(\^\^?|,,?|~~?)$/u.exec(rest);
+  if (caseChange !== null) {
+    const flip = (c: string): string => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase());
+    const change = (c: string): string => {
+      const op = (caseChange[1] as string)[0];
+      return op === "^" ? c.toUpperCase() : op === "," ? c.toLowerCase() : flip(c);
+    };
+    return (caseChange[1] as string).length === 2 ? [...value].map(change).join("") : `${change(value.slice(0, 1))}${value.slice(1)}`;
+  }
+  return null;
+}
+
+/**
+ * The variables of these segments whose value is a known plain literal
+ * (security review, point i): assigned by a `NAME=value` word in a run of
+ * assignment-only segments at the start (none in a subshell, none piped), the
+ * value free of globs, expansions, `~` and escapes, and the name written
+ * nowhere else in the text but as `$NAME` or `${NAME…}` (so `read`, `for`,
+ * `printf -v`, `declare`, a second assignment and the like make it unknown).
+ * Positionals, special parameters and array elements are never known.
+ */
+function knownLiteralValues(segments: readonly LexSegment[], inherited: ReadonlyMap<string, string>): Map<string, string> {
+  const known = new Map(inherited);
+  const assigned = new Map<string, number>();
+  const raw = segments.map((segment) => segment.text).join("\n");
+  let leading = true;
+  for (const [index, segment] of segments.entries()) {
+    const only =
+      segment.words.length > 0 &&
+      bashAssignmentCount(segment.words) === segment.words.length &&
+      segment.redirects.length === 0 &&
+      segment.bodySubstitutions.length === 0 &&
+      !segment.subshell &&
+      !segment.stdinFed &&
+      segments[index + 1]?.stdinFed !== true;
+    if (!only) leading = false;
+    for (const word of segment.words) {
+      const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=/u.exec(word.text);
+      if (assignment === null) continue;
+      const name = assignment[1] as string;
+      assigned.set(name, (assigned.get(name) ?? 0) + 1);
+      known.delete(name);
+      const value = word.text.slice(assignment[0].length);
+      if (leading && only && word.substitutions.length === 0 && !/[$`?*[\]~\\{}]/u.test(value) && assigned.size <= 64) known.set(name, value);
+    }
+  }
+  for (const name of known.keys()) {
+    if (inherited.has(name) && !assigned.has(name)) continue;
+    let elsewhere = 0;
+    for (const found of raw.matchAll(new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`, "gu"))) {
+      const before = raw.slice(Math.max(0, (found.index ?? 0) - 3), found.index ?? 0);
+      if (!/(?:\$|\$\{|\$\{[!#])$/u.test(before)) elsewhere += 1;
+    }
+    if (elsewhere !== 1 || assigned.get(name) !== 1) known.delete(name);
+  }
+  return known;
+}
+
 /**
  * Does a parameter expansion in this word carry `.git` (review of the
  * substitution fold, S2, and its security review, points d and e)? Each
@@ -5140,7 +5297,7 @@ function bodyPrintsGit(segments: readonly LexSegment[]): boolean {
  * A nested expansion stands, inside another's word, as the text it may
  * carry or as an unknown output.
  */
-function expansionWordNamesGit(text: string, cut: boolean): boolean {
+function expansionWordNamesGit(text: string, cut: boolean, known: ReadonlyMap<string, string> = new Map()): boolean {
   if (!text.includes("${")) return false;
   const valueNamesGit = (value: string): boolean =>
     GIT_SEGMENT_IN_TEXT.test(value.split(SUBSTITUTION_SENTINEL).join("/")) ||
@@ -5181,29 +5338,20 @@ function expansionWordNamesGit(text: string, cut: boolean): boolean {
       if (valueNamesGit(value)) return true;
       standIn = value;
       rewritten = true;
-    } else if (rest.startsWith("/")) {
-      const body = rest.replace(/^\/[#%/]?/u, "");
-      let slash = -1;
-      for (let index = 0; index < body.length; index += 1) {
-        if (body[index] === "\\") index += 1;
-        else if (body[index] === "/") {
-          slash = index;
-          break;
-        }
-      }
-      const replacement = slash === -1 ? "" : body.slice(slash + 1);
-      standIn = `${SUBSTITUTION_SENTINEL}${replacement}${SUBSTITUTION_SENTINEL}`;
-      if (valueNamesGit(standIn)) return true;
-      rewritten = true;
-    } else if (/^@[EP]$/u.test(rest)) {
-      return true;
-    } else if (/^(?:#|##|%|%%)/u.test(rest) || /^:[-\s0-9(]/u.test(rest) || /^:[A-Za-z_$]/u.test(rest)) {
-      if (cut) return true;
-      standIn = unknownValue;
-    } else if (/^(?:\^\^?|,,?|~~?|:\?|\?|@[A-Za-z])/u.test(rest)) {
+    } else if (/^:?\?/u.test(rest)) {
+      // `:?` and `?` give the value itself or stop the shell: as `$V`.
       standIn = unknownValue;
     } else {
-      return true;
+      // Every other operator transforms the value (removal, substring,
+      // replacement, case, `@`): it counts as naming `.git` unless the value
+      // is a known plain literal and the result is worked out exactly and is
+      // no `.git` (security review, point i). Positionals, special
+      // parameters and array elements are never known.
+      const value = known.get((name as RegExpExecArray)[0]);
+      const result = cut || value === undefined ? null : evaluateExpansion(value, rest);
+      if (result === null || valueNamesGit(result)) return true;
+      standIn = result;
+      rewritten = true;
     }
     open[open.length - 1] += standIn;
   }
@@ -5229,7 +5377,13 @@ function expansionWordNamesGit(text: string, cut: boolean): boolean {
  * levels; a deeper one counts as naming `.git`, the strict side, so the
  * reading's cost and its depth on the call stack stay bounded.
  */
-function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): boolean {
+function lineSpellsGitIndirectly(
+  segments: readonly LexSegment[],
+  depth = 0,
+  inherited: ReadonlyMap<string, string> = new Map(),
+): boolean {
+  // The variables whose value is a known plain literal (point i).
+  const known = knownLiteralValues(segments, inherited);
   // Removal and substring expansions count on a line that holds `.git`
   // anywhere: its raw text, that text with escapes decoded, or a word's or
   // target's text with quotes removed (security review, point g); and on a
@@ -5270,7 +5424,7 @@ function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): bo
     return (
       lexed.segments.some(asksGitForItsDirectory) ||
       bodyPrintsGit(lexed.segments) ||
-      lineSpellsGitIndirectly(lexed.segments, depth + 1)
+      lineSpellsGitIndirectly(lexed.segments, depth + 1, known)
     );
   };
   return segments.some((segment) => {
@@ -5283,7 +5437,7 @@ function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): bo
       words.some((word, index) => {
         if (word.substitutions.some(bodyNamesGit)) return true;
         if (wordJoinsGitAcrossSubstitution(word.text)) return true;
-        if (expansionWordNamesGit(word.text, cut)) return true;
+        if (expansionWordNamesGit(word.text, cut, known)) return true;
         // An assignment's VALUE is judged as a target is, patterns and braces
         // included (`D=.gi?`, `D=.g{i,}t`, `D='.[g]it'`): an unquoted `$D`
         // later expands it. Its words after `:` (a PATH-like list) too.
