@@ -921,6 +921,22 @@ a segment that is not a read (`tee`, `cp`, `mv`, `sed -i`, `rm`, `ln`, and
 Reads (`cat .git/config`), `.gitignore`, and prose with spaces in it are
 unmoved. `rm -f .git/index.lock` is in the class too.
 
+The rule follows a write past the literal text of its target. The classifier
+follows the line's own literal `cd`, `pushd` and `popd` (absolute, `./` or
+`../`, `~/`), so `cd .git && printf … >> config` and `cd .git/hooks && cp
+/tmp/x pre-push` are `git-dir-write`, while `cd .git/.. && echo x > notes`
+and `cd sub && echo x > notes.txt` are not; a `cd` it cannot follow (`cd
+"$D"`, `cd -`, one behind `HOME=` or `CDPATH=`) moves nothing. A bare
+redirection (`> .git/config`) takes the same rule. An option value attached
+to its letter names a target as surely as a separate word: `curl
+-o.git/config`, `wget -O.git/hooks/pre-push`, `cp -t.git/hooks`, `tar -C.git`
+and their `--long=` forms. Before any other pass, the hook resolves every
+write target where the disk lands it, from its own directory and each
+followed `cd`, through symlinks that exist (`g -> .git`), and against the
+checkout's git directory as its `.git` file names it (a linked worktree, a
+`--separate-git-dir`): a landing inside a git directory is `git-dir-write`,
+and so is a relative write from a hook whose own directory is inside one.
+
 **The hook reads the checkout before it answers a push.** After the pure
 classifier, `refinePushRepo` (`src/cli/push-repo.ts`) re-reads every `git push`
 segment under what the checkout says: `git rev-parse --git-common-dir`, `git
@@ -951,6 +967,16 @@ anything under `~/.config/git/`, `/etc/gitconfig`) are `vcs.history.rewrite`
 too (rule `git-config-file-write`), and a bare `GIT_*=` or
 `XDG_CONFIG_HOME=` assignment is refused, as `HOME=` already was (APRV-521's
 bare-assignment rule; its harmless words, such as `GIT_PAGER=cat`, still pass).
+
+A tag can also appear on the line itself. A plain `git fetch` follows tags
+(on git 2.50.1 it created a local tag), and `git tag`, `git pull`, `git
+remote update` and a fetch into `refs/tags/` can make one, after the hook read
+the checkout. So after such a segment a colon-less push word that is no local
+branch is at least `release.publish` (rule `git-push-new-tag`): `git fetch
+origin main:refs/tags/rel2 && git push origin rel2` published a tag while it
+read as a branch push. A word that is a local branch keeps its answer, because
+git refuses a source that is both a branch and a tag, and `HEAD` and `@` are
+unaffected, so `git fetch && git push -u origin lane` is still a branch push.
 
 Destinations are read the way git's ref DWIM reads them, in the pure
 classifier too: `heads/main` is `refs/heads/main` (git tries `refs/<name>`
@@ -1008,8 +1034,12 @@ these is denied to an agent and needs a person to run it:
 - every `git remote` form outside the read list: `add`, `set-url`, `rename`,
   `remove`, `set-head`, `set-branches`, `prune` and `update --prune`;
 - any write into `.git`, such as `rm -f .git/index.lock` after a crashed git
-  process, and any write to `~/.gitconfig`, `~/.config/git/` or
-  `/etc/gitconfig`.
+  process or `cd .git && rm index.lock`, and any write to `~/.gitconfig`,
+  `~/.config/git/` or `/etc/gitconfig`.
+
+A push after a fetch of a word that is no local branch (`git fetch && git push
+-u origin new-branch`) is `release.publish`, manual here; git refuses that push
+anyway unless the word is a tag.
 
 The way round for an agent is the push in its own Bash call. `git add -A &&
 git commit -m x` first, then `git push -u origin lane` alone: the hook reads
