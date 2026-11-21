@@ -336,15 +336,58 @@ def bound_pairs(fn):
                 if isinstance(a, ast.Name):
                     yield a.id, b
 
+def block_of(par, stmt):
+    """The statement list that holds a statement, or None."""
+    owner = par.get(stmt)
+    for field in ("body", "orelse", "finalbody", "handlers"):
+        block = getattr(owner, field, None)
+        if isinstance(block, list) and any(x is stmt for x in block):
+            return block
+    return None
+
+def spine(par, fn, call):
+    """S1 position rule: [(block, index)] for the statement holding the propose and each statement
+    around it up to the function's own body, climbing only out of an if or else branch, a try body
+    or a with body. None when the propose sits in a loop, an except or finally block, or a nested
+    def, class or lambda: no statement after it is then on every path from it."""
+    node = call
+    while not isinstance(node, ast.stmt):
+        node = par.get(node)
+        if node is None or isinstance(node, ast.Lambda):
+            return None
+    out = []
+    while True:
+        owner = par.get(node)
+        block = block_of(par, node)
+        if block is None:
+            return None
+        out.append((block, next(i for i, x in enumerate(block) if x is node)))
+        if owner is fn:
+            return out if block is fn.body else None
+        if isinstance(owner, ast.If) or (isinstance(owner, (ast.With, ast.AsyncWith)) and block is owner.body) or (isinstance(owner, ast.Try) and block is owner.body):
+            node = owner
+            continue
+        return None
+
+def ends_flow(body):
+    return bool(body) and isinstance(body[-1], (ast.Return, ast.Raise))
+
 def accepted_answers(m, par, call):
     """S1: the daemon answers the plugin goes on with after this propose, read in the enclosing
     function, where decision is the propose's answer's 'doc.get("decision")' (on 'answer.doc', or on
-    a name bound from it; direct, or a name bound from it, also as one member of 'a, b = x, y'):
-    - every 'decision != "x"' or 'decision not in (...)' narrows it to those answers;
+    a name bound from it; direct, or a name bound from it, also as one member of 'a, b = x, y').
+    Only an 'if' that every path from the propose passes through counts: a statement after the
+    propose in the block that holds it, or in a block around it the propose leaves only by an if
+    or else branch, a try body or a with body, in the same function (never a nested def, class or
+    lambda); see 'spine'. There:
+    - an 'if' whose body returns or raises, tested by 'decision != "x"' or 'decision not in (...)'
+      (alone, or as one operand of an 'or'), narrows it to those answers;
     - an if/elif chain that tests the decision and ends in an 'else' that returns or raises narrows
-      it to the answers its branches admit ('== "x"' or 'in (...)', alone or under 'and'; a test that
-      names no decision admits every answer); a chain testing the decision any other way is unread.
-    None (unread, the check fails closed) when nothing narrows it or a chain cannot be read."""
+      it to the answers of the branches the code goes on from ('== "x"' or 'in (...)', alone or
+      under 'and'; a test that names no decision admits every answer; a branch that returns or
+      raises admits none).
+    None (unread, the check fails closed) when nothing narrows it, or a narrowing comparison or a
+    chain that tests the decision sits anywhere else or in a form not read."""
     fn = enclosing(par, call, (ast.FunctionDef, ast.AsyncFunctionDef))
     assign = par.get(call)
     if fn is None or not (isinstance(assign, ast.Assign) and len(assign.targets) == 1 and isinstance(assign.targets[0], ast.Name)):
@@ -363,20 +406,30 @@ def accepted_answers(m, par, call):
         return is_decision(n) or (isinstance(n, ast.Name) and n.id in names)
     def mentions(n):
         return any(names_decision(x) for x in ast.walk(n))
+    where = spine(par, fn, call)
+    def after_propose(stmt):
+        block = block_of(par, stmt)
+        return where is not None and block is not None and any(b is block and next(j for j, x in enumerate(block) if x is stmt) > i for b, i in where)
     allowed = None
     for n in ast.walk(fn):
-        if not (isinstance(n, ast.Compare) and len(n.ops) == 1 and names_decision(n.left)):
+        if not (isinstance(n, ast.Compare) and len(n.ops) == 1 and names_decision(n.left) and isinstance(n.ops[0], (ast.NotEq, ast.NotIn))):
             continue
+        guard = par.get(n)
+        if isinstance(guard, ast.BoolOp) and isinstance(guard.op, ast.Or):
+            guard = par.get(guard)
+        if not (isinstance(guard, ast.If) and (guard.test is n or (isinstance(guard.test, ast.BoolOp) and isinstance(guard.test.op, ast.Or) and any(v is n for v in guard.test.values)))
+                and ends_flow(guard.body) and after_propose(guard)):
+            return None  # a narrowing that does not guard every path from the propose: unread
         try:
             right = ev(m, n.comparators[0])
         except Unresolved:
-            continue
+            return None
         if isinstance(n.ops[0], ast.NotEq) and isinstance(right, str):
             got = {right}
         elif isinstance(n.ops[0], ast.NotIn) and isinstance(right, list):
             got = set(right)
         else:
-            continue
+            return None
         allowed = got if allowed is None else allowed & got
     def admits(test):
         """The answers one branch test admits; Unresolved when it tests the decision another way."""
@@ -396,18 +449,19 @@ def accepted_answers(m, par, call):
         head = par.get(n)
         if not isinstance(n, ast.If) or (isinstance(head, ast.If) and head.orelse == [n]):
             continue  # not an if, or an elif inside a chain read from its head
-        tests, node = [], n
+        branches, node = [], n
         while True:
-            tests.append(node.test)
+            branches.append(node)
             if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
                 node = node.orelse[0]
                 continue
             break
-        final = node.orelse
-        if not any(mentions(t) for t in tests) or not final or not isinstance(final[-1], (ast.Return, ast.Raise)):
+        if not any(mentions(b.test) for b in branches) or not ends_flow(node.orelse):
             continue  # a chain that never tests the decision, or no else that ends the flow
+        if not after_propose(n):
+            return None  # before the propose, nested, or under a branch, loop, try or with that can be skipped
         try:
-            got = set().union(*(admits(t) for t in tests))
+            got = set().union(*(set() if ends_flow(b.body) else admits(b.test) for b in branches))
         except Unresolved:
             return None
         allowed = got if allowed is None else allowed & got
@@ -489,15 +543,28 @@ for plugin in (sorted(os.listdir(root)) if os.path.isdir(root) else []):
             aliases = {"register_tool"}
             # Review N1: every spelling of a daemon propose is read: '<x>.propose(...)' on any object
             # ('self' included), a bare 'propose(...)', a name imported as propose, or a local name bound
-            # from getattr(<x>, "propose"[, default]). Its class is then read or the site is unread.
+            # from getattr(<x>, "propose"[, default]), from '<x>.propose' or from another such name. Its
+            # class is then read or the site is unread. Any other reference to a propose that is not called
+            # on the spot (passed, stored, wrapped in a partial) is an unread site: the check fails closed.
             proposers = {"propose"}
+            bound = set()  # the '<x>.propose' and proposer names an alias assignment reads
+            for _ in range(2):  # an alias of an alias
+                for node in ast.walk(tree):
+                    if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                            and node.value.func.id == "getattr" and len(node.value.args) >= 2
+                            and isinstance(node.value.args[1], ast.Constant) and node.value.args[1].value in ("register_tool", "propose")):
+                        (aliases if node.value.args[1].value == "register_tool" else proposers).update(t.id for t in node.targets if isinstance(t, ast.Name))
+                    elif (isinstance(node, ast.Assign) and all(isinstance(t, ast.Name) for t in node.targets)
+                            and ((isinstance(node.value, ast.Attribute) and node.value.attr == "propose") or (isinstance(node.value, ast.Name) and node.value.id in proposers))):
+                        proposers.update(t.id for t in node.targets)
+                        bound.add(node.value)
+                    elif isinstance(node, ast.ImportFrom):
+                        proposers.update(a.asname for a in node.names if a.name == "propose" and a.asname)
             for node in ast.walk(tree):
-                if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
-                        and node.value.func.id == "getattr" and len(node.value.args) >= 2
-                        and isinstance(node.value.args[1], ast.Constant) and node.value.args[1].value in ("register_tool", "propose")):
-                    (aliases if node.value.args[1].value == "register_tool" else proposers).update(t.id for t in node.targets if isinstance(t, ast.Name))
-                elif isinstance(node, ast.ImportFrom):
-                    proposers.update(a.asname for a in node.names if a.name == "propose" and a.asname)
+                ref = (isinstance(node, ast.Attribute) and node.attr == "propose") or (isinstance(node, ast.Name) and node.id in proposers)
+                if ref and isinstance(node.ctx, ast.Load) and node not in bound and not (isinstance(par.get(node), ast.Call) and par[node].func is node):
+                    proposes.append({"plugin": plugin, "file": rel, "line": node.lineno, "accepts": None, "class": None,
+                                     "why": "a propose referenced but not called on the spot (passed, stored or wrapped), so its class cannot be read"})
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue

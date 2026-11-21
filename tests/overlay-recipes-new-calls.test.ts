@@ -653,6 +653,74 @@ test("without --with-envelopes the corpus carries no envelope keys (the pinned c
   rmSync(dir, { recursive: true, force: true });
 });
 
+// --- review of S1: the answers are read only where every path from the propose goes, and a propose reached
+// through a name or passed along is read or fails closed ----------------------------------------------------
+
+/** The av-events sites of one fixture module, by line: [line, class, accepts, why]. */
+function eventsSites(module: string): [unknown, unknown, unknown, unknown][] {
+  const run = extractFixture({ extra: { "plugins/av-events/_m.py": module } });
+  assert.equal(run.status, 0, run.err);
+  return (run.corpus["proposes"] as Json[])
+    .filter((p) => p["plugin"] === "av-events")
+    .sort((a, b) => Number(a["line"]) - Number(b["line"]))
+    .map((p) => [p["line"], p["class"], p["accepts"], p["why"] ?? null]);
+}
+const py = (...lines: string[]): string => `${lines.join("\n")}\n`;
+const CHAIN = ['    if decision == "requested":', "        x = 1", "    else:", "        return None"];
+
+test("S1 position: a chain on the decision BEFORE the propose makes its answers unread", { skip: NO_BUN }, () => {
+  const sites = eventsSites(py("def f(ap, decision):", ...CHAIN, '    answer = ap.propose("digest.share", "k", "s", "{}")', '    decision = answer.doc.get("decision")', "    return answer"));
+  assert.deepEqual(sites.map((x) => [x[0], x[2]]), [[6, null]]);
+});
+
+test("S1 position: a chain in a nested def makes the answers unread", { skip: NO_BUN }, () => {
+  const sites = eventsSites(py("def f(ap):", '    answer = ap.propose("digest.share", "k", "s", "{}")', '    decision = answer.doc.get("decision")', "    def later():", ...CHAIN.map((l) => `    ${l}`), "    return later"));
+  assert.deepEqual(sites.map((x) => [x[0], x[2]]), [[2, null]]);
+});
+
+test("S1 position: a chain under an outer if that can be skipped makes the answers unread; one after a try body around the propose is read", { skip: NO_BUN }, () => {
+  const skipped = eventsSites(py("def f(ap, flag):", '    answer = ap.propose("digest.share", "k", "s", "{}")', '    decision = answer.doc.get("decision")', "    if flag:", ...CHAIN.map((l) => `    ${l}`), "    return 1"));
+  assert.deepEqual(skipped.map((x) => [x[0], x[2]]), [[2, null]]);
+  // The av-events shape: the propose inside a try body, the chain after the try, on every path from it.
+  const tried = eventsSites(py("def f(ap):", "    try:", '        answer = ap.propose("digest.share", "k", "s", "{}")', "    except ValueError:", "        return None", '    decision = answer.doc.get("decision")', ...CHAIN, "    return 1"));
+  assert.deepEqual(tried.map((x) => [x[0], x[2]]), [[3, ["requested"]]]);
+  // A narrowing under a skippable branch is unread too.
+  const narrowed = eventsSites(py("def f(ap, flag):", '    answer = ap.propose("digest.share", "k", "s", "{}")', "    if flag:", '        if answer.doc.get("decision") != "requested":', "            return None", "    return 1"));
+  assert.deepEqual(narrowed.map((x) => [x[0], x[2]]), [[2, null]]);
+});
+
+test("S1 position: a branch that returns or raises does not admit its answers; only the branches the code goes on from do", { skip: NO_BUN }, () => {
+  const sites = eventsSites(py(
+    "def f(ap):",
+    '    answer = ap.propose("digest.share", "k", "s", "{}")',
+    '    decision = answer.doc.get("decision")',
+    '    if decision == "autonomous":',
+    "        return None",
+    '    elif decision in ("requested", "supervised"):',
+    "        x = 1",
+    "    else:",
+    "        raise ValueError(decision)",
+    "    return x",
+  ));
+  assert.deepEqual(sites.map((x) => [x[0], x[2]]), [[2, ["requested", "supervised"]]]);
+});
+
+test("S1 detection: a propose called through a name bound from <x>.propose is read", { skip: NO_BUN }, () => {
+  const sites = eventsSites(py("def f(self):", "    p = self.daemon.propose", '    answer = p("digest.share", "k", "s", "{}")', '    if answer.doc.get("decision") != "requested":', "        return None", "    return answer"));
+  assert.deepEqual(sites.map((x) => [x[0], x[1], x[2]]), [[3, "digest.share", ["requested"]]]);
+});
+
+test("S1 detection: a propose wrapped in functools.partial is an unread site (fail closed)", { skip: NO_BUN }, () => {
+  const sites = eventsSites(py("import functools", "def f(ap):", '    send = functools.partial(ap.propose, "digest.share")', '    return send("k", "s", "{}")'));
+  assert.deepEqual(sites.map((x) => [x[0], x[1]]), [[3, null]]);
+  assert.match(String(sites[0]?.[3]), /referenced but not called on the spot/u);
+});
+
+test("S1 detection: a propose passed as an argument, or stored in a dict, is an unread site (fail closed)", { skip: NO_BUN }, () => {
+  const sites = eventsSites(py("def f(ap, run):", '    run(ap.propose, "digest.share")', '    table = {"share": ap.propose}', "    return table"));
+  assert.deepEqual(sites.map((x) => [x[0], x[1]]), [[2, null], [3, null]]);
+});
+
 // --- box half: the real hook of this build ------------------------------------------
 
 const scratch = mkdtempSync(join(tmpdir(), "new-calls-test-"));

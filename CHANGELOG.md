@@ -174,9 +174,14 @@ ordinary workspace write.
     module's own guards compare that field with; the answers also read through
     `doc = answer.doc`, a pair assignment, or an `if`/`elif` chain whose `else`
     ends the flow. What the extractor cannot read fails closed, and so does a
-    corpus that still lists proposes apart. `self.propose(...)`, a bare
-    `propose(...)`, a name imported as `propose` and a `getattr` alias are read
-    as proposes. `expected.json` declares the four av-events sites (intent
+    corpus that still lists proposes apart. A comparison or chain counts only
+    where every path from the propose passes through it (after it, in the same
+    function, not under a branch, loop, try or with that can be skipped), and
+    a branch that returns or raises admits no answer; one anywhere else leaves
+    the answers unread. `self.propose(...)`, a bare `propose(...)`, a name
+    imported as `propose`, a `getattr` alias and a name bound from
+    `<x>.propose` are read as proposes; a propose passed, stored or wrapped
+    (a `functools.partial`) is an unread site. `expected.json` declares the four av-events sites (intent
     publish, digest share, village vote) as eight entries; six are limiting
     and wait for Carter's acceptance.
 - **CLASS-DIFF against the core the boxes run (B-167 release gate).**
