@@ -302,3 +302,65 @@ test("hook: the S1 and S2 spellings are git-dir-write in a checkout", { skip }, 
   assert.deepEqual(hook("printf $'a\\tb\\n' > out.tsv", repo), [REDIRECT]);
   assert.deepEqual(hook('echo x > "${OUT:-build}/log.txt"', repo), [REDIRECT]);
 });
+
+// ---------------------------------------------------------------------------
+// Security review of the S1 and S2 folds, points a to e: each only stricter
+// ---------------------------------------------------------------------------
+
+test("security review a: every ANSI-C piece of a word is decoded and joined, quotes removed", () => {
+  assert.deepEqual(pure("echo x >> $'\\x2e'g''$'\\x69'\"t\"/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> $'\\x2e'\"g\"\"i\"\"t\"/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> $'\\x2e'gi\"t\"/config"), [DIR_WRITE]);
+  // A glob where the word is unquoted, and an output beside the string.
+  assert.deepEqual(pure("cd $'\\x2eg'i? && echo x >> config"), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> $'\\x2e'$(printf git)/config"), [DIR_WRITE]);
+  // A decoded `.` that is no segment's start is no `.git`.
+  assert.deepEqual(pure("echo x > a$'\\x2e'gitx"), [REDIRECT]);
+});
+
+test("security review b: quotes are tracked, and a quote that does not close is the strict side", () => {
+  // `$'` inside single quotes is text the shell leaves as written.
+  assert.deepEqual(pure("echo '$'\"'\"'\\x2egit' > \"$D\""), [REDIRECT]);
+  // The lexer and the shell disagree on `\'` inside `$'…'`: unreadable, strict.
+  assert.deepEqual(pure("echo $'x\\'' ' > \"$D\""), [DIR_WRITE]);
+});
+
+test("security review c: what printf or echo prints is read with quotes removed", () => {
+  assert.deepEqual(pure("echo x >> \"$(printf '\\x2e''git')/config\""), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(printf '%sgit' .)/config\""), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(printf '%s' .g it)/config\""), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(printf '\\x2e%s' git)/config\""), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(echo -e '\\x2e'\"git\")/config\""), [DIR_WRITE]);
+  // Two segments print in turn; an argument the text cannot read is an unknown output.
+  assert.deepEqual(pure('echo x >> "$(printf .g; printf it)/config"'), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(printf '%s%s' .g \"$X\")/config\""), [DIR_WRITE]);
+  // Printed text that cannot make .git does not move.
+  assert.deepEqual(pure("echo x > \"$(printf '%03d' 7).txt\""), [REDIRECT]);
+  assert.deepEqual(pure('echo "$(date +%F; echo .txt)" > out.txt'), [REDIRECT]);
+  assert.deepEqual(pure("echo x > \"$(printf '%s-%s' \"$a\" \"$b\").txt\""), [REDIRECT]);
+});
+
+test("security review d: the other parameter expansion operators", () => {
+  // A replacement's new text sits between unknown runs of the value.
+  assert.deepEqual(pure("G=xgit; echo x >> ${G/x/.}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${G//a/.}/config"), [DIR_WRITE]);
+  // Removal and substring, on a line whose text holds .git.
+  assert.deepEqual(pure("G=.gitx; echo x >> ${G%x}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("G=.gitx; echo x >> ${G:0:4}/config"), [ASSIGNMENT, DIR_WRITE]);
+  // @E decodes escapes the value may hold.
+  assert.deepEqual(pure("X='\\x2egit'; echo x >> ${X@E}/config"), [ASSIGNMENT, DIR_WRITE]);
+  // Ordinary uses do not move.
+  assert.deepEqual(pure('echo x > "${f%.txt}.log"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${f/.txt/.md}"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "out/${NAME,,}.txt"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${#X}.txt"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${name}.${ext}"'), [REDIRECT]);
+});
+
+test("security review e: a nested expansion in an operator's word is an output that joins", () => {
+  assert.deepEqual(pure("echo x >> ${A:-.g${B}t}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> .g${A:-i}t/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${A:-.g$(printf i)t}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure('echo x > "${OUT:-${HOME}/out}/f"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${OUT:-out}.${EXT:-txt}"'), [REDIRECT]);
+});
