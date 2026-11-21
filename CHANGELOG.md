@@ -150,13 +150,27 @@ on the change above.
 - **A tree that carries `.git`.** In the hook, a copy or move whose source
   holds a `.git` entry at its top (`cp -R /x/. .`, `rsync -a /x/ .`) is
   `git-dir-write`.
+- **`.git` spelled by a substitution.** Two more spellings count as the line
+  spelling `.git`. The first is git's own answer: a substitution that runs
+  `git rev-parse` with `--git-dir`, `--absolute-git-dir`,
+  `--git-common-dir`, `--git-path`, `--resolve-git-dir` or
+  `--shared-index-path` (so `cd "$(git rev-parse --git-dir)" && echo x >>
+  config` is `git-dir-write`). The second is a spelling split across the
+  substitution's edge: literal text and the output that can join into
+  `.git` (`$(printf .gi)t`, `.g$(printf it)`, `.$(echo g)it`). Words whose
+  literal text cannot be part of `.git` do not move (`out/$(date
+  +%F).txt`, `$(pwd)/build/x`), and neither does `git rev-parse
+  --show-toplevel` or `--short`. A substitution's body is read as a line of
+  its own, and a `bash -lc` script reads its own text too.
 - **Looser than the change above, by design.** A read whose only write is its
   redirection writes nothing through its own words: `cat .git/HEAD > /tmp/x`,
   `ls .git/hooks > list.txt` and the like are the workspace write 0.4.8 called
   them, not `git-dir-write`. A redirection into `.git`, and a non-read with a
   `.git` operand (`cp .git/config /tmp/c`), stay `git-dir-write`.
 - **Known limits.** A variable set in an earlier call, or a value built from
-  several expansions (`A=.g; B=it; cd $A$B`); an archive unpacked into the
+  several expansions (`A=.g; B=it; cd $A$B`), so `cd $VAR && echo x >>
+  config` stays; a `git rev-parse` option passed in a variable (`git
+  rev-parse $OPT`); an archive unpacked into the
   checkout (`tar -xf`, `unzip`); a git include file (`~/.gitconfig.local`);
   a `sed -f` script file; the push pass does not read `core.hooksPath`; and,
   as above, a relative write after a `cd` the hook cannot place.
@@ -168,6 +182,16 @@ on the change above.
   above. Conformance: `command-class` 1.11.0 (from 1.10.0), five new
   vectors; main's 370 are byte-identical. The fleet's 63 overlay recipes are
   unmoved.
+- **Evidence, substitution spellings.** Against the follow-up's own build,
+  0 looser, and 647 lines move, every one stricter (or the same rank under
+  the overlay's template): 646 carry one of the two spellings, and one is a
+  `bash -lc` script whose own assignment spells `.git`. Against 0.4.8's
+  build and against main as merged, 0 looser of its own, over 25,617 lines
+  pure (153,702 comparisons) and 4,283 lines through the hook in thirteen
+  checkout states (222,716 comparisons); against main, the five redirected
+  reads above stay as they were. Conformance: `command-class` 1.12.0 (from
+  1.11.0), four new vectors; the follow-up's 375 are byte-identical. The
+  fleet's 63 overlay recipes are unmoved.
 
 ## 0.4.8 — 2026-11-20
 
