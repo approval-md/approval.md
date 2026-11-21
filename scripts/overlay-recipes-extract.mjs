@@ -172,16 +172,207 @@ export function gatedPatterns(text) {
 /**
  * 3b: every tool a plugin registers, with the input schema it registers it with
  * (P6: the real schema, never a hand-written one). Read by python3's own parser
- * (`ast`), never by importing the plugin: a `register_tool(name=..., schema=X)`
- * call whose name is a string literal and whose schema is a module-level dict
- * literal (village-bridge/__init__.py `SCHEMA`, literal-evaluated as R-DEON's
- * proof already does). A registration this cannot read is reported, so the
- * check fails closed on it when a gated tool is involved.
+ * (`ast`), never by importing the plugin. A registration is any call of
+ * `<x>.register_tool(...)`, of a bare `register_tool(...)`, or of a local name
+ * bound from `getattr(<x>, "register_tool", ...)` (the overlay's house style,
+ * B-167N review M1). Its name and schema are literals, module-level constants
+ * (of the module or a sibling it imports from), or the rows of the literal list
+ * a `for name, schema, ... in <list>` loop walks (av-events `_share_vote`).
+ * A registration this cannot read is reported (`unread`), so the check fails
+ * closed on it when a gated tool is involved, or when its name is unknown.
+ *
+ * The same pass reads, for the check:
+ * - every `<x>.propose(<class>, ...)` daemon propose (review M3), with its file,
+ *   line and class (a literal, a module constant, or the template a module
+ *   function `return PREFIX + "." + param` makes), and the daemon answers the
+ *   plugin goes on with after it (`accepts`, review S1: every
+ *   `decision != "x"` / `decision not in (...)` on that answer in the same
+ *   function);
+ * - the village tool's READ_OPERATIONS, WRITE_OPERATIONS and
+ *   APP_SCOPED_OPERATIONS (review M2), beside the module that registers it.
  */
 const PLUGIN_TOOLS_PY = String.raw`
 import ast, json, os, sys
 root = sys.argv[1]
-out, unread = [], []
+out, unread, proposes, village_ops = [], [], [], None
+
+class Unresolved(Exception):
+    pass
+
+MODS = {}  # path -> module info
+
+def load(path):
+    if path in MODS:
+        return MODS[path]
+    tree = ast.parse(open(path, encoding="utf-8").read(), path)
+    consts, funcs, imports = {}, {}, {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            consts[node.targets[0].id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            consts[node.target.id] = node.value
+        elif isinstance(node, ast.FunctionDef):
+            funcs[node.name] = node
+        elif isinstance(node, ast.ImportFrom) and node.level == 1 and node.module:
+            target = os.path.join(os.path.dirname(path), node.module.replace(".", os.sep) + ".py")
+            for a in node.names:
+                imports[a.asname or a.name] = (target, a.name)
+    MODS[path] = m = {"path": path, "tree": tree, "consts": consts, "funcs": funcs, "imports": imports}
+    return m
+
+def lookup(m, name, depth):
+    if name in m["consts"]:
+        return m, m["consts"][name]
+    if name in m["imports"]:
+        target, orig = m["imports"][name]
+        if depth < 8 and os.path.isfile(target):
+            return lookup(load(target), orig, depth + 1)
+    raise Unresolved(name)
+
+def ev(m, node, depth=0, local=None):
+    """A literal, with names resolved to module-level constants (this module or a sibling it imports)."""
+    if depth > 40:
+        raise Unresolved("too deep")
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if local is not None and node.id in local:
+            return local[node.id]
+        mm, value = lookup(m, node.id, 0)
+        return ev(mm, value, depth + 1)
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        items = []
+        for e in node.elts:
+            if isinstance(e, ast.Starred):
+                items.extend(list(ev(m, e.value, depth + 1, local)))
+            else:
+                items.append(ev(m, e, depth + 1, local))
+        return items
+    if isinstance(node, ast.Dict):
+        if any(k is None for k in node.keys):
+            raise Unresolved("dict unpacking")
+        return {ev(m, k, depth + 1, local): ev(m, v, depth + 1, local) for k, v in zip(node.keys, node.values)}
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("frozenset", "set", "tuple", "list") and len(node.args) == 1 and not node.keywords:
+        return list(ev(m, node.args[0], depth + 1, local))
+    if isinstance(node, ast.Subscript):
+        key = node.slice.value if isinstance(node.slice, ast.Constant) else None
+        base = ev(m, node.value, depth + 1, local)
+        if isinstance(base, dict) and key in base:
+            return base[key]
+        raise Unresolved("subscript")
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        a, b = ev(m, node.left, depth + 1, local), ev(m, node.right, depth + 1, local)
+        if isinstance(a, str) and isinstance(b, str):
+            return a + b
+        raise Unresolved("add")
+    raise Unresolved(type(node).__name__)
+
+def parents_of(tree):
+    par = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            par[child] = node
+    return par
+
+def enclosing(par, node, kinds):
+    while node in par:
+        node = par[node]
+        if isinstance(node, kinds):
+            return node
+    return None
+
+def loop_bindings(m, par, call):
+    """M1: a registration inside 'for a, b, ... in <list>' (the list a literal or a name bound once in the
+    function): one binding of the loop variables per element. None when the call is in no such loop."""
+    loop = enclosing(par, call, (ast.For,))
+    if loop is None:
+        return None
+    target = loop.target
+    names = [t.id for t in target.elts] if isinstance(target, ast.Tuple) and all(isinstance(t, ast.Name) for t in target.elts) else ([target.id] if isinstance(target, ast.Name) else None)
+    if names is None:
+        raise Unresolved("loop target")
+    it = loop.iter
+    if isinstance(it, ast.Name):
+        fn = enclosing(par, loop, (ast.FunctionDef, ast.AsyncFunctionDef))
+        bound = [n.value for n in ast.walk(fn) if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and n.targets[0].id == it.id] if fn else []
+        if len(bound) != 1:
+            raise Unresolved("loop list")
+        it = bound[0]
+    if not isinstance(it, (ast.List, ast.Tuple)):
+        raise Unresolved("loop list")
+    rows = []
+    for elt in it.elts:
+        if len(names) == 1:
+            rows.append({names[0]: elt})
+        elif isinstance(elt, (ast.Tuple, ast.List)) and len(elt.elts) == len(names):
+            rows.append(dict(zip(names, elt.elts)))
+        else:
+            raise Unresolved("loop row")
+    return rows
+
+def arg_of(call, kw, pos):
+    for k in call.keywords:
+        if k.arg == kw:
+            return k.value
+    return call.args[pos] if len(call.args) > pos else None
+
+def accepted_answers(m, par, call):
+    """S1: the daemon answers the plugin goes on with after this propose: every 'decision != "x"' or
+    'decision not in (...)' in the enclosing function, where decision is the propose's answer's
+    'doc.get("decision")' (direct, or a name bound from it). None when nothing narrows it."""
+    fn = enclosing(par, call, (ast.FunctionDef, ast.AsyncFunctionDef))
+    assign = par.get(call)
+    if fn is None or not (isinstance(assign, ast.Assign) and len(assign.targets) == 1 and isinstance(assign.targets[0], ast.Name)):
+        return None
+    answer = assign.targets[0].id
+    def is_decision(n):
+        return (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get" and n.args
+                and isinstance(n.args[0], ast.Constant) and n.args[0].value == "decision"
+                and isinstance(n.func.value, ast.Attribute) and n.func.value.attr == "doc"
+                and isinstance(n.func.value.value, ast.Name) and n.func.value.value.id == answer)
+    names = {n.targets[0].id for n in ast.walk(fn) if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name) and is_decision(n.value)}
+    allowed = None
+    for n in ast.walk(fn):
+        if not (isinstance(n, ast.Compare) and len(n.ops) == 1):
+            continue
+        left = n.left
+        if not (is_decision(left) or (isinstance(left, ast.Name) and left.id in names)):
+            continue
+        try:
+            right = ev(m, n.comparators[0])
+        except Unresolved:
+            continue
+        if isinstance(n.ops[0], ast.NotEq) and isinstance(right, str):
+            got = {right}
+        elif isinstance(n.ops[0], ast.NotIn) and isinstance(right, list):
+            got = set(right)
+        else:
+            continue
+        allowed = got if allowed is None else allowed & got
+    return sorted(allowed) if allowed is not None else None
+
+def propose_class(m, node):
+    """M3: the class a propose names: a literal or module constant, or a module function returning
+    CONSTANT + "." + parameter called with a name (a class template, '<prefix>.{param}')."""
+    try:
+        v = ev(m, node)
+        if isinstance(v, str):
+            return {"class": v}
+    except Unresolved:
+        pass
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in m["funcs"] and len(node.args) == 1 and isinstance(node.args[0], ast.Name):
+        fn = m["funcs"][node.func.id]
+        params = [a.arg for a in fn.args.args]
+        body = [s for s in fn.body if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
+        if len(params) == 1 and len(body) == 1 and isinstance(body[0], ast.Return) and isinstance(body[0].value, ast.BinOp):
+            try:
+                prefix = ev(m, body[0].value, local={params[0]: "\u0000"})
+                if isinstance(prefix, str) and prefix.count("\u0000") == 1 and prefix.endswith("\u0000"):
+                    return {"class": None, "template": prefix.replace("\u0000", "{" + node.args[0].id + "}")}
+            except Unresolved:
+                pass
+    return {"class": None, "why": "the class is not a literal, a module constant or a class template"}
+
 for plugin in (sorted(os.listdir(root)) if os.path.isdir(root) else []):
     pdir = os.path.join(root, plugin)
     if not os.path.isdir(pdir) or plugin.startswith("."):
@@ -193,33 +384,67 @@ for plugin in (sorted(os.listdir(root)) if os.path.isdir(root) else []):
                 continue
             path = os.path.join(dirpath, f)
             rel = os.path.relpath(path, os.path.dirname(root))
-            tree = ast.parse(open(path, encoding="utf-8").read(), path)
-            consts = {}
-            for node in tree.body:
-                if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-                    consts[node.targets[0].id] = node.value
+            m = load(path)
+            tree = m["tree"]
+            par = parents_of(tree)
+            # M1: a local name bound from getattr(<x>, "register_tool"[, default]) registers too.
+            aliases = {"register_tool"}
             for node in ast.walk(tree):
-                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "register_tool"):
+                if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                        and node.value.func.id == "getattr" and len(node.value.args) >= 2
+                        and isinstance(node.value.args[1], ast.Constant) and node.value.args[1].value == "register_tool"):
+                    aliases.update(t.id for t in node.targets if isinstance(t, ast.Name))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
                     continue
-                kw = {k.arg: k.value for k in node.keywords if k.arg}
-                name = kw.get("name")
-                if isinstance(name, ast.Name) and name.id in consts:
-                    name = consts[name.id]
-                schema = kw.get("schema")
-                if isinstance(schema, ast.Name) and schema.id in consts:
-                    schema = consts[schema.id]
-                if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
-                    unread.append({"plugin": plugin, "file": rel, "line": node.lineno, "why": "name is not a literal"})
+                fn = node.func
+                if isinstance(fn, ast.Attribute) and fn.attr == "propose" and not (isinstance(fn.value, ast.Name) and fn.value.id == "self"):
+                    cls_node = arg_of(node, "cls", 0)
+                    site = {"plugin": plugin, "file": rel, "line": node.lineno, "accepts": accepted_answers(m, par, node)}
+                    site.update(propose_class(m, cls_node) if cls_node is not None else {"class": None, "why": "no class argument"})
+                    proposes.append(site)
                     continue
+                if not ((isinstance(fn, ast.Attribute) and fn.attr == "register_tool") or (isinstance(fn, ast.Name) and fn.id in aliases)):
+                    continue
+                name_node, schema_node = arg_of(node, "name", 0), arg_of(node, "schema", 2)
                 try:
-                    value = ast.literal_eval(schema) if schema is not None else None
-                except Exception:
-                    value = None
-                if not isinstance(value, dict):
-                    unread.append({"plugin": plugin, "file": rel, "line": node.lineno, "name": name.value, "why": "schema is not a module-level dict literal"})
-                    value = None
-                out.append({"name": name.value, "plugin": plugin, "file": "%s:%d" % (rel, node.lineno), "schema": (value.get("parameters", value) if isinstance(value, dict) else None)})
-print(json.dumps({"tools": out, "unread": unread}, sort_keys=True))
+                    rows = loop_bindings(m, par, node)
+                except Unresolved as why:
+                    unread.append({"plugin": plugin, "file": rel, "line": node.lineno, "why": "registered in a loop whose list cannot be read (%s)" % why})
+                    continue
+                for local_nodes in (rows if rows is not None else [None]):
+                    local = None
+                    if local_nodes is not None:
+                        local = {}
+                        for k, v in local_nodes.items():
+                            try:
+                                local[k] = ev(m, v)
+                            except Unresolved:
+                                pass  # a loop value only a name or schema would read (a handler, a flag)
+                    try:
+                        name = ev(m, name_node, local=local) if name_node is not None else None
+                    except Unresolved:
+                        name = None
+                    if not isinstance(name, str):
+                        unread.append({"plugin": plugin, "file": rel, "line": node.lineno, "why": "name is not a literal or module constant"})
+                        continue
+                    try:
+                        value = ev(m, schema_node, local=local) if schema_node is not None else None
+                    except Unresolved:
+                        value = None
+                    if not isinstance(value, dict):
+                        unread.append({"plugin": plugin, "file": rel, "line": node.lineno, "name": name, "why": "schema is not a dict literal or module constant"})
+                        value = None
+                    entry = {"name": name, "plugin": plugin, "file": "%s:%d" % (rel, node.lineno), "schema": (value.get("parameters", value) if isinstance(value, dict) else None)}
+                    if not any(o["name"] == name and o["file"].split(":")[0] == rel and o["schema"] == entry["schema"] for o in out):
+                        out.append(entry)
+                    # M2: the village tool's operation lists, beside the module that registers it.
+                    if name == "village" and village_ops is None:
+                        try:
+                            village_ops = {k: sorted(set(ev(m, ast.Name(id=k)))) for k in ("READ_OPERATIONS", "WRITE_OPERATIONS", "APP_SCOPED_OPERATIONS")}
+                        except Unresolved as why:
+                            village_ops = {"error": "the village operation lists cannot be read (%s)" % why}
+print(json.dumps({"tools": out, "unread": unread, "proposes": proposes, "village_ops": village_ops}, sort_keys=True))
 `;
 
 export function pluginTools(overlayDir) {
@@ -277,6 +502,33 @@ export function manifestEnvelopes(overlayDir, villageSchema) {
   return out;
 }
 
+/**
+ * Review M2: one envelope per operation the village schema's `operation` enum
+ * accepts that no manifest already reached (handle() serves any enum operation
+ * in READ_OPERATIONS or WRITE_OPERATIONS, with or without a manifest). The
+ * app-scoped operations take an app from the caller and come from the
+ * manifests. An enum operation in neither list is `unmapped`: the check fails
+ * closed on it when it is new.
+ */
+export function enumEnvelopes(village, ops, already) {
+  const read = new Set(ops.READ_OPERATIONS);
+  const write = new Set(ops.WRITE_OPERATIONS);
+  const scoped = new Set(ops.APP_SCOPED_OPERATIONS);
+  const reached = new Set(already.filter((e) => e.tool === "village").map((e) => e.input?.operation));
+  const out = [];
+  const where = `${String(village.file).replace(/:\d+$/u, "")}#operation`;
+  for (const op of village.schema?.properties?.operation?.enum ?? []) {
+    if (scoped.has(op) || reached.has(op)) continue;
+    if (!read.has(op) && !write.has(op)) {
+      out.push({ key: `unmapped#${JSON.stringify(["village", op])}`, tool: null, input: null, where: `${where}:${String(op)}`, operation: op, unmapped: "an operation the village schema accepts that is in neither READ_OPERATIONS nor WRITE_OPERATIONS" });
+      continue;
+    }
+    const input = { operation: op };
+    out.push({ key: envelopeKey("village", input), tool: "village", input, where: `${where}:${op}`, operation: op, rw: write.has(op) ? "write" : "read" });
+  }
+  return out;
+}
+
 let envelopeScope;
 if (process.argv.includes("--with-envelopes")) {
   // Fail closed: an overlay without the gated list cannot say which plugin tools reach the hook.
@@ -292,6 +544,19 @@ if (process.argv.includes("--with-envelopes")) {
   const unread = found.unread.filter((u) => u.name === undefined || isGated(u.name));
   const village = tools.find((t) => t.name === "village");
   const envelopes = manifestEnvelopes(overlay, village?.schema);
+  if (village !== undefined) {
+    // Review M2: every operation the village schema accepts is a call, manifest or not.
+    if (found.village_ops === null || "error" in found.village_ops) {
+      process.stderr.write(`${found.village_ops?.error ?? "the village operation lists (READ_OPERATIONS, WRITE_OPERATIONS) were not found"}; fail closed\n`);
+      process.exit(1);
+    }
+    envelopes.push(...enumEnvelopes(village, found.village_ops, envelopes));
+  }
+  // Review M3: the daemon proposes of every plugin that owns a gated tool; the
+  // others are not behind a hooked call and are listed apart.
+  const gatedPlugins = new Set(tools.map((t) => t.plugin));
+  const proposes = found.proposes.filter((p) => gatedPlugins.has(p.plugin));
+  const proposesUnhooked = found.proposes.filter((p) => !gatedPlugins.has(p.plugin));
   // A gated plugin tool no manifest reaches gets one bare envelope of its own.
   for (const t of tools) {
     if (!envelopes.some((e) => e.tool === t.name)) envelopes.push({ key: envelopeKey(t.name, {}), tool: t.name, input: {}, where: t.file });
@@ -311,7 +576,7 @@ if (process.argv.includes("--with-envelopes")) {
     for (const d of dups) process.stderr.write(`duplicate envelope key ${d}\n`);
     process.exit(1);
   }
-  envelopeScope = { gated, tools, unread, envelopes };
+  envelopeScope = { gated, tools, unread, envelopes, proposes, proposesUnhooked };
 }
 
 const corpus = {
@@ -347,6 +612,8 @@ if (envelopeScope !== undefined) {
   corpus.tools = envelopeScope.tools;
   corpus.tools_unread = envelopeScope.unread;
   corpus.envelopes = envelopeScope.envelopes;
+  corpus.proposes = envelopeScope.proposes;
+  corpus.proposes_unhooked = envelopeScope.proposesUnhooked;
 }
 
 writeFileSync(OUT, `${JSON.stringify(corpus, null, 2)}\n`, "utf8");
