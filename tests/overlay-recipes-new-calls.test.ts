@@ -674,3 +674,32 @@ test("P2: a supervised-live draw is deterministic both ways (known-sample and kn
   }
 });
 
+// --- review S4: four fail-closed paths, one box test each -----------------------------------------
+
+test("S4 (M3): no pinned expected.json in the approval.md checkout exits 1", BOX_TIMEOUT, () => {
+  const run = gate([recipeEntry(), envelopeEntry()], { pinned: null });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.err, /is not the copy this approval\.md checkout pins/u);
+});
+
+test("S4 (M7): a limiting entry with accepted_at \"\" exits 1", BOX_TIMEOUT, () => {
+  const run = gate([recipeEntry(), envelopeEntry({ accepted_at: "" })]);
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.md, /awaiting acceptance: accepted_at "" is not a YYYY-MM-DD date/u);
+});
+
+test("S4 (M11): a gated plugin tool registration the extractor could not read exits 1", BOX_TIMEOUT, () => {
+  const corpus = corpusFile([STAY], [ENVELOPE], BLOCK, { tools_unread: [{ plugin: "av-events", file: "plugins/av-events/_x.py", line: 9, why: "name is not a literal or module constant" }] });
+  const run = gate([recipeEntry(), envelopeEntry()], { corpus });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.md, /a gated plugin tool registration the extractor cannot read/u);
+});
+
+test("S4 (M13): an entry input that drops a key of the manifest's derived call exits 1 (P5)", BOX_TIMEOUT, () => {
+  // The corpus call carries a derived key beyond the envelope key's parts; the entry leaves it out.
+  const derived = { ...ENVELOPE, input: { operation: "forkicks.order.confirm", draftId: "fk-draft-0001" } };
+  const corpus = corpusFile([STAY], [derived]);
+  const run = gate([recipeEntry(), envelopeEntry({ input: { operation: "forkicks.order.confirm" } })], { corpus });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.md, /input does not carry the manifest's call \(draftId\) \(P5\)/u);
+});
