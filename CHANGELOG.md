@@ -121,6 +121,98 @@ ordinary workspace write.
   Conformance: `command-class` 1.10.0 (from 1.9.0), sixteen new vectors;
   main's 354 are byte-identical. The fleet's 63 overlay recipes are unmoved.
 
+### Added
+
+- **CLASS-DIFF against the core the boxes run (B-167 release gate).**
+  `overlay-recipes-check.mjs --diff <baseline core>` classifies the same corpus
+  at a baseline core and at this one, over every recipe plus every `tools:`
+  line of the template (the box harness calls), and reports each call whose
+  class, decision (auto, sampled, card, human-only, refused) or card style
+  moves. An existing call moving from auto, sampled or card to human-only or
+  refused fails, unless the allowlist names it with a reason (an optional
+  `flip: {from, to}` narrows the entry to that move). The `overlay-recipes` job
+  now also re-extracts the corpus from the overlay at its pinned sha and fails
+  on any difference, installs the boxes' core from npm at a pinned integrity
+  (`BASELINE_CORE`, 0.4.8), and publishes the report (first line: the GATE
+  line) as the job summary and the `class-diff` artifact. Between 0.4.5 and
+  0.4.6, on the overlay the boxes ran on 19 October (`99d33417`), it reports
+  the eleven EdgeOS recipes moving `network.call` auto to `policy.core`
+  human-only: EDGEOS-BLOCK, caught before a tag. Every call is diffed in two
+  working directories, a neutral one and a box-like Hermes home (a `.hermes`
+  directory with a dummy `.env`, HERMES_HOME set to it), because the APRV-522
+  credential pass decides a reader's unexpanded `$` word by where it starts.
+  From the Hermes home, 0.4.6 also denies the `--url` EdgeOS recipes
+  (`-H "Authorization: Bearer $EDGEOS_API_KEY"` gains `account.credential`,
+  human-only under the template), and the diff reports those eleven as
+  blocking in that column.
+- **The class-diff runs the real hook in a box (B-167 fold 1, review-b's
+  refute).** Every shipped call now goes through each core's own `approval
+  hook hermes` (scripts/overlay-recipes-box.mjs), in a box layout:
+  HOME/.hermes with a dummy `.env`, `config.yaml`, the overlay's skills and
+  workspace, APPROVAL_HERMES_HOME set, and an attested store. Recipes run as
+  terminal calls at $HERMES_HOME, $HOME, workspace and unset; harness calls
+  run as Hermes tool envelopes (core's own tools plus every `tools:` line).
+  - **Blocking moves:** an existing call that loses autonomy (autonomous ->
+    supervised-retro, a higher live rate, auto -> card) or stops running.
+  - **Shadowed tools line:** a tools line newly shadowed by an earlier one
+    blocks.
+  - **The box check:** a shipped recipe the hook denies in the box fails
+    unless the allowlist lists it.
+  - **Acceptance by name:** every allowlist entry needs Carter's acceptance
+    (`accepted_by`, `accepted_at`), and a trivial reason is refused.
+  - **Pinned in CI:** ci.yml pins the gate's own files by sha256 and the
+    corpus by its count, and re-extracts the corpus with the base branch's
+    extractor.
+  - **Fail closed:** a hook run that exits 0 without an allow line is an
+    error, never an allow.
+- **Carded calls keep their class (B-167 fold 2).** A card's classes are
+  read from the request the hook opened in the box's store, so these now
+  block:
+  - a higher `live_rate`;
+  - supervised-live -> manual;
+  - a card falling from minimal to technical.
+
+  The box exports a fixed sampling value when the template names
+  `audit.sampling_secret_env`. Each concurrent worker has its own store, so
+  a lost log race can no longer read as a refusal.
+- **A card's request is bound to its call (B-167 fold 3).**
+  - The runner takes the request key from the hook's own `hook-timeout` deny,
+    looks it up in that call's store, and checks it against the call's tool and
+    command. It no longer guesses the task id.
+  - When the deny names no key, it matches by tool and command among what the
+    call appended.
+  - A card whose request cannot be bound is an error, and the gate exits 2.
+    A renamed or swapped task id is read correctly, and a card can no longer
+    fall to "class-diff: none".
+  - The sampling secret name may not be a box layout or runtime variable
+    (HOME, HERMES_HOME, PATH, `APPROVAL_*`, `NODE_*`); naming one exits 2.
+  - The minimal -> technical card rule compares per class.
+- **Cards are bound and read more strictly (B-167 folds 5 and 6).**
+  - A call that wrote its own request binds only to the rows it wrote. A deny
+    naming another call's request, even one with the same command, exits 2.
+  - A card whose bound request names no class that needs a human (every class
+    autonomous or supervised-retro) is an error, and the gate exits 2: the core
+    logged a class other than the one it carded on.
+  - When every class on the old card was minimal, a class new to the card at
+    another style blocks (one more technical card for the resident).
+  - Fold 6: a card whose bound request logs a class other than the one its key
+    names (core keys each action `<task>:<class>`) is an error, and the gate
+    exits 2, even when the logged class needs a human. A row of the bound task
+    keyed under another task with the same class is caught too.
+- **The class-diff baseline is 0.4.8, and the EdgeOS entries are gone (B-167,
+  rebuilt on 0.4.8).** `BASELINE_CORE` is npm approval-md@0.4.8 at its
+  pinned integrity, the core the boxes run since the 0.4.8 roll; it lives in
+  the `overlay-recipes` job of `ci.yml` and moves with the fleet, in the
+  approval.md PR after each roll. Under 0.4.7 (APRV-533, #666) the eleven
+  `--url` EdgeOS recipes became `network.call` at the Hermes home as
+  everywhere else, so their eleven hermes-home allowlist entries matched
+  nothing and failed as stale; they are deleted. Seven entries remain for
+  Carter's acceptance: agent-plaza, the four operator READMEs and the two
+  edge-india placeholder lines. From npm 0.4.8 to this tree (0.4.8 plus the
+  APRV-518 git rules above) the pinned corpus reads `class-diff: none`: all
+  304 calls unchanged, and the box check's 96 denied runs are the seven
+  entries' own.
+
 ## 0.4.8 — 2026-11-20
 
 0.4.8 carries everything merged since 0.4.7. On Telegram, a new request's
