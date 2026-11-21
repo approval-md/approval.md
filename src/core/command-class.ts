@@ -2336,6 +2336,12 @@ export interface ClassifierContext {
    * classifies; a caller leaves it unset, which is the line's own start.
    */
   shellDir?: ShellDir | null;
+  /**
+   * Does the line itself spell a `.git` segment in an assignment's value, a
+   * command substitution or a quoted string (second review, S3)? Set by
+   * {@link classifyCommand} for the whole line and its inner scripts.
+   */
+  lineNamesGit?: boolean;
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -3949,7 +3955,147 @@ const GIT_DIR_WRITE_RULE = "git-dir-write";
 
 /** Does this path have a `.git` segment (the directory, or a worktree's `.git` file)? */
 function namesGitDirectory(word: string): boolean {
-  return pathSegments(word).some((segment) => segment.toLowerCase() === ".git");
+  return mayNameGitDirectory(word);
+}
+
+/** Past this many brace alternatives a word is judged as naming `.git`. */
+const BRACE_LIMIT = 64;
+
+/**
+ * The words brace expansion makes of `word` (second review, S1): `.g{i,}t`
+ * gives `.git` and `.gt`, `.{f..h}it` gives `.fit`, `.git` and `.hit`.
+ * `null` past {@link BRACE_LIMIT}, which the caller judges the strict way. A
+ * group with no comma and no sequence is kept as text, as the shell keeps it.
+ */
+export function expandBraces(word: string, limit = BRACE_LIMIT): string[] | null {
+  const done: string[] = [];
+  const pending = [word];
+  while (pending.length > 0) {
+    const current = pending.pop() as string;
+    const group = braceGroup(current);
+    if (group === null) {
+      done.push(current);
+    } else {
+      for (const part of group.parts) pending.push(`${current.slice(0, group.start)}${part}${current.slice(group.end + 1)}`);
+    }
+    if (done.length + pending.length > limit) return null;
+  }
+  return done;
+}
+
+/** The first brace group of `word` the shell would expand, with its alternatives. */
+function braceGroup(word: string): { start: number; end: number; parts: string[] } | null {
+  for (let start = word.indexOf("{"); start !== -1; start = word.indexOf("{", start + 1)) {
+    let depth = 0;
+    const cuts: number[] = [];
+    let end = -1;
+    for (let at = start; at < word.length; at += 1) {
+      const char = word[at];
+      if (char === "\\") {
+        at += 1;
+        continue;
+      }
+      if (char === "{") depth += 1;
+      if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          end = at;
+          break;
+        }
+      }
+      if (char === "," && depth === 1) cuts.push(at);
+    }
+    if (end === -1) return null;
+    const body = word.slice(start + 1, end);
+    if (cuts.length > 0) {
+      const parts: string[] = [];
+      let from = start + 1;
+      for (const cut of [...cuts, end]) {
+        parts.push(word.slice(from, cut));
+        from = cut + 1;
+      }
+      return { start, end, parts };
+    }
+    const sequence = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.-?\d+)?$/u.exec(body);
+    if (sequence !== null) {
+      const [first, last] = [sequence[1] as string, sequence[2] as string];
+      const numeric = /\d/u.test(first) && /\d/u.test(last);
+      if (!numeric && (first.length !== 1 || last.length !== 1)) continue;
+      const from = numeric ? Number(first) : first.charCodeAt(0);
+      const to = numeric ? Number(last) : last.charCodeAt(0);
+      if (Math.abs(to - from) > BRACE_LIMIT) return { start, end, parts: Array.from({ length: BRACE_LIMIT + 1 }, () => "") };
+      const parts: string[] = [];
+      for (let at = from; from <= to ? at <= to : at >= to; at += from <= to ? 1 : -1) {
+        parts.push(numeric ? String(at) : String.fromCharCode(at));
+      }
+      return { start, end, parts };
+    }
+  }
+  return null;
+}
+
+/** Does this one path segment hold a glob character the shell would expand? */
+export function isPatternSegment(segment: string): boolean {
+  return /[*?[]/u.test(segment);
+}
+
+/**
+ * Does the glob `pattern` (one path segment: `*`, `?`, `[...]`) match the
+ * file name `name`, letter case ignored (second review, S1)? A name starting
+ * with `.` is matched only by a pattern that starts with a literal `.` or a
+ * bracket expression holding one, as the shell's filename expansion requires,
+ * so `*` never names `.git` while `.g*t` and `.[g]it` do. No shell and no
+ * file system: the pattern is turned into an anchored expression.
+ */
+export function globSegmentMatches(pattern: string, name: string): boolean {
+  if (!isPatternSegment(pattern)) return pattern.toLowerCase() === name.toLowerCase();
+  if (name.startsWith(".") && (pattern.startsWith("*") || pattern.startsWith("?"))) return false;
+  let source = "";
+  for (let at = 0; at < pattern.length; at += 1) {
+    const char = pattern[at] as string;
+    if (char === "\\" && at + 1 < pattern.length) {
+      at += 1;
+      source += (pattern[at] as string).replace(/[.*+?^${}()|[\]\\/-]/gu, "\\$&");
+    } else if (char === "*") {
+      source += "[^/]*";
+    } else if (char === "?") {
+      source += "[^/]";
+    } else if (char === "[") {
+      let close = at + 1;
+      if (pattern[close] === "!" || pattern[close] === "^") close += 1;
+      if (pattern[close] === "]") close += 1;
+      while (close < pattern.length && pattern[close] !== "]") close += 1;
+      if (close >= pattern.length) {
+        source += "\\[";
+        continue;
+      }
+      let body = pattern.slice(at + 1, close);
+      const negated = body.startsWith("!") || body.startsWith("^");
+      if (negated) body = body.slice(1);
+      source += `[${negated ? "^" : ""}${body.replace(/[\\\]^]/gu, "\\$&")}]`;
+      at = close;
+    } else {
+      source += char.replace(/[.*+?^${}()|[\]\\/-]/gu, "\\$&");
+    }
+  }
+  try {
+    return new RegExp(`^${source}$`, "iu").test(name);
+  } catch {
+    // A bracket expression this reader cannot turn into one: the strict side.
+    return true;
+  }
+}
+
+/**
+ * Does this path name a `.git` segment, read as the shell would expand it
+ * (second review, S1)? Each brace alternative is tested, and each segment
+ * holding a glob is a PATTERN that names `.git` when `.git` matches it, any
+ * letter case. Past the brace bound it is judged to.
+ */
+export function mayNameGitDirectory(word: string): boolean {
+  const words = word.includes("{") ? expandBraces(word) : [word];
+  if (words === null) return true;
+  return words.some((each) => pathSegments(each).some((segment) => globSegmentMatches(segment, ".git")));
 }
 
 /** The rule a write to a git configuration file outside a repository takes (APRV-518). */
@@ -4010,7 +4156,9 @@ function joinShellPath(base: readonly string[], parts: readonly string[]): strin
  * the name itself spells.
  */
 function shellDirTarget(word: string, from: readonly string[] | null): string[] | null {
-  if (word.startsWith("-") || /[$`*?[\]{}\\]/u.test(word)) return null;
+  // A glob or brace word is kept as its pattern (second review, S1): where
+  // it lands is judged by whether `.git` matches it.
+  if (word.startsWith("-") || /[$`\\]/u.test(word)) return null;
   if (word === "~") return ["~"];
   if (word.startsWith("~/")) return joinShellPath(["~"], word.slice(2).split("/"));
   if (word.startsWith("~")) return null;
@@ -4032,7 +4180,10 @@ function nextShellDir(segment: LexSegment, dir: ShellDir | null): ShellDir | nul
   const name = command.text.split("/").pop() ?? command.text;
   if (!["cd", "chdir", "pushd", "popd"].includes(name)) return dir;
   const rest = segment.words.slice(cursor + 1);
-  if (cursor > 0 || !command.exact || rest.some((word) => !word.exact || word.substitutions.length > 0)) return null;
+  // A word inexact only through a glob or brace is still followed, as its pattern.
+  const followable = (word: LexWord): boolean =>
+    word.substitutions.length === 0 && (word.exact || (word.expands && !word.splits && !/[$`~\\]/u.test(word.text)));
+  if (cursor > 0 || !command.exact || rest.some((word) => !followable(word))) return null;
   const words = rest.map((word) => word.text);
   const args = words[0] === "--" ? words.slice(1) : words;
   if (name === "popd") {
@@ -4056,7 +4207,7 @@ function nextShellDir(segment: LexSegment, dir: ShellDir | null): ShellDir | nul
 function relativeLandsInGitDir(word: string, dir: ShellDir | null | undefined): boolean {
   if (dir === null || dir === undefined || dir.segments.length === 0) return false;
   if (word.startsWith("/") || word.startsWith("~") || /[$`]/u.test(word) || /\s/u.test(word)) return false;
-  return joinShellPath(dir.segments, word.split("/")).some((part) => part.toLowerCase() === ".git");
+  return mayNameGitDirectory(joinShellPath(dir.segments, word.split("/")).join("/"));
 }
 
 /**
@@ -4074,6 +4225,70 @@ function attachedOptionValues(word: string): string[] {
   return tails;
 }
 
+/** The value of `--name=value` or `--name value` at `at`, or `undefined`. */
+function longOptionValue(args: readonly string[], at: number, name: string): string | undefined {
+  const arg = args[at] as string;
+  if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1);
+  return arg === name ? args[at + 1] : undefined;
+}
+
+/**
+ * The files and directories git ITSELF writes, from its own options
+ * (second review, S2), read from git 2.50.1's manual pages: the diff
+ * family's `--output=<file>` (`diff`, `log`, `show`, `stash show` and every
+ * other verb that takes diff options, so any verb here), `git apply`'s
+ * `--directory=<root>` (where the patched files land) and
+ * `--build-fake-ancestor=<file>`, `git worktree add <path>` (a checkout made
+ * there), and `git clone`'s `<directory>` and `--separate-git-dir`. The
+ * verbs that also write a file but have no row (`format-patch -o`,
+ * `archive -o`, `bundle create`, `init`, `config --file`) stay refused, and
+ * `--git-dir=` / `--work-tree=` name the repository git runs against, not a
+ * file it writes.
+ */
+export function gitWriteTargets(args: readonly string[]): string[] {
+  const verbAt = gitVerbIndex(args);
+  const verb = verbAt === null ? undefined : args[verbAt];
+  const rest = verbAt === null ? args : args.slice(verbAt + 1);
+  const values: string[] = [];
+  const positionals: string[] = [];
+  const skipNext = new Set(
+    verb === "clone"
+      ? ["-b", "--branch", "-o", "--origin", "-u", "--upload-pack", "--depth", "--reference", "--reference-if-able", "--shallow-since", "--shallow-exclude", "-c", "--config", "-j", "--jobs", "--filter", "--bundle-uri", "--server-option", "--template", "--separate-git-dir"]
+      : verb === "worktree"
+        ? ["-b", "-B", "--reason"]
+        : [],
+  );
+  for (let at = 0; at < rest.length; at += 1) {
+    const arg = rest[at] as string;
+    if (arg === "--") {
+      positionals.push(...rest.slice(at + 1));
+      break;
+    }
+    const output = longOptionValue(rest, at, "--output");
+    if (output !== undefined) values.push(output);
+    if (verb === "apply") {
+      for (const name of ["--directory", "--build-fake-ancestor"]) {
+        const value = longOptionValue(rest, at, name);
+        if (value !== undefined) values.push(value);
+      }
+    }
+    if (verb === "clone") {
+      const value = longOptionValue(rest, at, "--separate-git-dir");
+      if (value !== undefined) values.push(value);
+    }
+    if (arg.startsWith("-")) {
+      if (skipNext.has(arg) || arg === "--output" || (verb === "apply" && ["--directory", "--build-fake-ancestor"].includes(arg))) at += 1;
+      continue;
+    }
+    positionals.push(arg);
+  }
+  // `git worktree add <path> [<commit-ish>]`: the path is the first operand.
+  if (verb === "worktree" && positionals[0] === "add" && positionals[1] !== undefined) values.push(positionals[1]);
+  // `git clone <repository> [<directory>]`.
+  if (verb === "clone" && positionals[1] !== undefined) values.push(positionals[1]);
+  return values;
+}
+
 /**
  * The `.git` or git configuration file write a segment makes, if any
  * (APRV-518): its write targets, and the words it may write through
@@ -4087,16 +4302,49 @@ function gitWriteRefinement(
   named: readonly string[],
   dir: ShellDir | null | undefined,
   namedWrites = true,
+  lineNamesGit = false,
 ): { class: string; rule: string; path: string } | null {
   const spelled = named.filter((word) => !/\s/u.test(word));
   const words = [...writeTargets, ...spelled];
   const resolvable = namedWrites ? words : writeTargets;
+  // Second review, S3: on a line that itself spells `.git` in an assignment,
+  // a substitution or a quoted string, a target that expands, or a relative
+  // target after a directory change the text cannot place, may be that `.git`.
+  const throughLine = lineNamesGit
+    ? resolvable.find((word) => /[$`]/u.test(word) || (dir === null && !word.startsWith("/") && !word.startsWith("~")))
+    : undefined;
   const gitDir =
-    words.find((word) => namesGitDirectory(word)) ?? resolvable.find((word) => relativeLandsInGitDir(word, dir));
+    words.find((word) => namesGitDirectory(word)) ??
+    resolvable.find((word) => relativeLandsInGitDir(word, dir)) ??
+    throughLine;
   if (gitDir !== undefined) return { class: "vcs.history.rewrite", rule: GIT_DIR_WRITE_RULE, path: gitDir };
   const gitConfig = words.find(namesGitConfigFile);
   if (gitConfig !== undefined) return { class: "vcs.history.rewrite", rule: GIT_CONFIG_FILE_WRITE_RULE, path: gitConfig };
   return null;
+}
+
+/** A `.git` path segment inside free text (`D=.git`, `$PWD/.git/hooks`, `echo .git`), any case. */
+const GIT_SEGMENT_IN_TEXT = /(?:^|[^A-Za-z0-9_.-])\.git(?:$|[^A-Za-z0-9_.-])/iu;
+
+/**
+ * Does the line spell a `.git` segment where the shell may carry it to a
+ * later word (second review, S3): an assignment's value, the body of a
+ * command substitution, or a quoted string? A literal unquoted `.git` word
+ * is judged where it stands and does not count.
+ */
+function lineSpellsGitIndirectly(segments: readonly LexSegment[]): boolean {
+  return segments.some((segment) => {
+    const assignments = bashAssignmentCount(segment.words);
+    const words = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
+    return (
+      segment.bodySubstitutions.some((body) => GIT_SEGMENT_IN_TEXT.test(body)) ||
+      words.some(
+        (word, index) =>
+          word.substitutions.some((body) => GIT_SEGMENT_IN_TEXT.test(body)) ||
+          ((index < assignments || word.quoted) && GIT_SEGMENT_IN_TEXT.test(word.text)),
+      )
+    );
+  });
 }
 
 /** `git branch` reads until it is asked to delete, rename or force-set one. */
@@ -7459,7 +7707,7 @@ function classifySegment(
     // write; an assignment on its own touches nothing. A bare redirection into
     // `.git` or a git configuration file is that write (APRV-518, S1).
     if (writeTargets.length > 0) {
-      const gitWrite = gitWriteRefinement(writeTargets, [], context.shellDir);
+      const gitWrite = gitWriteRefinement(writeTargets, [], context.shellDir, true, context.lineNamesGit === true);
       if (gitWrite !== null) return { ok: true, ...gitWrite };
       return { ok: true, class: "files.write.workspace", rule: "redirect-write" };
     }
@@ -7868,7 +8116,7 @@ function classifySegment(
 
   // A read command with a write redirection writes. `ls > out.txt` creates a
   // file, and the class has to say so.
-  const readBeforeRedirect = cls.startsWith("read.") && basename !== "curl" && basename !== "wget";
+  const readBeforeRedirect = cls.startsWith("read.") && basename !== "curl" && basename !== "wget" && basename !== "git";
   if (cls.startsWith("read.") && writeTargets.length > 0) {
     cls = "files.write.workspace";
     ruleId = "redirect-write";
@@ -7887,7 +8135,7 @@ function classifySegment(
   // not a path.
   // `curl -o` / `wget -O` write a file while reading as `read.web`, so their
   // words are scanned too.
-  if ((!cls.startsWith("read.") || basename === "curl" || basename === "wget") && cls !== GATE_SELF_CLASS) {
+  if ((!cls.startsWith("read.") || basename === "curl" || basename === "wget" || basename === "git") && cls !== GATE_SELF_CLASS) {
     const flagValues = args
       .filter((arg) => isFlag(arg) && arg.includes("="))
       .map((arg) => arg.slice(arg.indexOf("=") + 1));
@@ -7901,8 +8149,10 @@ function classifySegment(
     const operandValues = args
       .filter((arg) => !isFlag(arg) && arg.includes("="))
       .map((arg) => arg.slice(arg.indexOf("=") + 1));
-    const named = basename === "git" ? [] : [...positionals, ...flagValues, ...attached, ...operandValues];
-    const gitWrite = gitWriteRefinement(writeTargets, named, context.shellDir, !readBeforeRedirect);
+    // Second review, S2: git's own words are judged only where git writes a
+    // file through them ({@link gitWriteTargets}).
+    const named = basename === "git" ? gitWriteTargets(args) : [...positionals, ...flagValues, ...attached, ...operandValues];
+    const gitWrite = gitWriteRefinement(writeTargets, named, context.shellDir, !readBeforeRedirect, context.lineNamesGit === true);
     if (gitWrite !== null) {
       return { ok: true, ...gitWrite, ...(sandbox === null ? {} : { sandbox }) };
     }
@@ -8202,6 +8452,11 @@ export function classifyCommand(
   // APRV-518 (S1): where the line's literal `cd`s have moved the shell, so a
   // relative write after `cd .git` is judged where it lands.
   let shellDir: ShellDir | null = context.shellDir === undefined ? SHELL_DIR_START : context.shellDir;
+  // Second review, S3: the line may carry `.git` to a write through a variable
+  // or a substitution it sets itself.
+  const lineNamesGit = context.lineNamesGit ?? lineSpellsGitIndirectly(lexed.segments);
+  context = { ...context, lineNamesGit };
+  execContext = { ...execContext, lineNamesGit };
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };
