@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-17 06:49'
-updated_date: '2026-10-17 07:39'
+updated_date: '2026-11-21 00:19'
 labels:
   - classifier
   - security
@@ -56,4 +56,13 @@ Done in lane claude-approval@main/APRV-REMOTE-MIRROR (Opus 5.5 subagent), stacke
 - Touches global invariant "fail closed" only in the strict direction.
 
 Security review round (TOCTOU, validator-differential): the hook now distrusts its own pre-run reading whenever any earlier segment that is not a read, or any concurrent non-read segment (pipe or &), could change config/HEAD/includes; such a push is vcs.history.rewrite when config decides its refs, at least release.publish when its refs are on the line (followTags), vcs.ref.delete when it only deletes. Added git-config-file-write (~/.gitconfig, ~/.config/git/*, /etc/gitconfig), refused bare GIT_*/XDG_CONFIG_HOME assignments, CDPATH-subject cd targets not followed, missing cd target = no push there. Real-git proofs: per-worktree config.worktree mirror, include.path mirror, includeIf onbranch flipped by an earlier checkout, HEAD after checkout, ~/.gitconfig append. Agreement tests: every git remote read form is accepted by git 2.50.1 and leaves .git/config and local heads unchanged; 24 DWIM destination and HEAD spellings classified at least as strictly as git acts on them (pure and hook). Residual (cannot be seen per call): a parallel Bash call running foreign code, an include target outside the known config files written in another call, exported GIT_* in a persistent harness shell. Differential vs #649: pure 24,696 lines 0 looser, hook 3,735 lines 0 looser. Targeted 28 files exit 0 (1,799 tests, 1,797 pass, 2 machine skips).
+
+Rebuilt on 0.4.8 (main 98fb94d5) as a new branch that replaces #650. #650 was cut from an older main and stacked on #649; main moved 50 commits since its base (ab83fab1) and gained the no-rule abstain, so the change was carried as one squashed port commit (old 2fa0fd13, e3aa0e3e, 8318f791; only CHANGELOG conflicted, the seven files main never touched are byte-equal to the old head and the five auto-merged ones carry the old hunks unchanged) and then made right on 0.4.8:
+- No-rule abstain (defaults.unclassified_command: abstain): a NO_RULE_CLASS stand-in is not a read.* class, so the push pass treats it as a segment that may change what git reads and a push on its line is unreadable; git config remote.*/push.* writes keep the refusal (git is a known binary, so its unlisted subcommand never stands in); a line holding a mutating git remote, a .git or git config file write, or a push always carries a side-effecting class and is denied (on 0.4.8 `railway status && git remote add --mirror=push m <url>` abstained). classifyForHook comment now counts seven refinements. Tests: tests/cli-hook-remote-config-abstain.test.ts.
+- Letter case: destination and tag prefixes (refs/, heads/, tags/, remotes/), legacy remotes file names and local tag names are compared without case. On git 2.50.1/APFS only the legacy remotes file was a live hole (git push OLD opened remotes/old and deleted a remote branch); the other spellings git refused or pushed as another ref, so the stricter reading costs nothing. Tests: tests/command-class-remote-config-case.test.ts (prints what git did).
+- A test for an unreadable checkout (mode-000 legacy remotes dir): the only mutant of 22 that survived the first run.
+- Conformance: command-class 1.9.0 (354 vectors on main) -> 1.10.0 (366); all 354 byte-identical, twelve new; manifest as the script writes it. AC #5 says 1.9.0: read 1.10.0.
+- Differential (AC #4) is now against 0.4.8 build, not #649: 0 looser under this repo APPROVAL.md and the overlay template policy; pure 22,925 lines x default/execCode/noRuleSegments (137,550 comparisons, 12,881 stricter); hook 1,628 lines x 11 checkout states x abstain on/off (71,632 comparisons, 7,758 stricter). Overlay recipe corpus: 63 recipes, 0 changed.
+- Evidence: typecheck 0, lint 0, build 0, conformance 922/922 (0); targeted 45 files exit 0 (2,026 tests, 2,020 pass, 5 skipped, 1 todo, 0 fail).
+- Touches the global invariant fail closed only in the strict direction.
 <!-- SECTION:NOTES:END -->
