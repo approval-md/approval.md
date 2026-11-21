@@ -2342,6 +2342,27 @@ export interface ClassifierContext {
    * {@link classifyCommand} for the whole line and its inner scripts.
    */
   lineNamesGit?: boolean;
+  /**
+   * The segments whose words, targets and substitution bodies the line's own
+   * reading for {@link lineNamesGit} already went through (review of the
+   * substitution fold, M1). Set by {@link classifyCommand}; a caller leaves
+   * it unset.
+   */
+  spelledSegments?: WeakSet<LexSegment>;
+  /**
+   * This text is a substitution body of such a segment on a line that does
+   * not spell `.git`, so reading it again would find nothing: the body was
+   * read, as a line of its own, by that line's reading. Set only by
+   * {@link classifySegment} for the substitutions it classifies, so a deep
+   * nesting is read once and not once per level.
+   */
+  bodyAlreadyRead?: boolean;
+  /**
+   * How many command substitutions this text sits inside (review of the
+   * substitution fold). Set by {@link classifySegment}; a caller leaves it
+   * unset.
+   */
+  substitutionDepth?: number;
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -4665,36 +4686,72 @@ function asksGitForItsDirectory(segment: LexSegment): boolean {
 }
 
 /**
- * The regular-expression source of one literal run of a word, its glob
- * characters read the broad way (APRV-518, substitution fold): `*` any run,
- * `?` and a closed bracket expression any one character.
+ * The positions of `.git` a literal character may stand at, any letter case,
+ * as a set of bits (bit `p` for the character at index `p`).
  */
-function globPieceSource(piece: string): string {
-  let source = "";
-  for (let at = 0; at < piece.length; at += 1) {
-    const char = piece[at] as string;
+function gitLetterPositions(char: string): number {
+  switch (char) {
+    case ".":
+      return 0b0001;
+    case "g":
+    case "G":
+      return 0b0010;
+    case "i":
+    case "I":
+      return 0b0100;
+    case "t":
+    case "T":
+      return 0b1000;
+    default:
+      return 0;
+  }
+}
+
+/** Every position of `.git`, start to end, as a set of bits. */
+const GIT_POSITIONS_ALL = 0b11111;
+
+/** A run of any text from the lowest position in `positions` on. */
+function anyRunFrom(positions: number): number {
+  return positions === 0 ? 0 : GIT_POSITIONS_ALL & ~((positions & -positions) - 1);
+}
+
+/**
+ * The positions of `.git` reachable after one literal run of a word, from
+ * `positions` (bit `p` set: the first `p` characters of `.git` are matched),
+ * its glob characters read the broad way (APRV-518, substitution fold): `*`
+ * any run, `?` and a closed bracket expression any one character, anything
+ * else itself in any letter case. A hand-written set walk over the four
+ * characters of `.git`, so its cost is the run's length times a constant:
+ * no expression is built from the line's text, and nothing backtracks
+ * (review of the substitution fold, M1).
+ */
+function stepGitThroughRun(positions: number, run: string): number {
+  // The walk stops when no position is left, so an unclosed `[` (a literal,
+  // which `.git` does not hold) ends it: its scan for a `]` runs once.
+  for (let at = 0; at < run.length && positions !== 0; at += 1) {
+    const char = run[at] as string;
     if (char === "*") {
-      source += ".*";
+      positions = anyRunFrom(positions);
       continue;
     }
     if (char === "?") {
-      source += ".";
+      positions = (positions << 1) & GIT_POSITIONS_ALL;
       continue;
     }
     if (char === "[") {
       let close = at + 1;
-      if (piece[close] === "!" || piece[close] === "^") close += 1;
-      if (piece[close] === "]") close += 1;
-      close = piece.indexOf("]", close);
-      if (close !== -1) {
-        source += ".";
-        at = close;
+      if (run[close] === "!" || run[close] === "^") close += 1;
+      if (run[close] === "]") close += 1;
+      const closeAt = run.indexOf("]", close);
+      if (closeAt !== -1) {
+        positions = (positions << 1) & GIT_POSITIONS_ALL;
+        at = closeAt;
         continue;
       }
     }
-    source += char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    positions = ((positions & gitLetterPositions(char)) << 1) & GIT_POSITIONS_ALL;
   }
-  return source;
+  return positions;
 }
 
 /**
@@ -4711,6 +4768,16 @@ function globPieceSource(piece: string): string {
  * of outputs (`$(pwd)/build`) does not count: the output alone would spell
  * `.git`, and its body is judged for that. Neither do pieces whose literal
  * text cannot be part of `.git` (`out/$(date +%F).txt`, `v$(cat V).tgz`).
+ *
+ * Every window is tried in ONE walk of the piece (review of the substitution
+ * fold, M1: a window at a time, each an expression of `.*` runs, grew as
+ * about the fifth power of the outputs). Two sets of `.git` positions are
+ * carried: windows with no literal character yet, and windows with one. A
+ * window starts at the piece's start or inside any output (any position,
+ * since the output's own text comes first); an output carries every window
+ * on through any text; a window holding a literal character that reaches an
+ * output may end inside it; one that reaches the piece's end must stand at
+ * the end of `.git`. The cost is the word's length times a constant.
  */
 function wordJoinsGitAcrossSubstitution(text: string): boolean {
   if (!text.includes(SUBSTITUTION_SENTINEL)) return false;
@@ -4719,20 +4786,37 @@ function wordJoinsGitAcrossSubstitution(text: string): boolean {
   for (const word of words) {
     for (const piece of word.split(/[/=:\s]/u)) {
       const runs = piece.split(SUBSTITUTION_SENTINEL);
-      const outputs = runs.length - 1;
-      if (outputs === 0 || runs.join("").length === 0) continue;
-      for (let first = 0; first <= outputs; first += 1) {
-        for (let last = first; last <= outputs; last += 1) {
-          const literal = runs.slice(first, last + 1);
-          if (literal.join("").length === 0) continue;
-          const source = `^${first > 0 ? ".*" : ""}${literal.map(globPieceSource).join(".*")}${last < outputs ? ".*" : ""}$`;
-          if (new RegExp(source, "iu").test(".git")) return true;
+      if (runs.length === 1 || runs.join("").length === 0) continue;
+      // Bit p: the first p characters of `.git` are matched.
+      let bare = 0b1;
+      let holding = 0;
+      for (let at = 0; at < runs.length; at += 1) {
+        if (at > 0) {
+          // An output: a window holding a literal character ends inside it.
+          if (holding !== 0) return true;
+          // Every window goes on through it, and a new one starts in it.
+          bare = GIT_POSITIONS_ALL;
         }
+        const run = runs[at] as string;
+        if (run.length === 0) continue;
+        holding = stepGitThroughRun(bare | holding, run);
+        bare = 0;
       }
+      if ((holding & 0b10000) !== 0) return true;
     }
   }
   return false;
 }
+
+/**
+ * How deep command substitutions may nest before a line is refused (review
+ * of the substitution fold): far past any command an agent writes, and far
+ * short of the call stack's own limit.
+ */
+const SUBSTITUTION_NESTING_LIMIT = 128;
+
+/** How many levels of nested substitution bodies the line's `.git` reading reads. */
+const SUBSTITUTION_READ_DEPTH = 64;
 
 /**
  * Does the line spell a `.git` segment where the shell may carry it to a
@@ -4742,20 +4826,24 @@ function wordJoinsGitAcrossSubstitution(text: string): boolean {
  * two spellings: a body that asks git for its directory
  * ({@link asksGitForItsDirectory}), and a word whose literal text and
  * substitution output join into `.git` ({@link wordJoinsGitAcrossSubstitution}).
+ * Substitution bodies are read this way to {@link SUBSTITUTION_READ_DEPTH}
+ * levels; a deeper one counts as naming `.git`, the strict side, so the
+ * reading's cost and its depth on the call stack stay bounded.
  */
-function lineSpellsGitIndirectly(segments: readonly LexSegment[]): boolean {
+function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): boolean {
   // A substitution body's words, each read as a path the shell may still
   // expand (`$(echo .gi?)`); its own segments read as a line of their own
   // (a nested substitution, an assignment in it, a split spelling); and a
   // `git rev-parse --git-dir` in it. A body that does not lex is unreadable,
   // and the strict side.
   const bodyNamesGit = (body: string): boolean => {
+    if (depth >= SUBSTITUTION_READ_DEPTH) return true;
     if (GIT_SEGMENT_IN_TEXT.test(body) || body.split(/[\s;&|()]+/u).some((token) => mayNameGitDirectory(token.replace(/["']/gu, "")))) {
       return true;
     }
     const lexed = lex(body);
     if (!lexed.ok) return true;
-    return lexed.segments.some(asksGitForItsDirectory) || lineSpellsGitIndirectly(lexed.segments);
+    return lexed.segments.some(asksGitForItsDirectory) || lineSpellsGitIndirectly(lexed.segments, depth + 1);
   };
   return segments.some((segment) => {
     const assignments = bashAssignmentCount(segment.words);
@@ -7973,15 +8061,30 @@ function classifySegment(
   // `read.shell`. It tightens a `read.shell` answer below, as a named target
   // would.
   let substitutedEscape: { path: string; rule: string } | null = null;
+  // Review of the substitution fold, M1: a body the line's reading already
+  // went through, on a line that spells no `.git`, is not read again.
+  const bodyAlreadyRead = context.lineNamesGit === false && context.spelledSegments?.has(segment) === true;
+  const substitutionDepth = (context.substitutionDepth ?? 0) + 1;
   for (const word of expanded) {
     for (const inner of word.substitutions) {
+      // Review of the substitution fold: past this depth the recursion is
+      // refused, not run until the call stack gives out (which it did near
+      // 1,250 levels, on main too, with a thrown error instead of an answer).
+      if (substitutionDepth > SUBSTITUTION_NESTING_LIMIT) {
+        return {
+          ok: false,
+          code: "opaque",
+          detail: `command substitutions nested more than ${String(SUBSTITUTION_NESTING_LIMIT)} deep are not read by this classifier`,
+        };
+      }
       // A substitution keeps today's refusal: the no-rule stand-in is for the
       // command's own segments only.
-      const nested = classifyCommand(
-        inner,
-        protectedPaths,
-        context.noRuleSegments === true ? { ...context, noRuleSegments: false } : context,
-      );
+      const nested = classifyCommand(inner, protectedPaths, {
+        ...context,
+        ...(context.noRuleSegments === true ? { noRuleSegments: false } : {}),
+        bodyAlreadyRead,
+        substitutionDepth,
+      });
       if (!nested.ok) {
         return {
           ok: false,
@@ -8940,9 +9043,14 @@ export function classifyCommand(
   // substitution body) reads its own text too, on top of what its line
   // spells: a spelling inside single quotes is no substitution to the outer
   // line, and is one to the script (substitution fold).
-  const lineNamesGit = context.lineNamesGit === true || lineSpellsGitIndirectly(lexed.segments);
-  context = { ...context, lineNamesGit };
-  execContext = { ...execContext, lineNamesGit };
+  // A substitution body the line's reading already went through is not read
+  // again (review of the substitution fold, M1): that reading found nothing,
+  // and this one would find the same.
+  const lineNamesGit =
+    context.lineNamesGit === true || (context.bodyAlreadyRead !== true && lineSpellsGitIndirectly(lexed.segments));
+  const spelledSegments = new WeakSet<LexSegment>(lexed.segments);
+  context = { ...context, lineNamesGit, spelledSegments, bodyAlreadyRead: false };
+  execContext = { ...execContext, lineNamesGit, spelledSegments, bodyAlreadyRead: false };
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };
