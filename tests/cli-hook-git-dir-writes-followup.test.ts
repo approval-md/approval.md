@@ -189,6 +189,14 @@ test("B review: a sed script read command by command; a part it cannot read, bef
   assert.deepEqual(pure('sed -n "1zw out.txt" f'), ["read.shell sed-read"]);
 });
 
+test("review: wget's long output options are read by any prefix, on disk too", { skip }, () => {
+  const repo = checkout();
+  symlinkSync(".git", join(repo, "g"));
+  assert.deepEqual(hook("wget --output-doc=g/config https://example.invalid/x", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("wget --output-f g/log https://example.invalid/x", repo), [DIR_WRITE]);
+  assert.ok(!hook("wget --output-doc=out.html https://example.invalid/x", repo).includes(DIR_WRITE));
+});
+
 test("B hook: a read's output word is walked on disk", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "g"));
