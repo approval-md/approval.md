@@ -268,8 +268,15 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     env:
-      BASELINE_CORE: "0.4.7"
-      BASELINE_CORE_INTEGRITY: "sha512-HksuK9n/+lUQqW6g/7PU4iM7V50Ttp3wtdiioQJr1j2ZOvWyT9C5VgN6PGL9ULUTM5j/2EAsKa2BBizJYdTEUg=="
+      # The core the boxes run, and the one place it is named for this gate.
+      # It follows the fleet, not this repo's releases: when a roll moves the
+      # boxes (the control plane's APPROVAL_MD_VERSION, which the overlay
+      # mirrors as APPROVAL_MD_PINNED), the next approval.md PR moves both
+      # lines here together, the integrity from `npm view
+      # approval-md@<version> dist.integrity`. This file is a protected path,
+      # so that move is the owner's grant or attest like any other ci.yml edit.
+      BASELINE_CORE: "0.4.8"
+      BASELINE_CORE_INTEGRITY: "sha512-YrAM0K3zAaqrnk/Ss7z8aZZOGsBJTMaum5HB+dY85ABjOcRmDw2CIv0o+FW+f6aRH4z/LrOA3dGo6Iyb1xEH0g=="
       CORPUS_RECIPES: "63"
       PIN_CORPUS: "069cae876367a6c65613a645bbece0212583dde3d6e186454d5d4a9f287cb1c4"
       PIN_ALLOWLIST: "408a7e3b6b0f86900e7e3b94cd724445a84910580316d2a1c718074adb4f526d"

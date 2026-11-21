@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-20 11:10'
-updated_date: '2026-10-21 05:54'
+updated_date: '2026-11-21 08:00'
 labels:
   - release
   - ci
@@ -47,4 +47,6 @@ Fold 5 (review-b recheck of 6f752ab8, 0M/0S/5N; lead: fold N-10 + N-9): N-10, de
 Fold 6 (review-b recheck of 2502bc44, 0M/0S/3N; lead: fold N-15): core keys every action <task>:<cls> (hook.ts actionKey; an adopted key is an earlier request of the same class). bindRequest reports the bound task rows whose key is not their own task and class (mislabeled); decideInBox makes a hook-timeout card with any such row verdict error card-request-class-mismatch, so the gate exits 2. This runs after the N-10 check, so a no-human class still reads card-request-no-human-class. Box test with review-b C4 (both cores log digest.share, which needs a human, while carding on network.call, plus a real minimal -> technical move): fail-before rc 0 none, now rc 2. Non-card calls are unchanged. Full fd30cd7b corpus (304 calls, conc 4): network.call manual and default template both rc 0 none, no false error. N-14 (adoption across workdirs) and N-16 (a class newly carded on a mixed card is changed) noted, not built. Touches the fail-closed invariant (strengthens it).
 
 0.4.7 rebase round (approval ruling 1, L16259; review-b N-17, L17225): merged origin/main eaa76223 (0.4.7: #663, #666, #667) into the branch; the one overlap, CHANGELOG.md, auto-merged with this branch's B-167 bullets inside the released 0.4.7 section, moved back under Unreleased (0.4.7 section byte-identical to main). BASELINE_CORE is npm approval-md@0.4.7 with its integrity pinned. Under 0.4.7 (#666) the eleven --url EdgeOS curls are network.call at the Hermes home, so their eleven hermes-home allowlist entries went stale (a run with the old 18 entries: rc 1, exactly 11 stale lines) and are deleted: 18 -> 7, PIN_ALLOWLIST refreshed. Box check at fd30cd7b with the 7 entries: 96 denied runs, 0 not allowlisted. The test fixture's own hermes-home CURL entry went stale the same way and is removed. N-17: pure probe P12 in the N-15 test (a row of task T keyed under task U, same class, is mislabeled, on the named-key and span paths); mutant MN15d (suffix-only compare) now fails it. Full fd30cd7b corpus, same build both sides, conc 4: network.call manual rc 0 none (40 cards per side, all bound, 0 card-request-*), default rc 0 none.
+
+Rebuilt on 0.4.8 (main 919dfb3f, replaces approval-md#665): the PR head fb998ecc merged into main with its history; the one conflict, CHANGELOG.md, resolved by hand with the PR's Added block under Unreleased after main's Security section. BASELINE_CORE is npm approval-md@0.4.8 with its integrity pinned (the core the boxes run since the 0.4.8 roll). Gate npm 0.4.8 -> this tree (0.4.8 plus the APRV-518 git rules), pinned corpus fd30cd7b, conc 4: CLASS-DIFF PASS, class-diff: none, 304 of 304 calls unchanged; box check 96 denied runs, 0 not allowlisted; red only on the seven entries awaiting acceptance.
 <!-- SECTION:NOTES:END -->

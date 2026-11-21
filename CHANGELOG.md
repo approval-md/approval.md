@@ -133,7 +133,7 @@ ordinary workspace write.
   `flip: {from, to}` narrows the entry to that move). The `overlay-recipes` job
   now also re-extracts the corpus from the overlay at its pinned sha and fails
   on any difference, installs the boxes' core from npm at a pinned integrity
-  (`BASELINE_CORE`, 0.4.7), and publishes the report (first line: the GATE
+  (`BASELINE_CORE`, 0.4.8), and publishes the report (first line: the GATE
   line) as the job summary and the `class-diff` artifact. Between 0.4.5 and
   0.4.6, on the overlay the boxes ran on 19 October (`99d33417`), it reports
   the eleven EdgeOS recipes moving `network.call` auto to `policy.core`
@@ -199,14 +199,19 @@ ordinary workspace write.
     names (core keys each action `<task>:<class>`) is an error, and the gate
     exits 2, even when the logged class needs a human. A row of the bound task
     keyed under another task with the same class is caught too.
-- **The class-diff baseline is 0.4.7, and the EdgeOS entries are gone (B-167,
-  0.4.7 rebase round).** `BASELINE_CORE` is npm approval-md@0.4.7 at its
-  pinned integrity, the core the boxes run from the 0.4.7 roll. Under 0.4.7
-  (APRV-533, #666) the eleven `--url` EdgeOS recipes are `network.call` at the
-  Hermes home as everywhere else, so their eleven hermes-home allowlist
-  entries matched nothing and failed as stale; they are deleted. Seven entries remain for
+- **The class-diff baseline is 0.4.8, and the EdgeOS entries are gone (B-167,
+  rebuilt on 0.4.8).** `BASELINE_CORE` is npm approval-md@0.4.8 at its
+  pinned integrity, the core the boxes run since the 0.4.8 roll; it lives in
+  the `overlay-recipes` job of `ci.yml` and moves with the fleet, in the
+  approval.md PR after each roll. Under 0.4.7 (APRV-533, #666) the eleven
+  `--url` EdgeOS recipes became `network.call` at the Hermes home as
+  everywhere else, so their eleven hermes-home allowlist entries matched
+  nothing and failed as stale; they are deleted. Seven entries remain for
   Carter's acceptance: agent-plaza, the four operator READMEs and the two
-  edge-india placeholder lines.
+  edge-india placeholder lines. From npm 0.4.8 to this tree (0.4.8 plus the
+  APRV-518 git rules above) the pinned corpus reads `class-diff: none`: all
+  304 calls unchanged, and the box check's 96 denied runs are the seven
+  entries' own.
 
 ## 0.4.8 — 2026-11-20
 
