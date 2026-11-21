@@ -72,6 +72,16 @@
  * `--overlay-tree`. Exit codes: 0 clean, 1 a finding (unlisted human-only, an
  * unlisted box deny, a blocking move, a new shadowed tools line, a stale or
  * unaccepted allowlist entry), 2 an input could not be read.
+ *
+ * The report (`--md`, `--diff-json`) says FAIL whenever the run exits 1. Its
+ * first line (the GATE line, or the NEW-CALLS line when there is no `--diff`)
+ * is `PASS` or `FAIL n BLOCKING` as before when nothing else fails, and gains
+ * `k OTHER` (`FAIL k OTHER`, `FAIL n BLOCKING, k OTHER`) for each finding no
+ * BLOCKING count holds: a stale or unaccepted allowlist entry, an unlisted
+ * deny, an expected.json that is not the pinned copy. Those are listed right
+ * under the first line ("Other findings") and in the JSON's `reasons`, beside
+ * `failed` (true exactly when the run exits 1). The NEW-CALLS findings are
+ * counted on the NEW-CALLS line, as before.
  */
 
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -440,10 +450,46 @@ export function shadowedTools(toolsLines) {
   return out;
 }
 
+/**
+ * The verdict a summary line opens with. `blocking` counts what the line's own
+ * report lists as BLOCKING; `other` counts the run's other findings (a stale
+ * or unaccepted allowlist entry, an unlisted deny, anything else that makes the
+ * run exit 1), which the report lists under "Other findings". With no other
+ * finding the verdict is today's `PASS` or `FAIL n BLOCKING`, byte for byte.
+ */
+export function verdictOf(blocking, other = 0) {
+  if (blocking > 0 && other > 0) return `FAIL ${String(blocking)} BLOCKING, ${String(other)} OTHER`;
+  if (blocking > 0) return `FAIL ${String(blocking)} BLOCKING`;
+  if (other > 0) return `FAIL ${String(other)} OTHER`;
+  return "PASS";
+}
+
+/**
+ * The report's "Other findings" section, right under its first line: every
+ * reason the run exits 1 that no BLOCKING count holds, one per line, the same
+ * text the check writes to stderr. Nothing on a run without one.
+ */
+export function otherFindingsLines(reasons = []) {
+  if (reasons.length === 0) return [];
+  const longest = Math.max(0, ...reasons.map((r) => Math.max(0, ...(String(r).match(/`+/gu) ?? []).map((run) => run.length))));
+  const fence = "`".repeat(Math.max(3, longest + 1));
+  return [`## Other findings (each fails the run): ${String(reasons.length)}`, "", `${fence}text`, ...reasons.map((r) => String(r).replace(/\n/gu, " ")), fence, ""];
+}
+
+/**
+ * A NEW-CALLS line that heads the report (a run with `--expected` and no
+ * `--diff`) carries the run's other findings in its verdict as the GATE line
+ * does. Pure; a line without other findings comes back unchanged.
+ */
+export function withOtherFindings(line, other) {
+  if (other === 0) return line;
+  return line.replace(/^(NEW-CALLS) (?:PASS|FAIL (\d+) BLOCKING):/u, (_m, head, n) => `${head} ${verdictOf(Number(n ?? 0), other)}:`);
+}
+
 /** The GATE line: the one line the release GATE carries verbatim. */
 export function gateLine(meta, summary, extra = {}) {
   const findings = summary.blocking + (extra.shadowed ?? 0);
-  const verdict = findings > 0 ? `FAIL ${String(findings)} BLOCKING` : "PASS";
+  const verdict = verdictOf(findings, extra.other ?? 0);
   const moved = summary.blocking + summary.allowlisted + summary.changed;
   const overlay =
     meta.baselineOverlay === meta.overlay
@@ -479,7 +525,8 @@ function cell(text) {
 }
 
 export function renderDiff(meta, diff, extra = {}) {
-  const out = [gateLine(meta, diff.summary, { shadowed: (extra.shadowed ?? []).length }), ""];
+  const reasons = extra.reasons ?? [];
+  const out = [gateLine(meta, diff.summary, { shadowed: (extra.shadowed ?? []).length, other: reasons.length }), "", ...otherFindingsLines(reasons)];
   out.push(`## Class-diff: approval.md core ${meta.baselineCore} -> ${meta.core}`, "");
   out.push(`- baseline: core ${meta.baselineCore} (${meta.baselineLabel}), overlay ${meta.overlayRepo}@${meta.baselineOverlay}`);
   out.push(`- candidate: core ${meta.core} (${meta.coreLabel}), overlay ${meta.overlayRepo}@${meta.overlay}`);
@@ -687,9 +734,13 @@ async function main() {
     }
     for (const row of verdict.refused) process.stdout.write(`refused (info)  ${row.where}  ${row.code}\n`);
   }
-  let bad = false;
-  const complain = (message) => {
-    bad = true;
+  // Every reason the run exits 1, collected as it goes to stderr. `counted`: a
+  // BLOCKING count of the report already holds it (the class-diff's blocking
+  // moves and shadowed tools lines, the NEW-CALLS findings); every other one is
+  // an "other finding" the report's first line and the JSON carry.
+  const complaints = [];
+  const complain = (message, counted = false) => {
+    complaints.push({ message, counted });
     process.stderr.write(`${message}\n`);
   };
   for (const entry of verdict.stale) complain(`stale allowlist entry (no held recipe matches it any more; delete it): ${entry.file}: ${entry.command}`);
@@ -787,8 +838,10 @@ async function main() {
     }
 
     const movedKeys = new Set();
-    let md = null;
-    let diffDoc = null;
+    // The class-diff's and the new-calls check's results, rendered once every
+    // complaint is in (the report's first line carries them all).
+    let classDiff = null;
+    let newCalls = null;
     if (baselineDir !== undefined) {
       const baselineTree = resolvePath(arg("--baseline-overlay-tree") ?? overlayTree);
       const before = await decideInBox({ core: baselineCore, corpus: baselineCorpus, overlayTree: baselineTree, boxRoot, toolsLines, concurrency, harnessOnly, ...jobsFor(baselineCorpus) });
@@ -821,16 +874,15 @@ async function main() {
         baselineOverlay: baselineCorpus.overlay.sha,
         overlayRepo: corpus.overlay.repo,
       };
-      md = renderDiff(meta, diff, { shadowed });
-      if (!json) process.stdout.write(`\n${md}`);
-      diffDoc = { gate: gateLine(meta, diff.summary, { shadowed: shadowed.length }), meta, shadowed, boxHeld: box.held, ...diff };
+      classDiff = { meta, diff, shadowed };
       if (diff.summary.blocking > 0) {
         complain(
           `${String(diff.summary.blocking)} shipped call run(s) lose autonomy or stop running between core ${meta.baselineCore} and ${meta.core} (EDGEOS-BLOCK, S-4). ` +
             "Fix the classifier, change the overlay first, or have Carter accept the move by name in the allowlist.",
+          true,
         );
       }
-      if (shadowed.length > 0) complain(`${String(shadowed.length)} tools line(s) are newly shadowed by an earlier line (first match wins): the later line never decides anything`);
+      if (shadowed.length > 0) complain(`${String(shadowed.length)} tools line(s) are newly shadowed by an earlier line (first match wins): the later line never decides anything`, true);
     }
     // 4. B-167N: the new-calls check, at this core, under the village default
     // and in every matrix cell (P2).
@@ -854,28 +906,52 @@ async function main() {
       const harness = { names: harnessCalls(toolsCandidate).map((c) => c.tool), matches: toolsCandidate.map((l) => String(l.match)) };
       const result = judgeNewCalls({ corpus, tagCorpus, validated, head: after, cells, movedKeys, autonomyOf: (cls) => core.resolve(after.load, cls).autonomy, harness });
       const meta = { core: core.version, tagLabel: arg("--tag-label") ?? `overlay ${tagCorpus.overlay.sha.slice(0, 12)}` };
-      const nmd = renderNewCalls(meta, result, validated);
-      if (!json) process.stdout.write(`\n${nmd}`);
-      md = md === null ? nmd : `${md}\n${nmd}`;
-      diffDoc = { ...diffDoc, newCalls: { line: newCallsLine(meta, result.summary), ...result } };
+      newCalls = { meta, result };
       if (result.findings.length > 0) {
         complain(
           `${String(result.findings.length)} new-calls finding(s) (B-167N): a new or changed call with no declared outcome, an outcome other than declared, ` +
             "a limiting entry without Carter's acceptance, or a stale entry. Declare the call in expected.json, fix the call, or have Carter accept it by name.",
+          true,
         );
       }
     }
-    const mdOut = arg("--md");
-    if (mdOut !== undefined && md !== null) writeFileSync(mdOut, md, "utf8");
-    const jsonOut = arg("--diff-json");
-    if (jsonOut !== undefined && diffDoc !== null) writeFileSync(jsonOut, `${JSON.stringify(diffDoc, null, 2)}\n`, "utf8");
     // An entry nothing used is stale (box and any scopes; neutral ones above).
+    // Judged before the report is written, so the report carries it.
     for (const entry of allowlist.entries) {
       if (scopeOf(entry) === "neutral" || used.has(entry)) continue;
       complain(`stale allowlist entry (nothing held or blocked matches it; delete it): ${entry.file}: ${entry.command}`);
     }
+    // The report: its first line says FAIL whenever the run exits 1, and why.
+    const reasons = complaints.filter((c) => !c.counted).map((c) => c.message);
+    const failed = complaints.length > 0;
+    let md = null;
+    let diffDoc = null;
+    if (classDiff !== null) {
+      const { meta, diff, shadowed } = classDiff;
+      md = renderDiff(meta, diff, { shadowed, reasons });
+      diffDoc = { gate: gateLine(meta, diff.summary, { shadowed: shadowed.length, other: reasons.length }), failed, reasons, meta, shadowed, boxHeld: box.held, ...diff };
+    }
+    if (newCalls !== null) {
+      const { meta, result } = newCalls;
+      const nmd = renderNewCalls(meta, result, validated);
+      if (classDiff !== null) {
+        md = `${md}\n${nmd}`;
+        diffDoc = { ...diffDoc, newCalls: { line: newCallsLine(meta, result.summary), ...result } };
+      } else {
+        // No class-diff: the NEW-CALLS line heads the report and carries the other findings.
+        const [first, blank, ...rest] = nmd.split("\n");
+        const line = withOtherFindings(first, reasons.length);
+        md = [line, blank, ...otherFindingsLines(reasons), ...rest].join("\n");
+        diffDoc = { failed, reasons, newCalls: { line, ...result } };
+      }
+    }
+    if (!json && md !== null) process.stdout.write(`\n${md}`);
+    const mdOut = arg("--md");
+    if (mdOut !== undefined && md !== null) writeFileSync(mdOut, md, "utf8");
+    const jsonOut = arg("--diff-json");
+    if (jsonOut !== undefined && diffDoc !== null) writeFileSync(jsonOut, `${JSON.stringify(diffDoc, null, 2)}\n`, "utf8");
   }
-  process.exit(bad ? 1 : 0);
+  process.exit(complaints.length > 0 ? 1 : 0);
 }
 
 // Review N5: compared by real path, so a run through a symlinked directory (the

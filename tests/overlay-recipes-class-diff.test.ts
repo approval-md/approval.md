@@ -55,7 +55,11 @@ import {
   gateLine,
   leftMinimal,
   newlyNotMinimal,
+  otherFindingsLines,
+  renderDiff,
   shadowedTools,
+  verdictOf,
+  withOtherFindings,
   // @ts-expect-error no declaration file for the standalone check script
 } from "../../scripts/overlay-recipes-check.mjs";
 import {
@@ -377,6 +381,39 @@ test("the GATE line names both cores by label, and FAIL with the count", () => {
   assert.match(gateLine(meta, summary), /^CLASS-DIFF FAIL 1 BLOCKING: core 0\.4\.6 \(npm 0\.4\.6\) -> 0\.4\.6 \(this build abc\).*blocking by column: home 1$/u);
 });
 
+// The release GATE carries this line verbatim and other code reads it: a clean
+// PASS and a pure FAIL n BLOCKING stay the bytes they were before other findings
+// joined the verdict; any other finding turns the verdict FAIL and says how many.
+test("the GATE line: PASS and FAIL n BLOCKING byte for byte as before; other findings make it FAIL k OTHER", () => {
+  const meta = { core: "0.4.9", baselineCore: "0.4.8", coreLabel: "this build abc", baselineLabel: "npm 0.4.8", overlay: "f".repeat(40), baselineOverlay: "f".repeat(40) };
+  const clean = { calls: 8, recipes: 6, harness: 2, blocking: 0, allowlisted: 0, changed: 0, new: 0, removed: 0, unchanged: 8, columns: {} };
+  const blocked = { ...clean, blocking: 2, unchanged: 6, columns: { home: 2 } };
+  const tail = "core 0.4.8 (npm 0.4.8) -> 0.4.9 (this build abc), overlay ffffffffffff; 8 calls (6 recipe runs + 2 harness calls); ";
+  assert.equal(gateLine(meta, clean), `CLASS-DIFF PASS: ${tail}class-diff: none; 0 new, 0 removed`);
+  assert.equal(gateLine(meta, clean, { other: 0 }), `CLASS-DIFF PASS: ${tail}class-diff: none; 0 new, 0 removed`);
+  assert.equal(gateLine(meta, blocked), `CLASS-DIFF FAIL 2 BLOCKING: ${tail}2 moved (2 blocking, 0 allowlisted, 0 changed); 0 new, 0 removed; blocking by column: home 2`);
+  assert.equal(gateLine(meta, clean, { shadowed: 1 }), `CLASS-DIFF FAIL 1 BLOCKING: ${tail}class-diff: none; 0 new, 0 removed; 1 newly shadowed tools line(s)`);
+  assert.equal(gateLine(meta, clean, { other: 3 }), `CLASS-DIFF FAIL 3 OTHER: ${tail}class-diff: none; 0 new, 0 removed`);
+  assert.equal(gateLine(meta, blocked, { other: 1 }), `CLASS-DIFF FAIL 2 BLOCKING, 1 OTHER: ${tail}2 moved (2 blocking, 0 allowlisted, 0 changed); 0 new, 0 removed; blocking by column: home 2`);
+  assert.equal(verdictOf(0), "PASS");
+  assert.equal(verdictOf(0, 2), "FAIL 2 OTHER");
+  // A NEW-CALLS line heading a run with no class-diff takes the same verdict.
+  const nc = "NEW-CALLS PASS: core 0.4.9, village default template, base v1; 1 new, 0 changed (0 bytes, 0 core move or propose); 1 declared, 0 undeclared";
+  assert.equal(withOtherFindings(nc, 0), nc);
+  assert.equal(withOtherFindings(nc, 1), nc.replace("NEW-CALLS PASS:", "NEW-CALLS FAIL 1 OTHER:"));
+  assert.equal(withOtherFindings(nc.replace("PASS", "FAIL 4 BLOCKING"), 2), nc.replace("NEW-CALLS PASS:", "NEW-CALLS FAIL 4 BLOCKING, 2 OTHER:"));
+  // The report: nothing under a clean or a blocking-only line; each reason, verbatim, under any other.
+  assert.deepEqual(otherFindingsLines([]), []);
+  const diff = { rows: [], summary: clean };
+  const plain = (renderDiff(meta, diff) as string).split("\n");
+  assert.equal(plain[0], gateLine(meta, clean));
+  assert.equal(plain[2], "## Class-diff: approval.md core 0.4.8 -> 0.4.9");
+  const reasons = ["stale allowlist entry (nothing held or blocked matches it; delete it): skills/x/SKILL.md: run `x` <arg>", "a second reason"];
+  const red = (renderDiff(meta, diff, { reasons }) as string).split("\n");
+  assert.deepEqual(red.slice(0, 8), [gateLine(meta, clean, { other: 2 }), "", "## Other findings (each fails the run): 2", "", "```text", reasons[0], reasons[1], "```"]);
+  assert.equal(red[9], "## Class-diff: approval.md core 0.4.8 -> 0.4.9");
+});
+
 test("M-3 (c): ci.yml pins the gate's own files by sha256 and the corpus by its count, so a pruned corpus fails", () => {
   const wf = parse(readFileSync(join(ROOT, ".github", "workflows", "ci.yml"), "utf8")) as {
     jobs: Record<string, { env?: Record<string, string> }>;
@@ -450,18 +487,25 @@ function corpusWith(recipes: { where: string; command: string }[], block = baseC
  * the gate made it fail; the corpus keeps the curl, now run in every column.
  */
 const allowlist = join(scratch, "allowlist.json");
-function writeAllowlist(): void {
-  writeFileSync(allowlist, JSON.stringify({ entries: [] }));
+function writeAllowlist(entries: unknown[] = []): void {
+  writeFileSync(allowlist, JSON.stringify({ entries }));
+}
+
+interface Report {
+  gate?: string;
+  failed?: boolean;
+  reasons?: string[];
 }
 
 function gate(
   env: Record<string, string>,
-  opts: { corpus?: string; baselineCorpus?: string; core?: string; baseline?: string; concurrency?: number } = {},
-): { status: number | null; out: string; err: string } {
-  writeAllowlist();
+  opts: { corpus?: string; baselineCorpus?: string; core?: string; baseline?: string; concurrency?: number; allowlist?: unknown[] } = {},
+): { status: number | null; out: string; err: string; json: Report } {
+  writeAllowlist(opts.allowlist);
   const corpus = opts.corpus ?? corpusWith([STAY, CURL]);
   const box = mkdtempSync(join(boxes, "box-"));
   const md = join(box, "report.md");
+  const jsonOut = join(box, "report.json");
   const run = spawnSync(
     process.execPath,
     [
@@ -474,6 +518,7 @@ function gate(
       "--overlay-tree", overlay,
       "--box-root", box,
       "--md", md,
+      "--diff-json", jsonOut,
       "--box-concurrency", String(opts.concurrency ?? 1),
       // Sequential hook runs (the lead's load rule) over the harness tools the plants touch.
       "--harness-only", "terminal,read_file,search_files,send_message,web_search,mcp__index__list_intents",
@@ -486,15 +531,50 @@ function gate(
   } catch {
     report = "(no report)";
   }
-  return { status: run.status, out: report, err: run.stderr };
+  let json: Report = {};
+  try {
+    json = JSON.parse(readFileSync(jsonOut, "utf8")) as Report;
+  } catch {
+    json = {};
+  }
+  return { status: run.status, out: report, err: run.stderr, json };
 }
 
 const BOX_TIMEOUT = { timeout: 600_000 };
+
+/** Exit 1, the report's first line FAIL with these other findings, each reason in the md, the JSON and stderr. */
+function assertOtherFindings(run: { status: number | null; out: string; err: string; json: Report }, reasons: RegExp[], blocking = 0): void {
+  assert.equal(run.status, 1, `${run.err}\n${run.out.slice(0, 600)}`);
+  const first = run.out.split("\n")[0] ?? "";
+  const verdict = blocking > 0 ? `FAIL ${String(blocking)} BLOCKING, ${String(reasons.length)} OTHER` : `FAIL ${String(reasons.length)} OTHER`;
+  assert.ok(first.startsWith(`CLASS-DIFF ${verdict}: `), first);
+  assert.equal(run.json.gate, first);
+  assert.equal(run.json.failed, true);
+  assert.equal(run.json.reasons?.length, reasons.length, JSON.stringify(run.json.reasons));
+  const section = run.out.split("\n").slice(1, 6 + reasons.length).join("\n");
+  assert.match(section, new RegExp(`^\\n## Other findings \\(each fails the run\\): ${String(reasons.length)}\\n`, "u"));
+  for (const reason of reasons) {
+    const said: string | undefined = run.json.reasons?.find((r) => reason.test(r));
+    assert.ok(said !== undefined, `${String(reason)} not in ${JSON.stringify(run.json.reasons)}`);
+    assert.ok(section.split("\n").includes(said), `${said} not under the first line`);
+    assert.ok(run.err.split("\n").includes(said), `${said} not on stderr`);
+  }
+}
+
+/** Nothing besides the BLOCKING count: no other-findings section, an empty reasons list. */
+function assertNoOtherFindings(run: { out: string; json: Report }): void {
+  assert.doesNotMatch(run.out.split("\n")[0] ?? "", /OTHER/u);
+  assert.doesNotMatch(run.out, /## Other findings/u);
+  assert.deepEqual(run.json.reasons, []);
+  assert.equal(run.json.gate, run.out.split("\n")[0]);
+}
 
 test("box control: the planted copy with every plant off passes, class-diff: none", BOX_TIMEOUT, () => {
   const run = gate({});
   assert.equal(run.status, 0, run.err);
   assert.match(run.out, /^CLASS-DIFF PASS: .*class-diff: none/u);
+  assertNoOtherFindings(run);
+  assert.equal(run.json.failed, false);
 });
 
 const plants: [string, Record<string, string>, RegExp][] = [
@@ -512,6 +592,10 @@ for (const [name, env, shape] of plants) {
     assert.equal(run.status, 1, `${run.err}\n${run.out.slice(0, 400)}`);
     assert.match(run.out, /^CLASS-DIFF FAIL \d+ BLOCKING/u);
     assert.match(run.out.split("\n")[0] ?? "", shape);
+    assert.equal(run.json.failed, true);
+    assert.equal(run.json.gate, run.out.split("\n")[0]);
+    // P17 is a pure blocking fail (no recipe denied in the box): the GATE line as it always was, nothing else listed.
+    if (name.startsWith("P17")) assertNoOtherFindings(run);
   });
 }
 
@@ -529,6 +613,44 @@ test("S-1: a shipped recipe the hook denies in the box fails with no diff move, 
   assert.equal(run.status, 1, run.err);
   assert.match(run.out, /class-diff: none/u);
   assert.match(run.err, /denied by the real hook in the box layout/u);
+  // The report says FAIL and why, never "CLASS-DIFF PASS" on a red run: the
+  // pre-fix curl is human-only in the neutral check too, so two reasons.
+  assertOtherFindings(run, [
+    /^1 overlay recipe\(s\) resolve to a human-only class under this core and are not allowlisted\. /u,
+    /^\d+ shipped recipe run\(s\) are denied by the real hook in the box layout/u,
+  ]);
+});
+
+// --- a red run's report says FAIL, and why (the GATE line carries every reason the run exits 1) ---
+
+const NEVER = "bun skills/edgeos/scripts/events.ts --when never";
+const entry = (command: string, scope: string, over: Record<string, unknown> = {}) => ({ file: "skills/edgeos/SKILL.md", command, scope, reason: "a fixture entry with a reason that says something", ...ACCEPTED, ...over });
+
+test("a stale neutral allowlist entry: exit 1, the GATE line FAIL 1 OTHER, the reason in the md and the JSON", BOX_TIMEOUT, () => {
+  const run = gate({}, { core: ROOT, allowlist: [entry(NEVER, "neutral")] });
+  assertOtherFindings(run, [/^stale allowlist entry \(no held recipe matches it any more; delete it\): skills\/edgeos\/SKILL\.md: bun skills\/edgeos\/scripts\/events\.ts --when never$/u]);
+  assert.match(run.out, /class-diff: none; 0 new, 0 removed$/mu);
+});
+
+test("a stale box and a stale any-scope entry (judged after the box and the diff): exit 1, FAIL 2 OTHER, both reasons in the md and the JSON", BOX_TIMEOUT, () => {
+  const run = gate({}, { core: ROOT, allowlist: [entry(NEVER, "box"), entry(`${NEVER} again`, "any")] });
+  assertOtherFindings(run, [
+    /^stale allowlist entry \(nothing held or blocked matches it; delete it\): skills\/edgeos\/SKILL\.md: bun skills\/edgeos\/scripts\/events\.ts --when never$/u,
+    /^stale allowlist entry \(nothing held or blocked matches it; delete it\): skills\/edgeos\/SKILL\.md: bun skills\/edgeos\/scripts\/events\.ts --when never again$/u,
+  ]);
+});
+
+test("an allowlist entry awaiting acceptance (it lists a real box deny): exit 1, FAIL 2 OTHER, each acceptance error in the md and the JSON", BOX_TIMEOUT, () => {
+  const run = gate({}, { core: ROOT, corpus: corpusWith([STAY, PRE_FIX]), allowlist: [entry(PRE_FIX.command, "any", { accepted_by: undefined, accepted_at: undefined })] });
+  assertOtherFindings(run, [/: awaiting acceptance: accepted_by is empty \(Carter accepts by name\)$/u, /: accepted_at is not a YYYY-MM-DD date$/u]);
+  assert.doesNotMatch(run.err, /denied by the real hook|stale allowlist entry/u);
+});
+
+test("a blocking move and an other finding together: FAIL n BLOCKING, k OTHER", BOX_TIMEOUT, () => {
+  const run = gate({ PLANT_RESOLVE: "network.call=supervised:retro" }, { allowlist: [entry(NEVER, "box")] });
+  const blocking = Number((run.out.split("\n")[0] ?? "").match(/^CLASS-DIFF FAIL (\d+) BLOCKING/u)?.[1] ?? 0);
+  assert.ok(blocking > 0, run.out.slice(0, 400));
+  assertOtherFindings(run, [/^stale allowlist entry \(nothing held or blocked matches it; delete it\): .*--when never$/u], blocking);
 });
 
 // --- fold 2: carded calls keep their class, autonomy and style (S-4) -----------------------

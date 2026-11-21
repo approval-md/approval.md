@@ -159,6 +159,12 @@ ordinary workspace write.
     overlay main `255f9291` (twelve eci-volunteers operations,
     `kismet.web_link`, `zzz.schedule_posts`) and Gold Stars' send propose; the
     For Kicks propose cites where the code proposes today.
+  - A red run's report says FAIL and why. A stale or unaccepted allowlist
+    entry, an unlisted deny or an unpinned `expected.json` used to exit 1 under
+    a `CLASS-DIFF PASS` line; the first line now reads `FAIL k OTHER` (or `FAIL
+    n BLOCKING, k OTHER`) with each reason listed under it and in the JSON's
+    `reasons` and `failed`, while a clean PASS and a blocking-only FAIL line are
+    unchanged.
 - **CLASS-DIFF against the core the boxes run (B-167 release gate).**
   `overlay-recipes-check.mjs --diff <baseline core>` classifies the same corpus
   at a baseline core and at this one, over every recipe plus every `tools:`

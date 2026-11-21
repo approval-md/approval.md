@@ -534,7 +534,7 @@ function corpusFile(recipes: unknown[], envelopes: unknown[], block = BLOCK, ext
 function gate(
   entries: unknown[],
   opts: { corpus?: string; tag?: string; core?: string; diff?: boolean; env?: Record<string, string>; pinned?: string | null } = {},
-): { status: number | null; md: string; err: string } {
+): { status: number | null; md: string; err: string; json: Json } {
   const expected = join(scratch, `expected-${String(Math.random()).slice(2)}.json`);
   writeFileSync(expected, JSON.stringify({ entries }));
   if (opts.pinned === null) rmSync(PINNED, { force: true });
@@ -544,6 +544,7 @@ function gate(
   const corpus = opts.corpus ?? corpusFile([STAY], [ENVELOPE]);
   const box = mkdtempSync(join(boxes, "box-"));
   const md = join(box, "report.md");
+  const jsonOut = join(box, "report.json");
   const args = [
     SCRIPT,
     "--core", opts.core ?? ROOT,
@@ -552,6 +553,7 @@ function gate(
     "--overlay-tree", overlay,
     "--box-root", box,
     "--md", md,
+    "--diff-json", jsonOut,
     "--harness-only", "terminal",
     "--expected", expected,
     "--tag-corpus", opts.tag ?? corpusFile([OTHER], []),
@@ -564,15 +566,27 @@ function gate(
   } catch {
     report = "(no report)";
   }
-  return { status: run.status, md: report, err: run.stderr };
+  let json: Json = {};
+  try {
+    json = JSON.parse(readFileSync(jsonOut, "utf8")) as Json;
+  } catch {
+    json = {};
+  }
+  return { status: run.status, md: report, err: run.stderr, json };
 }
 
 const BOX_TIMEOUT = { timeout: 600_000 };
+const PIN_REASON = /^expected\.json at .* is not the copy this approval\.md checkout pins/u;
 
 test("control: a new recipe and the For Kicks order shape, both declared, Carter's acceptance on the limiting one: exit 0", BOX_TIMEOUT, () => {
   const run = gate([recipeEntry(), envelopeEntry()]);
   assert.equal(run.status, 0, `${run.err}\n${run.md.slice(0, 2000)}`);
-  assert.match(run.md, /^NEW-CALLS PASS: .*2 new/mu);
+  assert.match(run.md, /^NEW-CALLS PASS: .*2 new/u);
+  // A clean run lists no other finding.
+  assert.doesNotMatch(run.md, /## Other findings/u);
+  assert.equal(run.json["failed"], false);
+  assert.deepEqual(run.json["reasons"], []);
+  assert.equal((run.json["newCalls"] as Json)["line"], run.md.split("\n")[0]);
   assert.match(run.md, /marketplace\.app\.action \| card \| minimal \| [0-9.]+ \| marketplace\.app\.action:forkicks\.order\.confirm:fk-draft-0001/u);
 });
 
@@ -609,6 +623,36 @@ test("P1 security fold: an overlay expected.json that is not approval.md's pinne
   const run = gate([recipeEntry(), envelopeEntry()], { pinned: JSON.stringify({ entries: [recipeEntry()] }) });
   assert.equal(run.status, 1, run.err);
   assert.match(run.err, /is not the copy this approval\.md checkout pins/u);
+  // No class-diff here: the NEW-CALLS line heads the report, and it says FAIL and why (never PASS on a red run).
+  const lines = run.md.split("\n");
+  assert.match(lines[0] ?? "", /^NEW-CALLS FAIL 1 OTHER: /u);
+  assert.equal(lines[2], "## Other findings (each fails the run): 1");
+  const reasons = run.json["reasons"] as string[];
+  assert.equal(reasons.length, 1);
+  assert.match(reasons[0] ?? "", PIN_REASON);
+  assert.equal(lines[5], reasons[0]);
+  assert.ok(run.err.split("\n").includes(reasons[0] ?? ""));
+  assert.equal(run.json["failed"], true);
+  assert.equal((run.json["newCalls"] as Json)["line"], lines[0]);
+});
+
+test("NEW-CALLS findings and an other finding together: the heading NEW-CALLS line says FAIL n BLOCKING, 1 OTHER", BOX_TIMEOUT, () => {
+  const run = gate([recipeEntry()], { pinned: JSON.stringify({ entries: [recipeEntry(), envelopeEntry()] }) });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.md.split("\n")[0] ?? "", /^NEW-CALLS FAIL [1-9]\d* BLOCKING, 1 OTHER: /u);
+  assert.match((run.json["reasons"] as string[])[0] ?? "", PIN_REASON);
+  assert.match(run.md, /village#forkicks\.order\.confirm`: new call with no declared outcome/u);
+});
+
+test("with the class-diff, NEW-CALLS findings stay on their own line: CLASS-DIFF PASS, NEW-CALLS FAIL n BLOCKING, failed true", BOX_TIMEOUT, () => {
+  const run = gate([recipeEntry()], { diff: true });
+  assert.equal(run.status, 1, run.err);
+  assert.match(run.md.split("\n")[0] ?? "", /^CLASS-DIFF PASS: /u);
+  assert.match(run.md, /^NEW-CALLS FAIL [1-9]\d* BLOCKING: /mu);
+  assert.doesNotMatch(run.md, /## Other findings/u);
+  assert.equal(run.json["failed"], true);
+  assert.deepEqual(run.json["reasons"], []);
+  assert.equal(run.json["gate"], run.md.split("\n")[0]);
 });
 
 test("security fold: two corpus envelopes with one key exit 1", BOX_TIMEOUT, () => {
