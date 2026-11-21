@@ -1030,10 +1030,14 @@ the body's words with quotes removed: the format filled from its arguments,
 escapes decoded, an argument the text cannot read an unknown output, and a
 body's segments printed in turn (`$(printf .g; printf it)`). A replacement
 expansion's new text counts as text between unknown runs (`${G/x/.}`);
-removal and substring count on a line that holds `.git`, in its text,
-its decoded escapes or a word with quotes removed (`G=.gitx; ${G%x}`,
-`G='.gi''tx'`), or one that assigns a value that is no plain literal (a glob
-or an expansion: `D=.gi?x; ${D%x}`); `@E` and `@P` count; `${!-.git}` is the default word of
+every operator that transforms a value (removal, substring, replacement,
+case, `@`) counts unless the value is a known plain literal, set by a
+`NAME=` word at the start of the line and nowhere else, and the result,
+worked out exactly, is no `.git`: so `echo x > "${f%.txt}.log"` with `f` set
+in an earlier call, a positional (`${1%.md}`), a special parameter or an
+array element is `git-dir-write`, while `f=notes.txt; echo x >
+"${f%.txt}.log"` stays a workspace write; it also counts on a line that
+holds `.git` or assigns a value that is no plain literal; `${!-.git}` is the default word of
 `$!`, read as the operator it is; an operator this reader does not know, or
 a `${` that does not close, counts. Inside an operator's word a nested
 expansion is an unknown output, and a default word stands for its expansion

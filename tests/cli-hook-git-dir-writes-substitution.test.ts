@@ -349,10 +349,8 @@ test("security review d: the other parameter expansion operators", () => {
   assert.deepEqual(pure("G=.gitx; echo x >> ${G:0:4}/config"), [ASSIGNMENT, DIR_WRITE]);
   // @E decodes escapes the value may hold.
   assert.deepEqual(pure("X='\\x2egit'; echo x >> ${X@E}/config"), [ASSIGNMENT, DIR_WRITE]);
-  // Ordinary uses do not move.
-  assert.deepEqual(pure('echo x > "${f%.txt}.log"'), [REDIRECT]);
-  assert.deepEqual(pure('echo x > "${f/.txt/.md}"'), [REDIRECT]);
-  assert.deepEqual(pure('echo x > "out/${NAME,,}.txt"'), [REDIRECT]);
+  // A length and plain expansions do not move. (A transforming operator on a
+  // variable the line does not set is strict now: point i below.)
   assert.deepEqual(pure('echo x > "${#X}.txt"'), [REDIRECT]);
   assert.deepEqual(pure('echo x > "${name}.${ext}"'), [REDIRECT]);
 });
@@ -397,4 +395,28 @@ test("security review h: removal and substring count after an assignment that is
   assert.deepEqual(pure("D=.gi?x; cd ${D:0:4} && echo x >> config"), [ASSIGNMENT, READ_SHELL, DIR_WRITE]);
   // Plain literal values that hold no .git keep a removal an unknown value.
   assert.deepEqual(pure('f=notes.txt; echo x > "${f%.txt}.log"'), [ASSIGNMENT, REDIRECT]);
+});
+
+test("security review i: a transforming expansion counts unless its value is a known literal and its result no .git", () => {
+  // A variable the line does not set, a positional, a special parameter, an
+  // array element: the value is unknown, so the result is too.
+  assert.deepEqual(pure('echo x > "${f%.txt}.log"'), [DIR_WRITE]);
+  assert.deepEqual(pure('echo x > "${f/.txt/.md}"'), [DIR_WRITE]);
+  assert.deepEqual(pure('echo x > "out/${NAME,,}.txt"'), [DIR_WRITE]);
+  assert.deepEqual(pure('echo x > "out/${f: -3}.txt"'), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${@#x}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${A[0]%x}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure('echo x > "${1%.md}.html"'), [DIR_WRITE]);
+  // Set by `set --`, a `for` loop or `read`: those lines are refused already.
+  assert.deepEqual(pure("set -- .gitx; echo x >> ${1%x}/config"), ["refused unclassified"]);
+  assert.deepEqual(pure("for D in .gi?x; do echo x >> ${D%x}/config; done"), ["refused unclassified"]);
+  // A known literal is worked out: to .git it counts, to anything else not.
+  assert.deepEqual(pure("G=.GITX; echo x >> ${G,,}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure('f=notes.txt; echo x > "${f%.*}.log"'), [ASSIGNMENT, REDIRECT]);
+  assert.deepEqual(pure('f=report.txt; echo x > "out/${f/.txt/.md}"'), [ASSIGNMENT, REDIRECT]);
+  assert.deepEqual(pure('OUT=build/; echo x > "${OUT%/}/y"'), [ASSIGNMENT, REDIRECT]);
+  assert.deepEqual(pure('n=abcdef; echo x > "out/${n:0:3}.txt"'), [ASSIGNMENT, REDIRECT]);
+  // Assigned twice, or after its use, it is not known.
+  assert.deepEqual(pure('f=a.txt; f=b.txt; echo x > "${f%.txt}.log"'), [ASSIGNMENT, ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure('echo x > "${f%.txt}.log"; f=a.txt'), [DIR_WRITE, ASSIGNMENT]);
 });
