@@ -118,13 +118,13 @@ ordinary workspace write.
   feature branch.
 - **Every verdict that moved, moved stricter.** Against 0.4.8's build, 0
   looser under this repository's APPROVAL.md and under the overlay's template
-  policy, a refusal counted strictest: 23,731 command lines classified pure
+  policy, a refusal counted strictest: 23,782 command lines classified pure
   with the default options, with `exec.code` open and under the no-rule
-  abstain (142,386 comparisons, 13,829 stricter), and 2,832 lines through the
+  abstain (142,692 comparisons, 13,904 stricter), and 2,835 lines through the
   hook in thirteen checkout states (a hook inside `.git` and a symlink to it
-  among them), with and without the abstain (147,264 comparisons, 21,083
+  among them), with and without the abstain (147,420 comparisons, 21,413
   stricter). Real-git tests on a bare local remote prove each case's effect.
-  Conformance: `command-class` 1.10.0 (from 1.9.0), sixteen new vectors;
+  Conformance: `command-class` 1.10.0 (from 1.9.0), nineteen new vectors;
   main's 354 are byte-identical. The fleet's 63 overlay recipes are unmoved.
 
 ## 0.4.8 — 2026-11-20
