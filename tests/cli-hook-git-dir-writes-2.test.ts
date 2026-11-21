@@ -157,6 +157,28 @@ test("S1 review: a directory listing is read whole; thousands of matches do not 
   assert.deepEqual(hook("cp /tmp/x logs/*.log", repo), [DIR_WRITE]);
 });
 
+test("S1 review: an entry whose own name holds a glob character is a real match", { skip }, () => {
+  const repo = checkout();
+  symlinkSync(".git", join(repo, "a*b"));
+  assert.deepEqual(hook("cd a*b && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(hook("echo x >> a*b/config", repo), [DIR_WRITE]);
+  // A pattern that matches nothing, under a listing that is not empty, is
+  // never "no target and nothing unknown": the hook says it cannot place it.
+  const { notes } = classifyForHook("cd q*z && echo x > f", [], repo);
+  assert.ok(notes.some((note) => /matches nothing here/u.test(note)), notes.join(" | "));
+});
+
+test("S1 review: a matching directory at the last segment is walked, so a git directory under another name is seen", { skip }, () => {
+  const at = root();
+  git(at, "init", "-q", "--separate-git-dir=wstore", "repo");
+  const repo = join(at, "repo");
+  assert.deepEqual(hook("cp /tmp/x ../w*/", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cp /tmp/x ../ws?ore", repo), [DIR_WRITE]);
+  // A directory that is no git directory does not move.
+  mkdirSync(join(at, "work"));
+  assert.ok(!hook("cp /tmp/x ../wo*/", repo).includes(DIR_WRITE));
+});
+
 test("S1 review: a bracket expression with a POSIX class, an equivalence class or a collating element may match", () => {
   for (const command of [
     "echo x > .[[:alpha:]]it/config",

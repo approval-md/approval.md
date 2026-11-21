@@ -243,8 +243,20 @@ function isPattern(word: string): boolean {
 /** Directory entries one expansion may visit, in all; past it, it gives up. */
 const ENTRY_LIMIT = 100_000;
 
+/**
+ * One path a pattern stands for: `"match"`, an entry a real listing
+ * returned; `"parent"`, the pattern itself under a listed directory, standing
+ * for the plain files there (a plain file lands where its parent does);
+ * `"literal"`, the whole word as written, which the shell uses as the name
+ * when the pattern matches nothing.
+ */
+interface Placed {
+  path: string;
+  from: "match" | "parent" | "literal";
+}
+
 /** The paths a pattern stands for, or why this step could not expand it. */
-type Expansion = { paths: string[] } | { giveUp: string };
+type Expansion = { paths: Placed[] } | { giveUp: string };
 
 /** Keep every entry that is a directory or a link (one that may be descended or followed). */
 const DIRECTORY_OR_LINK = (entry: Dirent): boolean => entry.isDirectory() || entry.isSymbolicLink();
@@ -253,45 +265,48 @@ const DIRECTORY_OR_LINK = (entry: Dirent): boolean => entry.isDirectory() || ent
  * The paths a glob or brace word names on disk from `base` (second review,
  * S1), for walking: braces expanded first, then each pattern segment matched
  * against its parent's entries with the classifier's own matcher. Every
- * entry of a listing is read; an inner segment descends each matching
- * directory or link, and the LAST segment keeps only the matching entries
- * `keepLast` says matter, plus the pattern itself under its parent, which
- * stands for every plain entry (a plain file lands where its parent does).
- * It gives up past {@link ENTRY_LIMIT} entries visited in all, or when a
- * parent cannot be read; the caller then judges a sure target the strict way
- * and a possible one by its text (review of the second fold).
+ * entry of a listing is read, and every matching directory or link (and an
+ * entry named `.git`) is kept, at the last segment too, since a directory may
+ * be a git directory under another name; only plain files are left to the
+ * pattern under their parent. Each path says where it came from
+ * ({@link Placed}), never read back from its text. It gives up past
+ * {@link ENTRY_LIMIT} entries visited in all, or when a parent cannot be
+ * read; the caller then judges a sure target the strict way and a possible
+ * one by its text (review of the second fold).
  */
-function expandOnDisk(base: string, word: string, keepLast: (entry: Dirent) => boolean): Expansion {
+function expandOnDisk(base: string, word: string): Expansion {
   const words = word.includes("{") ? expandBraces(word) : [word];
   if (words === null) return { giveUp: "more brace alternatives than this hook expands" };
   const join2 = (place: string, name: string): string => (place === "/" ? `/${name}` : `${place}/${name}`);
-  const found: string[] = [];
+  const found: Placed[] = [];
   let visited = 0;
   for (const each of words) {
+    const start = each.startsWith("/") ? "/" : base;
     const segments = each.split("/").filter((part) => part.length > 0);
-    let places = [each.startsWith("/") ? "/" : base];
-    for (const [index, segment] of segments.entries()) {
+    found.push({ path: segments.reduce(join2, start), from: "literal" });
+    let places: Placed[] = [{ path: start, from: "match" }];
+    for (const segment of segments) {
       if (!isPatternSegment(segment)) {
-        places = places.map((place) => join2(place, segment));
+        places = places.map((place) => ({ path: join2(place.path, segment), from: place.from }));
         continue;
       }
-      const last = index === segments.length - 1;
-      const next: string[] = [];
+      const next: Placed[] = [];
       for (const place of places) {
+        if (place.from !== "match") continue;
         let entries: Dirent[];
         try {
-          entries = readdirSync(place, { withFileTypes: true });
+          entries = readdirSync(place.path, { withFileTypes: true });
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code ?? "an error";
           if (code === "ENOENT" || code === "ENOTDIR") continue;
-          return { giveUp: `${place} cannot be listed (${code})` };
+          return { giveUp: `${place.path} cannot be listed (${code})` };
         }
         visited += entries.length;
         if (visited > ENTRY_LIMIT) return { giveUp: `more than ${String(ENTRY_LIMIT)} entries to read` };
-        if (last) next.push(join2(place, segment));
+        next.push({ path: join2(place.path, segment), from: "parent" });
         for (const entry of entries) {
           if (!globSegmentMatches(segment, entry.name)) continue;
-          if (last ? keepLast(entry) || entry.name.toLowerCase() === ".git" : DIRECTORY_OR_LINK(entry)) next.push(join2(place, entry.name));
+          if (DIRECTORY_OR_LINK(entry) || entry.name.toLowerCase() === ".git") next.push({ path: join2(place.path, entry.name), from: "match" });
         }
       }
       places = next;
@@ -299,6 +314,16 @@ function expandOnDisk(base: string, word: string, keepLast: (entry: Dirent) => b
     found.push(...places);
   }
   return { paths: found };
+}
+
+/** Does anything exist at `path` itself (a link counts, followed or not)? */
+function entryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** The commands that copy or move a whole tree, `.git` entry included. */
@@ -383,10 +408,16 @@ function directoryTargets(
   if (isPattern(word)) {
     // Second review, S1: a glob or brace directory is expanded on disk; one
     // match is certain, several or none readable are not.
-    const expanded = expandOnDisk(dir, word, DIRECTORY_OR_LINK);
+    const expanded = expandOnDisk(dir, word);
     if ("giveUp" in expanded) return { targets: [], unknown: `\`${bin} ${word}\` (a pattern this hook cannot expand: ${expanded.giveUp})` };
-    // The pattern itself under its parent is no directory a `cd` lands in.
-    const matches = expanded.paths.filter((path) => !isPattern(path.slice(dir.length)));
+    // Every entry a real listing matched; with none, the shell uses the word
+    // as a name, which is a target only when such an entry exists.
+    const matches = expanded.paths.filter((placed) => placed.from === "match").map((placed) => placed.path);
+    if (matches.length === 0) {
+      const literal = expanded.paths.filter((placed) => placed.from === "literal" && entryExists(placed.path)).map((placed) => placed.path);
+      if (literal.length === 0) return { targets: [], unknown: `\`${bin} ${word}\` (a pattern that matches nothing here)` };
+      return { targets: literal.flatMap(both), unknown: envChanged ? "a relative `cd` after the line may have changed PWD or CDPATH" : null };
+    }
     return {
       targets: matches.flatMap(both),
       unknown: matches.length > 1 ? `\`${bin} ${word}\` (a pattern with ${String(matches.length)} matches)` : envChanged ? "a relative `cd` after the line may have changed PWD or CDPATH" : null,
@@ -527,7 +558,7 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
           hit = { word, landed: `${text} (a pattern that names .git)` };
           break;
         }
-        const expanded = expandOnDisk(dir, spelled, (entry) => entry.isSymbolicLink());
+        const expanded = expandOnDisk(dir, spelled);
         if ("giveUp" in expanded) {
           // Cannot be expanded: a sure target the strict way; a possible one
           // was judged by its text just above.
@@ -537,7 +568,7 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
           }
           continue;
         }
-        for (const match of expanded.paths) placed.push({ word, spelled: match });
+        for (const each of expanded.paths) placed.push({ word, spelled: each.path });
       }
       if (hit !== null) break;
       for (const { word, spelled } of placed) {
@@ -570,7 +601,7 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
         const spelled = word.startsWith("~/") && home !== undefined ? `${home}/${word.slice(2)}` : word;
         let paths = [spelled.startsWith("/") ? spelled : `${dir}/${spelled}`];
         if (isPattern(spelled)) {
-          const expanded = expandOnDisk(dir, spelled, DIRECTORY_OR_LINK);
+          const expanded = expandOnDisk(dir, spelled);
           if ("giveUp" in expanded) {
             if (sure.has(word)) {
               hit = { word, landed: `a tree this hook cannot list (${expanded.giveUp})` };
@@ -578,7 +609,10 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
             }
             continue;
           }
-          paths = expanded.paths;
+          // The tree a copy reads: each real match, or the word as a name.
+          paths = expanded.paths
+            .filter((placed) => placed.from === "match" || (placed.from === "literal" && entryExists(placed.path)))
+            .map((placed) => placed.path);
         }
         for (const path of paths) {
           const last = path.replace(/(?:\/\.?)+$/u, "").split("/").pop() ?? "";
