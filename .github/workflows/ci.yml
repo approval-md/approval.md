@@ -289,11 +289,11 @@ jobs:
       CORPUS_RECIPES: "63"
       PIN_CORPUS: "069cae876367a6c65613a645bbece0212583dde3d6e186454d5d4a9f287cb1c4"
       PIN_ALLOWLIST: "408a7e3b6b0f86900e7e3b94cd724445a84910580316d2a1c718074adb4f526d"
-      PIN_EXPECTED: "9de406d88adf3aca4d064156d18106e50d7156cfe1391cb48a3db4213efd8965"
+      PIN_EXPECTED: "e2037ae13f5948d0db1c431043dad44b96c098fac9fd838784483f3390bb0c73"
       PIN_CHECK: "322e7c86d0fbafc0953b18719ab8b2aab8dc0b60532d290559e3ccd2833fd4d3"
       PIN_BOX: "b9ab914808913bef08a22e0225e2024898be72a775fa34b9a85e0b5c60bb29cb"
-      PIN_EXTRACT: "3e59ed9c543cc1060deb09031a92106f8286637fc01a55ebb871b6729f68199b"
-      PIN_NEWCALLS: "2163ec4c6e58d2d9d74df0ba7c9bcc9267c682f8cfb82616b6be7d21d4185d5d"
+      PIN_EXTRACT: "05348c0d2f0a3b61b001991c7c3a630798abb7bdb07d8915576bafa97a081c93"
+      PIN_NEWCALLS: "125d7d2363583666659890417c4f489b4e5b8cfefb6a051339c7eec751cbdb2e"
     steps:
       # Depth 2: HEAD^1 is the base the change is measured against (a pull
       # request's merge commit's first parent, the queue's base, or the main a
