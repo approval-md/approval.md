@@ -449,3 +449,16 @@ test("security review m: shell options and extglob forms are strict", () => {
   assert.deepEqual(pure('f=notes.txt; shopt -s nocasematch; echo x > "${f%.txt}.log"'), ["refused unclassified"]);
   assert.deepEqual(pure('f=notes.txt; set -o noglob; echo x > "${f%.txt}.log"'), ["refused unclassified"]);
 });
+
+test("security review n: an expansion that assigns makes a name unknown", () => {
+  // The review's line is refused already (`:` has no rule).
+  assert.deepEqual(pure("D=x; : ${D:=.git}; echo x >> ${D%q}/config"), ["refused unclassified"]);
+  // `${D:=y}` sets D again, so `${D%q}` no longer has a known value.
+  assert.deepEqual(pure('D=x; echo "${D:=y}" > out.txt; echo x >> ${D%q}/config'), [ASSIGNMENT, REDIRECT, DIR_WRITE]);
+  assert.deepEqual(pure('D=x; echo "${D=y}" > out.txt; echo x >> ${D%q}/config'), [ASSIGNMENT, REDIRECT, DIR_WRITE]);
+  // Without it the value is known and the result no .git.
+  assert.deepEqual(pure('D=x; echo "${D}" > out.txt; echo x >> ${D%q}/config'), [ASSIGNMENT, REDIRECT, REDIRECT]);
+  // The line-level fallback, kept: a line that holds .git keeps a removal
+  // strict even where the evaluator works it out to no .git.
+  assert.deepEqual(pure("G=x.gitx; echo x >> ${G#x}/config"), [ASSIGNMENT, DIR_WRITE]);
+});
