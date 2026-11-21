@@ -975,8 +975,13 @@ targets: `--output` of `diff`, `log`, `show` and every verb that takes it,
 more, as git's option parser reads `apply` and `clone`. `format-patch`,
 `archive`, `bundle`, `init` and `config --file` have no row and stay refused.
 A read-class command that names a file it writes takes the same rules for
-that file: `sort -o` / `--output`, `uniq`'s second operand, sed's `w`
-command and `s///w` flag, and `tree -o`; its class is otherwise a read.
+that file: `sort -o` / `--output`, `uniq`'s second operand and `tree -o`;
+its class is otherwise a read. A sed script is not parsed, since every
+hand-written reading differs from BSD's or GNU's somewhere: a script with a
+`w` or `W` anywhere may write, and the rest of each such line and every
+word of the script are possible targets under the same rules. This Mac's
+sed has no `e` command (GNU sed's runs a shell command); a script holding
+one is judged by the same text rule and is otherwise a read.
 A read whose only write is its redirection writes nothing through its own
 words, so `cat .git/HEAD > /tmp/x` is a workspace write and only a
 redirection into `.git` is `git-dir-write`. On a line that spells `.git` in

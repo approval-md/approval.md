@@ -4284,11 +4284,11 @@ export function readWriteTargets(bin: string, args: readonly string[]): string[]
 }
 
 /**
- * The outputs {@link readWriteTargets} is SURE of: every one but the words of
- * a sed script this step could not read, which are only possible targets.
+ * The outputs {@link readWriteTargets} is SURE of: every one but a sed
+ * script's, which are only possible targets.
  */
 export function readWriteSureTargets(bin: string, args: readonly string[]): string[] {
-  return bin === "sed" ? sedScripts(args).flatMap((script) => readSedScript(script).files) : readWriteTargets(bin, args);
+  return bin === "sed" ? [] : readWriteTargets(bin, args);
 }
 
 /**
@@ -4385,163 +4385,32 @@ function sedScripts(args: readonly string[]): string[] {
 }
 
 /**
- * A sed script read command by command (follow-up, item B, and the review
- * of it): the files its `w` / `W` commands and the `w` flag of `s` write,
- * and whether some part could not be read. Addresses: a line number,
- * `first~step`, `$`, `/re/` or `\cREc` with `I` / `M`, and a second one
- * after `,` (also `+N` and `~N`), then `!`. Commands: `{` `}`, `#`, `:label`,
- * `b` / `t` / `T` with a label, `a` / `i` / `c` text, `r` / `R` / `w` / `W`
- * with a file, `s` and `y` with their delimited parts, and the one-letter
- * commands. Anything else (GNU's `e`, which this Mac's sed does not have, a
- * form not listed) makes the rest unreadable.
- */
-function readSedScript(script: string): { files: string[]; unreadable: boolean } {
-  const files: string[] = [];
-  let at = 0;
-  const length = script.length;
-  const peek = (): string => script[at] ?? "";
-  const space = (): void => {
-    while (at < length && (peek() === " " || peek() === "\t")) at += 1;
-  };
-  const toLineEnd = (): string => {
-    const end = script.indexOf("\n", at);
-    const text = script.slice(at, end === -1 ? length : end);
-    at = end === -1 ? length : end;
-    return text;
-  };
-  /** Past a delimited part closed by `delimiter`, escapes and brackets read; false if it never closes. */
-  const delimited = (delimiter: string): boolean => {
-    while (at < length) {
-      const char = peek();
-      if (char === "\\") {
-        at += 2;
-        continue;
-      }
-      if (char === "\n") return false;
-      at += 1;
-      if (char === delimiter) return true;
-    }
-    return false;
-  };
-  const address = (second: boolean): boolean | null => {
-    const char = peek();
-    if (/\d/u.test(char)) {
-      while (/\d/u.test(peek())) at += 1;
-      if (peek() === "~") {
-        at += 1;
-        while (/\d/u.test(peek())) at += 1;
-      }
-      return true;
-    }
-    if (second && (char === "+" || char === "~")) {
-      at += 1;
-      if (!/\d/u.test(peek())) return null;
-      while (/\d/u.test(peek())) at += 1;
-      return true;
-    }
-    if (char === "$") {
-      at += 1;
-      return true;
-    }
-    if (char === "/" || char === "\\") {
-      let delimiter = "/";
-      if (char === "\\") {
-        delimiter = script[at + 1] ?? "";
-        if (delimiter === "" || delimiter === "\n") return null;
-        at += 1;
-      }
-      at += 1;
-      if (!delimited(delimiter)) return null;
-      while (peek() === "I" || peek() === "M") at += 1;
-      return true;
-    }
-    return false;
-  };
-  const ONE_LETTER = "=dDgGhHlnNpPqQxzF";
-  while (at < length) {
-    while (at < length && /[\s;]/u.test(peek())) at += 1;
-    if (at >= length) break;
-    const first = address(false);
-    if (first === null) return { files, unreadable: true };
-    if (first) {
-      space();
-      if (peek() === ",") {
-        at += 1;
-        space();
-        if (address(true) !== true) return { files, unreadable: true };
-      }
-    }
-    space();
-    while (peek() === "!") {
-      at += 1;
-      space();
-    }
-    const command = peek();
-    at += 1;
-    if (command === "{" || command === "}") continue;
-    if (command === "#" || command === ":" || command === "a" || command === "i" || command === "c") {
-      // A comment, a label, or text: to the end of the line, and a text's
-      // lines that end in a backslash carry on.
-      let line = toLineEnd();
-      while ((command === "a" || command === "i" || command === "c") && line.endsWith("\\") && at < length) {
-        at += 1;
-        line = toLineEnd();
-      }
-      continue;
-    }
-    if (command === "b" || command === "t" || command === "T") {
-      space();
-      while (at < length && !/[;\n}]/u.test(peek())) at += 1;
-      continue;
-    }
-    if (command === "r" || command === "R" || command === "w" || command === "W") {
-      space();
-      const file = toLineEnd().trim();
-      if (command === "w" || command === "W") {
-        if (file.length === 0) return { files, unreadable: true };
-        files.push(file);
-      }
-      continue;
-    }
-    if (command === "s" || command === "y") {
-      const delimiter = peek();
-      if (delimiter === "" || delimiter === "\\" || delimiter === "\n") return { files, unreadable: true };
-      at += 1;
-      if (!delimited(delimiter) || !delimited(delimiter)) return { files, unreadable: true };
-      if (command === "s") {
-        while (/[gpiImMe0-9]/u.test(peek())) at += 1;
-        if (peek() === "w") {
-          at += 1;
-          space();
-          const file = toLineEnd().trim();
-          if (file.length === 0) return { files, unreadable: true };
-          files.push(file);
-          continue;
-        }
-      }
-    } else if (ONE_LETTER.includes(command) && command !== "") {
-      if (command === "q" || command === "Q" || command === "l") while (/\d/u.test(peek())) at += 1;
-    } else {
-      return { files, unreadable: true };
-    }
-    space();
-    // A command ends at `;`, a newline, `}`, `#` or the end; anything else
-    // is a form this reader does not know.
-    if (at < length && !/[;\n}#]/u.test(peek())) return { files, unreadable: true };
-  }
-  return { files, unreadable: false };
-}
-
-/**
- * The files a sed script writes, or, when some of it cannot be read and a
- * `w` or `W` stands in what is left, every word of it as a POSSIBLE target
- * (judged by the same `.git` rules): it may write a file this reader cannot
- * name.
+ * The POSSIBLE files a sed script text may write (follow-up, item B). The
+ * script is NOT parsed: a hand-written sed parser differs from BSD's and
+ * GNU's in brackets, labels and file names, and each difference is a way
+ * past. A text with no `w` and no `W` writes nothing. Otherwise every one
+ * of these is a possible target: for each `w` or `W`, the rest of its line
+ * with leading blanks trimmed (a file name with blanks kept whole); every
+ * run of characters between blanks, `;`, `{` and `}`; and, as the plain
+ * text rule, the `.git` path the text spells anywhere.
  */
 function sedWriteFiles(script: string): string[] {
-  const read = readSedScript(script);
-  if (!read.unreadable) return read.files;
-  return /[wW]/u.test(script) ? [...read.files, ...script.split(/[\s;{}]+/u).filter((word) => word.length > 0)] : read.files;
+  if (!/[wW]/u.test(script)) return [];
+  const files: string[] = [];
+  for (let at = 0; at < script.length; at += 1) {
+    if (script[at] !== "w" && script[at] !== "W") continue;
+    const end = script.indexOf("\n", at);
+    const rest = script.slice(at + 1, end === -1 ? script.length : end).replace(/^[ \t]+/u, "");
+    if (rest.length > 0) files.push(rest);
+  }
+  files.push(...script.split(/[\s;{}]+/u).filter((word) => word.length > 0));
+  const spelled = GIT_SEGMENT_IN_TEXT.exec(script);
+  if (spelled !== null) {
+    const from = script.indexOf(".", spelled.index);
+    const tail = script.slice(from).split(/[\s;{}]/u)[0] ?? "";
+    files.push(tail.length > 0 ? tail : ".git");
+  }
+  return files;
 }
 
 /**

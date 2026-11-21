@@ -148,45 +148,50 @@ test("B: the same commands writing elsewhere, or not writing, do not move", () =
   assert.deepEqual(pure('sed -n "w out.txt" x'), ["read.shell sed-read"]);
   assert.deepEqual(pure('sed -n "/word/p" x'), ["read.shell sed-read"]);
   assert.deepEqual(pure('sed "s/w/v/" x'), ["read.shell sed-read"]);
-  // A `w` inside an address or a pattern is no write command, even before `.git`.
-  assert.deepEqual(pure('sed -n "/w .git/p" x'), ["read.shell sed-read"]);
-  assert.deepEqual(pure('sed "s/w .git/x/" y'), ["read.shell sed-read"]);
   assert.deepEqual(pure("sort -t, -k1 x"), [READ_SHELL]);
   assert.deepEqual(pure("sed -f s.sed x"), ["read.shell sed-read"]);
 });
 
-test("B review: a sed script read command by command; a part it cannot read, before a w, fails closed", () => {
-  // Read in full: no move, whatever the operands are.
+test("B review: a sed script is not parsed; with a w or W, its words and the rest of each w's line are possible targets", () => {
+  for (const command of [
+    'sed -n "w .git/config" x',
+    'sed -n "/a[/]b/w .git/config" x',
+    'sed -e ":a;w .git/config" x',
+    'sed -n "w .git/my config" x',
+    'sed "s/a/b/w .git/config" x',
+    'sed -n "1~2w .git/x" f',
+    'sed -n "/a/{w .git/x\n}" f',
+  ]) {
+    assert.deepEqual(pure(command), [DIR_WRITE], command);
+  }
+  // No w or W, or no .git among the possible targets: nothing moves.
   for (const command of [
     'sed -n "/word/p" x',
     'sed "s/w/v/" x',
     'sed -e "s/a/b/" -e "/w/d" x',
     'sed "y/abc/xyw/" x',
     'sed -n "5,10p" x',
+    'sed "s/www/x/" file',
     'sed -n "/word/p" .git/config',
-    'sed -n "1~2p;/a/,+3d" .git/config',
+    'sed -n "w out.txt" x',
+    'sed -n "1e echo" f',
   ]) {
     assert.deepEqual(pure(command), ["read.shell sed-read"], command);
   }
-  // Address forms read in full name the file exactly.
-  for (const command of [
-    'sed -n "1~2w .git/x" f',
-    'sed -n "/a/,+2w .git/x" f',
-    'sed -n "/a/,~4w .git/x" f',
-    'sed -n "\\,a,w .git/x" f',
-    'sed -n "/a/Mw .git/x" f',
-    'sed -n "/a/{w .git/x\n}" f',
-    'sed -n "/a/!w .git/x" f',
-  ]) {
-    assert.deepEqual(pure(command), [DIR_WRITE], command);
-  }
-  // A part it cannot read (an unknown command, GNU's e), before a w: every
-  // word of the script is a possible target.
-  assert.deepEqual(pure('sed -n "1zw .git/x" f'), [DIR_WRITE]);
-  assert.deepEqual(pure('sed -n "1e echo;w .git/x" f'), [DIR_WRITE]);
-  // ... and with no w, or no .git, nothing moves.
-  assert.deepEqual(pure('sed -n "1e echo" f'), ["read.shell sed-read"]);
-  assert.deepEqual(pure('sed -n "1zw out.txt" f'), ["read.shell sed-read"]);
+  assert.deepEqual(pure('sed -i "" "s/old/new/" src/w.ts'), ["files.write.workspace sed-in-place"]);
+  // A script file cannot be read from the line (a known limit).
+  assert.deepEqual(pure("sed -f s.sed x"), ["read.shell sed-read"]);
+});
+
+test("B review hook: a sed write through a link to .git, a name with blanks kept whole", { skip }, () => {
+  const repo = checkout();
+  symlinkSync(".git", join(repo, "l"));
+  assert.deepEqual(hook('sed -n "w l/config" x', repo), [DIR_WRITE]);
+  assert.deepEqual(hook('sed -n "w l/my config" x', repo), [DIR_WRITE]);
+  mkdirSync(join(repo, "my dir"));
+  symlinkSync("../.git", join(repo, "my dir", "g"));
+  assert.deepEqual(hook('sed -n "w my dir/g/config" x', repo), [DIR_WRITE]);
+  assert.deepEqual(hook('sed -n "w out.txt" x', repo), ["read.shell sed-read"]);
 });
 
 test("review: wget's long output options are read by any prefix, on disk too", { skip }, () => {

@@ -529,7 +529,9 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
     // itself (`sort -o`, `uniq in out`, sed's `w`: follow-up, item B);
     // `git`'s own words are file writes only where git writes through them.
     const gitWrites = bin === "git" ? gitWriteTargets(shape.args).filter(pathOrPattern) : [];
-    const readOutputs = bin === null ? [] : readWriteTargets(bin, shape.args).filter(pathOrPattern);
+    // A sed script's possible file keeps its blanks (`w .git/my config`).
+    const readOutputs =
+      bin === null ? [] : readWriteTargets(bin, shape.args).filter((word) => (bin === "sed" ? word.length > 0 && !/[$`]/u.test(word) : pathOrPattern(word)));
     const named =
       reads || segment.rule === "redirect-write"
         ? readOutputs
