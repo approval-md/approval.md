@@ -161,7 +161,20 @@ on the change above.
   literal text cannot be part of `.git` do not move (`out/$(date
   +%F).txt`, `$(pwd)/build/x`), and neither does `git rev-parse
   --show-toplevel` or `--short`. A substitution's body is read as a line of
-  its own, and a `bash -lc` script reads its own text too.
+  its own, and a `bash -lc` script reads its own text too. Two more count:
+  an escape that decodes to `.git`, in an ANSI-C quoted string
+  (`$'\x2egit'`) or a substitution body (`$(printf '\x2egit')`), and the
+  word a parameter expansion may carry (`${VAR:-.git}`, `${VAR=.git}`,
+  `${VAR:+.git}`).
+- **A line cannot be built to make the classifier slow.** A hook past its
+  timeout lets the call through, so the cost of reading a line is bounded.
+  The split-spelling reader tried every window of a word as its own
+  expression (130 substitutions and a letter took 74 s through the hook),
+  and the glob reader built one backtracking expression per pattern (`.`,
+  400 `*` and `x` took 14 s). Both now walk the text once. Past 1,024 glob
+  characters a pattern segment counts as naming `.git`; substitution bodies
+  are read for `.git` to 64 levels of nesting, and a deeper one counts; past
+  128 levels a line is refused (`opaque`), where it used to throw near 1,250.
 - **Looser than the change above, by design.** A read whose only write is its
   redirection writes nothing through its own words: `cat .git/HEAD > /tmp/x`,
   `ls .git/hooks > list.txt` and the like are the workspace write 0.4.8 called
@@ -170,7 +183,10 @@ on the change above.
 - **Known limits.** A variable set in an earlier call, or a value built from
   several expansions (`A=.g; B=it; cd $A$B`), so `cd $VAR && echo x >>
   config` stays; a `git rev-parse` option passed in a variable (`git
-  rev-parse $OPT`); an archive unpacked into the
+  rev-parse $OPT`); two outputs that only together spell `.git`
+  (`"$(printf .g)$(printf it)/config"`), an encoding a command decodes
+  (`base64 -d`) and a parameter expansion's pattern operators (`${G%x}`);
+  an archive unpacked into the
   checkout (`tar -xf`, `unzip`); a git include file (`~/.gitconfig.local`);
   a `sed -f` script file; the push pass does not read `core.hooksPath`; and,
   as above, a relative write after a `cd` the hook cannot place.
