@@ -364,3 +364,27 @@ test("security review e: a nested expansion in an operator's word is an output t
   assert.deepEqual(pure('echo x > "${OUT:-${HOME}/out}/f"'), [REDIRECT]);
   assert.deepEqual(pure('echo x > "${OUT:-out}.${EXT:-txt}"'), [REDIRECT]);
 });
+
+test("security review f: an operator after a special parameter is read as the operator", () => {
+  // `$!` and `$#` with a default word: `-` is the operator, not part of a name.
+  assert.deepEqual(pure("echo x >> ${!-.git}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${!-.g}it/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${#-.git}/config"), [DIR_WRITE]);
+  // An indirection with an operator after it counts, the strict side.
+  assert.deepEqual(pure("echo x >> ${!REF:-.git}/config"), [DIR_WRITE]);
+  // `${!-}` and `${#-}` are an indirection and a length of `$-`.
+  assert.deepEqual(pure('echo x > "out/${#-}.txt"'), [REDIRECT]);
+  // A length and a plain indirection stay unknown values.
+  assert.deepEqual(pure('echo x > "${#X}.txt"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "out/${!REF}.txt"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "out/${#arr[@]}.txt"'), [REDIRECT]);
+});
+
+test("security review g: removal and substring count when .git is spelled through quotes or escapes", () => {
+  assert.deepEqual(pure("G='.gi''tx'; echo x >> ${G%x}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("G=.gi\"t\"x; echo x >> ${G%x}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("G=$'\\x2egitx'; echo x >> ${G%x}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("G=$'\\x2egitx'; echo x >> ${G:0:4}/config"), [ASSIGNMENT, DIR_WRITE]);
+  // A line that holds no .git keeps a removal an unknown value.
+  assert.deepEqual(pure('f=a.txt; echo x > "${f%.txt}.log"'), [ASSIGNMENT, REDIRECT]);
+});
