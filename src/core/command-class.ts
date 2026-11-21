@@ -4257,6 +4257,144 @@ function attachedOptionValues(word: string): string[] {
 }
 
 /**
+ * The files a READ-class command writes through its own words (follow-up,
+ * item B), read from this Mac's manual pages: `sort -o <file>` /
+ * `--output=<file>` (any prefix of two letters or more), `uniq`'s second
+ * operand, `sed`'s `w` command and the `w` flag of `s` in a script given on
+ * the line, and `tree -o <file>`. Every other command the table reads
+ * (`cat`, `grep`, `head`, `cut`, `jq`, `diff`, `ls`, `wc` and the rest) names
+ * no file it writes. A `sed -f` script file cannot be read here.
+ */
+export function readWriteTargets(bin: string, args: readonly string[]): string[] {
+  switch (bin) {
+    case "sort":
+      return optionOutputs(args, "o", "kStT", ["--output"], [
+        "--key", "--field-separator", "--buffer-size", "--temporary-directory", "--batch-size",
+        "--compress-program", "--random-source", "--files0-from", "--parallel",
+      ]);
+    case "tree":
+      return optionOutputs(args, "o", "LPIHT", [], ["--filelimit", "--charset", "--timefmt", "--sort"]);
+    case "uniq":
+      return uniqOutput(args);
+    case "sed":
+      return sedScripts(args).flatMap(sedWriteFiles);
+    default:
+      return [];
+  }
+}
+
+/**
+ * The values of an output option: a short `letter` in a cluster takes the
+ * rest of the word or the next word; a letter in `valued` takes a value
+ * that is not an output and ends the cluster; a long option of two letters
+ * or more that is a prefix of one in `outputs` takes its `=` value or the
+ * next word, and one in `skipping` consumes the next word.
+ */
+function optionOutputs(
+  args: readonly string[],
+  letter: string,
+  valued: string,
+  outputs: readonly string[],
+  skipping: readonly string[],
+): string[] {
+  const values: string[] = [];
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") break;
+    if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      const name = equals === -1 ? arg : arg.slice(0, equals);
+      if (name.length >= 4 && outputs.some((option) => option.startsWith(name))) {
+        const value = equals === -1 ? args[at + 1] : arg.slice(equals + 1);
+        if (value !== undefined) values.push(value);
+        if (equals === -1) at += 1;
+      } else if (equals === -1 && skipping.includes(name)) {
+        at += 1;
+      }
+      continue;
+    }
+    if (!arg.startsWith("-") || arg.length < 2) continue;
+    for (let index = 1; index < arg.length; index += 1) {
+      const char = arg[index] as string;
+      if (char !== letter && !valued.includes(char)) continue;
+      const rest = arg.slice(index + 1);
+      if (char === letter) {
+        const value = rest.length > 0 ? rest : args[at + 1];
+        if (value !== undefined) values.push(value);
+      }
+      if (rest.length === 0) at += 1;
+      break;
+    }
+  }
+  return values;
+}
+
+/** `uniq [options] [input [output]]`: the second operand is the file it writes. */
+function uniqOutput(args: readonly string[]): string[] {
+  const operands: string[] = [];
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") {
+      operands.push(...args.slice(at + 1));
+      break;
+    }
+    if (arg === "-f" || arg === "-s" || arg === "-w" || arg === "--skip-fields" || arg === "--skip-chars" || arg === "--check-chars") {
+      at += 1;
+      continue;
+    }
+    if (arg.startsWith("-") && arg !== "-") continue;
+    operands.push(arg);
+  }
+  return operands[1] === undefined || operands[1] === "-" ? [] : [operands[1]];
+}
+
+/** The scripts a `sed` line gives: each `-e` value, else its first operand. */
+function sedScripts(args: readonly string[]): string[] {
+  const scripts: string[] = [];
+  let fromFile = false;
+  let first: string | undefined;
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "-e" || arg === "--expression" || /^-[nEralsuz]+e$/u.test(arg)) {
+      const value = args[at + 1];
+      if (value !== undefined) scripts.push(value);
+      at += 1;
+    } else if (arg.startsWith("--expression=")) {
+      scripts.push(arg.slice("--expression=".length));
+    } else if (/^-[nEralsuz]*e./u.test(arg)) {
+      scripts.push(arg.slice(arg.indexOf("e") + 1));
+    } else if (arg === "-f" || arg === "--file" || arg.startsWith("--file=") || /^-[nEralsuz]*f/u.test(arg)) {
+      fromFile = true;
+      if (arg === "-f" || arg === "--file") at += 1;
+    } else if (arg === "-I" || arg === "-i") {
+      continue;
+    } else if (!arg.startsWith("-") && first === undefined) {
+      first = arg;
+    }
+  }
+  if (scripts.length === 0 && !fromFile && first !== undefined) scripts.push(first);
+  return scripts;
+}
+
+/** One sed address: a line number, `$`, or a `/regex/` (`\cregexc` is left out). */
+const SED_ADDRESS = String.raw`(?:\d+|\$|\/(?:[^/\\\n]|\\.)*\/I?)`;
+/** The `w` (or GNU `W`) command at a command's position, with its file to the end of the line. */
+const SED_WRITE_COMMAND = new RegExp(String.raw`(?:^|[;\n{}])\s*(?:${SED_ADDRESS}(?:\s*,\s*${SED_ADDRESS})?)?\s*!?\s*[wW]\s*([^\n]+)`, "gu");
+/** The `w` flag of an `s` command, with its file to the end of the line. */
+const SED_WRITE_FLAG = new RegExp(
+  String.raw`(?:^|[;\n{}])\s*(?:${SED_ADDRESS}(?:\s*,\s*${SED_ADDRESS})?)?\s*!?\s*s([^\\\n])(?:(?!\1)[^\\\n]|\\.)*\1(?:(?!\1)[^\\\n]|\\.)*\1[gpiImMe0-9]*w\s*([^\n]+)`,
+  "gu",
+);
+
+/** The files a sed script writes with `w` or `s///w`. */
+function sedWriteFiles(script: string): string[] {
+  const files: string[] = [];
+  for (const found of script.matchAll(SED_WRITE_COMMAND)) files.push((found[1] as string).trim());
+  for (const found of script.matchAll(SED_WRITE_FLAG)) files.push((found[2] as string).trim());
+  return files.filter((file) => file.length > 0);
+}
+
+/**
  * The files and directories git ITSELF writes, from its own options
  * (second review, S2), read from git 2.50.1's manual pages: the diff
  * family's `--output=<file>` (`diff`, `log`, `show`, `stash show` and every
@@ -8177,7 +8315,13 @@ function classifySegment(
   // not a path.
   // `curl -o` / `wget -O` write a file while reading as `read.web`, so their
   // words are scanned too.
-  if ((!cls.startsWith("read.") || basename === "curl" || basename === "wget" || basename === "git") && cls !== GATE_SELF_CLASS) {
+  // Follow-up, item B: a read-class command that writes a file through one
+  // of its own words (`sort -o`, `uniq in out`, sed's `w`).
+  const readOutputs = readWriteTargets(basename, args);
+  if (
+    (!cls.startsWith("read.") || basename === "curl" || basename === "wget" || basename === "git" || readOutputs.length > 0) &&
+    cls !== GATE_SELF_CLASS
+  ) {
     const flagValues = args
       .filter((arg) => isFlag(arg) && arg.includes("="))
       .map((arg) => arg.slice(arg.indexOf("=") + 1));
@@ -8193,8 +8337,17 @@ function classifySegment(
       .map((arg) => arg.slice(arg.indexOf("=") + 1));
     // Second review, S2: git's own words are judged only where git writes a
     // file through them ({@link gitWriteTargets}).
-    const named = basename === "git" ? gitWriteTargets(args) : [...positionals, ...flagValues, ...attached, ...operandValues];
-    const gitWrite = gitWriteRefinement(writeTargets, named, context.shellDir, !readBeforeRedirect, context.lineNamesGit === true);
+    // Follow-up, item A: a read whose only write is its redirection writes
+    // nothing through its own words (`cat .git/HEAD > /tmp/x` reads `.git`
+    // and writes `/tmp/x`), so only the redirection targets and the outputs
+    // the read names itself (item B) are judged.
+    const named =
+      basename === "git"
+        ? gitWriteTargets(args)
+        : readBeforeRedirect
+          ? readOutputs
+          : [...positionals, ...flagValues, ...attached, ...operandValues];
+    const gitWrite = gitWriteRefinement(writeTargets, named, context.shellDir, true, context.lineNamesGit === true);
     if (gitWrite !== null) {
       return { ok: true, ...gitWrite, ...(sandbox === null ? {} : { sandbox }) };
     }

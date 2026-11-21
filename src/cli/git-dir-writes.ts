@@ -38,6 +38,7 @@ import {
   globSegmentMatches,
   isPatternSegment,
   mayNameGitDirectory,
+  readWriteTargets,
   type ClassifiedSegment,
   type CommandClassification,
 } from "../core/command-class.js";
@@ -521,11 +522,17 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
     if (shapes.length !== 1 || shape === undefined) continue;
     const bin = shape.bin === null ? null : (shape.bin.split("/").pop() ?? shape.bin);
     const reads = segment.class.startsWith("read.") && bin !== "curl" && bin !== "wget" && bin !== "git";
-    // A read writes nothing but its redirection; `git`'s own words are file
-    // writes only where git writes through them (second review, S2).
+    // A read writes nothing but its redirection and the outputs it names
+    // itself (`sort -o`, `uniq in out`, sed's `w`: follow-up, item B);
+    // `git`'s own words are file writes only where git writes through them.
     const gitWrites = bin === "git" ? gitWriteTargets(shape.args).filter(pathOrPattern) : [];
+    const readOutputs = bin === null ? [] : readWriteTargets(bin, shape.args).filter(pathOrPattern);
     const named =
-      reads || segment.rule === "redirect-write" ? [] : bin === "git" ? gitWrites : writeWords(shape.args).filter(pathOrPattern);
+      reads || segment.rule === "redirect-write"
+        ? readOutputs
+        : bin === "git"
+          ? gitWrites
+          : writeWords(shape.args).filter(pathOrPattern);
     const candidates = [...shape.writes.filter(pathOrPattern), ...named];
     // The words the segment surely writes: its redirection targets, and every
     // word of a segment the classifier already calls a file write. A word of
@@ -538,6 +545,7 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
       ...(segment.class.startsWith("files.") ? named : []),
       ...(bin === null ? [] : fetchOutputValues(bin, shape.args)),
       ...gitWrites,
+      ...readOutputs,
     ]);
     const sources = bin === null ? [] : treeSources(bin, shape.args).filter(pathOrPattern);
     if (candidates.length === 0 && sources.length === 0) continue;
