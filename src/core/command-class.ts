@@ -4515,16 +4515,144 @@ function gitWriteRefinement(
 const GIT_SEGMENT_IN_TEXT = /(?:^|[^A-Za-z0-9_.-])\.git(?:$|[^A-Za-z0-9_.-])/iu;
 
 /**
+ * The `git rev-parse` options that print a path to, or inside, the git
+ * directory (APRV-518, substitution fold), read from git 2.50.1's manual:
+ * `--git-dir`, `--absolute-git-dir`, `--git-common-dir`, `--git-path
+ * <path>`, `--resolve-git-dir <path>` (a gitfile's repository) and
+ * `--shared-index-path` (a file in it). The options that print the working
+ * tree (`--show-toplevel`, `--show-cdup`, `--show-prefix`,
+ * `--show-superproject-working-tree`), a word (`--is-*`, `--show-*-format`,
+ * `--local-env-vars`) or an object name are not here.
+ */
+const GIT_DIR_QUERY_OPTIONS: readonly string[] = [
+  "--git-dir",
+  "--absolute-git-dir",
+  "--git-common-dir",
+  "--git-path",
+  "--resolve-git-dir",
+  "--shared-index-path",
+];
+
+/**
+ * Does one segment of a substitution body ask git for its own directory
+ * (APRV-518, substitution fold): a `rev-parse` (any case, also as
+ * `git-rev-parse` or inside an alias value such as `alias.d=rev-parse
+ * --git-dir`) followed by one of {@link GIT_DIR_QUERY_OPTIONS}? An option is
+ * read by any prefix of three characters or more (`--git-d`), and an option
+ * name the text cannot read (`--git-$(echo dir)`, `-$X`) counts, as does a
+ * verb it cannot read (`git $(echo rev-parse) --git-dir`). A bare `$X`
+ * operand is a revision, as it almost always is, and does not count; nor
+ * does a value the text cannot read after a readable name (`--short=$N`).
+ */
+function asksGitForItsDirectory(segment: LexSegment): boolean {
+  const tokens = segment.words.flatMap((word) => word.text.split(/\s+/u)).filter((token) => token.length > 0);
+  const unreadable = (token: string): boolean => /[$`*?[]/u.test(token);
+  let verb = false;
+  for (const token of tokens) {
+    const name = (token.startsWith("-") ? token.split("=")[0] : token) as string;
+    const option =
+      name.startsWith("--") &&
+      name.length >= 3 &&
+      GIT_DIR_QUERY_OPTIONS.some((each) => each.startsWith(name.toLowerCase()));
+    if (verb && (option || (name.startsWith("-") && unreadable(name)))) return true;
+    if (/(?:^|[=!/-])rev-parse$/iu.test(token) || unreadable(token)) verb = true;
+  }
+  return false;
+}
+
+/**
+ * The regular-expression source of one literal run of a word, its glob
+ * characters read the broad way (APRV-518, substitution fold): `*` any run,
+ * `?` and a closed bracket expression any one character.
+ */
+function globPieceSource(piece: string): string {
+  let source = "";
+  for (let at = 0; at < piece.length; at += 1) {
+    const char = piece[at] as string;
+    if (char === "*") {
+      source += ".*";
+      continue;
+    }
+    if (char === "?") {
+      source += ".";
+      continue;
+    }
+    if (char === "[") {
+      let close = at + 1;
+      if (piece[close] === "!" || piece[close] === "^") close += 1;
+      if (piece[close] === "]") close += 1;
+      close = piece.indexOf("]", close);
+      if (close !== -1) {
+        source += ".";
+        at = close;
+        continue;
+      }
+    }
+    source += char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  }
+  return source;
+}
+
+/**
+ * Can literal text and a substitution's output JOIN into a `.git` segment
+ * of this word (APRV-518, substitution fold)? `$(printf .gi)t`,
+ * `.g$(printf it)`, `$(printf .)git`, `.$(echo g)it`. The output is unknown
+ * and may hold a `/`, so a `.git` segment may begin inside one output and
+ * end inside another; what the text fixes is the literal run between them.
+ * So, for each piece of the word between `/`, `=`, `:` and blanks that holds
+ * both a substitution and a literal character: does `.git` match a window of
+ * it that starts at the piece's start or inside an output, ends at its end
+ * or inside an output, and holds at least one literal character, each output
+ * read as any text and each glob character the broad way? A piece made only
+ * of outputs (`$(pwd)/build`) does not count: the output alone would spell
+ * `.git`, and its body is judged for that. Neither do pieces whose literal
+ * text cannot be part of `.git` (`out/$(date +%F).txt`, `v$(cat V).tgz`).
+ */
+function wordJoinsGitAcrossSubstitution(text: string): boolean {
+  if (!text.includes(SUBSTITUTION_SENTINEL)) return false;
+  const words = text.includes("{") ? expandBraces(text) : [text];
+  if (words === null) return true;
+  for (const word of words) {
+    for (const piece of word.split(/[/=:\s]/u)) {
+      const runs = piece.split(SUBSTITUTION_SENTINEL);
+      const outputs = runs.length - 1;
+      if (outputs === 0 || runs.join("").length === 0) continue;
+      for (let first = 0; first <= outputs; first += 1) {
+        for (let last = first; last <= outputs; last += 1) {
+          const literal = runs.slice(first, last + 1);
+          if (literal.join("").length === 0) continue;
+          const source = `^${first > 0 ? ".*" : ""}${literal.map(globPieceSource).join(".*")}${last < outputs ? ".*" : ""}$`;
+          if (new RegExp(source, "iu").test(".git")) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Does the line spell a `.git` segment where the shell may carry it to a
  * later word (second review, S3): an assignment's value, the body of a
  * command substitution, or a quoted string? A literal unquoted `.git` word
- * is judged where it stands and does not count.
+ * is judged where it stands and does not count. The substitution fold adds
+ * two spellings: a body that asks git for its directory
+ * ({@link asksGitForItsDirectory}), and a word whose literal text and
+ * substitution output join into `.git` ({@link wordJoinsGitAcrossSubstitution}).
  */
 function lineSpellsGitIndirectly(segments: readonly LexSegment[]): boolean {
   // A substitution body's words, each read as a path the shell may still
-  // expand (`$(echo .gi?)`).
-  const bodyNamesGit = (body: string): boolean =>
-    GIT_SEGMENT_IN_TEXT.test(body) || body.split(/[\s;&|()]+/u).some((token) => mayNameGitDirectory(token.replace(/["']/gu, "")));
+  // expand (`$(echo .gi?)`); its own segments read as a line of their own
+  // (a nested substitution, an assignment in it, a split spelling); and a
+  // `git rev-parse --git-dir` in it. A body that does not lex is unreadable,
+  // and the strict side.
+  const bodyNamesGit = (body: string): boolean => {
+    if (GIT_SEGMENT_IN_TEXT.test(body) || body.split(/[\s;&|()]+/u).some((token) => mayNameGitDirectory(token.replace(/["']/gu, "")))) {
+      return true;
+    }
+    const lexed = lex(body);
+    if (!lexed.ok) return true;
+    return lexed.segments.some(asksGitForItsDirectory) || lineSpellsGitIndirectly(lexed.segments);
+  };
   return segments.some((segment) => {
     const assignments = bashAssignmentCount(segment.words);
     const words = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
@@ -4532,6 +4660,7 @@ function lineSpellsGitIndirectly(segments: readonly LexSegment[]): boolean {
       segment.bodySubstitutions.some(bodyNamesGit) ||
       words.some((word, index) => {
         if (word.substitutions.some(bodyNamesGit)) return true;
+        if (wordJoinsGitAcrossSubstitution(word.text)) return true;
         // An assignment's VALUE is judged as a target is, patterns and braces
         // included (`D=.gi?`, `D=.g{i,}t`, `D='.[g]it'`): an unquoted `$D`
         // later expands it. Its words after `:` (a PATH-like list) too.
@@ -8703,8 +8832,11 @@ export function classifyCommand(
   // relative write after `cd .git` is judged where it lands.
   let shellDir: ShellDir | null = context.shellDir === undefined ? SHELL_DIR_START : context.shellDir;
   // Second review, S3: the line may carry `.git` to a write through a variable
-  // or a substitution it sets itself.
-  const lineNamesGit = context.lineNamesGit ?? lineSpellsGitIndirectly(lexed.segments);
+  // or a substitution it sets itself. An inner script (`bash -c '…'`, a
+  // substitution body) reads its own text too, on top of what its line
+  // spells: a spelling inside single quotes is no substitution to the outer
+  // line, and is one to the script (substitution fold).
+  const lineNamesGit = context.lineNamesGit === true || lineSpellsGitIndirectly(lexed.segments);
   context = { ...context, lineNamesGit };
   execContext = { ...execContext, lineNamesGit };
   for (const segment of lexed.segments) {
