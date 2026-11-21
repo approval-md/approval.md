@@ -154,10 +154,13 @@ test("S1 review: a directory listing is read whole; thousands of matches do not 
   mkdirSync(logs);
   for (let at = 0; at < 5000; at += 1) writeFileSync(join(logs, `f${String(at)}.log`), "");
   assert.deepEqual(hook("rm logs/*.log", repo), ["files.delete.out_of_scope rm-unreadable-path"]);
-  assert.deepEqual(hook("cp /tmp/x logs/*.log", repo), ["files.write.workspace workspace-write"]);
+  // The source is inside the checkout: an absolute `/tmp` source is out of the
+  // write scope wherever the checkout itself sits under `/tmp` (a Linux runner).
+  writeFileSync(join(repo, "seed.txt"), "");
+  assert.deepEqual(hook("cp seed.txt logs/*.log", repo), ["files.write.workspace workspace-write"]);
   // Among them, one link into .git is still found.
   symlinkSync("../.git/config", join(logs, "zz.log"));
-  assert.deepEqual(hook("cp /tmp/x logs/*.log", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cp seed.txt logs/*.log", repo), [DIR_WRITE]);
 });
 
 test("S1 review: an entry whose own name holds a glob character is a real match", { skip }, () => {
