@@ -148,6 +148,10 @@ test("rule 2: literal text and a substitution's output that join into .git name 
   assert.deepEqual(pure("cd .g$(printf it) && echo x >> config"), [READ_SHELL, DIR_WRITE]);
   assert.deepEqual(pure("D=$(printf .gi)t; echo x >> $D/config"), [ASSIGNMENT, DIR_WRITE]);
   assert.deepEqual(pure("D=a:.g$(printf it); cd $D && echo x >> config"), [ASSIGNMENT, READ_SHELL, DIR_WRITE]);
+  // An output may hold a `/`: `.git` may begin inside one (`x/.gi` + `t`) or
+  // end inside one (`.g` + `it/x`), past literal text around it.
+  assert.deepEqual(pure("echo x >> x$(printf /.gi)t/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> .g$(printf it/)config"), [DIR_WRITE]);
   // A glob or brace beside the substitution is read the broad way.
   assert.deepEqual(pure("echo x >> .g$(printf i)?/config"), [DIR_WRITE]);
   assert.deepEqual(pure("echo x >> .g{x,$(printf it)}/config"), [DIR_WRITE]);
