@@ -5122,172 +5122,6 @@ function bodyPrintsGit(segments: readonly LexSegment[]): boolean {
   );
 }
 
-/** Any character outside ASCII. */
-const NON_ASCII = /[\u0080-\u{10FFFF}]/u;
-
-/** The longest variable value or pattern an expansion is worked out for. */
-const EXPANSION_EVALUATION_LIMIT = 256;
-
-/**
- * Does the shell pattern `pattern` (`*` any run, `/` included, `?` one
- * character, anything else itself) match all of `text`? `null` when it holds
- * what {@link patternUnmodelled} names, which the caller judges the strict
- * way. A walk over the text as a set of positions.
- */
-function patternUnmodelled(pattern: string): boolean {
-  // Bracket expressions (ranges follow the locale's collation, and `[]a-z]`
-  // hides one), extglob forms (`@( )`, `+( )`, `!( )`, `|`), escapes and
-  // quotes are not worked out (points m and o).
-  return /[\\'"()|!@+[]/u.test(pattern);
-}
-
-/**
- * Does the shell pattern `pattern` match all of `text`, or `null` when it
- * holds what {@link patternUnmodelled} names (shared with the replacement
- * branch of {@link evaluateExpansion}, so both refuse the same forms)?
- */
-function shellPatternMatches(pattern: string, text: string): boolean | null {
-  if (patternUnmodelled(pattern)) return null;
-  let live = new Uint8Array(text.length + 1);
-  live[0] = 1;
-  for (let at = 0; at < pattern.length; at += 1) {
-    const char = pattern[at] as string;
-    const next = new Uint8Array(text.length + 1);
-    if (char === "*") {
-      for (let p = 0; p <= text.length; p += 1) next[p] = live[p] === 1 || (p > 0 && next[p - 1] === 1) ? 1 : 0;
-      live = next;
-      continue;
-    }
-    const test = (c: string): boolean => char === "?" || c === char;
-    for (let p = 0; p < text.length; p += 1) if (live[p] === 1 && test(text[p] as string)) next[p + 1] = 1;
-    live = next;
-  }
-  return live[text.length] === 1;
-}
-
-/**
- * The value `${NAME<rest>}` takes when NAME holds `value`, worked out exactly
- * (security review, point i): removal (`#`, `##`, `%`, `%%`), substring
- * (`:offset`, `:offset:length`, plain integers), replacement of a literal
- * (`/`, `//`, `/#`, `/%`, no `&` in the new text) and case changes without a
- * pattern. `null` for anything else, or anything this reader cannot work out
- * exactly, which the caller judges the strict way.
- */
-function evaluateExpansion(value: string, rest: string): string | null {
-  if (value.length > EXPANSION_EVALUATION_LIMIT || rest.length > EXPANSION_EVALUATION_LIMIT || /[$`\\'"]/u.test(rest)) return null;
-  // The shell works on the locale's characters, and its case mapping is not
-  // JavaScript's: any character outside ASCII is the strict side (point l).
-  if (NON_ASCII.test(value) || NON_ASCII.test(rest)) return null;
-  const removal = /^(##?|%%?)([\s\S]*)$/u.exec(rest);
-  if (removal !== null) {
-    const [op, pattern] = [removal[1] as string, removal[2] as string];
-    const fromStart = op.startsWith("#");
-    const longest = op.length === 2;
-    for (let step = 0; step <= value.length; step += 1) {
-      // `#` tries the shortest prefix first, `##` the longest; `%` the
-      // shortest suffix first, `%%` the longest.
-      const length = longest ? value.length - step : step;
-      const piece = fromStart ? value.slice(0, length) : value.slice(value.length - length);
-      const matched = shellPatternMatches(pattern, piece);
-      if (matched === null) return null;
-      if (matched) return fromStart ? value.slice(length) : value.slice(0, value.length - length);
-    }
-    return value;
-  }
-  // Offsets and lengths are arithmetic to the shell (`010` is 8, `0x10`,
-  // `1+1` and names too): only a plain decimal is worked out (point k).
-  const substring = /^:\s*(-?(?:0|[1-9]\d*))\s*(?::\s*(-?(?:0|[1-9]\d*))\s*)?$/u.exec(rest);
-  if (/^:\s*[-0-9]/u.test(rest) && substring === null) return null;
-  if (substring !== null) {
-    let start = Number(substring[1]);
-    if (start < 0) start = value.length + start;
-    if (start < 0 || start > value.length) return "";
-    if (substring[2] === undefined) return value.slice(start);
-    let length = Number(substring[2]);
-    const end = length < 0 ? value.length + length : start + length;
-    if (end < start) return null;
-    length = end - start;
-    return value.slice(start, start + length);
-  }
-  const replace = /^\/([#%/]?)([^/]*)(?:\/([\s\S]*))?$/u.exec(rest);
-  if (replace !== null) {
-    const [mode, pattern, replacement] = [replace[1] as string, replace[2] as string, replace[3] ?? ""];
-    // An empty pattern is no no-op for `/#` and `/%` (`${D/#/.g}` prepends):
-    // any empty pattern is left to the strict side (point j).
-    if (pattern === "" || /[*?[]/u.test(pattern) || patternUnmodelled(pattern) || replacement.includes("&")) return null;
-    if (mode === "/") return value.split(pattern).join(replacement);
-    if (mode === "#") return value.startsWith(pattern) ? `${replacement}${value.slice(pattern.length)}` : value;
-    if (mode === "%") return value.endsWith(pattern) ? `${value.slice(0, value.length - pattern.length)}${replacement}` : value;
-    return value.replace(pattern, () => replacement);
-  }
-  const caseChange = /^(\^\^?|,,?|~~?)$/u.exec(rest);
-  if (caseChange !== null) {
-    const flip = (c: string): string => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase());
-    const change = (c: string): string => {
-      const op = (caseChange[1] as string)[0];
-      return op === "^" ? c.toUpperCase() : op === "," ? c.toLowerCase() : flip(c);
-    };
-    return (caseChange[1] as string).length === 2 ? [...value].map(change).join("") : `${change(value.slice(0, 1))}${value.slice(1)}`;
-  }
-  return null;
-}
-
-/**
- * The variables of these segments whose value is a known plain literal
- * (security review, point i): assigned by a `NAME=value` word in a run of
- * assignment-only segments at the start (none in a subshell, none piped), the
- * value free of globs, expansions, `~` and escapes, and the name written
- * nowhere else in the text but as `$NAME` or `${NAME…}` (so `read`, `for`,
- * `printf -v`, `declare`, a second assignment and the like make it unknown).
- * Positionals, special parameters and array elements are never known, and
- * nothing is known on a line that may change a shell option.
- */
-function knownLiteralValues(segments: readonly LexSegment[], inherited: ReadonlyMap<string, string>): Map<string, string> {
-  const raw = segments.map((segment) => segment.text).join("\n");
-  // Shell options change how patterns match (extglob, nocasematch,
-  // globasciiranges): a line that may set one knows no value (point m).
-  if (/\bshopt\b|\bset\s+[-+]o\b|BASHOPTS|SHELLOPTS/u.test(raw)) return new Map();
-  const known = new Map(inherited);
-  const assigned = new Map<string, number>();
-  let leading = true;
-  for (const [index, segment] of segments.entries()) {
-    const only =
-      segment.words.length > 0 &&
-      bashAssignmentCount(segment.words) === segment.words.length &&
-      segment.redirects.length === 0 &&
-      segment.bodySubstitutions.length === 0 &&
-      !segment.subshell &&
-      !segment.stdinFed &&
-      segments[index + 1]?.stdinFed !== true;
-    if (!only) leading = false;
-    for (const word of segment.words) {
-      const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=/u.exec(word.text);
-      if (assignment === null) continue;
-      const name = assignment[1] as string;
-      assigned.set(name, (assigned.get(name) ?? 0) + 1);
-      known.delete(name);
-      const value = word.text.slice(assignment[0].length);
-      if (leading && only && word.substitutions.length === 0 && !/[$`?*[\]~\\{}]/u.test(value) && !NON_ASCII.test(value) && assigned.size <= 64) {
-        known.set(name, value);
-      }
-    }
-  }
-  for (const name of known.keys()) {
-    if (inherited.has(name) && !assigned.has(name)) continue;
-    let elsewhere = 0;
-    for (const found of raw.matchAll(new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`, "gu"))) {
-      const at = found.index ?? 0;
-      const before = raw.slice(Math.max(0, at - 3), at);
-      // A use is `$NAME` or `${NAME…}`, but `${NAME:=…}`, `${NAME=…}` and
-      // `${NAME[i]=…}` assign it (point n): those count as setting it again.
-      const assigns = before.endsWith("${") && /^(?:\[[^\]]*\])?:?=/u.test(raw.slice(at + name.length));
-      if (!/(?:\$|\$\{|\$\{[!#])$/u.test(before) || assigns) elsewhere += 1;
-    }
-    if (elsewhere !== 1 || assigned.get(name) !== 1) known.delete(name);
-  }
-  return known;
-}
-
 /**
  * Does a parameter expansion in this word carry `.git` (review of the
  * substitution fold, S2, and its security review, points d and e)? Each
@@ -5298,17 +5132,12 @@ function knownLiteralValues(segments: readonly LexSegment[], inherited: Readonly
  * - `:?`, `?`, a length (`${#X}`) and an indirection (`${!X}`) carry no
  *   new text, and stand as an unknown value as `$V` does;
  * - every other operator transforms the value (removal, substring,
- *   replacement, case, `@`; points f to n): it counts on a line `cut` marks
- *   (one that holds `.git` or assigns a value that is no plain literal), and
- *   otherwise unless the value is a known plain literal
- *   ({@link knownLiteralValues}) and the result, worked out exactly
- *   ({@link evaluateExpansion}), is no `.git`; then the result stands for the
- *   expansion in the word around it;
+ *   replacement, case, `@`; points d and f to q), and counts;
  * - a `${` that does not close counts.
  * A nested expansion stands, inside another's word, as the text it may
  * carry or as an unknown output.
  */
-function expansionWordNamesGit(text: string, cut: boolean, known: ReadonlyMap<string, string> = new Map()): boolean {
+function expansionWordNamesGit(text: string): boolean {
   if (!text.includes("${")) return false;
   const valueNamesGit = (value: string): boolean =>
     GIT_SEGMENT_IN_TEXT.test(value.split(SUBSTITUTION_SENTINEL).join("/")) ||
@@ -5354,15 +5183,12 @@ function expansionWordNamesGit(text: string, cut: boolean, known: ReadonlyMap<st
       standIn = unknownValue;
     } else {
       // Every other operator transforms the value (removal, substring,
-      // replacement, case, `@`): it counts as naming `.git` unless the value
-      // is a known plain literal and the result is worked out exactly and is
-      // no `.git` (security review, point i). Positionals, special
-      // parameters and array elements are never known.
-      const value = known.get((name as RegExpExecArray)[0]);
-      const result = cut || value === undefined ? null : evaluateExpansion(value, rest);
-      if (result === null || valueNamesGit(result)) return true;
-      standIn = result;
-      rewritten = true;
+      // replacement, case, `@`), on any parameter (a name, a positional, a
+      // special parameter, an array element): it counts as naming `.git`
+      // (security review, points d and f to q). Working the result out
+      // exactly was tried and left as a carry: each review round found
+      // another shell corner.
+      return true;
     }
     open[open.length - 1] += standIn;
   }
@@ -5388,31 +5214,7 @@ function expansionWordNamesGit(text: string, cut: boolean, known: ReadonlyMap<st
  * levels; a deeper one counts as naming `.git`, the strict side, so the
  * reading's cost and its depth on the call stack stay bounded.
  */
-function lineSpellsGitIndirectly(
-  segments: readonly LexSegment[],
-  depth = 0,
-  inherited: ReadonlyMap<string, string> = new Map(),
-): boolean {
-  // The variables whose value is a known plain literal (point i).
-  const known = knownLiteralValues(segments, inherited);
-  // Defence in depth under that evaluator (points g and h, kept): a
-  // transforming expansion also counts on a line that holds `.git` anywhere,
-  // in its raw text, that text with escapes decoded, or a word's or target's
-  // text with quotes removed, and on a line that assigns a value that is no
-  // plain literal. The evaluator only adds strictness on top of this.
-  const holdsGit = (text: string): boolean => /\.git/iu.test(text);
-  const cut = segments.some(
-    (segment) =>
-      holdsGit(segment.text) ||
-      (segment.text.includes("\\") &&
-        (holdsGit(decodeBackslashEscapes(segment.text, false)) || holdsGit(decodeBackslashEscapes(segment.text, true)))) ||
-      segment.words.some((word) => holdsGit(word.text)) ||
-      segment.redirects.some((redirect) => holdsGit(redirect.target.text)) ||
-      segment.words.some((word) => {
-        const assignment = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u.exec(word.text);
-        return assignment !== null && /[?*[$`]/u.test(word.text.slice(assignment[0].length));
-      }),
-  );
+function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): boolean {
   // A substitution body's words, each read as a path the shell may still
   // expand (`$(echo .gi?)`); its own segments read as a line of their own
   // (a nested substitution, an assignment in it, a split spelling); and a
@@ -5433,7 +5235,7 @@ function lineSpellsGitIndirectly(
     return (
       lexed.segments.some(asksGitForItsDirectory) ||
       bodyPrintsGit(lexed.segments) ||
-      lineSpellsGitIndirectly(lexed.segments, depth + 1, known)
+      lineSpellsGitIndirectly(lexed.segments, depth + 1)
     );
   };
   return segments.some((segment) => {
@@ -5446,7 +5248,7 @@ function lineSpellsGitIndirectly(
       words.some((word, index) => {
         if (word.substitutions.some(bodyNamesGit)) return true;
         if (wordJoinsGitAcrossSubstitution(word.text)) return true;
-        if (expansionWordNamesGit(word.text, cut, known)) return true;
+        if (expansionWordNamesGit(word.text)) return true;
         // An assignment's VALUE is judged as a target is, patterns and braces
         // included (`D=.gi?`, `D=.g{i,}t`, `D='.[g]it'`): an unquoted `$D`
         // later expands it. Its words after `:` (a PATH-like list) too.
