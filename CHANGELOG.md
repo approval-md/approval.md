@@ -170,9 +170,8 @@ on the change above.
   `printf` and `echo` print is rendered from their words (`$(printf .g;
   printf it)`), an unknown operator or an unclosed `${` counts, and every
   operator that transforms a value (removal, substring, replacement, case,
-  `@`) counts unless the value is a known literal set at the start of the
-  line and the result, worked out, is no `.git`. That one costs: `echo x >
-  "${f%.txt}.log"` with `f` from an earlier call becomes `git-dir-write`.
+  `@`) counts, on any parameter. That one costs: `echo x >
+  "${f%.txt}.log"` or `"${1%.md}.html"` becomes `git-dir-write`.
 - **A line cannot be built to make the classifier slow.** A hook past its
   timeout lets the call through, so the cost of reading a line is bounded.
   The split-spelling reader tried every window of a word as its own

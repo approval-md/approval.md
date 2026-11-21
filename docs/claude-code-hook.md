@@ -1028,18 +1028,14 @@ the shell reads it, its pieces decoded and joined (`$'\x2e'"g""i""t"`), and a
 quote that does not close counts. What `printf` or `echo` prints is read from
 the body's words with quotes removed: the format filled from its arguments,
 escapes decoded, an argument the text cannot read an unknown output, and a
-body's segments printed in turn (`$(printf .g; printf it)`). A replacement
-expansion's new text counts as text between unknown runs (`${G/x/.}`);
-every operator that transforms a value (removal, substring, replacement,
-case, `@`) counts unless the value is a known plain literal, set by a
-`NAME=` word at the start of the line and nowhere else, and the result,
-worked out exactly, is no `.git`: so `echo x > "${f%.txt}.log"` with `f` set
-in an earlier call, a positional (`${1%.md}`), a special parameter or an
-array element is `git-dir-write`, while `f=notes.txt; echo x >
-"${f%.txt}.log"` stays a workspace write; it also counts on a line that
-holds `.git` or assigns a value that is no plain literal; `${!-.git}` is the default word of
-`$!`, read as the operator it is; an operator this reader does not know, or
-a `${` that does not close, counts. Inside an operator's word a nested
+body's segments printed in turn (`$(printf .g; printf it)`). Every operator
+that transforms a value (removal, substring, replacement, case, `@`) counts,
+on any parameter, a name the line sets included: so `echo x >
+"${f%.txt}.log"` and `"${1%.md}.html"` are `git-dir-write`, while a length,
+a plain `${f}`, an indirection and `:?` stay unknown values. (Working the
+result out exactly was tried and left out: each review round found another
+shell corner.) `${!-.git}` is the default word of `$!`, read as the operator
+it is; and a `${` that does not close counts. Inside an operator's word a nested
 expansion is an unknown output, and a default word stands for its expansion
 (`.g${A:-i}t`).
 
