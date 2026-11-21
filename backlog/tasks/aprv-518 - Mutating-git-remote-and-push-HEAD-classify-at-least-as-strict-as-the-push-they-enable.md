@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-17 06:49'
-updated_date: '2026-11-21 00:19'
+updated_date: '2026-11-21 03:50'
 labels:
   - classifier
   - security
@@ -65,4 +65,6 @@ Rebuilt on 0.4.8 (main 98fb94d5) as a new branch that replaces #650. #650 was cu
 - Differential (AC #4) is now against 0.4.8 build, not #649: 0 looser under this repo APPROVAL.md and the overlay template policy; pure 22,925 lines x default/execCode/noRuleSegments (137,550 comparisons, 12,881 stricter); hook 1,628 lines x 11 checkout states x abstain on/off (71,632 comparisons, 7,758 stricter). Overlay recipe corpus: 63 recipes, 0 changed.
 - Evidence: typecheck 0, lint 0, build 0, conformance 922/922 (0); targeted 45 files exit 0 (2,026 tests, 2,020 pass, 5 skipped, 1 todo, 0 fail).
 - Touches the global invariant fail closed only in the strict direction.
+
+Review fold on PR #676 (three should items and automated security reviews): a write into .git is judged where it lands. The classifier follows the line's literal cd/pushd/popd and takes a bare redirection as a write; option values (attached, separate, --long=, every tail of a short cluster, an operand's key=value, curl --output-dir, wget's log file options, a cluster's last value letter taking the next word) carry the target. A new first hook pass (src/cli/git-dir-writes.ts) walks each target on disk as the kernel does (physical .., every symlink followed, dangling too) from the hook's directory and every certain cd landing (logical and physical), and adds git-dir-write beside the segment when it lands in a git directory (the checkout's own as its .git file names it). Only a missing component is applied as text; a sure target that cannot be placed (EACCES, ENAMETOOLONG, ELOOP) is strict, a possible one is judged by its text. After a segment that can create a tag, a push word that is no local branch, or the source of a src:dst whose destination is not under refs/, is at least release.publish (git-push-new-tag); git 2.50.1 facts are printed by the real-git tests. Known limit: a relative write after an unknown cd (cd "$D", cd -, stale HOME/CDPATH) keeps 0.4.8's answer; 54 of 105 such lines are autonomous on 0.4.8, so the strict rule waits for the owner. Evidence: probes 80/80; differential 0 looser (pure 142,386 comparisons, hook 147,264 in 13 states); 32 mutants killed; 63 recipes unchanged; conformance 926/926, 370 command-class vectors (16 new, 1.10.0).
 <!-- SECTION:NOTES:END -->
