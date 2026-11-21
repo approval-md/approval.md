@@ -34,6 +34,10 @@
  *   propose under each resident setting for its class, as the plugin then
  *   takes it: the box runs `approval propose` for it in every cell, and an
  *   answer the code after the propose does not go on with is `refused`;
+ * - for a propose of a held entry's class (review S1b), `propose.writers`: the
+ *   lines that give a held entry that class, each `{ file, function, class }`
+ *   (the extractor's class writers); every writer is listed once, by an entry
+ *   of its class, and every listed writer exists;
  * - `reason`, `owner`; and, when the entry is LIMITING (P1: any layer's decision
  *   stricter than auto under the village default, or any layer's class whose
  *   template default autonomy is manual), `accepted_by: "human:carter"` exactly
@@ -45,7 +49,8 @@
  * unclassified or opaque and was not declared with Carter's acceptance; a card
  * is technical (an undeclared say entry, or for a propose an unlisted payload
  * key); a matrix cell's decision differs; an entry is stale or duplicated (P4);
- * an envelope input fails its tool's schema (P6).
+ * an envelope input fails its tool's schema (P6); a class writer appears,
+ * disappears, changes its class or cannot be read (S1b).
  *
  * Pure but for the core functions it is handed.
  */
@@ -182,6 +187,7 @@ export function validateExpected(doc) {
         // Review S1: the answers the plugin goes on with, declared; the check compares them with the code.
         if (!Array.isArray(p.accepts) || p.accepts.length === 0 || p.accepts.some((a) => !ANSWERS.includes(a)) || JSON.stringify([...p.accepts].sort()) !== JSON.stringify(p.accepts) || new Set(p.accepts).size !== p.accepts.length)
           err(`propose.accepts must list, sorted and once each, the daemon answers the plugin goes on with (${ANSWERS.join(", ")})`);
+        for (const e of writerListErrors(p)) err(e);
       }
     }
     entries.push({ entry, kind, key });
@@ -201,6 +207,87 @@ const covers = (source, site) => {
   const span = sourceSpan(source);
   return span !== null && span.file === site.file && site.line >= span.from && site.line <= span.to;
 };
+
+// ---------------------------------------------------------------------------
+// Review S1b: the class writers. A propose of a held entry's class proposes
+// whatever class the entry was filed with, so each line that gives a held entry
+// its class (the extractor's `class_writers`: a dict literal's "class", an
+// assignment to x["class"], or a call that passes the class to the function
+// that stores it, followed across the plugin's modules) is declared and judged.
+// A writer's identity is its file and enclosing function, with the class it
+// files; its line is reported only, so a writer moved within its function
+// stays declared.
+// ---------------------------------------------------------------------------
+
+const WRITER_FIELDS = ["class", "file", "function"];
+/** The identity of a class writer: file, enclosing function, class. */
+export const writerId = (w) => `${String(w.file)}#${String(w.function)}#${String(w.class)}`;
+const writerLabel = (w) => `${String(w.function)} (${String(w.file)}${w.line === undefined ? "" : `:${String(w.line)}`}${Array.isArray(w.via) && w.via.length > 0 ? `, through ${w.via.join(" <- ")}` : ""})`;
+
+/** `propose.writers`: optional; each `{ file, function, class }`, its class the propose's, once each. */
+function writerListErrors(p) {
+  if (p.writers === undefined) return [];
+  if (!Array.isArray(p.writers)) return ["propose.writers must be a list of { file, function, class }"];
+  const errors = [];
+  const seen = new Set();
+  p.writers.forEach((w, i) => {
+    const at = `propose.writers[${String(i)}]`;
+    if (w === null || typeof w !== "object" || Array.isArray(w) || Object.keys(w).sort().join(",") !== WRITER_FIELDS.join(",") || WRITER_FIELDS.some((k) => typeof w[k] !== "string" || w[k].trim() === "")) {
+      errors.push(`${at} must name exactly file, function and class`);
+      return;
+    }
+    if (w.class !== p.class) errors.push(`${at} files class ${w.class}, but this entry declares ${String(p.class)}: list a writer on an entry of its own class`);
+    if (seen.has(writerId(w))) errors.push(`${at} lists ${w.function} in ${w.file} a second time`);
+    seen.add(writerId(w));
+  });
+  return errors;
+}
+
+/**
+ * Judge the corpus's class writers against the entries' `propose.writers`.
+ * Every writer the extractor read is listed (same file, function and class) by
+ * an entry of its class, once; every listed writer exists; an unread writer, a
+ * plugin whose propose carries a held entry's class with no writer found, or a
+ * corpus from an extractor that does not list writers fails closed.
+ */
+export function judgeClassWriters(corpus, entries, find) {
+  const heldPlugins = [...new Set((corpus.proposes ?? []).filter((s) => s.held === true || (Array.isArray(s.classes) && s.classes.length > 0)).map((s) => String(s.plugin)))].sort();
+  const declared = [];
+  for (const v of entries) for (const w of Array.isArray(v.entry.propose?.writers) ? v.entry.propose.writers : []) declared.push({ ...w, by: v.key });
+  if (!Array.isArray(corpus.class_writers)) {
+    if (heldPlugins.length > 0 || declared.length > 0) find("class_writers", "the corpus lists no class writers, so the class a held entry gets is not judged: re-extract with this approval.md's extractor (review S1b); fail closed");
+    return [];
+  }
+  const writers = corpus.class_writers;
+  for (const p of heldPlugins) {
+    if (!writers.some((w) => w.plugin === p)) find(`writers#${p}`, `plugin ${p} proposes a held entry's class, and the extractor found no line that gives a held entry its class (a writer in a form it does not read); fail closed (review S1b)`);
+  }
+  const read = writers.filter((w) => typeof w.class === "string");
+  for (const w of writers.filter((x) => typeof x.class !== "string")) find(`writer#${String(w.file)}:${String(w.line)}`, `a class writer whose class cannot be read: ${writerLabel(w)} (${String(w.why)}); fail closed (review S1b)`);
+  const listedTwice = new Set();
+  const byId = new Map();
+  for (const d of declared) {
+    if (byId.has(writerId(d))) listedTwice.add(writerId(d));
+    else byId.set(writerId(d), d);
+  }
+  for (const id of listedTwice) find(`writer#${id}`, `listed by two entries (${declared.filter((d) => writerId(d) === id).map((d) => keyLabel(d.by)).join(" and ")}); one writer, one declaration`);
+  const readIds = new Set(read.map(writerId));
+  const unreadAt = new Set(writers.filter((x) => typeof x.class !== "string").map((x) => `${String(x.file)}#${String(x.function)}`));
+  const accounted = new Set();
+  for (const w of read) {
+    if (byId.has(writerId(w))) continue;
+    // The same function listed with another class: the class a held entry gets has changed.
+    const was = declared.filter((d) => d.file === w.file && d.function === w.function && d.class !== w.class && !readIds.has(writerId(d)));
+    for (const d of was) accounted.add(writerId(d));
+    if (was.length > 0) find(`writer#${writerId(w)}`, `the class writer ${writerLabel(w)} files class ${w.class}, declared ${[...new Set(was.map((d) => d.class))].join(", ")} (by ${[...new Set(was.map((d) => keyLabel(d.by)))].join(", ")}): the class a held entry gets has changed (review S1b)`);
+    else find(`writer#${writerId(w)}`, `an undeclared class writer: ${writerLabel(w)} files class ${w.class}; list it in propose.writers of an entry of class ${w.class} (review S1b)`);
+  }
+  for (const d of declared) {
+    if (readIds.has(writerId(d)) || accounted.has(writerId(d)) || unreadAt.has(`${d.file}#${d.function}`)) continue;
+    find(d.by, `propose.writers lists ${d.function} in ${d.file} filing ${d.class}, which the extractor does not find (a writer removed, renamed or moved to another function); delete it (review S1b)`);
+  }
+  return writers.map((w) => ({ at: `${String(w.file)}:${String(w.line)}`, function: w.function, class: w.class ?? null, via: w.via ?? [], declaredBy: declared.filter((d) => writerId(d) === writerId(w)).map((d) => keyLabel(d.by)) }));
+}
 
 /**
  * Review N2: the members a JSON text names twice in one object (JSON.parse keeps
@@ -613,6 +700,8 @@ export function judgeNewCalls({ corpus, tagCorpus, validated, head, cells = {}, 
       find(v.key, `propose.source ${String(v.entry.propose.source)} names no daemon propose the extractor found (review M3)`);
     }
   }
+  // Review S1b: which class a held entry gets, line by line.
+  const writerRows = judgeClassWriters(corpus, withPropose, find);
 
   // Review S1: a propose-only entry is a call of its own: new with its site, moved with the core.
   for (const v of validated.entries) {
@@ -704,7 +793,7 @@ export function judgeNewCalls({ corpus, tagCorpus, validated, head, cells = {}, 
     undeclared: rows.filter((r) => !r.entry).length,
     blocking: findings.length,
   };
-  return { rows, findings, summary, proposes: proposeRows };
+  return { rows, findings, summary, proposes: proposeRows, writers: writerRows };
 }
 
 export function newCallsLine(meta, summary) {
@@ -752,6 +841,11 @@ export function renderNewCalls(meta, result, validated) {
   if ((result.proposes ?? []).length > 0) {
     out.push("### Daemon proposes, every plugin, each judged (review M3, S1)", "", "| propose | class | answers it goes on with | declared by | its plugin owns a gated tool | new since the base |", "|---|---|---|---|---|---|");
     for (const p of result.proposes) out.push(`| \`${cellText(p.at)}\` | ${cellText(p.class ?? "(unread)")} | ${cellText(p.accepts === null ? "(unread)" : p.accepts.join(", "))} | ${cellText(p.claimedBy.join(", ") || "-")} | ${p.gatedPlugin === null ? "-" : p.gatedPlugin ? "yes" : "no"} | ${p.isNew ? "yes" : "no"} |`);
+    out.push("");
+  }
+  if ((result.writers ?? []).length > 0) {
+    out.push("### Class writers: the lines that give a held entry its class (review S1b)", "", "| writer | function | class | through | declared by |", "|---|---|---|---|---|");
+    for (const w of result.writers) out.push(`| \`${cellText(w.at)}\` | ${cellText(w.function)} | ${cellText(w.class ?? "(unread)")} | ${cellText(w.via.join(" <- ") || "-")} | ${cellText(w.declaredBy.join(", ") || "-")} |`);
     out.push("");
   }
   out.push("### Expected live decision lines (P7: `class | decision | card_style | core version | tool/command key`)", "", "```");

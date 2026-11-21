@@ -186,13 +186,20 @@ export function gatedPatterns(text) {
  *   plugin owns no gated tool is judged all the same), spelled
  *   `<x>.propose(<class>, ...)` (`self` included), a bare `propose(...)`, a
  *   name imported as `propose` or bound from `getattr(<x>, "propose")` (review
- *   N1), with its file, line and class (a literal, a module constant, the
+ *   N1), or `getattr(<x>, "propose")(...)` called on the spot (review N3),
+ *   with its file, line and class (a literal, a module constant, the
  *   template a module function `return PREFIX + "." + param` makes, or the
  *   class field of a held entry read as the classes the module's guards
  *   compare it with), and the daemon answers the plugin goes on with after it
  *   (`accepts`, review S1: `decision != "x"` / `decision not in (...)` on that
  *   answer in the same function, and an `if`/`elif` chain on it whose `else`
  *   ends the flow); a class or answers it cannot read are reported unread;
+ * - in every plugin with a propose of a held entry's class (review S1b), the
+ *   class writers (`class_writers`): each line that gives a held entry its
+ *   class, with its file, enclosing function, line and the class it files, a
+ *   call into the function that stores the class followed across the plugin's
+ *   modules (see the S1b block in the Python below); a writer it cannot read
+ *   is listed with no class and a reason;
  * - the village tool's READ_OPERATIONS, WRITE_OPERATIONS and
  *   APP_SCOPED_OPERATIONS (review M2), beside the module that registers it.
  */
@@ -200,6 +207,7 @@ const PLUGIN_TOOLS_PY = String.raw`
 import ast, json, os, sys
 root = sys.argv[1]
 out, unread, proposes, village_ops = [], [], [], None
+PLUGIN_FILES = {}  # plugin -> its module paths, walk order (S1b: a class writer's calls are followed across them)
 
 class Unresolved(Exception):
     pass
@@ -510,8 +518,8 @@ def propose_class(m, node):
     if is_class_field(node):
         classes = held_classes(m)
         if classes:
-            return {"class": None, "classes": classes}
-        return {"class": None, "why": "the class is a held entry's field, and the module compares that field with no class it can read"}
+            return {"class": None, "classes": classes, "held": True}
+        return {"class": None, "held": True, "why": "the class is a held entry's field, and the module compares that field with no class it can read"}
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in m["funcs"] and len(node.args) == 1 and isinstance(node.args[0], ast.Name):
         fn = m["funcs"][node.func.id]
         params = [a.arg for a in fn.args.args]
@@ -525,6 +533,311 @@ def propose_class(m, node):
                 pass
     return {"class": None, "why": "the class is not a literal, a module constant or a class template"}
 
+# ---- Review S1b: the class writers -------------------------------------------------------------
+# A held-class propose (above) proposes whatever class its held entry carries, so the lines that give a
+# held entry its class decide which class is proposed. In a plugin with such a propose, every place a
+# "class" field gets its value is a writer, read to the class it files, with the file and the enclosing
+# function (its identity in expected.json) and the line (reported only):
+# - a dict literal with a "class" key ({"class": SHARE_CLASS, ...});
+# - an assignment to x["class"] (also one member of 'x["class"], y = a, b');
+# - x.setdefault("class", v) and x.__setitem__("class", v);
+# a key read as "class" when it is that literal or a module constant equal to it. The class value is a
+# literal, a module constant (of the module, a sibling it imports from, or a plugin module reached through
+# an alias: 'ia = _ia()', 'from . import x as y', 'import x'), a local name bound once in the function to
+# one of those, or a PARAMETER of the enclosing function, followed to every call of that function in the
+# plugin (by name, or through a module alias, a 'from .m import f' name, keyword or position, or its
+# default), where each call is then the writer (open_entry(..., cls=ia.INFERRED_CLASS) in another module).
+# Anything else is an UNREAD writer, which the check fails closed on: a value it cannot read, a parameter
+# with no call found, one passed through *args or **kwargs or rebound in the function, a writer function
+# referenced but not called on the spot (passed, stored, getattr), an augmented assignment, an unpaired
+# unpacking. Reads ('entry.get("class")', 'ap["class"]', the map loaded back from disk) are not writers:
+# a writer whose value is such a read is unread, never skipped.
+
+def qualnames(tree):
+    """Each def's dotted name: its classes and outer defs, then its own name."""
+    out = {}
+    def visit(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if not isinstance(child, ast.ClassDef):
+                    out[child] = prefix + child.name
+                visit(child, prefix + child.name + ".")
+            else:
+                visit(child, prefix)
+    visit(tree, "")
+    return out
+
+SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+
+def info(m):
+    if "par" not in m:
+        m["par"] = parents_of(m["tree"])
+        m["qual"] = qualnames(m["tree"])
+        m["rel"] = os.path.relpath(m["path"], os.path.dirname(root))
+    return m
+
+def scope_of(m, node):
+    return enclosing(m["par"], node, SCOPES)
+
+def module_path(m, dotted):
+    """A module beside m (relative import), or None."""
+    base = os.path.join(os.path.dirname(m["path"]), *dotted.split("."))
+    for p in (base + ".py", os.path.join(base, "__init__.py")):
+        if os.path.isfile(p):
+            return os.path.abspath(p)
+    return None
+
+def plain_import_path(m, dotted):
+    """'import a.b.x': the plugin module x names (any tail of the dotted name under the plugin's directory), or None."""
+    parts = dotted.split(".")
+    pdir = m.get("plugin_dir")
+    if pdir is None:
+        return None
+    for i in range(len(parts)):
+        base = os.path.join(pdir, *parts[i:])
+        for p in (base + ".py", os.path.join(base, "__init__.py")):
+            if os.path.isfile(p):
+                return os.path.abspath(p)
+    return None
+
+def module_aliases(m):
+    """(scope, name) -> the plugin module that name names in that scope, when EVERY binding of the name in the
+    scope names that one module: 'from . import x [as y]', 'from .pkg import x' (x a module), 'import a.x as y',
+    'y = <an alias>', 'y = f()' for a module function f whose every return is an alias. A name also bound any
+    other way in the scope (a parameter, a loop or with target, another value) is no alias there."""
+    if "aliases" in m:
+        return m["aliases"]
+    info(m)
+    fixed, assigns = {}, []
+    def add(scope, name, value):
+        fixed.setdefault((scope, name), set()).add(value)
+    for n in ast.walk(m["tree"]):
+        if isinstance(n, ast.ImportFrom):
+            for a in n.names:
+                target = module_path(m, a.name if not n.module else n.module + "." + a.name) if n.level == 1 else None
+                add(scope_of(m, n), a.asname or a.name, target)
+        elif isinstance(n, ast.Import):
+            for a in n.names:
+                add(scope_of(m, n), a.asname or a.name.split(".")[0], plain_import_path(m, a.name) if (a.asname or "." not in a.name) else None)
+        elif isinstance(n, SCOPES):
+            args = n.args
+            for a in args.posonlyargs + args.args + args.kwonlyargs + [x for x in (args.vararg, args.kwarg) if x is not None]:
+                add(n, a.arg, None)
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            owner = m["par"].get(n)
+            if isinstance(owner, ast.Assign) and len(owner.targets) == 1 and owner.targets[0] is n:
+                assigns.append((scope_of(m, n), n.id, owner.value))
+            else:
+                add(scope_of(m, n), n.id, None)
+    bound = set(fixed) | {(s, n) for s, n, _ in assigns}
+    resolved, rets = {}, {}
+    def resolve_in(scope, name):
+        """The module a name names where it is read: its innermost scope that binds it, as Python looks it up."""
+        while (scope, name) not in bound:
+            if scope is None:
+                return None
+            scope = scope_of(m, scope)
+        return resolved.get((scope, name))
+    for _ in range(4):
+        rets = {}
+        for fname, f in m["funcs"].items():
+            vals = [r.value for r in ast.walk(f) if isinstance(r, ast.Return)]
+            paths = {resolve_in(scope_of(m, v), v.id) if isinstance(v, ast.Name) else None for v in vals}
+            if vals and len(paths) == 1 and None not in paths:
+                rets[fname] = next(iter(paths))
+        cur = {k: set(v) for k, v in fixed.items()}
+        for scope, name, value in assigns:
+            p = None
+            if isinstance(value, ast.Name):
+                p = resolve_in(scope, value.id)
+            elif isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and not value.args and not value.keywords:
+                p = rets.get(value.func.id)
+            cur.setdefault((scope, name), set()).add(p)
+        resolved = {k: next(iter(v)) for k, v in cur.items() if len(v) == 1 and None not in v}
+    m["aliases"], m["module_funcs"], m["bound"] = resolved, rets, bound
+    return resolved
+
+def module_of_expr(m, expr):
+    """The plugin module an expression names: an alias name (looked up from its scope outwards, as Python
+    does), or a call of a module function that returns one ('_ia()'). None otherwise."""
+    aliases = module_aliases(m)
+    if isinstance(expr, ast.Name):
+        scope = scope_of(m, expr)
+        while True:
+            if (scope, expr.id) in m["bound"]:
+                return aliases.get((scope, expr.id))
+            if scope is None:
+                return None
+            scope = scope_of(m, scope)
+    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and not expr.args and not expr.keywords:
+        scope = scope_of(m, expr)
+        while scope is not None:
+            if (scope, expr.func.id) in m["bound"]:
+                return None
+            scope = scope_of(m, scope)
+        return m["module_funcs"].get(expr.func.id)
+    return None
+
+def cev(m, node):
+    """ev, and '<module alias>.NAME' read as that plugin module's constant ('ia.INFERRED_CLASS')."""
+    if isinstance(node, ast.Attribute):
+        target = module_of_expr(m, node.value)
+        if target is None:
+            raise Unresolved("attribute")
+        mm, value = lookup(load(target), node.attr, 0)
+        return ev(mm, value)
+    return ev(m, node)
+
+def is_class_key(m, k):
+    if isinstance(k, ast.Constant):
+        return k.value == "class"
+    if not isinstance(k, (ast.Name, ast.Attribute)):
+        return False
+    try:
+        return cev(m, k) == "class"
+    except Exception:  # noqa: BLE001 - a key it cannot read is not taken for "class" (computed keys are not read)
+        return False
+
+def class_subscript(m, t):
+    return isinstance(t, ast.Subscript) and isinstance(t.ctx, ast.Store) and is_class_key(m, t.slice)
+
+def fn_label(m, fn):
+    return "<module>" if fn is None else m["qual"].get(fn, getattr(fn, "name", "<lambda>"))
+
+def same_path(a, b):
+    return a is not None and b is not None and os.path.abspath(a) == os.path.abspath(b)
+
+def calls_of(M, fn, plugin):
+    """Every call in the plugin that may call fn (by its name, a 'from .m import fn [as g]' name, or
+    '<x>.fn(...)' whose x is no OTHER plugin module), and every reference to it not called on the spot."""
+    fname = fn.name
+    calls, refs = [], []
+    for path in PLUGIN_FILES.get(plugin, []):
+        m = info(load(path))
+        module_aliases(m)
+        imported = {a.asname or a.name for n in ast.walk(m["tree"]) if isinstance(n, ast.ImportFrom) and n.level == 1 and n.module
+                    for a in n.names if a.name == fname and same_path(module_path(m, n.module), M["path"])}
+        own = m is M or same_path(m["path"], M["path"])
+        def names_fn(x):
+            if isinstance(x, ast.Name):
+                return x.id in imported or (x.id == fname and (own or x.id not in m["funcs"]))
+            if isinstance(x, ast.Attribute) and x.attr == fname:
+                target = module_of_expr(m, x.value)
+                return target is None or same_path(target, M["path"])
+            return False
+        for n in ast.walk(m["tree"]):
+            parent = m["par"].get(n)
+            called = isinstance(parent, ast.Call) and parent.func is n
+            if isinstance(n, (ast.Name, ast.Attribute)) and isinstance(n.ctx, ast.Load) and names_fn(n):
+                (calls if called else refs).append((m, parent if called else n))
+            elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr" and len(n.args) >= 2
+                  and isinstance(n.args[1], ast.Constant) and n.args[1].value == fname):
+                refs.append((m, n))
+    return calls, refs
+
+def arg_value(fn, call, pname, method_call):
+    """(the node a call passes for parameter pname, None) or (a default node, "default") or (None, why)."""
+    a = fn.args
+    positional = [x.arg for x in a.posonlyargs + a.args]
+    defaults = dict(zip(positional[len(positional) - len(a.defaults):], a.defaults))
+    defaults.update({x.arg: d for x, d in zip(a.kwonlyargs, a.kw_defaults) if d is not None})
+    if method_call and positional:
+        positional = positional[1:]
+    for k in call.keywords:
+        if k.arg == pname:
+            return k.value, None
+    if pname in positional:
+        i = positional.index(pname)
+        for j, x in enumerate(call.args):
+            if isinstance(x, ast.Starred) and j <= i:
+                return None, "the class is passed through *args"
+        if i < len(call.args):
+            return call.args[i], None
+    if any(k.arg is None for k in call.keywords) or any(isinstance(x, ast.Starred) for x in call.args):
+        return None, "the class may be passed through **kwargs or *args"
+    if pname in defaults:
+        return defaults[pname], "default"
+    return None, "the call passes no class"
+
+def writer_records(m_eval, node, m_site, at, depth, via, plugin, following=()):
+    """The writer(s) a class value decides: [{file, function, line, class[, via]}], a class None with a why when unread."""
+    fn = enclosing(m_site["par"], at, (ast.FunctionDef, ast.AsyncFunctionDef))
+    rec = {"plugin": plugin, "file": m_site["rel"], "function": fn_label(m_site, fn), "line": at.lineno}
+    if via:
+        rec["via"] = list(via)
+    def unread(why):
+        return [dict(rec, **{"class": None, "why": why})]
+    params = [x.arg for x in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs] if fn is not None else []
+    local = [v for name, v in bound_pairs(fn) if name == node.id] if fn is not None and isinstance(node, ast.Name) else []
+    if not (isinstance(node, ast.Name) and (node.id in params or local)):
+        try:
+            v = cev(m_eval, node)
+            return [dict(rec, **{"class": v})] if isinstance(v, str) else unread("the class is not a string")
+        except Unresolved:
+            return unread("the class is not a literal, a module constant or a parameter followed to its calls (a computed value, or a read of another entry)")
+    if m_eval is not m_site:
+        return unread("the class is a name the extractor cannot read")
+    if node.id not in params:
+        if len(local) == 1:
+            return writer_records(m_eval, local[0], m_site, at, depth + 1, via, plugin, following)
+        return unread("the class is a name the extractor cannot read (bound %d times in %s)" % (len(local), fn_label(m_site, fn)))
+    if local:
+        return unread("the class is parameter %s, which %s rebinds" % (node.id, fn_label(m_site, fn)))
+    if depth >= 6 or fn in following:
+        return unread("the class is parameter %s, followed too deep or in a cycle" % node.id)
+    hop = "%s:%d %s(%s)" % (m_site["rel"], at.lineno, fn_label(m_site, fn), node.id)
+    method = isinstance(m_site["par"].get(fn), ast.ClassDef) and not any(isinstance(d, ast.Name) and d.id == "staticmethod" for d in fn.decorator_list)
+    calls, refs = calls_of(m_site, fn, plugin)
+    out = []
+    def at_call(mc, node_at, **fields):
+        site = enclosing(mc["par"], node_at, (ast.FunctionDef, ast.AsyncFunctionDef))
+        return dict({"plugin": plugin, "file": mc["rel"], "function": fn_label(mc, site), "line": node_at.lineno, "via": via + [hop]}, **fields)
+    for mc, call in calls:
+        val, how = arg_value(fn, call, node.id, method and isinstance(call.func, ast.Attribute))
+        if val is None:
+            out.append(at_call(mc, call, **{"class": None, "why": how}))
+        elif how == "default":
+            # The default is read where the function is defined; the writer is the call that leaves it.
+            try:
+                v = cev(m_site, val)
+            except Unresolved:
+                v = None
+            out.append(at_call(mc, call, **({"class": v} if isinstance(v, str) else {"class": None, "why": "the call leaves the class to a default the extractor cannot read"})))
+        else:
+            out += writer_records(mc, val, mc, call, depth + 1, via + [hop], plugin, following + (fn,))
+    for mr, ref in refs:
+        out.append(at_call(mr, ref, **{"class": None, "why": "%s, which stores the class, is referenced but not called on the spot (passed, stored or through getattr), so the class it is given cannot be followed" % fn.name}))
+    return out or unread("the class is parameter %s of %s, and the plugin has no call of it" % (node.id, fn_label(m_site, fn)))
+
+def class_writers_in(m, plugin):
+    info(m)
+    out = []
+    def recs(value, at):
+        return writer_records(m, value, m, at, 0, [], plugin)
+    def unread(at, why):
+        fn = enclosing(m["par"], at, (ast.FunctionDef, ast.AsyncFunctionDef))
+        return [{"plugin": plugin, "file": m["rel"], "function": fn_label(m, fn), "line": at.lineno, "class": None, "why": why}]
+    for n in ast.walk(m["tree"]):
+        if isinstance(n, ast.Dict):
+            for k, v in zip(n.keys, n.values):
+                if k is not None and is_class_key(m, k):
+                    out += recs(v, k)
+        elif isinstance(n, (ast.Assign, ast.AnnAssign)):
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                if class_subscript(m, t):
+                    out += recs(n.value, t) if n.value is not None else []
+                elif isinstance(t, (ast.Tuple, ast.List)):
+                    for i, e in enumerate(t.elts):
+                        if class_subscript(m, e):
+                            pairs = isinstance(n.value, (ast.Tuple, ast.List)) and len(n.value.elts) == len(t.elts) and not any(isinstance(x, ast.Starred) for x in n.value.elts + t.elts)
+                            out += recs(n.value.elts[i], e) if pairs else unread(e, "the class is unpacked from a value the extractor cannot pair")
+        elif isinstance(n, ast.AugAssign) and class_subscript(m, n.target):
+            out += unread(n.target, "an augmented assignment to the class")
+        elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("setdefault", "__setitem__")
+              and n.args and is_class_key(m, n.args[0])):
+            out += recs(n.args[1], n) if len(n.args) >= 2 else unread(n, "setdefault of the class with no value")
+    return out
+
 for plugin in (sorted(os.listdir(root)) if os.path.isdir(root) else []):
     pdir = os.path.join(root, plugin)
     if not os.path.isdir(pdir) or plugin.startswith("."):
@@ -537,6 +850,8 @@ for plugin in (sorted(os.listdir(root)) if os.path.isdir(root) else []):
             path = os.path.join(dirpath, f)
             rel = os.path.relpath(path, os.path.dirname(root))
             m = load(path)
+            m["plugin_dir"] = pdir
+            PLUGIN_FILES.setdefault(plugin, []).append(path)
             tree = m["tree"]
             par = parents_of(tree)
             # M1: a local name bound from getattr(<x>, "register_tool"[, default]) registers too.
@@ -547,13 +862,19 @@ for plugin in (sorted(os.listdir(root)) if os.path.isdir(root) else []):
             # class is then read or the site is unread. Any other reference to a propose that is not called
             # on the spot (passed, stored, wrapped in a partial) is an unread site: the check fails closed.
             proposers = {"propose"}
-            bound = set()  # the '<x>.propose' and proposer names an alias assignment reads
+            bound = set()  # the '<x>.propose', proposer names and getattr(<x>, "propose") an alias assignment reads
+            def getattr_propose(n):
+                """Review N3: getattr(<x>, "propose"[, default])."""
+                return (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr" and len(n.args) >= 2
+                        and isinstance(n.args[1], ast.Constant) and n.args[1].value == "propose")
             for _ in range(2):  # an alias of an alias
                 for node in ast.walk(tree):
                     if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
                             and node.value.func.id == "getattr" and len(node.value.args) >= 2
                             and isinstance(node.value.args[1], ast.Constant) and node.value.args[1].value in ("register_tool", "propose")):
                         (aliases if node.value.args[1].value == "register_tool" else proposers).update(t.id for t in node.targets if isinstance(t, ast.Name))
+                        if node.value.args[1].value == "propose" and all(isinstance(t, ast.Name) for t in node.targets):
+                            bound.add(node.value)
                     elif (isinstance(node, ast.Assign) and all(isinstance(t, ast.Name) for t in node.targets)
                             and ((isinstance(node.value, ast.Attribute) and node.value.attr == "propose") or (isinstance(node.value, ast.Name) and node.value.id in proposers))):
                         proposers.update(t.id for t in node.targets)
@@ -561,15 +882,17 @@ for plugin in (sorted(os.listdir(root)) if os.path.isdir(root) else []):
                     elif isinstance(node, ast.ImportFrom):
                         proposers.update(a.asname for a in node.names if a.name == "propose" and a.asname)
             for node in ast.walk(tree):
-                ref = (isinstance(node, ast.Attribute) and node.attr == "propose") or (isinstance(node, ast.Name) and node.id in proposers)
-                if ref and isinstance(node.ctx, ast.Load) and node not in bound and not (isinstance(par.get(node), ast.Call) and par[node].func is node):
+                ref = ((isinstance(node, ast.Attribute) and node.attr == "propose") or (isinstance(node, ast.Name) and node.id in proposers)) and isinstance(node.ctx, ast.Load)
+                # Review N3: getattr(<x>, "propose") is a reference too: called on the spot it is read as a
+                # propose below; bound to a name it is an alias; anything else (passed, stored) is unread.
+                if (ref or getattr_propose(node)) and node not in bound and not (isinstance(par.get(node), ast.Call) and par[node].func is node):
                     proposes.append({"plugin": plugin, "file": rel, "line": node.lineno, "accepts": None, "class": None,
                                      "why": "a propose referenced but not called on the spot (passed, stored or wrapped), so its class cannot be read"})
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue
                 fn = node.func
-                if (isinstance(fn, ast.Attribute) and fn.attr == "propose") or (isinstance(fn, ast.Name) and fn.id in proposers):
+                if (isinstance(fn, ast.Attribute) and fn.attr == "propose") or (isinstance(fn, ast.Name) and fn.id in proposers) or getattr_propose(fn):
                     cls_node = arg_of(node, "cls", 0)
                     site = {"plugin": plugin, "file": rel, "line": node.lineno, "accepts": accepted_answers(m, par, node)}
                     site.update(propose_class(m, cls_node) if cls_node is not None else {"class": None, "why": "no class argument"})
@@ -615,7 +938,14 @@ for plugin in (sorted(os.listdir(root)) if os.path.isdir(root) else []):
                             village_ops = {k: sorted(set(ev(m, ast.Name(id=k)))) for k in ("READ_OPERATIONS", "WRITE_OPERATIONS", "APP_SCOPED_OPERATIONS")}
                         except Unresolved as why:
                             village_ops = {"error": "the village operation lists cannot be read (%s)" % why}
-print(json.dumps({"tools": out, "unread": unread, "proposes": proposes, "village_ops": village_ops}, sort_keys=True))
+# S1b: in every plugin with a propose of a held entry's class, every class writer (a plugin with such a
+# propose and no writer at all is the check's finding).
+class_writers = []
+for plugin in sorted({p["plugin"] for p in proposes if p.get("held")}):
+    for path in PLUGIN_FILES.get(plugin, []):
+        class_writers.extend(class_writers_in(load(path), plugin))
+class_writers.sort(key=lambda w: (w["file"], w["line"], w["function"], str(w.get("class"))))
+print(json.dumps({"tools": out, "unread": unread, "proposes": proposes, "village_ops": village_ops, "class_writers": class_writers}, sort_keys=True))
 `;
 
 export function pluginTools(overlayDir) {
@@ -748,7 +1078,7 @@ if (process.argv.includes("--with-envelopes")) {
     for (const d of dups) process.stderr.write(`duplicate envelope key ${d}\n`);
     process.exit(1);
   }
-  envelopeScope = { gated, tools, unread, envelopes, proposes };
+  envelopeScope = { gated, tools, unread, envelopes, proposes, classWriters: found.class_writers };
 }
 
 const corpus = {
@@ -785,6 +1115,8 @@ if (envelopeScope !== undefined) {
   corpus.tools_unread = envelopeScope.unread;
   corpus.envelopes = envelopeScope.envelopes;
   corpus.proposes = envelopeScope.proposes;
+  // Review S1b: every line that gives a held entry its class, in a plugin whose propose carries one.
+  corpus.class_writers = envelopeScope.classWriters;
 }
 
 writeFileSync(OUT, `${JSON.stringify(corpus, null, 2)}\n`, "utf8");

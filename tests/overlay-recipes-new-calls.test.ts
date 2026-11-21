@@ -274,6 +274,14 @@ test("S1: the answers a plugin goes on with are the code's; an answer outside th
 // share and village vote) is judged exactly like one behind a hooked call, by a propose-only entry.
 const ALL_ANSWERS = ["autonomous", "requested", "supervised"];
 const SHARE_SITE = { plugin: "av-events", file: "plugins/av-events/_share_vote.py", line: 1119, class: null, classes: ["digest.share", "village.vote"], accepts: ALL_ANSWERS, gated_plugin: false };
+// Review S1b: the lines that give the held share and vote entries their class, as the extractor lists them.
+const SHARE_WRITERS = [
+  { plugin: "av-events", file: "plugins/av-events/_share_vote.py", function: "_share", line: 1835, class: "digest.share" },
+  { plugin: "av-events", file: "plugins/av-events/_share_vote.py", function: "_vote", line: 1995, class: "village.vote" },
+];
+/** The `propose.writers` declaration of one class: file, function and class of each of its writers. */
+const writersOf = (cls: string, writers: { file: string; function: string; class: string | null }[] = SHARE_WRITERS): Json[] =>
+  writers.filter((w) => w.class === cls).map((w) => ({ file: w.file, function: w.function, class: w.class }));
 const shareEntry = (cls: string, over: Json = {}): Json => ({
   template: "village default",
   reason: "a fixture share or vote that always asks",
@@ -290,11 +298,12 @@ const shareEntry = (cls: string, over: Json = {}): Json => ({
     decision: "card",
     card_style: "minimal",
     matrix: { ask: "card", autonomous: "auto", "supervised-retro": "auto", "supervised-live": "sampled", manual: "card" },
+    writers: writersOf(cls),
     ...(over["propose"] as Json | undefined),
   },
   ...Object.fromEntries(Object.entries(over).filter(([k]) => k !== "propose")),
 });
-const unhooked = (proposes: unknown[]): Json => ({ recipes: [], envelopes: [], gated_tools: [], tools: [], proposes });
+const unhooked = (proposes: unknown[], writers: unknown[] = SHARE_WRITERS): Json => ({ recipes: [], envelopes: [], gated_tools: [], tools: [], proposes, class_writers: writers });
 const SHARE_ENTRIES = [shareEntry("digest.share"), shareEntry("village.vote")];
 
 test("S1: an unhooked daemon propose is judged: declared and unchanged it passes; one that appears with no entry fails", () => {
@@ -313,9 +322,11 @@ test("S1: an unhooked daemon propose whose class moves, or whose accepted answer
   assert.match(moved, /propose\.class digest\.share, but plugins\/av-events\/_share_vote\.py:1119 proposes one of digest\.publish, village\.vote/u);
   assert.match(moved, /\(class digest\.publish, a class its plugin's held entries carry\) that no expected\.json entry declares/u);
   // A literal class at an unhooked site that moves.
+  // (A literal class is no held entry's field, so the plugin has no class writers to list.)
   const literal = { ...SHARE_SITE, class: "digest.share", classes: undefined };
-  assert.deepEqual(pureFindings(unhooked([literal]), unhooked([literal]), [shareEntry("digest.share")]), []);
-  assert.match(pureFindings(unhooked([{ ...literal, class: "digest.publish" }]), unhooked([literal]), [shareEntry("digest.share")]).join("\n"), /propose\.class digest\.share, but .* proposes digest\.publish/u);
+  const plain = shareEntry("digest.share", { propose: { writers: undefined } });
+  assert.deepEqual(pureFindings(unhooked([literal], []), unhooked([literal], []), [plain]), []);
+  assert.match(pureFindings(unhooked([{ ...literal, class: "digest.publish" }], []), unhooked([literal], []), [plain]).join("\n"), /propose\.class digest\.share, but .* proposes digest\.publish/u);
   // The code after the propose now goes on with fewer answers (a manual share would lose its card).
   const narrowed = pureFindings(unhooked([{ ...SHARE_SITE, accepts: ["autonomous", "supervised"] }]), unhooked([SHARE_SITE]), SHARE_ENTRIES).join("\n");
   assert.match(narrowed, /propose\.accepts \["autonomous","requested","supervised"\], but the code after plugins\/av-events\/_share_vote\.py:1119 goes on with \["autonomous","supervised"\]/u);
@@ -350,6 +361,68 @@ test("S1: a propose-only entry has no hooked call, names one source line, and is
   const validated = validateExpected({ entries: [bare, shareEntry("village.vote")] });
   const r = judgeNewCalls({ corpus: unhooked([SHARE_SITE]), tagCorpus: unhooked([SHARE_SITE]), validated, head: { calls: [], proposed: [] }, autonomyOf: manual }) as { findings: { key: string; message: string }[] };
   assert.match(r.findings.map((f) => `${f.key}: ${f.message}`).join("\n"), /propose#plugins\/av-events\/_share_vote\.py:1119#digest\.share: LIMITING \(propose decision card; propose class digest\.share defaults to manual\): awaiting acceptance/u);
+});
+
+// --- review S1b: the lines that decide WHICH class a held entry gets are declared and judged ------------------
+
+const writerFindings = (writers: unknown[], entries: unknown[] = SHARE_ENTRIES, proposes: unknown[] = [SHARE_SITE]): string[] =>
+  pureFindings(unhooked(proposes, writers), unhooked(proposes, writers), entries);
+
+test("S1b: the class writers unchanged pass; a writer moved to another line in the same function still passes", () => {
+  assert.deepEqual(writerFindings(SHARE_WRITERS), []);
+  assert.deepEqual(writerFindings(SHARE_WRITERS.map((w) => ({ ...w, line: w.line + 40 }))), []);
+});
+
+test("S1b: a writer added with a new class fails, in a new function or beside a declared one", () => {
+  const added = writerFindings([...SHARE_WRITERS, { plugin: "av-events", file: "plugins/av-events/_share_vote.py", function: "_publish", line: 2100, class: "digest.publish" }]).join("\n");
+  assert.match(added, /writer#plugins\/av-events\/_share_vote\.py#_publish#digest\.publish: an undeclared class writer: _publish \(plugins\/av-events\/_share_vote\.py:2100\) files class digest\.publish; list it in propose\.writers of an entry of class digest\.publish/u);
+  // A second class filed by a function already declared for one class is a writer of its own.
+  const beside = writerFindings([...SHARE_WRITERS, { plugin: "av-events", file: "plugins/av-events/_share_vote.py", function: "_share", line: 1850, class: "village.vote" }]).join("\n");
+  assert.match(beside, /an undeclared class writer: _share \(plugins\/av-events\/_share_vote\.py:1850\) files class village\.vote/u);
+});
+
+test("S1b: a writer whose class changes fails, naming the function and both classes", () => {
+  const swapped = writerFindings([SHARE_WRITERS[0], { ...SHARE_WRITERS[1], class: "digest.share" }]);
+  assert.deepEqual(swapped, [
+    "writer#plugins/av-events/_share_vote.py#_vote#digest.share: the class writer _vote (plugins/av-events/_share_vote.py:1995) files class digest.share, declared village.vote (by propose#plugins/av-events/_share_vote.py:1119#village.vote): the class a held entry gets has changed (review S1b)",
+  ]);
+});
+
+test("S1b: a writer removed with its declaration left fails", () => {
+  const removed = writerFindings([SHARE_WRITERS[1]]);
+  assert.deepEqual(removed, [
+    "propose#plugins/av-events/_share_vote.py:1119#digest.share: propose.writers lists _share in plugins/av-events/_share_vote.py filing digest.share, which the extractor does not find (a writer removed, renamed or moved to another function); delete it (review S1b)",
+  ]);
+});
+
+test("S1b: an unread writer fails closed", () => {
+  const unread = { plugin: "av-events", file: "plugins/av-events/_share_vote.py", function: "_copy", line: 2200, class: null, why: "the class is not a literal, a module constant or a parameter followed to its calls (a computed value, or a read of another entry)" };
+  assert.match(writerFindings([...SHARE_WRITERS, unread]).join("\n"), /writer#plugins\/av-events\/_share_vote\.py:2200: a class writer whose class cannot be read: _copy \(plugins\/av-events\/_share_vote\.py:2200\) \(the class is not a literal.*\); fail closed/u);
+  // An unread writer in a declared function is reported as unread, not also as a stale declaration.
+  const inPlace = writerFindings([{ ...SHARE_WRITERS[0], class: null, why: "the call passes no class" }, SHARE_WRITERS[1]]);
+  assert.equal(inPlace.length, 1);
+  assert.match(inPlace[0] ?? "", /a class writer whose class cannot be read: _share/u);
+});
+
+test("S1b: a plugin with a held-class propose and no class writer fails closed, and so does a corpus that lists none", () => {
+  assert.match(writerFindings([], [shareEntry("digest.share", { propose: { writers: undefined } }), shareEntry("village.vote", { propose: { writers: undefined } })]).join("\n"), /writers#av-events: plugin av-events proposes a held entry's class, and the extractor found no line that gives a held entry its class/u);
+  const noList = { recipes: [], envelopes: [], gated_tools: [], tools: [], proposes: [SHARE_SITE] };
+  assert.match(pureFindings(noList, noList, SHARE_ENTRIES).join("\n"), /class_writers: the corpus lists no class writers, so the class a held entry gets is not judged: re-extract/u);
+  // A held site whose classes are unread is still a held-class propose: its plugin needs its writers too.
+  const unreadSite = { ...SHARE_SITE, classes: undefined, held: true, why: "the class is a held entry's field, and the module compares that field with no class it can read" };
+  assert.match(pureFindings(unhooked([unreadSite], []), unhooked([unreadSite], []), []).join("\n"), /writers#av-events: plugin av-events proposes a held entry's class/u);
+});
+
+test("S1b: propose.writers names file, function and class, of the entry's own class, once each", () => {
+  const bad = (writers: unknown): string => validateExpected({ entries: [shareEntry("digest.share", { propose: { writers } })] }).errors.map((e: { message: string }) => e.message).join("\n");
+  assert.match(bad("x"), /propose\.writers must be a list/u);
+  assert.match(bad([{ file: "plugins/av-events/_share_vote.py", function: "_share" }]), /propose\.writers\[0\] must name exactly file, function and class/u);
+  assert.match(bad([{ file: "plugins/av-events/_share_vote.py", function: "_share", class: "digest.share", line: 1835 }]), /must name exactly file, function and class/u);
+  assert.match(bad(writersOf("village.vote")), /files class village\.vote, but this entry declares digest\.share/u);
+  assert.match(bad([...writersOf("digest.share"), ...writersOf("digest.share")]), /lists _share in plugins\/av-events\/_share_vote\.py a second time/u);
+  // Two entries listing one writer.
+  const twice = pureFindings(unhooked([SHARE_SITE]), unhooked([SHARE_SITE]), [...SHARE_ENTRIES, shareEntry("digest.share", { propose: { source: "plugins/av-events/_share_vote.py:1077" } })]).join("\n");
+  assert.match(twice, /writer#plugins\/av-events\/_share_vote\.py#_share#digest\.share: listed by two entries/u);
 });
 
 test("N1, N2, N3: a future acceptance date, a member named twice, two recipes with one key and other bytes", () => {
@@ -721,6 +794,173 @@ test("S1 detection: a propose passed as an argument, or stored in a dict, is an 
   assert.deepEqual(sites.map((x) => [x[0], x[1]]), [[2, null], [3, null]]);
 });
 
+test("N3: getattr(x, \"propose\")(...) called on the spot is read as a propose; getattr(x, \"propose\") passed along is an unread site", { skip: NO_BUN }, () => {
+  const sites = eventsSites(py(
+    "def f(ap):",
+    '    answer = getattr(ap, "propose")("digest.share", "k", "s", "{}")',
+    '    if answer.doc.get("decision") != "requested":',
+    "        return None",
+    "    return answer",
+    "def g(ap, run):",
+    '    run(getattr(ap, "propose"))',
+    "def h(ap):",
+    '    p = getattr(ap, "propose", None)',
+    '    return p("village.vote", "k", "s", "{}")',
+  ));
+  assert.deepEqual(sites.map((x) => [x[0], x[1], x[2]]), [[2, "digest.share", ["requested"]], [7, null, null], [10, "village.vote", null]]);
+  assert.match(String(sites[1]?.[3]), /referenced but not called on the spot/u);
+});
+
+// --- review S1b: the class writers, extracted from the plugin's own code, two modules apart ------------------
+
+/** The av-events two-module shape: _intent_approval.py proposes the held entry's class and stores it in open_entry; _record_intention.py files it through an alias. */
+const INTENT_MODULE = py(
+  "from . import _approval",
+  'INFERRED_CLASS = "intent.publish.inferred.index"',
+  'STATED_CLASS = "intent.publish.stated.index"',
+  "CLASSES = (INFERRED_CLASS, STATED_CLASS)",
+  "def valid_shape(intention_id, ap):",
+  '    cls = ap.get("class")',
+  '    return cls in CLASSES and ap.get("key") == cls + ":" + intention_id',
+  "def open_entry(intention_id, *, cls, text, source, norm_hash, inline=True):",
+  '    approval = {"class": cls, "key": cls + ":" + intention_id, "payload": text, "state": "unfiled"}',
+  "    return approval",
+  "def _propose(intention_id, ap):",
+  '    answer = _approval.propose(ap["class"], ap["key"], "s", ap.get("payload"))',
+  '    decision = answer.doc.get("decision")',
+  '    if decision == "requested":',
+  "        x = 1",
+  '    elif decision in ("autonomous", "supervised"):',
+  "        x = 2",
+  "    else:",
+  "        return None",
+  "    return x",
+);
+const recordModule = (heldClass: string): string => py(
+  "def _ia():",
+  "    from . import _intent_approval",
+  "    return _intent_approval",
+  "def _held_through_approval(result, intention_id, text, norm):",
+  "    ia = _ia()",
+  `    code = ia.open_entry(intention_id, cls=ia.${heldClass}, text=text, source="restrictive", norm_hash=norm)`,
+  "    return code",
+  "def _stated_through_approval(result, text, source):",
+  "    ia = _ia()",
+  '    code = ia.open_entry("id", cls=ia.STATED_CLASS, text=text, source=source, norm_hash=None)',
+  "    return code",
+);
+const INTENT_SITE_SOURCE = "plugins/av-events/_intent_approval.py:12";
+const intentEntry = (cls: string, writers: Json[]): Json =>
+  shareEntry(cls, { reason: "a fixture intent publish that asks", propose: { key: `${cls}:0193a6c0-0000-7000-8000-000000000001`, summary: "Publish to Index", payload: { text: "t" }, source: INTENT_SITE_SOURCE, writers } });
+const INTENT_ENTRIES = [
+  intentEntry("intent.publish.inferred.index", [{ file: "plugins/av-events/_record_intention.py", function: "_held_through_approval", class: "intent.publish.inferred.index" }]),
+  intentEntry("intent.publish.stated.index", [{ file: "plugins/av-events/_record_intention.py", function: "_stated_through_approval", class: "intent.publish.stated.index" }]),
+];
+function intentRun(record: string, extra: Record<string, string> = {}): { writers: Json[]; findings: string[] } {
+  const run = extractFixture({ extra: { "plugins/av-events/_intent_approval.py": INTENT_MODULE, "plugins/av-events/_record_intention.py": record, ...extra } });
+  assert.equal(run.status, 0, run.err);
+  const site = (run.corpus["proposes"] as Json[]).find((p) => p["plugin"] === "av-events");
+  assert.deepEqual([site?.["file"], site?.["line"], site?.["classes"], site?.["held"]], ["plugins/av-events/_intent_approval.py", 12, ["intent.publish.inferred.index", "intent.publish.stated.index"], true]);
+  return { writers: run.corpus["class_writers"] as Json[], findings: pureFindings(run.corpus, run.corpus, INTENT_ENTRIES) };
+}
+
+test("S1b: the class writers are extracted across modules: open_entry's parameter followed through the module alias to each call", { skip: NO_BUN }, () => {
+  const { writers, findings } = intentRun(recordModule("INFERRED_CLASS"));
+  assert.deepEqual(
+    writers.map((w) => [w["file"], w["function"], w["line"], w["class"], w["via"]]),
+    [
+      ["plugins/av-events/_record_intention.py", "_held_through_approval", 6, "intent.publish.inferred.index", ["plugins/av-events/_intent_approval.py:9 open_entry(cls)"]],
+      ["plugins/av-events/_record_intention.py", "_stated_through_approval", 10, "intent.publish.stated.index", ["plugins/av-events/_intent_approval.py:9 open_entry(cls)"]],
+    ],
+  );
+  // The unchanged case: declared as extracted, nothing found.
+  assert.deepEqual(findings, []);
+});
+
+test("S1b: the reviewer's mutant: an inferred capture filed as STATED_CLASS is a finding naming the function and both classes", { skip: NO_BUN }, () => {
+  const { findings } = intentRun(recordModule("STATED_CLASS"));
+  assert.deepEqual(findings, [
+    "writer#plugins/av-events/_record_intention.py#_held_through_approval#intent.publish.stated.index: the class writer _held_through_approval (plugins/av-events/_record_intention.py:6, through plugins/av-events/_intent_approval.py:9 open_entry(cls)) files class intent.publish.stated.index, declared intent.publish.inferred.index (by propose#plugins/av-events/_intent_approval.py:12#intent.publish.inferred.index): the class a held entry gets has changed (review S1b)",
+  ]);
+});
+
+test("S1b: a writer moved to another line in its function stays declared; one in a new function, or removed, fails", { skip: NO_BUN }, () => {
+  const moved = recordModule("INFERRED_CLASS").replace("    ia = _ia()\n    code = ia.open_entry(intention_id,", "    ia = _ia()\n    norm = norm or None\n    code = ia.open_entry(intention_id,");
+  assert.notEqual(moved, recordModule("INFERRED_CLASS"));
+  assert.deepEqual(intentRun(moved).findings, []);
+  // The stated capture deleted: its declaration is stale.
+  const removed = recordModule("INFERRED_CLASS").split("def _stated_through_approval")[0] ?? "";
+  assert.match(intentRun(removed).findings.join("\n"), /propose\.writers lists _stated_through_approval in plugins\/av-events\/_record_intention\.py filing intent\.publish\.stated\.index, which the extractor does not find/u);
+  // A new capture path in another module, through 'from . import _intent_approval as ia'.
+  const added = intentRun(recordModule("INFERRED_CLASS"), { "plugins/av-events/_brief.py": py("from . import _intent_approval as ia", "def capture(i, t):", "    return ia.open_entry(i, cls=ia.STATED_CLASS, text=t, source=\"s\", norm_hash=None)") });
+  assert.match(added.findings.join("\n"), /an undeclared class writer: capture \(plugins\/av-events\/_brief\.py:3, through plugins\/av-events\/_intent_approval\.py:9 open_entry\(cls\)\) files class intent\.publish\.stated\.index/u);
+});
+
+test("S1b: the writer forms read (dict literal, x[\"class\"] =, setdefault, a pair, a local name, a method parameter, a from-import name) and the unread ones", { skip: NO_BUN }, () => {
+  const forms = py(
+    "import functools",
+    "from ._intent_approval import open_entry as oe, STATED_CLASS",
+    'LOCAL = "digest.share"',
+    "def dict_literal():",
+    '    return {"class": LOCAL}',
+    "def subscript(entry):",
+    '    entry["class"] = "village.vote"',
+    "def default(entry):",
+    '    entry.setdefault("class", LOCAL)',
+    "def pair(entry):",
+    '    x, entry["class"] = 1, LOCAL',
+    "def local(entry):",
+    "    cls = STATED_CLASS",
+    '    entry["class"] = cls',
+    "class Store:",
+    "    def put(self, cls):",
+    '        self.d = {"class": cls}',
+    "    def go(self):",
+    "        self.put(LOCAL)",
+    "def imported(i):",
+    '    return oe(i, cls=STATED_CLASS, text="t", source="s", norm_hash=None)',
+    "def unread_read(entry, old):",
+    '    entry["class"] = old.get("class")',
+    "def unread_param(i, k):",
+    '    return oe(i, cls=k, text="t", source="s", norm_hash=None)',
+    "def unread_kwargs(i, **kw):",
+    '    return oe(i, text="t", source="s", norm_hash=None, **kw)',
+    "def unread_partial():",
+    "    return functools.partial(oe, cls=STATED_CLASS)",
+    "def unread_aug(entry):",
+    '    entry["class"] += ".x"',
+  );
+  const { writers } = intentRun(recordModule("INFERRED_CLASS"), { "plugins/av-events/_forms.py": forms });
+  const got = writers.filter((w) => w["file"] === "plugins/av-events/_forms.py").map((w) => [w["line"], w["function"], w["class"]]);
+  assert.deepEqual(got, [
+    [5, "dict_literal", "digest.share"],
+    [7, "subscript", "village.vote"],
+    [9, "default", "digest.share"],
+    [11, "pair", "digest.share"],
+    [14, "local", "intent.publish.stated.index"],
+    [19, "Store.go", "digest.share"],
+    [21, "imported", "intent.publish.stated.index"],
+    [23, "unread_read", null],
+    [25, "unread_param", null],
+    [27, "unread_kwargs", null],
+    [29, "unread_partial", null],
+    [31, "unread_aug", null],
+  ]);
+  const why = (line: number): string => String(writers.find((w) => w["file"] === "plugins/av-events/_forms.py" && w["line"] === line)?.["why"]);
+  assert.match(why(23), /a computed value, or a read of another entry/u);
+  assert.match(why(25), /parameter k of unread_param, and the plugin has no call of it/u);
+  assert.match(why(27), /\*\*kwargs/u);
+  assert.match(why(29), /open_entry, which stores the class, is referenced but not called on the spot/u);
+  assert.match(why(31), /an augmented assignment/u);
+});
+
+test("S1b: a plugin with a held-class propose and no class writer: the extractor lists none, and the check fails closed", { skip: NO_BUN }, () => {
+  const run = extractFixture({ extra: { "plugins/lonely/_m.py": INTENT_MODULE.replace('    approval = {"class": cls, "key": cls + ":" + intention_id, "payload": text, "state": "unfiled"}', "    approval = None") } });
+  assert.equal(run.status, 0, run.err);
+  assert.deepEqual((run.corpus["class_writers"] as Json[]).filter((w) => w["plugin"] === "lonely"), []);
+  assert.match(pureFindings(run.corpus, run.corpus, []).join("\n"), /writers#lonely: plugin lonely proposes a held entry's class, and the extractor found no line that gives a held entry its class/u);
+});
+
 // --- box half: the real hook of this build ------------------------------------------
 
 const scratch = mkdtempSync(join(tmpdir(), "new-calls-test-"));
@@ -989,7 +1229,7 @@ test("S4 (M13): an entry input that drops a key of the manifest's derived call e
 // --- review S1: a daemon propose with no hooked call in front of it, run and judged in the box -----------
 
 test("S1 (box): a propose-only entry's propose runs in the box and in every cell; declared as it runs: exit 0; a cell other than declared: exit 1", BOX_TIMEOUT, () => {
-  const corpus = corpusFile([STAY], [ENVELOPE], BLOCK, { proposes: [FK_PROPOSE, SHARE_SITE] });
+  const corpus = corpusFile([STAY], [ENVELOPE], BLOCK, { proposes: [FK_PROPOSE, SHARE_SITE], class_writers: SHARE_WRITERS });
   const control = gate([recipeEntry(), envelopeEntry(), ...SHARE_ENTRIES], { corpus });
   assert.equal(control.status, 0, `${control.err}\n${control.md.slice(0, 3000)}`);
   // The share and the vote each get the minimal card under the village default, and every cell is the daemon's answer as the plugin takes it.
@@ -1002,7 +1242,7 @@ test("S1 (box): a propose-only entry's propose runs in the box and in every cell
 });
 
 test("S1 (box): an unhooked propose no entry declares exits 1", BOX_TIMEOUT, () => {
-  const corpus = corpusFile([STAY], [ENVELOPE], BLOCK, { proposes: [FK_PROPOSE, SHARE_SITE] });
+  const corpus = corpusFile([STAY], [ENVELOPE], BLOCK, { proposes: [FK_PROPOSE, SHARE_SITE], class_writers: SHARE_WRITERS });
   const run = gate([recipeEntry(), envelopeEntry()], { corpus });
   assert.equal(run.status, 1, run.err);
   assert.match(run.md, /propose#plugins\/av-events\/_share_vote\.py:1119`: a daemon propose \(class digest\.share, a class its plugin's held entries carry\) that no expected\.json entry declares/u);

@@ -184,6 +184,18 @@ ordinary workspace write.
     (a `functools.partial`) is an unread site. `expected.json` declares the four av-events sites (intent
     publish, digest share, village vote) as eight entries; six are limiting
     and wait for Carter's acceptance.
+  - The lines that decide which class a held entry gets are judged too. Such a
+    propose sends whatever class its entry was filed with, so filing an
+    inferred intention as stated (which publishes without asking) used to
+    leave the check green. The extractor now lists every class writer in a
+    plugin with such a propose (`class_writers`): a dict literal's `"class"`,
+    an assignment to `x["class"]`, `setdefault`, and a call that passes the
+    class to the function that stores it, followed across the plugin's modules
+    and through a module alias such as `ia = _ia()`. Each writer is declared
+    by file and function in `propose.writers` of an entry of its class; a
+    writer that appears, disappears or changes its class, one whose class
+    cannot be read, and a plugin with such a propose and no writer all fail.
+    `getattr(x, "propose")(...)` is now read as a propose too.
 - **CLASS-DIFF against the core the boxes run (B-167 release gate).**
   `overlay-recipes-check.mjs --diff <baseline core>` classifies the same corpus
   at a baseline core and at this one, over every recipe plus every `tools:`
