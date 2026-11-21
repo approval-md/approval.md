@@ -158,6 +158,13 @@ test("rule 2: literal text and a substitution's output that join into .git name 
   assert.deepEqual(pure("echo x >> `printf .gi`t/config"), ["refused opaque"]);
 });
 
+test("both rules inside a substitution body: the body is read as a line of its own", () => {
+  assert.deepEqual(pure('echo x >> "$(echo $(printf .gi)t)/config"'), [DIR_WRITE]);
+  assert.deepEqual(pure("D=$(echo .g$(printf it)); cd $D && echo x >> config"), [ASSIGNMENT, READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure('D=$(cd "$(git rev-parse --git-dir)" && pwd); echo x >> $D/config'), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure('echo x > "$(echo $(date +%F))".txt'), [REDIRECT]);
+});
+
 test("rule 2: a word with a substitution whose literal text cannot join into .git does not move", () => {
   assert.deepEqual(pure("echo x > out/$(date +%F).txt"), [REDIRECT]);
   assert.deepEqual(pure("echo x > $(date +%s).dat"), [REDIRECT]);
