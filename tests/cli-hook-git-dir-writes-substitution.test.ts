@@ -420,3 +420,32 @@ test("security review i: a transforming expansion counts unless its value is a k
   assert.deepEqual(pure('f=a.txt; f=b.txt; echo x > "${f%.txt}.log"'), [ASSIGNMENT, ASSIGNMENT, DIR_WRITE]);
   assert.deepEqual(pure('echo x > "${f%.txt}.log"; f=a.txt'), [DIR_WRITE, ASSIGNMENT]);
 });
+
+test("security review j and k: forms the evaluator does not model are strict", () => {
+  // j: an empty pattern anchored at the start or end adds text.
+  assert.deepEqual(pure("D=it; echo x >> ${D/#/.g}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("D=.gi; echo x >> ${D/%/t}/config"), [ASSIGNMENT, DIR_WRITE]);
+  // k: an offset is arithmetic (`010` is 8), so only a plain decimal is worked out.
+  assert.deepEqual(pure("D=xxxxxxxx.git; echo x >> ${D:010}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("D=xxxxxxxx.git; echo x >> ${D:0x8}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("D=xxxxxxxx.git; echo x >> ${D:4+4}/config"), [ASSIGNMENT, DIR_WRITE]);
+  // A range in a pattern follows the locale: strict.
+  assert.deepEqual(pure('f=notes.txt; echo x > "${f%[a-z].txt}.log"'), [ASSIGNMENT, DIR_WRITE]);
+  // A plain decimal is worked out.
+  assert.deepEqual(pure('n=abcdef; echo x > "out/${n:1:2}.txt"'), [ASSIGNMENT, REDIRECT]);
+});
+
+test("security review l: a value, pattern or new text outside ASCII is strict", () => {
+  assert.deepEqual(pure("D=\u00e9.git; echo x >> ${D:1}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure('f=r\u00e9sum\u00e9.txt; echo x > "${f%.txt}.log"'), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure('f=notes.txt; echo x > "${f/.txt/.\u00e9}"'), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("G=.GIT\u00c9; echo x > ${G,,}/f"), [ASSIGNMENT, DIR_WRITE]);
+});
+
+test("security review m: shell options and extglob forms are strict", () => {
+  assert.deepEqual(pure('f=notes.txt; echo x > "${f/@(notes)/x}.log"'), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure('f=notes.txt; echo x > "${f%+(.txt)}.log"'), [ASSIGNMENT, DIR_WRITE]);
+  // A line that sets a shell option is refused already; nothing on it is known either.
+  assert.deepEqual(pure('f=notes.txt; shopt -s nocasematch; echo x > "${f%.txt}.log"'), ["refused unclassified"]);
+  assert.deepEqual(pure('f=notes.txt; set -o noglob; echo x > "${f%.txt}.log"'), ["refused unclassified"]);
+});
