@@ -1,6 +1,6 @@
 /**
- * The NEW-CALLS check (B-167N; Carter L17349, L17375; spec approval L17350;
- * review-b's pre-refute folds P1-P7, L17356): scripts/overlay-recipes-newcalls.mjs
+ * The NEW-CALLS check (B-167N; Carter's ruling; the approval spec;
+ * review-b's pre-refute folds P1-P7): scripts/overlay-recipes-newcalls.mjs
  * and its `--expected` / `--tag-corpus` run in scripts/overlay-recipes-check.mjs.
  *
  * Pure half: the expectations vocabulary (P2 matrix, card_style), one entry per

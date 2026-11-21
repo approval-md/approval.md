@@ -1,12 +1,12 @@
 ---
-id: APRV-534
+id: APRV-536
 title: >-
   NEW-CALLS check: every new or changed overlay call needs a declared outcome,
   the real hook must give it (B-167N)
 status: In Progress
 assignee: []
 created_date: '2026-10-21 14:47'
-updated_date: '2026-10-21 14:58'
+updated_date: '2026-11-21 09:30'
 labels:
   - release-gate
   - overlay
@@ -19,7 +19,7 @@ ordinal: 406000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Carter's rule (CLAIMS L17349, L17375): approval.md must never limit existing functionality OR a new capability. B-167 (APRV-532) covers the calls the boxes already run. This covers new ones: every call NEW or CHANGED at the candidate vs the previous release (shell recipes plus harness-tool envelopes derived from mini-app manifests and gated plugin tools) needs its outcome declared in the overlay's scripts/approval-class-diff/expected.json, and the real hook (and the daemon propose behind a plugin call) of the pinned core, in the box layout, under the village default template and in each settings cell, must give exactly it. Spec: approval L17350; review-b pre-refute folds P1-P7 (L17356); release brief B167N-NEW-CALLS-GATE-BRIEF.md.
+Carter's rule (B-167N): approval.md must never limit existing functionality OR a new capability. B-167 (APRV-532) covers the calls the boxes already run. This covers new ones: every call NEW or CHANGED at the candidate vs the previous release (shell recipes plus harness-tool envelopes derived from mini-app manifests and gated plugin tools) needs its outcome declared in the overlay's scripts/approval-class-diff/expected.json, and the real hook (and the daemon propose behind a plugin call) of the pinned core, in the box layout, under the village default template and in each settings cell, must give exactly it. Spec: approval L17350; review-b pre-refute folds P1-P7 (L17356); release brief B167N-NEW-CALLS-GATE-BRIEF.md.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

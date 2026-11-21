@@ -123,7 +123,7 @@ ordinary workspace write.
 
 ### Added
 
-- **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-534).**
+- **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536).**
   `overlay-recipes-check.mjs --expected <expected.json> --tag-corpus <corpus>`
   finds every call that is new or changed against the previous release (a new
   recipe, other command bytes, or a call the CLASS-DIFF moved between the

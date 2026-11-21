@@ -264,7 +264,7 @@ jobs:
     # Carter's grant or attest. The corpus is re-extracted from the overlay at
     # its pinned sha with the BASE branch's extractor, not this PR's.
     #
-    # NEW-CALLS (B-167N, APRV-534): scripts/overlay-recipes-newcalls.mjs, pinned
+    # NEW-CALLS (B-167N, APRV-536): scripts/overlay-recipes-newcalls.mjs, pinned
     # here like the other gate files. It runs when the overlay's class-diff job
     # passes --expected (the overlay's expected.json) and --tag-corpus; this
     # job's pinned corpus carries no envelopes, so it does not run it here.
@@ -293,7 +293,7 @@ jobs:
       PIN_CHECK: "1130cd5b7852cad52c1b0e4012f0a3e7e0140e9b2e4130a5a88472b15a378450"
       PIN_BOX: "ae87d7be0e0bd143071eda27c120356dcc18764a120e595e06513a25ffacd3e6"
       PIN_EXTRACT: "d68b77e7831f400e3cede4da6e7fa82ece4ec740983ee743e2f1db9796a3104c"
-      PIN_NEWCALLS: "6752bd813990be06de79a7068ed1f540640437d002ce93ac1808da53052241d1"
+      PIN_NEWCALLS: "97987563ed999540f2b790d7e9516c38cbb31b22d3445a7f60b05d2561b504e2"
     steps:
       # Depth 2: HEAD^1 is the base the change is measured against (a pull
       # request's merge commit's first parent, the queue's base, or the main a

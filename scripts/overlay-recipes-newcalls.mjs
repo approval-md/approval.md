@@ -1,6 +1,6 @@
 /**
- * The NEW-CALLS check (B-167N, Carter's ruling CLAIMS L17349 and L17375; spec
- * approval L17350; review-b's pre-refute folds P1-P7, L17356).
+ * The NEW-CALLS check (B-167N, Carter's ruling; the approval spec;
+ * review-b's pre-refute folds P1-P7).
  *
  * approval.md must never limit existing functionality OR a new capability.
  * B-167's CLASS-DIFF covers the calls the boxes already run. This covers the
