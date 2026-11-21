@@ -994,8 +994,33 @@ the text cannot place, is `git-dir-write`. At hook level a copy or move
 whose source is a tree with a `.git` entry at its top (`cp -R /x/. .`,
 `rsync -a /x/ .`) is too.
 
+A substitution may spell `.git` in two more ways, and each counts as the
+line spelling it. The first is git's own answer: a body that runs `git
+rev-parse` with an option that prints the git directory or a path in it
+(`--git-dir`, `--absolute-git-dir`, `--git-common-dir`, `--git-path`,
+`--resolve-git-dir`, `--shared-index-path`, by any prefix of three
+characters or more). So `cd "$(git rev-parse --git-dir)" && echo x >>
+config` and `echo x >> "$(git rev-parse --git-path hooks)/pre-push"` are
+`git-dir-write`, while `--show-toplevel`, `--short` and `--abbrev-ref` move
+nothing. The other git commands whose output may name the git directory
+(`git worktree list`, `git config --show-origin`, `git var`) are refused
+inside a substitution already. The second is a spelling split across the substitution's edge: a
+word whose literal text and a substitution's output can join into a `.git`
+segment (`$(printf .gi)t`, `.g$(printf it)`, `$(printf .)git`, `.$(echo
+g)it`). An output is read as any text, a `/` included, so the literal run
+beside it is what decides: `out/$(date +%F).txt`, `$(pwd)/build/x` and
+`v$(cat VERSION).tgz` cannot make `.git` and do not move. A body is read as
+a line of its own, so either spelling one level down counts too, and a
+script a shell wrapper runs (`bash -lc '...'`) reads its own text as well
+as its line's. The backtick forms were refused before and still are. The
+hook adds nothing here: the pure classifier already answers these lines,
+and the disk pass leaves a segment it has raised alone.
+
 Known limits: a variable set in an EARLIER call, or a value built from
-several expansions on the line (`A=.g; B=it; cd $A$B`), cannot be seen; an
+several expansions on the line (`A=.g; B=it; cd $A$B`), cannot be seen, so
+`cd $VAR && echo x >> config` with `VAR` set before the call stays the
+unknown-`cd` limit above; `git rev-parse` with its option passed in a
+variable (`git rev-parse $OPT`) is read as a revision; an
 archive unpacked into the checkout (`tar -xf`, `unzip`) is judged by its
 named directory only, not by what the archive holds; a git include file
 (`~/.gitconfig.local`, a path named by `include.path`) is judged as an
