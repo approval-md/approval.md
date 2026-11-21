@@ -28,7 +28,7 @@
  */
 
 import { existsSync, lstatSync, readFileSync, readlinkSync, statSync } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { dirname, join, normalize, sep } from "node:path";
 
 import {
   commandSegmentShapes,
@@ -177,36 +177,85 @@ function literalPath(word: string): boolean {
 const DIRECTORY_CHANGERS: ReadonlySet<string> = new Set(["cd", "chdir", "pushd", "popd"]);
 
 /**
- * Every directory a `cd` / `chdir` / `pushd` word may lead to from `dir`, as
- * text. A bare name is tried from `dir` and from every `CDPATH` entry of the
- * hook's own environment (an assignment on the segment itself counts as
- * unknown). A target the text cannot give (`cd "$D"`, `cd -`, `~user`, a
- * glob, `popd`, a `HOME=` or `CDPATH=` prefix) yields nothing: KNOWN LIMIT,
- * such a line keeps the hook's other directories, exactly as the write-scope
- * pass judges every write from the hook's own directory, and is not raised
- * for the unknown one.
+ * Where a directory change may lead from `dir` (review fold, round 2). The
+ * principle: follow only the forms whose landing is certain, and for those
+ * take BOTH landings, the logical one (the shell's default `cd -L` removes `.`
+ * and `..` from `<dir>/<word>` as text before it lands) and the physical one
+ * (`cd -P`, walked later component by component). Every other form is
+ * UNKNOWN, with the reason: `cd -`, `+N` / `-N`, two operands (zsh's
+ * substitution form), a word the shell may still change, `~user`, `pushd`
+ * with no operand, a change behind an assignment, and a bare-name or
+ * no-argument `cd`, or any relative one, once an earlier segment may have
+ * changed `HOME`, `CDPATH`, `OLDPWD` or `PWD`. An unknown change still contributes every landing it
+ * can name (a failed `cd` stays put, so nothing is lost by adding them).
  */
-function directoryTargets(args: readonly string[], assignments: readonly string[], dir: string): string[] {
-  if (assignments.length > 0) return [];
-  const words = args.filter((word) => !/^-[LPe@]+$/u.test(word));
-  const operands = words[0] === "--" ? words.slice(1) : words;
+function directoryTargets(
+  bin: string,
+  args: readonly string[],
+  assignments: readonly string[],
+  dir: string,
+  envChanged: boolean,
+): { targets: string[]; unknown: string | null } {
+  if (assignments.length > 0) return { targets: [], unknown: "a directory change behind an assignment" };
+  let at = 0;
+  let options = "";
+  while (at < args.length && /^-[LPe@]+$/u.test(args[at] as string)) {
+    options += (args[at] as string).slice(1);
+    at += 1;
+  }
+  const physicalOnly = options.lastIndexOf("P") > options.lastIndexOf("L");
+  const operands = args[at] === "--" ? args.slice(at + 1) : args.slice(at);
+  const both = (text: string): string[] => (physicalOnly ? [text] : [...new Set([normalize(text), text])]);
   const home = process.env["HOME"];
-  if (operands.length === 0) return home === undefined ? [] : [home];
-  if (operands.length !== 1) return [];
+  const homeTargets = home === undefined ? [] : both(home);
+  if (bin === "popd") {
+    // Back to a directory already in the set; `popd +N` / `-N` drop another.
+    return operands.length === 0 ? { targets: [], unknown: null } : { targets: [], unknown: `\`popd ${operands.join(" ")}\`` };
+  }
+  if (operands.length === 0) {
+    if (bin === "pushd") return { targets: [], unknown: "`pushd` with no operand swaps the stack" };
+    return { targets: homeTargets, unknown: envChanged ? "a `cd` to HOME after the line may have changed HOME" : null };
+  }
+  if (operands.length !== 1) return { targets: [], unknown: `\`${bin} ${operands.join(" ")}\` (two operands)` };
   const word = operands[0] as string;
-  if (word === "-" || word.startsWith("-") || /[$`*?[\]{}\\]/u.test(word)) return [];
-  if (word === "~") return home === undefined ? [] : [home];
-  if (word.startsWith("~/")) return home === undefined ? [] : [`${home}/${word.slice(2)}`];
-  if (word.startsWith("~")) return [];
-  if (word.startsWith("/")) return [word];
-  const targets = [`${dir}/${word}`];
-  if (!word.startsWith("./") && !word.startsWith("../") && word !== "." && word !== "..") {
+  if (word === "-" || /^[+-]\d+$/u.test(word) || word.startsWith("-")) return { targets: [], unknown: `\`${bin} ${word}\`` };
+  if (/[$`*?[\]{}\\]/u.test(word)) return { targets: [], unknown: `\`${bin} ${word}\` (a word the shell may still change)` };
+  if (word === "~" || word.startsWith("~/")) {
+    const targets = home === undefined ? [] : both(word === "~" ? home : `${home}/${word.slice(2)}`);
+    return { targets, unknown: envChanged ? "a `cd` to HOME after the line may have changed HOME" : null };
+  }
+  if (word.startsWith("~")) return { targets: [], unknown: `\`${bin} ${word}\`` };
+  if (word.startsWith("/")) return { targets: both(word), unknown: null };
+  const targets = both(`${dir}/${word}`);
+  const bare = !word.startsWith("./") && !word.startsWith("../") && word !== "." && word !== "..";
+  if (bare) {
     for (const entry of (process.env["CDPATH"] ?? "").split(":")) {
       if (entry.length === 0) continue;
-      targets.push(entry.startsWith("/") ? `${entry}/${word}` : `${dir}/${entry}/${word}`);
+      targets.push(...both(entry.startsWith("/") ? `${entry}/${word}` : `${dir}/${entry}/${word}`));
     }
   }
-  return targets;
+  // A relative `cd` reads `$PWD` for its logical landing, and a bare name
+  // `$CDPATH`: once the line may have changed either, it cannot be placed.
+  return { targets, unknown: envChanged ? "a relative `cd` after the line may have changed PWD or CDPATH" : null };
+}
+
+/** The variables a directory change reads from the environment. */
+const CD_VARIABLES = /^(?:HOME|CDPATH|OLDPWD|PWD)(?:=|$)/u;
+
+/**
+ * May this segment change `HOME`, `CDPATH`, `OLDPWD` or `PWD` for the rest of
+ * the line? An assignment on its own, `export` / `declare` / `typeset` /
+ * `local` / `readonly` / `unset` naming one, `set -a` (every later assignment
+ * exported), and `source` / `.` / `eval`, which may do any of them.
+ */
+function changesCdEnvironment(shape: { bin: string | null; args: readonly string[]; assignments: readonly string[] }): boolean {
+  if (shape.bin === null) return shape.assignments.some((word) => CD_VARIABLES.test(word));
+  const bin = shape.bin.split("/").pop() ?? shape.bin;
+  if (["export", "declare", "typeset", "local", "readonly", "unset"].includes(bin)) {
+    return shape.args.some((word) => CD_VARIABLES.test(word));
+  }
+  if (bin === "set") return shape.args.some((word) => /^-[A-Za-z]*a/u.test(word) || word === "allexport");
+  return bin === "source" || bin === "." || bin === "eval";
 }
 
 /** A classification plus one note per segment this step raised. */
@@ -242,15 +291,26 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
   // in it.
   const home = process.env["HOME"];
   let dirs = [cwd];
+  let envChanged = false;
+  // Why the shell may stand somewhere this step cannot name, once it may.
+  let unknown: string | null = null;
   for (const [index, segment] of result.segments.entries()) {
     const shapes = commandSegmentShapes(segment.text);
     if (shapes === null) continue;
     const before = dirs;
+    const unknownBefore = unknown;
     for (const shape of shapes) {
       const bin = shape.bin === null ? null : (shape.bin.split("/").pop() ?? shape.bin);
-      if (bin === null || !DIRECTORY_CHANGERS.has(bin)) continue;
+      if (bin === null || !DIRECTORY_CHANGERS.has(bin)) {
+        if (changesCdEnvironment(shape)) envChanged = true;
+        continue;
+      }
       const next: string[] = [];
-      for (const dir of dirs) next.push(...directoryTargets(shape.args, shape.assignments, dir));
+      for (const dir of dirs) {
+        const led = directoryTargets(bin, shape.args, shape.assignments, dir, envChanged);
+        next.push(...led.targets);
+        if (led.unknown !== null) unknown ??= led.unknown;
+      }
       dirs = [...new Set([...dirs, ...next])];
     }
     if (segment.class === REWRITE_CLASS || segment.class === GATE_SELF_CLASS) continue;
@@ -285,7 +345,19 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
       }
       if (hit !== null) break;
     }
-    if (hit === null) continue;
+    if (hit === null) {
+      // KNOWN LIMIT (measured: such lines are autonomous on 0.4.8 under this
+      // repository's policy, so the strict answer would move ordinary lines).
+      // A relative write after a directory change this step cannot place is
+      // judged from the places it can name, as 0.4.8 judges it, and said so.
+      const relative = candidates.find((word) => !word.startsWith("/") && !word.startsWith("~/"));
+      if (unknownBefore !== null && relative !== undefined) {
+        notes.push(
+          `git-dir-write: \`${segment.text}\` writes ${relative} after ${unknownBefore}, which this hook cannot place; it is judged from the directories it can name (known limit), and stays ${segment.class}`,
+        );
+      }
+      continue;
+    }
     const { path: _dropped, ...rest } = segment as ClassifiedSegment;
     segments[index] = { ...rest, class: REWRITE_CLASS, rule: GIT_DIR_WRITE_RULE, path: hit.word };
     notes.push(

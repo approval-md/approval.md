@@ -939,11 +939,17 @@ physical directory, and every symlink is followed whether or not its target
 exists yet, so a dangling link into `.git/hooks` counts. A landing inside a
 git directory, the checkout's own as its `.git` file names it (a linked
 worktree, a `--separate-git-dir`) included, is `git-dir-write`, and so is a
-relative write from a hook whose own directory is inside one. Known limit: a
-`cd` whose target the text does not give (`cd "$D"`, `cd -`, one behind
-`HOME=` or `CDPATH=`) adds no directory, so a relative write after it is
-judged from the other directories only, as the write-scope pass judges every
-write from the hook's own.
+relative write from a hook whose own directory is inside one. A directory
+change is followed only where its landing is certain, and then at both
+landings: the logical one (the shell's default `cd -L` removes `.` and `..`
+as text) and the physical one (`cd -P`). Every other change is unknown: `cd
+-`, `cd +1` and `-1`, two operands, a word the shell may still change, `~user`,
+one behind an assignment, and a relative or no-argument `cd` after the line
+may have changed `HOME`, `CDPATH`, `OLDPWD` or `PWD`. Known limit: a relative
+write after an unknown change is judged from the places the hook can name, as
+0.4.8 judges it, and the hook says so in its notes. The strict answer would
+move ordinary lines (`cd "$D" && echo x > f` is autonomous today), so it waits
+for the owner.
 
 **The hook reads the checkout before it answers a push.** After the pure
 classifier, `refinePushRepo` (`src/cli/push-repo.ts`) re-reads every `git push`

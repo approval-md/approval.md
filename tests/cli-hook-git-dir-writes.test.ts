@@ -269,6 +269,84 @@ test("review 3: `..` after a symlink is applied to the physical directory, as th
 });
 
 // ---------------------------------------------------------------------------
+// The second review: cd is followed only where its landing is certain
+// ---------------------------------------------------------------------------
+
+/** The hook's classes and notes for a line, in `cwd`. */
+function hookWithNotes(command: string, cwd: string): { classes: string[]; notes: string[] } {
+  const refined = classifyForHook(command, [], cwd);
+  assert.equal(refined.result.ok, true, `${command}: ${JSON.stringify(refined.result)}`);
+  return {
+    classes: refined.result.ok ? refined.result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [],
+    notes: refined.notes,
+  };
+}
+
+const CANNOT_PLACE = /which this hook cannot place; it is judged from the directories it can name \(known limit\)/u;
+
+test("round 2, (1): a certain cd is judged at both landings, the logical one (cd -L) and the physical one (cd -P)", { skip }, () => {
+  const repo = checkout();
+  symlinkSync(".git", join(repo, "g"));
+  const deep = join(repo, "..", "other", "deep");
+  mkdirSync(deep, { recursive: true });
+  symlinkSync(deep, join(repo, "x"));
+  // Logically `x/../g` is `g`, which is .git; physically it is other/g, which is nothing.
+  assert.deepEqual(hook("cd x/../g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
+  assert.deepEqual(hook("cd -L x/../g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
+  const physical = hookWithNotes("cd -P x/../g && echo x >> config", repo);
+  assert.deepEqual(physical.classes, ["read.shell read-shell", "files.write.workspace redirect-write"]);
+  assert.equal(physical.notes.length, 0, "-P is a certain form");
+  // And the physical landing alone: l -> .git/hooks, so `l/..` is physically .git.
+  symlinkSync(".git/hooks", join(repo, "l"));
+  assert.deepEqual(hook("cd l/.. && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
+});
+
+test("round 2, (2): after a segment that may change HOME, CDPATH, OLDPWD or PWD, a bare-name or no-argument cd cannot be placed", { skip }, () => {
+  const repo = checkout();
+  // Most such segments have no row and refuse the whole line before any pass.
+  for (const command of [
+    "export CDPATH=/x; cd sub && echo x > notes.txt",
+    "CDPATH=/x; cd sub && echo x > notes.txt",
+    "unset HOME; cd && echo x > notes.txt",
+    "declare -x HOME=/x; cd ~/sub && echo x > notes.txt",
+    "set -a; cd sub && echo x > notes.txt",
+    ". ./env.sh; cd sub && echo x > notes.txt",
+  ]) {
+    assert.equal(classifyForHook(command, [], repo).result.ok, false, command);
+  }
+  // The ones that classify (a bare PWD= or OLDPWD= assignment) cannot be placed.
+  for (const command of ["PWD=/x; cd sub && echo x > notes.txt", "PWD=/x; cd ./sub && echo x > notes.txt", "OLDPWD=/x; cd && echo x > notes.txt"]) {
+    const { classes, notes } = hookWithNotes(command, repo);
+    assert.ok(classes.includes("files.write.workspace redirect-write"), `${command}: ${classes.join(", ")}`);
+    assert.ok(notes.some((note) => CANNOT_PLACE.test(note)), `${command}: ${notes.join(" | ")}`);
+  }
+  // Without such a segment the same cd is certain, and nothing is said.
+  assert.deepEqual(hookWithNotes("cd sub && echo x > notes.txt", repo).notes, []);
+  // A landing it can still name is judged: `cd g` from here is .git, whatever CDPATH became.
+  symlinkSync(".git", join(repo, "g"));
+  assert.ok(hookWithNotes("PWD=/x; cd g && echo x >> config", repo).classes.includes(DIR_WRITE));
+});
+
+test("round 2, (3): forms the hook does not model are unknown, never placed", { skip }, () => {
+  const repo = checkout();
+  for (const command of [
+    "cd a b && echo x > f",
+    "cd +1 && echo x > f",
+    "cd -2 && echo x > f",
+    "cd - && echo x > f",
+    'cd "$D" && echo x > f',
+    "cd $D && cp a f",
+    "cd ~nobody && rm f",
+    "cd * && tee f",
+  ]) {
+    const { classes, notes } = hookWithNotes(command, repo);
+    assert.equal(classes[0], "read.shell read-shell", command);
+    assert.ok(!classes.includes(DIR_WRITE), `${command}: ${classes.join(", ")}`);
+    assert.ok(notes.some((note) => CANNOT_PLACE.test(note)), `${command}: ${notes.join(" | ")}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // A note from the same review: `HOME=… cd` is not followed by the push pass
 // ---------------------------------------------------------------------------
 
