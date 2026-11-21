@@ -5286,18 +5286,18 @@ function knownLiteralValues(segments: readonly LexSegment[], inherited: Readonly
  * - a word it may expand to (`:-`, `-`, `:=`, `=`, `:+`, `+`) is judged as an
  *   assignment's value is, and stands for the expansion in the word around
  *   it, so `.g${V:-i}t` is `.git`;
- * - a replacement (`/`, `//`, `/#`, `/%`) puts its new text between two
- *   unknown runs of the value (`${G/x/.}` may be `.git`);
- * - `@E` and `@P` decode escapes the value may hold, and count;
- * - removal and substring (`#`, `##`, `%`, `%%`, `:n`) count on a line whose
- *   text holds `.git` anywhere (`G=.gitx; … ${G%x}`), as `cut` says;
- * - case changes, `:?`, a length, an indirection and the other `@` forms
- *   carry no new text, and stand as an unknown value as `$V` does;
- * - anything else, and a `${` that does not close, counts.
+ * - `:?`, `?`, a length (`${#X}`) and an indirection (`${!X}`) carry no
+ *   new text, and stand as an unknown value as `$V` does;
+ * - every other operator transforms the value (removal, substring,
+ *   replacement, case, `@`; points f to i): it counts unless the value is a
+ *   known plain literal ({@link knownLiteralValues}) and the result, worked
+ *   out exactly ({@link evaluateExpansion}), is no `.git`, and then the
+ *   result stands for the expansion in the word around it;
+ * - a `${` that does not close counts.
  * A nested expansion stands, inside another's word, as the text it may
  * carry or as an unknown output.
  */
-function expansionWordNamesGit(text: string, cut: boolean, known: ReadonlyMap<string, string> = new Map()): boolean {
+function expansionWordNamesGit(text: string, known: ReadonlyMap<string, string> = new Map()): boolean {
   if (!text.includes("${")) return false;
   const valueNamesGit = (value: string): boolean =>
     GIT_SEGMENT_IN_TEXT.test(value.split(SUBSTITUTION_SENTINEL).join("/")) ||
@@ -5348,7 +5348,7 @@ function expansionWordNamesGit(text: string, cut: boolean, known: ReadonlyMap<st
       // no `.git` (security review, point i). Positionals, special
       // parameters and array elements are never known.
       const value = known.get((name as RegExpExecArray)[0]);
-      const result = cut || value === undefined ? null : evaluateExpansion(value, rest);
+      const result = value === undefined ? null : evaluateExpansion(value, rest);
       if (result === null || valueNamesGit(result)) return true;
       standIn = result;
       rewritten = true;
@@ -5384,26 +5384,6 @@ function lineSpellsGitIndirectly(
 ): boolean {
   // The variables whose value is a known plain literal (point i).
   const known = knownLiteralValues(segments, inherited);
-  // Removal and substring expansions count on a line that holds `.git`
-  // anywhere: its raw text, that text with escapes decoded, or a word's or
-  // target's text with quotes removed (security review, point g); and on a
-  // line that assigns a value that is no plain literal (point h).
-  const holdsGit = (text: string): boolean => /\.git/iu.test(text);
-  const cut = segments.some(
-    (segment) =>
-      holdsGit(segment.text) ||
-      (segment.text.includes("\\") &&
-        (holdsGit(decodeBackslashEscapes(segment.text, false)) || holdsGit(decodeBackslashEscapes(segment.text, true)))) ||
-      segment.words.some((word) => holdsGit(word.text)) ||
-      segment.redirects.some((redirect) => holdsGit(redirect.target.text)) ||
-      // Point h: or an assignment-shaped word (`D=…`, `export D=…`) whose
-      // value is no plain literal: a glob (`D=.gi?x`, so `${D%x}` is `.gi?`)
-      // or an expansion the text cannot read.
-      segment.words.some((word) => {
-        const assignment = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u.exec(word.text);
-        return assignment !== null && /[?*[$`]/u.test(word.text.slice(assignment[0].length));
-      }),
-  );
   // A substitution body's words, each read as a path the shell may still
   // expand (`$(echo .gi?)`); its own segments read as a line of their own
   // (a nested substitution, an assignment in it, a split spelling); and a
@@ -5437,7 +5417,7 @@ function lineSpellsGitIndirectly(
       words.some((word, index) => {
         if (word.substitutions.some(bodyNamesGit)) return true;
         if (wordJoinsGitAcrossSubstitution(word.text)) return true;
-        if (expansionWordNamesGit(word.text, cut, known)) return true;
+        if (expansionWordNamesGit(word.text, known)) return true;
         // An assignment's VALUE is judged as a target is, patterns and braces
         // included (`D=.gi?`, `D=.g{i,}t`, `D='.[g]it'`): an unquoted `$D`
         // later expands it. Its words after `:` (a PATH-like list) too.
