@@ -59,6 +59,13 @@
  *        [--overlay-tree <dir>] [--box-root <dir>] [--box-concurrency <n>, default 1] [--harness-only <tool,...> (tests)]
  *        [--diff <baseline core dir> [--baseline-corpus <path>] [--baseline-overlay-tree <dir>]
  *         [--md <out.md>] [--diff-json <out.json>] [--core-label <t>] [--baseline-label <t>]]
+ *        [--expected <expected.json> --tag-corpus <corpus at the previous release> [--tag-label <t>]]
+ *
+ * 4. The NEW-CALLS check (`--expected`, B-167N; scripts/overlay-recipes-newcalls.mjs):
+ *    every call NEW or CHANGED against `--tag-corpus` (both corpora extracted
+ *    with `--with-envelopes`) needs its declared outcome, and the hook in the
+ *    box (and a plugin's daemon propose) must give exactly it under the
+ *    village default template and in each settings cell. Findings exit 1.
  *
  * A core dir is a package root holding `dist/src` (a build, or
  * node_modules/approval-md of an npm install). `--diff` requires
@@ -67,12 +74,13 @@
  * unaccepted allowlist entry), 2 an input could not be read.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { probeName, runBox } from "./overlay-recipes-box.mjs";
+import { harnessCalls, probeName, runBox } from "./overlay-recipes-box.mjs";
+import { CELLS, decideProposeCall, duplicateMembers, judgeNewCalls, recipeKey, renderNewCalls, newCallsLine, validateExpected, variantBlock } from "./overlay-recipes-newcalls.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 
@@ -121,8 +129,15 @@ const scopeOf = (entry) => entry.scope ?? "any";
  * Does an allowlist entry name this call: its file, its command (or "*"), and,
  * when the entry lists `columns`, the box column the call ran in?
  */
+/**
+ * A whole-file entry ("*") is for an operator README only (gate review N1): a
+ * README is read by a human, while any other file ships recipes an agent runs,
+ * each of which must be listed by its own command.
+ */
+export const wholeFileAllowed = (file) => /(^|\/)README\.md$/u.test(String(file));
+
 export function entryMatches(entry, file, command, column) {
-  if (entry.file !== file || (entry.command !== command && entry.command !== "*")) return false;
+  if (entry.file !== file || (entry.command !== command && !(entry.command === "*" && wholeFileAllowed(entry.file)))) return false;
   if (column !== undefined && Array.isArray(entry.columns) && !entry.columns.includes(column)) return false;
   return true;
 }
@@ -179,6 +194,7 @@ export function acceptanceErrors(entry) {
     errors.push("accepted_at is not a YYYY-MM-DD date");
   }
   if (!["neutral", "box", "any"].includes(scopeOf(entry))) errors.push(`scope "${entry.scope}" is not neutral, box or any`);
+  if (entry.command === "*" && !wholeFileAllowed(entry.file)) errors.push(`a whole-file entry ("*") is allowed only on a README.md, not on ${String(entry.file)}`);
   if (entry.columns !== undefined && (!Array.isArray(entry.columns) || entry.columns.some((c) => !["hermes-home", "home", "workspace", "harness"].includes(c)))) {
     errors.push("columns names a column other than hermes-home, home, workspace or harness");
   }
@@ -281,6 +297,8 @@ export function decideBoxCall(core, load, call) {
     rank: DENIES.has(decision) ? -1 : decision === "card" && call.classes.length === 0 ? 1 : strictest.rank,
     style,
     styles,
+    // B-167N (P2): which side of a supervised-live draw the call fell on.
+    drawn: decision === "sampled" ? (call.verdict === "allow" ? "skip" : "card") : null,
     detail: call.detail,
   };
 }
@@ -534,7 +552,7 @@ export async function loadCore(root) {
 }
 
 /** Every call of a corpus through one core's real hook in a box, decided. */
-export async function decideInBox({ core, corpus, overlayTree, boxRoot, toolsLines, concurrency = 1, harnessOnly = null }) {
+export async function decideInBox({ core, corpus, overlayTree, boxRoot, toolsLines, concurrency = 1, harnessOnly = null, envelopes = [], proposals = [] }) {
   const load = loadCorpusPolicy(core.loadPolicyText, corpus);
   if (!load.ok) return { error: `the template policy did not load at core ${core.version}: ${load.code}: ${load.message}` };
   // A fixed sampling secret (fold 2): when the template names
@@ -546,7 +564,7 @@ export async function decideInBox({ core, corpus, overlayTree, boxRoot, toolsLin
   // A name that would replace the box layout or the runtime is refused by
   // runBox (fold 3, N-7), and the gate exits 2.
   const extraEnv = typeof secretEnv === "string" && secretEnv.length > 0 ? { [secretEnv]: "class-diff-fixed-sampling-value-not-a-secret" } : {};
-  const ran = await runBox({ coreRoot: core.root, corpus, policyText: policyTextOf(corpus), overlayTree, boxRoot, toolsLines, concurrency, harnessOnly, extraEnv });
+  const ran = await runBox({ coreRoot: core.root, corpus, policyText: policyTextOf(corpus), overlayTree, boxRoot, toolsLines, concurrency, harnessOnly, extraEnv, envelopes, proposals });
   if ("error" in ran) return ran;
   for (const c of ran.calls) {
     if (cardWithoutHumanClass(core, load, c)) {
@@ -569,7 +587,11 @@ export async function decideInBox({ core, corpus, overlayTree, boxRoot, toolsLin
   }
   const bad = ran.calls.filter((c) => c.verdict === "error");
   if (bad.length > 0) return { error: `${String(bad.length)} hook run(s) ended in neither allow nor deny at core ${core.version}, e.g. ${bad[0].code}: ${bad[0].detail}` };
-  return { calls: ran.calls.map((c) => decideBoxCall(core, load, c)), load };
+  // B-167N: a propose that neither answered nor refused is an error, as a hook run is.
+  const proposed = (ran.proposed ?? []).map((p) => decideProposeCall(core, load, p));
+  const badPropose = proposed.find((p) => p.decision === "error");
+  if (badPropose !== undefined) return { error: `a daemon propose ended in neither an answer nor a refusal at core ${core.version} (${String(badPropose.key)}: ${String(badPropose.code)})` };
+  return { calls: ran.calls.map((c) => decideBoxCall(core, load, c)), proposed, load };
 }
 
 /** The box check (S-1): recipes the hook denies at a real workdir, against the allowlist. */
@@ -578,6 +600,28 @@ export function boxHeld(calls, allowlist) {
   const held = calls.filter((c) => c.kind === "recipe" && c.column !== "unset" && DENIES.has(c.decision));
   const listed = (c) => entries.find((e) => entryMatches(e, fileOf(c.where), c.command, c.column));
   return { held, unlisted: held.filter((c) => listed(c) === undefined), listedBy: listed };
+}
+
+/**
+ * B-167N: the envelopes and proposes a box runs for the new-calls check: every
+ * corpus envelope (with its declared input when an entry names it), and every
+ * entry's propose. `onlyDeclared` keeps just the declared ones (the matrix).
+ */
+export function newCallJobs(c, validated, onlyDeclared = false) {
+  const byKey = new Map(validated.entries.map((v) => [v.key, v]));
+  const seen = new Set();
+  const envelopes = [];
+  for (const e of c.envelopes ?? []) {
+    if (e.tool === null || seen.has(e.key)) continue;
+    const v = byKey.get(e.key);
+    if (onlyDeclared && v === undefined) continue;
+    seen.add(e.key);
+    envelopes.push({ key: e.key, tool: e.tool, input: v?.entry.input ?? e.input, where: e.where });
+  }
+  const proposals = validated.entries
+    .filter((v) => v.entry.propose !== undefined && v.entry.propose !== null && typeof v.entry.propose === "object")
+    .map((v) => ({ key: `${v.key}#propose`, cls: v.entry.propose.class, actionKey: v.entry.propose.key, summary: v.entry.propose.summary, payload: v.entry.propose.payload, where: v.entry.propose.source, accepts: Array.isArray(v.entry.propose.accepts) ? v.entry.propose.accepts : null }));
+  return { envelopes, proposals };
 }
 
 function readJson(path, what) {
@@ -665,6 +709,39 @@ async function main() {
     if (entry !== undefined) used.add(entry);
   }
 
+  // 4. B-167N: the new-calls check's inputs, read before any box runs.
+  const expectedPath = arg("--expected");
+  let validated;
+  let tagCorpus;
+  if (expectedPath !== undefined) {
+    if (overlayTree === undefined) fail("--expected needs --overlay-tree: the new-calls check runs in a box layout");
+    const tagPath = arg("--tag-corpus");
+    if (tagPath === undefined) fail("--expected needs --tag-corpus, the corpus at the previous release (P3)");
+    if (!existsSync(tagPath)) fail(`no tag corpus at ${tagPath}`);
+    tagCorpus = readJson(tagPath, "the tag corpus");
+    checkCorpusShape(tagCorpus, tagPath);
+    if (!Array.isArray(corpus.envelopes) || !Array.isArray(tagCorpus.envelopes)) fail("--expected needs corpora extracted with --with-envelopes (3a/3b)");
+    if (!existsSync(expectedPath)) fail(`no expected.json at ${expectedPath}`);
+    validated = validateExpected(readJson(expectedPath, "expected.json"));
+    // Review N2: JSON.parse keeps the last of two members with one name, while a reader sees the first.
+    for (const d of duplicateMembers(readFileSync(expectedPath, "utf8"))) validated.errors.push({ key: "(file)", message: `expected.json names member "${d.name}" twice in one object (at offset ${String(d.at)}); one name, one value` });
+    // P1, security fold: accepted_by is text the PR author writes, so it is not
+    // the control. The control is this pin: the overlay's expected.json must be
+    // byte for byte the copy approval.md holds (scripts/overlay-recipes/expected.json,
+    // sha256-pinned as PIN_EXPECTED in ci.yml, a protected path), plus code-owner
+    // review of the overlay file. The pinned copy is read from this script's own
+    // checkout only; no flag or variable names another one.
+    const pinnedPath = join(REPO_ROOT, "scripts", "overlay-recipes", "expected.json");
+    const pinned = existsSync(pinnedPath) ? readFileSync(pinnedPath) : null;
+    if (pinned === null || !pinned.equals(readFileSync(expectedPath))) {
+      complain(
+        `expected.json at ${expectedPath} is not the copy this approval.md checkout pins (scripts/overlay-recipes/expected.json, PIN_EXPECTED in its ci.yml): ` +
+          "a change to the declared outcomes lands in an approval.md PR first (reviewed by approval), then the overlay moves its tool ref (B-167N P1).",
+      );
+    }
+  }
+  const jobsFor = (c, onlyDeclared = false) => (validated === undefined ? { envelopes: [], proposals: [] } : newCallJobs(c, validated, onlyDeclared));
+
   // 2. The box check, and 3. the diff.
   if (overlayTree !== undefined) {
     const toolsBaseline = [];
@@ -688,7 +765,7 @@ async function main() {
     if (!cl.ok) fail(`the template policy did not load: ${cl.code}: ${cl.message}`);
     const toolsCandidate = cl.policy.tools ?? [];
     const toolsLines = [...toolsCandidate, ...toolsBaseline];
-    const after = await decideInBox({ core, corpus, overlayTree: resolvePath(overlayTree), boxRoot, toolsLines, concurrency, harnessOnly });
+    const after = await decideInBox({ core, corpus, overlayTree: resolvePath(overlayTree), boxRoot, toolsLines, concurrency, harnessOnly, ...jobsFor(corpus) });
     if ("error" in after) fail(after.error);
 
     const box = boxHeld(after.calls, allowlist);
@@ -709,11 +786,25 @@ async function main() {
       );
     }
 
+    const movedKeys = new Set();
+    let md = null;
+    let diffDoc = null;
     if (baselineDir !== undefined) {
       const baselineTree = resolvePath(arg("--baseline-overlay-tree") ?? overlayTree);
-      const before = await decideInBox({ core: baselineCore, corpus: baselineCorpus, overlayTree: baselineTree, boxRoot, toolsLines, concurrency, harnessOnly });
+      const before = await decideInBox({ core: baselineCore, corpus: baselineCorpus, overlayTree: baselineTree, boxRoot, toolsLines, concurrency, harnessOnly, ...jobsFor(baselineCorpus) });
       if ("error" in before) fail(before.error);
       const diff = diffCalls(before.calls, after.calls, allowlist);
+      // B-167N (P3): CHANGED includes every call this diff moved; the new-calls
+      // check reads it from here and never re-derives it.
+      for (const row of diff.rows) {
+        if (!["blocking", "allowlisted", "changed"].includes(row.status)) continue;
+        if (row.kind === "recipe") movedKeys.add(recipeKey(fileOf(row.where), row.command));
+        if (row.kind === "envelope") movedKeys.add(row.command);
+      }
+      for (const p of after.proposed ?? []) {
+        const was = (before.proposed ?? []).find((b) => b.key === p.key);
+        if (was !== undefined && (was.decision !== p.decision || (was.style ?? null) !== (p.style ?? null))) movedKeys.add(p.key.replace(/#propose$/u, ""));
+      }
       for (const row of diff.rows) {
         if (row.status !== "allowlisted") continue;
         const entry = allowlistedFlip(allowlist, row);
@@ -730,14 +821,9 @@ async function main() {
         baselineOverlay: baselineCorpus.overlay.sha,
         overlayRepo: corpus.overlay.repo,
       };
-      const md = renderDiff(meta, diff, { shadowed });
+      md = renderDiff(meta, diff, { shadowed });
       if (!json) process.stdout.write(`\n${md}`);
-      const mdOut = arg("--md");
-      if (mdOut !== undefined) writeFileSync(mdOut, md, "utf8");
-      const jsonOut = arg("--diff-json");
-      if (jsonOut !== undefined) {
-        writeFileSync(jsonOut, `${JSON.stringify({ gate: gateLine(meta, diff.summary, { shadowed: shadowed.length }), meta, shadowed, boxHeld: box.held, ...diff }, null, 2)}\n`, "utf8");
-      }
+      diffDoc = { gate: gateLine(meta, diff.summary, { shadowed: shadowed.length }), meta, shadowed, boxHeld: box.held, ...diff };
       if (diff.summary.blocking > 0) {
         complain(
           `${String(diff.summary.blocking)} shipped call run(s) lose autonomy or stop running between core ${meta.baselineCore} and ${meta.core} (EDGEOS-BLOCK, S-4). ` +
@@ -746,6 +832,43 @@ async function main() {
       }
       if (shadowed.length > 0) complain(`${String(shadowed.length)} tools line(s) are newly shadowed by an earlier line (first match wins): the later line never decides anything`);
     }
+    // 4. B-167N: the new-calls check, at this core, under the village default
+    // and in every matrix cell (P2).
+    if (validated !== undefined) {
+      const declared = new Set(validated.entries.map((v) => v.key));
+      const declaredRecipes = corpus.recipes.filter((r) => declared.has(recipeKey(fileOf(r.where), r.command)));
+      const classes = validated.entries.flatMap((v) => [v.entry.class, v.entry.propose?.class]).filter((c) => typeof c === "string");
+      const only = jobsFor(corpus, true);
+      const cells = {};
+      if (declaredRecipes.length + only.envelopes.length + only.proposals.length > 0) {
+        for (const cell of CELLS) {
+          const variant = variantBlock(corpus.policy.block, classes, cell);
+          if ("error" in variant) fail(`matrix ${cell}: ${variant.error}`);
+          const vc = { ...corpus, policy: { ...corpus.policy, block: variant.block }, recipes: declaredRecipes };
+          const run = await decideInBox({ core, corpus: vc, overlayTree: resolvePath(overlayTree), boxRoot, toolsLines: [], concurrency, harnessOnly: [], ...only });
+          if ("error" in run) fail(`matrix ${cell}: ${run.error}`);
+          cells[cell] = run;
+        }
+      }
+      // Review M1: the calls a gated pattern may reach besides the corpus envelopes.
+      const harness = { names: harnessCalls(toolsCandidate).map((c) => c.tool), matches: toolsCandidate.map((l) => String(l.match)) };
+      const result = judgeNewCalls({ corpus, tagCorpus, validated, head: after, cells, movedKeys, autonomyOf: (cls) => core.resolve(after.load, cls).autonomy, harness });
+      const meta = { core: core.version, tagLabel: arg("--tag-label") ?? `overlay ${tagCorpus.overlay.sha.slice(0, 12)}` };
+      const nmd = renderNewCalls(meta, result, validated);
+      if (!json) process.stdout.write(`\n${nmd}`);
+      md = md === null ? nmd : `${md}\n${nmd}`;
+      diffDoc = { ...diffDoc, newCalls: { line: newCallsLine(meta, result.summary), ...result } };
+      if (result.findings.length > 0) {
+        complain(
+          `${String(result.findings.length)} new-calls finding(s) (B-167N): a new or changed call with no declared outcome, an outcome other than declared, ` +
+            "a limiting entry without Carter's acceptance, or a stale entry. Declare the call in expected.json, fix the call, or have Carter accept it by name.",
+        );
+      }
+    }
+    const mdOut = arg("--md");
+    if (mdOut !== undefined && md !== null) writeFileSync(mdOut, md, "utf8");
+    const jsonOut = arg("--diff-json");
+    if (jsonOut !== undefined && diffDoc !== null) writeFileSync(jsonOut, `${JSON.stringify(diffDoc, null, 2)}\n`, "utf8");
     // An entry nothing used is stale (box and any scopes; neutral ones above).
     for (const entry of allowlist.entries) {
       if (scopeOf(entry) === "neutral" || used.has(entry)) continue;
@@ -755,4 +878,13 @@ async function main() {
   process.exit(bad ? 1 : 0);
 }
 
-if (process.argv[1] !== undefined && pathToFileURL(resolvePath(process.argv[1])).href === import.meta.url) await main();
+// Review N5: compared by real path, so a run through a symlinked directory (the
+// macOS /var -> /private/var temp dir) runs main instead of exiting 0 silently.
+const realOrSelf = (p) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+};
+if (process.argv[1] !== undefined && realOrSelf(resolvePath(process.argv[1])) === realOrSelf(fileURLToPath(import.meta.url))) await main();
