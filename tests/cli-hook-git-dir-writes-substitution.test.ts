@@ -388,3 +388,13 @@ test("security review g: removal and substring count when .git is spelled throug
   // A line that holds no .git keeps a removal an unknown value.
   assert.deepEqual(pure('f=a.txt; echo x > "${f%.txt}.log"'), [ASSIGNMENT, REDIRECT]);
 });
+
+test("security review h: removal and substring count after an assignment that is no plain literal", () => {
+  // `${D%x}` is `.gi?`, a pattern `.git` matches.
+  assert.deepEqual(pure("D=.gi?x; echo x >> ${D%x}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("D='.gi*x'; echo x >> ${D%x}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("D=$(cat name.txt); echo x >> ${D%x}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("D=.gi?x; cd ${D:0:4} && echo x >> config"), [ASSIGNMENT, READ_SHELL, DIR_WRITE]);
+  // Plain literal values that hold no .git keep a removal an unknown value.
+  assert.deepEqual(pure('f=notes.txt; echo x > "${f%.txt}.log"'), [ASSIGNMENT, REDIRECT]);
+});

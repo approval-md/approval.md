@@ -1032,7 +1032,8 @@ body's segments printed in turn (`$(printf .g; printf it)`). A replacement
 expansion's new text counts as text between unknown runs (`${G/x/.}`);
 removal and substring count on a line that holds `.git`, in its text,
 its decoded escapes or a word with quotes removed (`G=.gitx; ${G%x}`,
-`G='.gi''tx'`); `@E` and `@P` count; `${!-.git}` is the default word of
+`G='.gi''tx'`), or one that assigns a value that is no plain literal (a glob
+or an expansion: `D=.gi?x; ${D%x}`); `@E` and `@P` count; `${!-.git}` is the default word of
 `$!`, read as the operator it is; an operator this reader does not know, or
 a `${` that does not close, counts. Inside an operator's word a nested
 expansion is an unknown output, and a default word stands for its expansion
