@@ -72,6 +72,77 @@ export function harnessCalls(toolsLines) {
 const fillPaths = (value, hh, ws) =>
   JSON.parse(JSON.stringify(value).replaceAll("$WS", ws).replaceAll("$HH", hh));
 
+/**
+ * The key of a harness-tool envelope (B-167N, SPEC 1; P5): the tool name, then
+ * what selects the call inside the tool. For the village-bridge `village` tool
+ * that is its `operation`, then the app a generic operation names and the MCP
+ * tool (`village#mini-app.read:dizko.search_events`,
+ * `village#mini-app.context.read:dizko`). The extractor keys the corpus
+ * envelopes and the check keys expected.json entries with this one rule.
+ *
+ * Unambiguous by construction (security fold): each part is a string of a
+ * closed character set that excludes the separators that follow it (a tool
+ * name has no `#`, `:` or `.`; an operation no `#` or `:`; an app id and an MCP
+ * tool no `#`, `:` or `.`), so two different calls never share a key. A part
+ * outside its set, or present but not a string, has no key:
+ * `envelopeKeyErrors` names why, and `envelopeKey` returns null.
+ */
+const KEY_PARTS = [
+  ["tool", /^[A-Za-z0-9_-]{1,128}$/u],
+  ["operation", /^[A-Za-z0-9_.-]{1,128}$/u],
+  ["appId", /^[A-Za-z0-9_-]{1,128}$/u],
+  ["mcp tool", /^[A-Za-z0-9_-]{1,128}$/u],
+];
+
+export function envelopeKeyErrors(tool, input) {
+  const i = input !== null && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const values = [tool, i.operation, i.appId, i.tool];
+  const errors = [];
+  KEY_PARTS.forEach(([name, re], n) => {
+    const v = values[n];
+    if (n > 0 && v === undefined) return;
+    if (typeof v !== "string" || !re.test(v)) errors.push(`${name} ${JSON.stringify(v ?? null)} is not a key part (${String(re)})`);
+  });
+  return errors;
+}
+
+export function envelopeKey(tool, input) {
+  if (envelopeKeyErrors(tool, input).length > 0) return null;
+  const i = input !== null && typeof input === "object" && !Array.isArray(input) ? input : {};
+  let key = String(tool);
+  if (i.operation !== undefined) key += `#${i.operation}`;
+  if (i.appId !== undefined) key += `:${i.appId}`;
+  if (i.tool !== undefined) key += `.${i.tool}`;
+  return key;
+}
+
+/**
+ * A daemon propose's answer (B-167N, fixture 1): `approval propose` as the agent,
+ * the verb a plugin's own approval call reaches (av-events _approval.py
+ * `propose`, POST /verb/propose). `requested` opens a card; `autonomous` and
+ * `supervised` let the plugin act; a refusal prints {"error":{"code"}}.
+ */
+export function readProposeAnswer(status, stdout, stderr) {
+  const first = (text) => {
+    for (const line of String(text).split("\n")) {
+      const t = line.trim();
+      if (!t.startsWith("{")) continue;
+      try {
+        return JSON.parse(t);
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  };
+  const doc = first(stdout) ?? first(stderr);
+  if (doc === null) return { verdict: "error", answer: null, code: `exit-${String(status)}` };
+  if (doc.error !== undefined) return { verdict: "refused", answer: null, code: String(doc.error?.code ?? `exit-${String(status)}`) };
+  const answer = typeof doc.decision === "string" ? doc.decision : null;
+  if (status !== 0 || answer === null) return { verdict: "error", answer, code: `exit-${String(status)}` };
+  return { verdict: "answered", answer, code: null, task: typeof doc.task === "string" ? doc.task : null };
+}
+
 /** The verdict of one hook run, read off its exit code and stderr. */
 export function readVerdict(status, stdout, stderr) {
   const text = `${stdout}\n${stderr}`;
@@ -233,7 +304,7 @@ export function boxEnv(home, hh, extra) {
  * Run a corpus and its harness calls through one core's real hook in a fresh
  * box. Returns `{ calls }` (one per call per column) or `{ error }`.
  */
-export async function runBox({ coreRoot, corpus, policyText, overlayTree, boxRoot, toolsLines, extraEnv = {}, concurrency = 1, harnessOnly = null }) {
+export async function runBox({ coreRoot, corpus, policyText, overlayTree, boxRoot, toolsLines, extraEnv = {}, concurrency = 1, harnessOnly = null, envelopes = [], proposals = [] }) {
   const cliPath = join(coreRoot, "dist", "src", "cli", "main.js");
   if (!existsSync(cliPath)) return { error: `no hook CLI at ${cliPath}` };
   const reserved = Object.keys(extraEnv).filter(reservedEnvName);
@@ -304,6 +375,11 @@ export async function runBox({ coreRoot, corpus, policyText, overlayTree, boxRoo
     for (const call of harnessCalls(toolsLines).filter((c) => harnessOnly === null || harnessOnly.includes(c.tool))) {
       const label = `${call.tool} ${JSON.stringify(call.input)}`;
       jobs.push({ key: keyed("harness", "harness", "tools", label), column: "harness", kind: "harness", where: "harness", command: label, tool: call.tool, input: fillPaths(call.input, hh, ws) });
+    }
+    // B-167N (SPEC 1, 3a/3b): the declared harness-tool envelopes, one per
+    // expected.json entry, each the exact call the hook sees for that tool.
+    for (const e of envelopes) {
+      jobs.push({ key: keyed("envelope", "envelope", e.where ?? "tools", e.key), column: "envelope", kind: "envelope", where: e.where ?? "envelope", command: e.key, tool: e.tool, input: fillPaths(e.input, hh, ws) });
     }
     const scrub = (s) => s.replaceAll(ws, "$WS").replaceAll(hh, "$HH").replaceAll(home, "$HOME").replaceAll(box, "$BOX");
     let n = 0;
@@ -380,7 +456,19 @@ export async function runBox({ coreRoot, corpus, policyText, overlayTree, boxRoo
       if (bound.mislabeled !== undefined) call.mislabeled = bound.mislabeled;
       call.classes = card ? [...new Set([...call.classes, ...bound.classes])].sort() : call.classes.length === 0 ? bound.classes : call.classes;
     });
-    return { calls };
+    // B-167N (fixture 1): the daemon proposes a plugin makes behind a call (a
+    // For Kicks order's marketplace.app.action), each once, as the agent, in
+    // store 0, after every hook run.
+    const proposed = [];
+    for (const p of proposals) {
+      const r = spawnSync(
+        process.execPath,
+        [cli, "propose", "--class", p.cls, "--key", p.actionKey, "--summary", p.summary, "--payload-json", JSON.stringify(p.payload), "--as", "agent:hermes", "--json"],
+        { cwd: stores[0], env, encoding: "utf8" },
+      );
+      proposed.push({ key: p.key, kind: "propose", where: p.where ?? "propose", command: p.key, cls: p.cls, payload: p.payload, ...readProposeAnswer(r.status, r.stdout, r.stderr), detail: scrub(`${r.stderr ?? ""}`.trim().slice(0, 240)) });
+    }
+    return { calls, proposed };
   } finally {
     rmSync(box, { recursive: true, force: true });
   }
