@@ -4042,28 +4042,71 @@ export function isPatternSegment(segment: string): boolean {
   return /[*?[]/u.test(segment);
 }
 
+/** Past this many glob characters one pattern segment is judged to match. */
+const GLOB_ELEMENT_LIMIT = 1024;
+
 /**
- * Does the glob `pattern` (one path segment: `*`, `?`, `[...]`) match the
- * file name `name`, letter case ignored (second review, S1)? A name starting
- * with `.` is matched only by a pattern that starts with a literal `.` or a
- * bracket expression holding one, as the shell's filename expansion requires,
- * so `*` never names `.git` while `.g*t` and `.[g]it` do. No shell and no
- * file system: the pattern is turned into an anchored expression.
+ * One element of a glob pattern segment: a run of any characters but `/`
+ * (`*`, and an unclosed bracket expression holding a class), or exactly one
+ * character, tested by the expression source of that one character.
  */
-export function globSegmentMatches(pattern: string, name: string): boolean {
-  if (!isPatternSegment(pattern)) return pattern.toLowerCase() === name.toLowerCase();
-  if (name.startsWith(".") && (pattern.startsWith("*") || pattern.startsWith("?"))) return false;
-  let source = "";
+type GlobElement = { star: true } | { star: false; source: string; test?: RegExp };
+
+/** The last pattern read into elements, so a disk walk reads it once. */
+let globElementsCache: { pattern: string; elements: GlobElement[] | null } | null = null;
+
+/**
+ * A glob pattern segment as elements (review of the substitution fold, M1),
+ * read exactly as the anchored expression this matcher used to build was:
+ * an escaped character is itself, `*` a run, `?` one character, a bracket
+ * expression one character (any one when it holds a POSIX class), an
+ * unclosed `[` a literal unless a class inside it left the reading uncertain
+ * (then a run, and nothing after it is read). Runs next to each other are
+ * one. `null` past {@link GLOB_ELEMENT_LIMIT} glob characters, or when a
+ * bracket expression cannot be turned into an expression: the caller judges
+ * both the strict way.
+ */
+function globElements(pattern: string): GlobElement[] | null {
+  if (globElementsCache !== null && globElementsCache.pattern === pattern) return globElementsCache.elements;
+  let globs = 0;
+  for (let at = 0; at < pattern.length; at += 1) {
+    const char = pattern[at];
+    if ((char === "*" || char === "?" || char === "[") && (globs += 1) > GLOB_ELEMENT_LIMIT) {
+      globElementsCache = { pattern, elements: null };
+      return null;
+    }
+  }
+  const elements: GlobElement[] = [];
+  const star = (): void => {
+    if (elements[elements.length - 1]?.star !== true) elements.push({ star: true });
+  };
+  const one = (source: string): void => {
+    // A surrogate pair split over two units is one character, as it was in
+    // the one expression.
+    const last = elements[elements.length - 1];
+    if (last !== undefined && !last.star && /^[\uD800-\uDBFF]$/u.test(last.source) && /^[\uDC00-\uDFFF]$/u.test(source)) {
+      last.source += source;
+      return;
+    }
+    elements.push({ star: false, source });
+  };
+  // Once a `[` is unclosed with no class inside, every later `[` is too: its
+  // scan would visit the same characters. Read once, not once per `[`.
+  let unclosedFrom = -1;
   for (let at = 0; at < pattern.length; at += 1) {
     const char = pattern[at] as string;
     if (char === "\\" && at + 1 < pattern.length) {
       at += 1;
-      source += (pattern[at] as string).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      one((pattern[at] as string).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"));
     } else if (char === "*") {
-      source += "[^/]*";
+      star();
     } else if (char === "?") {
-      source += "[^/]";
+      one("[^/]");
     } else if (char === "[") {
+      if (unclosedFrom !== -1 && at > unclosedFrom) {
+        one("\\[");
+        continue;
+      }
       // A bracket expression: a leading `!` or `^` negates it and a leading
       // `]` is a member; a POSIX class, equivalence class or collating
       // element (`[:alpha:]`, `[=g=]`, `[.g.]`) is skipped to its own close
@@ -4091,30 +4134,91 @@ export function globSegmentMatches(pattern: string, name: string): boolean {
       if (close >= pattern.length) {
         // Unclosed: a literal `[`, unless a class inside it left the reading
         // uncertain, which the strict side reads as any characters.
-        source += posix ? "[^/]*" : "\\[";
-        if (posix) break;
+        if (posix) {
+          star();
+          break;
+        }
+        unclosedFrom = at;
+        one("\\[");
         continue;
       }
       if (posix) {
-        source += "[^/]";
+        one("[^/]");
         at = close;
         continue;
       }
       let body = pattern.slice(at + 1, close);
       const negated = body.startsWith("!") || body.startsWith("^");
       if (negated) body = body.slice(1);
-      source += `[${negated ? "^" : ""}${body.replace(/[\\\]^]/gu, "\\$&")}]`;
+      one(`[${negated ? "^" : ""}${body.replace(/[\\\]^]/gu, "\\$&")}]`);
       at = close;
     } else {
-      source += char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      one(char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"));
     }
   }
-  try {
-    return new RegExp(`^${source}$`, "iu").test(name);
-  } catch {
-    // A bracket expression this reader cannot turn into one: the strict side.
-    return true;
+  let result: GlobElement[] | null = elements;
+  for (const element of elements) {
+    if (element.star || !element.source.startsWith("[")) continue;
+    try {
+      element.test = new RegExp(`^${element.source}$`, "iu");
+    } catch {
+      // A bracket expression this reader cannot turn into one: the strict side.
+      result = null;
+      break;
+    }
   }
+  globElementsCache = { pattern, elements: result };
+  return result;
+}
+
+/**
+ * Does the glob `pattern` (one path segment: `*`, `?`, `[...]`) match the
+ * file name `name`, letter case ignored (second review, S1)? A name starting
+ * with `.` is matched only by a pattern that starts with a literal `.` or a
+ * bracket expression holding one, as the shell's filename expansion requires,
+ * so `*` never names `.git` while `.g*t` and `.[g]it` do. No shell and no
+ * file system.
+ *
+ * The pattern is walked over the name as a set of positions, one element at
+ * a time, so the cost is the elements read times the name's length (review
+ * of the substitution fold, M1: the one anchored expression it used to build
+ * backtracked, and `.` and 400 `*` and `x` took 14 s). The walk stops when no
+ * position is left. Past {@link GLOB_ELEMENT_LIMIT} glob characters a
+ * pattern is judged to match, the strict side (the one expression failed to
+ * build past about ten thousand, and was then judged to match too).
+ */
+export function globSegmentMatches(pattern: string, name: string): boolean {
+  if (!isPatternSegment(pattern)) return pattern.toLowerCase() === name.toLowerCase();
+  if (name.startsWith(".") && (pattern.startsWith("*") || pattern.startsWith("?"))) return false;
+  const elements = globElements(pattern);
+  if (elements === null) return true;
+  const chars = Array.from(name);
+  // live[p]: the first p characters of the name are matched so far.
+  let live = new Uint8Array(chars.length + 1);
+  live[0] = 1;
+  for (const element of elements) {
+    const next = new Uint8Array(chars.length + 1);
+    let any = false;
+    if (element.star) {
+      for (let p = 0; p <= chars.length; p += 1) {
+        if (live[p] === 1 || (p > 0 && next[p - 1] === 1 && chars[p - 1] !== "/")) {
+          next[p] = 1;
+          any = true;
+        }
+      }
+    } else {
+      element.test ??= new RegExp(`^${element.source}$`, "iu");
+      for (let p = 0; p < chars.length; p += 1) {
+        if (live[p] === 1 && element.test.test(chars[p] as string)) {
+          next[p + 1] = 1;
+          any = true;
+        }
+      }
+    }
+    if (!any) return false;
+    live = next;
+  }
+  return live[chars.length] === 1;
 }
 
 /**
