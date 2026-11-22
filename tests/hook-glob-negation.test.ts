@@ -86,17 +86,28 @@ const lab = ((): { dir: string; home: string } => {
   return { dir, home };
 })();
 
-/** The decision the Claude Code hook gives a Bash command, and its reason. */
-function claude(command: string): string {
+/** The same gate under `defaults.unclassified_command: abstain`: a no-rule segment is a stand-in, not a refusal. */
+const abstainLab = ((): { dir: string; home: string } => {
+  const dir = join(scratch, "proj-abstain");
+  mkdirSync(join(dir, ".approval"), { recursive: true });
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY.replace('  on_expiry: reject\n', '  on_expiry: reject\n  unclassified_command: abstain\n'), "utf8");
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir, lab.home);
+  assert.equal(attested.code, 0, attested.stderr);
+  writeFileSync(join(dir, ".approval", "env"), "SYNTHETIC=1\n", "utf8");
+  return { dir, home: lab.home };
+})();
+
+/** The decision the Claude Code hook gives a Bash command, and its reason; `abstain` when it prints none. */
+function claude(command: string, at: { dir: string; home: string } = lab): string {
   const run = runCli(
     ["hook", "claude-code", "--as", "agent:cc"],
-    lab.dir,
-    lab.home,
+    at.dir,
+    at.home,
     JSON.stringify({
       hook_event_name: "PreToolUse",
       session_id: "glob-negation",
       tool_use_id: `cc-${String(Math.random()).slice(2)}`,
-      cwd: lab.dir,
+      cwd: at.dir,
       tool_name: "Bash",
       tool_input: { command },
       transcript_path: "/dev/null",
@@ -104,6 +115,7 @@ function claude(command: string): string {
     }),
   );
   assert.equal(run.code, 0, run.stderr);
+  if (run.stdout.trim() === "") return "abstain";
   const parsed = JSON.parse(run.stdout) as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } };
   const output = parsed.hookSpecificOutput ?? {};
   return `${output.permissionDecision ?? "?"}: ${output.permissionDecisionReason ?? ""}`;
@@ -284,4 +296,27 @@ test("sweep L60842 group (4): after a shell option set in the same command, ever
   assert.ok(classes("cat ~/.?ERMES/auth.json").includes("account.credential"));
   // No option line, no change: an ordinary glob stays ordinary.
   assert.equal(classes("cat ~/.hermes/notes*", true).includes("account.credential"), false);
+});
+
+test("security review of d0288514: a group inside a word, which zsh globs with no option, is judged as zsh reads it", () => {
+  // zsh -f opens auth.json and .approval/env for these; bash and dash refuse
+  // them as syntax errors. Under the abstain policy the hook abstained on
+  // both at 591f461b (a read.shell and a no-rule stand-in).
+  for (const command of ["cat ~/.hermes/a(u)th.json", "cat .approval/e(n)v"]) {
+    const decision = claude(command, abstainLab);
+    assert.match(decision, /^deny: /u, `${command}: ${decision}`);
+    assert.ok(classes(command, true).includes("account.credential"), `${command}: ${JSON.stringify(classes(command, true))}`);
+  }
+});
+
+test("security review of d0288514: ordinary lines with parentheses keep their verdict", () => {
+  // Each as at 591f461b, under the abstain policy.
+  for (const [command, expected] of [
+    ["f() { echo hi; }; f", /^deny: hook-unclassified/u],
+    ["(cd x && ls)", /^allow: /u],
+    ["echo (x)", /^abstain$/u],
+  ] as const) {
+    const decision = claude(command, abstainLab);
+    assert.match(decision, expected, `${command}: ${decision}`);
+  }
 });

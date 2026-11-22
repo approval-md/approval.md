@@ -4102,11 +4102,14 @@ export function classifyForHook(
   try {
     let judged = classifyForHookOnce(command, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments);
     // Other readings of the same text, the stricter together: zsh's numeric
-    // glob where bash reads a redirect (a refusal of that reading stands), and,
-    // under a shell option, a group a word carries.
+    // glob where bash reads a redirect (a refusal of that reading stands), and
+    // a group a word carries, which zsh globs with no option set (`a(u)th.json`
+    // opens auth.json; security review of d0288514) and bash's extglob or
+    // zsh's extended glob read under an option (a refusal of that reading
+    // alone adds nothing, so `f() { …; }` keeps its verdict).
     const zsh = zshNumericGlobReading(command);
     if (zsh !== null) judged = together(judged, classifyForHookOnce(zsh, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments), true);
-    const grouped = shellOptionsSet ? optionGroupReading(command) : null;
+    const grouped = optionGroupReading(command);
     if (grouped !== null) judged = together(judged, classifyForHookOnce(grouped, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments), false);
     return judged;
   } finally {
@@ -8333,24 +8336,26 @@ function hasGlobChars(text: string): boolean {
 /**
  * Does the command set a shell option (lead's ruling L60846 on #682)? `shopt`,
  * `setopt`, `unsetopt`, `emulate`, `set -o` / `set +o`, or a shell started with
- * `-O` / `-o`, anywhere in the text: an option set before a glob on the same
+ * `-O` / `-o` or a long option, anywhere in the text: an option set before a glob on the same
  * line (nocaseglob, dotglob, globstar, extglob, zsh's extendedglob, kshglob,
  * globdots, braceccl, ...) changes what the glob opens, and this hook does not
  * model the options, so every glob in such a command matches any name. An
  * option set by an EARLIER call, in a shell that persists between calls, is
  * not in this text and is not seen here.
  */
-function setsShellOption(command: string): boolean {
+export function setsShellOption(command: string): boolean {
   if (/(?:^|[^A-Za-z0-9_.-])(?:shopt|setopt|unsetopt|emulate)(?![A-Za-z0-9_.-])/u.test(command)) return true;
   // One pass over the words (no regular expression that backtracks over a
   // long line): after `set` or a shell's name in a segment, an option word
-  // holding `o` or `O` (`-o`, `+o`, `-eo`, bash's `-O`).
+  // holding `o` or `O`, its value attached or not (`-o`, `+o`, `-eo`,
+  // `-oextendedglob`, bash's `-O` and `-Oextglob`), or any long option
+  // (`--extendedglob`, `--emulate`; security review of d0288514).
   let afterSetter = false;
   for (const word of command.split(/(?=[;&|\n])|\s+/u)) {
     if (/^[;&|\n]/u.test(word)) afterSetter = false;
     const name = word.replace(/^[;&|\n(]+/u, "").split("/").pop() ?? "";
     if (SHELL_OPTION_SETTERS.has(name)) afterSetter = true;
-    else if (afterSetter && /^[-+][A-Za-z]*[oO]$/u.test(word)) return true;
+    else if (afterSetter && (/^[-+][A-Za-z]*[oO]/u.test(word) || /^--[A-Za-z]/u.test(word))) return true;
   }
   return false;
 }
@@ -8379,11 +8384,11 @@ function zshNumericGlobReading(command: string): string | null {
 /**
  * The command with each group a word carries (`~/(#i).HERMES`, `@(a|b)`,
  * `x(#a1)`) and each zsh glob flag group (`(#i)`, at a word's start too)
- * written as `*`, for a command that sets a shell option (zsh's extended
- * glob, bash's extglob): the lexer reads a `(` inside a word as the start of
- * a subshell or a syntax error, and `#` after it as a comment. `null` when
- * there is none. A `(` after `$`, `<`, `>` or `=` (a substitution, a process
- * substitution, an array) is left alone.
+ * written as `*`: zsh globs a group with no option set, and bash's extglob
+ * and zsh's extended glob read more under one, while the lexer reads a `(`
+ * inside a word as the start of a subshell or a syntax error, and `#` after
+ * it as a comment. `null` when there is none. A `(` after `$`, `<`, `>` or
+ * `=` (a substitution, a process substitution, an array) is left alone.
  */
 function optionGroupReading(command: string): string | null {
   const group = /(?<=[^\s;&|<>$=(])\([^()\s]*\)|\(#[^()\s]*\)/gu;
