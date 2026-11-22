@@ -26,7 +26,13 @@
  *   sampled:skip);
  * - optionally `propose`: the plugin's own daemon propose behind the call (a For
  *   Kicks order proposes marketplace.app.action from _forkicks.py), with its own
- *   class, action key, payload, decision, card_style and matrix;
+ *   class, action key, payload, decision, card_style and matrix, and
+ *   `irreversible: true` when the code proposes with `irreversible=True`
+ *   (`approval propose --irreversible`, APRV-537: core's SPEC section 7 floor
+ *   for the key, so every cell but human-only asks a person). The box passes
+ *   the flag exactly when the entry says so, the decision and the card style
+ *   are resolved with the floor, and the check compares the entry's flag with
+ *   the code's (the extractor reads it at the propose site);
  * - or, for a daemon propose with no hooked call in front of it (review S1: the
  *   av-events intent publish, digest share and village vote), `propose` ALONE
  *   (no file, command, tool, input, class, decision, card_style or matrix of
@@ -184,6 +190,8 @@ export function validateExpected(doc) {
         if (typeof p.summary !== "string" || p.summary.trim() === "") err("propose.summary is empty");
         if (p.payload === null || typeof p.payload !== "object" || Array.isArray(p.payload)) err("propose.payload is not an object");
         if (typeof p.source !== "string" || sourceSpan(p.source) === null) err("propose.source must cite the code that proposes (file:line or file:line-line)");
+        // APRV-537: the floor the code asks for, when it does; absent is false.
+        if (p.irreversible !== undefined && typeof p.irreversible !== "boolean") err(`propose.irreversible must be true or false (approval propose --irreversible), not ${JSON.stringify(p.irreversible)}`);
         // Review S1: the answers the plugin goes on with, declared; the check compares them with the code.
         if (!Array.isArray(p.accepts) || p.accepts.length === 0 || p.accepts.some((a) => !ANSWERS.includes(a)) || JSON.stringify([...p.accepts].sort()) !== JSON.stringify(p.accepts) || new Set(p.accepts).size !== p.accepts.length)
           err(`propose.accepts must list, sorted and once each, the daemon answers the plugin goes on with (${ANSWERS.join(", ")})`);
@@ -331,13 +339,20 @@ export const layersOf = (entry) => [...(entryKind(entry) === "propose" ? [] : [{
  * P1: why an entry is LIMITING, from nothing the author declares but its
  * decision and class: a decision stricter than auto under the village default,
  * or a class whose template default autonomy is manual. Empty = not limiting.
+ *
+ * APRV-537: a propose with `irreversible: true` is resolved with core's SPEC
+ * section 7 floor, so its class is limiting whenever the floor makes it manual
+ * (`autonomyOf(cls, { reversible: false })`), even under a template that runs
+ * the class on its own.
  */
 export function limitingReasons(entry, autonomyOf) {
   const out = [];
   if (entryKind(entry) === "gated") return out;
   for (const { name, layer } of layersOf(entry)) {
     if (layer.decision !== "auto") out.push(`${name} decision ${String(layer.decision)}`);
-    if (typeof layer.class === "string" && autonomyOf(layer.class) === "manual") out.push(`${name} class ${layer.class} defaults to manual`);
+    if (typeof layer.class !== "string") continue;
+    if (autonomyOf(layer.class) === "manual") out.push(`${name} class ${layer.class} defaults to manual`);
+    else if (name === "propose" && layer.irreversible === true && autonomyOf(layer.class, { reversible: false }) === "manual") out.push(`${name} class ${layer.class} is floored to manual (irreversible, SPEC section 7)`);
   }
   return out;
 }
@@ -464,8 +479,11 @@ export function variantBlock(block, classes, cell) {
 // Deciding a propose, and judging a layer against its declaration.
 // ---------------------------------------------------------------------------
 
-const isLive = (core, load, cls) => {
-  const r = core.resolve(load, cls);
+/** APRV-537: an irreversible propose is resolved as core resolves it, with the SPEC section 7 floor. */
+const floorOf = (irreversible) => (irreversible === true ? { reversible: false } : {});
+
+const isLive = (core, load, cls, irreversible = false) => {
+  const r = core.resolve(load, cls, floorOf(irreversible));
   return r.autonomy === "supervised" && r.supervision === "live";
 };
 
@@ -476,7 +494,7 @@ const isLive = (core, load, cls) => {
  * the payload alone. The too-long and truncated fallbacks need the rendering and
  * are not modelled.
  */
-export function proposeCardStyle(core, load, cls, payload) {
+export function proposeCardStyle(core, load, cls, payload, irreversible = false) {
   const style = typeof core.promptStyleFor === "function" ? core.promptStyleFor(load, "telegram") : "technical";
   if (style !== "minimal") return style;
   if (cls === "policy" || /^(policy|log)\./u.test(cls)) return "technical (policy)";
@@ -488,16 +506,19 @@ export function proposeCardStyle(core, load, cls, payload) {
   const unlisted = Object.keys(payload).filter((k) => !Object.prototype.hasOwnProperty.call(quote, k));
   if (unlisted.length > 0) return `technical (unlisted-key: ${unlisted.sort().join(", ")})`;
   if (!Object.values(quote).some((v) => typeof v === "string")) return "technical (nothing-quoted)";
-  if (core.resolve(load, cls).autonomy !== "manual") return "technical (anomaly: autonomy not manual)";
+  // APRV-537: the floor makes an irreversible propose's class manual, as core's renderer reads it.
+  if (core.resolve(load, cls, floorOf(irreversible)).autonomy !== "manual") return "technical (anomaly: autonomy not manual)";
   return "minimal";
 }
 
 /** One propose answer, decided: decision, class, drawn side, card style. */
 export function decideProposeCall(core, load, p) {
-  const base = { key: p.key, kind: "propose", where: p.where, command: p.command, classes: [p.cls], code: p.code ?? null, answer: p.answer ?? null, style: null, drawn: null };
+  const irreversible = p.irreversible === true;
+  const base = { key: p.key, kind: "propose", where: p.where, command: p.command, classes: [p.cls], code: p.code ?? null, answer: p.answer ?? null, style: null, drawn: null, irreversible };
   if (p.verdict === "refused") return { ...base, decision: /human-only/u.test(String(p.code)) ? "human-only" : "refused" };
   if (p.verdict !== "answered") return { ...base, decision: "error" };
-  const live = isLive(core, load, p.cls);
+  // APRV-537: with the floor a supervised-live class is manual, so a `requested` is a card, never a draw.
+  const live = isLive(core, load, p.cls, irreversible);
   let decision;
   let drawn = null;
   if (p.answer === "requested") {
@@ -514,7 +535,7 @@ export function decideProposeCall(core, load, p) {
   // daemon decided.
   if (Array.isArray(p.accepts) && !p.accepts.includes(p.answer)) return { ...base, decision: "refused", code: `plugin-refuses:${String(p.answer)}`, drawn };
   // A card is drawn only on a card, or a supervised-live draw that fell on the card side.
-  const style = decision === "card" || drawn === "card" ? proposeCardStyle(core, load, p.cls, p.payload) : null;
+  const style = decision === "card" || drawn === "card" ? proposeCardStyle(core, load, p.cls, p.payload, irreversible) : null;
   return { ...base, decision, drawn, style };
 }
 
@@ -666,7 +687,7 @@ export function judgeNewCalls({ corpus, tagCorpus, validated, head, cells = {}, 
     const claims = withPropose.filter((v) => covers(v.entry.propose.source, site));
     // Review S1: a propose of a held entry's class field proposes any class the module's guards compare it with.
     const held = Array.isArray(site.classes) && site.classes.length > 0 ? site.classes : null;
-    proposeRows.push({ at, class: site.class ?? site.template ?? (held === null ? null : held.join(" or ")), accepts: site.accepts, claimedBy: claims.map((v) => keyLabel(v.key)), isNew: newSites.has(at), gatedPlugin: site.gated_plugin ?? null });
+    proposeRows.push({ at, class: site.class ?? site.template ?? (held === null ? null : held.join(" or ")), accepts: site.accepts, irreversible: site.irreversible ?? false, claimedBy: claims.map((v) => keyLabel(v.key)), isNew: newSites.has(at), gatedPlugin: site.gated_plugin ?? null });
     if (site.class === null && site.template === undefined && held === null) {
       find(`propose#${at}`, `a daemon propose whose class cannot be read (${String(site.why)}); fail closed`);
       continue;
@@ -692,6 +713,13 @@ export function judgeNewCalls({ corpus, tagCorpus, validated, head, cells = {}, 
       }
       if (site.accepts !== null && JSON.stringify(v.entry.propose.accepts) !== JSON.stringify(site.accepts)) {
         find(v.key, `propose.accepts ${JSON.stringify(v.entry.propose.accepts ?? null)}, but the code after ${at} goes on with ${JSON.stringify(site.accepts)} (review S1)`);
+      }
+      // APRV-537: the box passes --irreversible from the entry, so the entry must say what the code does.
+      // A site from an extractor before this field (no member) reads as no flag.
+      if (site.irreversible === null) {
+        find(v.key, `the propose at ${at} passes irreversible in a form the extractor cannot read (${String(site.irreversible_why ?? "unread")}); fail closed (APRV-537)`);
+      } else if ((site.irreversible === true) !== (v.entry.propose.irreversible === true)) {
+        find(v.key, `propose.irreversible ${String(v.entry.propose.irreversible === true)}, but the propose at ${at} ${site.irreversible === true ? "passes" : "does not pass"} irreversible=True (APRV-537)`);
       }
     }
   }
@@ -840,7 +868,7 @@ export function renderNewCalls(meta, result, validated) {
   }
   if ((result.proposes ?? []).length > 0) {
     out.push("### Daemon proposes, every plugin, each judged (review M3, S1)", "", "| propose | class | answers it goes on with | declared by | its plugin owns a gated tool | new since the base |", "|---|---|---|---|---|---|");
-    for (const p of result.proposes) out.push(`| \`${cellText(p.at)}\` | ${cellText(p.class ?? "(unread)")} | ${cellText(p.accepts === null ? "(unread)" : p.accepts.join(", "))} | ${cellText(p.claimedBy.join(", ") || "-")} | ${p.gatedPlugin === null ? "-" : p.gatedPlugin ? "yes" : "no"} | ${p.isNew ? "yes" : "no"} |`);
+    for (const p of result.proposes) out.push(`| \`${cellText(p.at)}\` | ${cellText(p.class ?? "(unread)")}${p.irreversible === true ? " (irreversible)" : p.irreversible === null ? " (irreversible unread)" : ""} | ${cellText(p.accepts === null ? "(unread)" : p.accepts.join(", "))} | ${cellText(p.claimedBy.join(", ") || "-")} | ${p.gatedPlugin === null ? "-" : p.gatedPlugin ? "yes" : "no"} | ${p.isNew ? "yes" : "no"} |`);
     out.push("");
   }
   if ((result.writers ?? []).length > 0) {

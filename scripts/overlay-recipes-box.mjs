@@ -458,15 +458,18 @@ export async function runBox({ coreRoot, corpus, policyText, overlayTree, boxRoo
     });
     // B-167N (fixture 1): the daemon proposes a plugin makes behind a call (a
     // For Kicks order's marketplace.app.action), each once, as the agent, in
-    // store 0, after every hook run.
+    // store 0, after every hook run. APRV-537: `--irreversible` exactly when the
+    // entry declares it (the check holds the entry to the code); a core without
+    // the flag refuses it (usage), which the check reads as a refused propose.
     const proposed = [];
     for (const p of proposals) {
+      const irreversible = p.irreversible === true;
       const r = spawnSync(
         process.execPath,
-        [cli, "propose", "--class", p.cls, "--key", p.actionKey, "--summary", p.summary, "--payload-json", JSON.stringify(p.payload), "--as", "agent:hermes", "--json"],
+        [cli, "propose", "--class", p.cls, "--key", p.actionKey, "--summary", p.summary, "--payload-json", JSON.stringify(p.payload), ...(irreversible ? ["--irreversible"] : []), "--as", "agent:hermes", "--json"],
         { cwd: stores[0], env, encoding: "utf8" },
       );
-      proposed.push({ key: p.key, kind: "propose", where: p.where ?? "propose", command: p.key, cls: p.cls, payload: p.payload, accepts: Array.isArray(p.accepts) ? p.accepts : null, ...readProposeAnswer(r.status, r.stdout, r.stderr), detail: scrub(`${r.stderr ?? ""}`.trim().slice(0, 240)) });
+      proposed.push({ key: p.key, kind: "propose", where: p.where ?? "propose", command: p.key, cls: p.cls, payload: p.payload, accepts: Array.isArray(p.accepts) ? p.accepts : null, irreversible, ...readProposeAnswer(r.status, r.stdout, r.stderr), detail: scrub(`${r.stderr ?? ""}`.trim().slice(0, 240)) });
     }
     return { calls, proposed };
   } finally {

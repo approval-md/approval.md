@@ -194,6 +194,9 @@ export function gatedPatterns(text) {
  *   (`accepts`, review S1: `decision != "x"` / `decision not in (...)` on that
  *   answer in the same function, and an `if`/`elif` chain on it whose `else`
  *   ends the flow); a class or answers it cannot read are reported unread;
+ *   and whether it passes `irreversible=True` (APRV-537, `approval propose
+ *   --irreversible`): a literal or module constant read, no keyword is false,
+ *   any other spelling is reported unread (`irreversible: null`);
  * - in every plugin with a propose of a held entry's class (review S1b), the
  *   class writers (`class_writers`): each line that gives a held entry its
  *   class, with its file, enclosing function, line and the class it files, a
@@ -532,6 +535,26 @@ def propose_class(m, node):
             except Unresolved:
                 pass
     return {"class": None, "why": "the class is not a literal, a module constant or a class template"}
+
+def propose_irreversible(m, node):
+    """APRV-537: whether a propose asks core for the SPEC section 7 floor ('approval propose
+    --irreversible'), read as the keyword 'irreversible=' with a literal True or False or a module
+    constant that is one. No such keyword is False. Anything else (a local name, an expression, a
+    fifth positional, '*args' or '**kwargs') is unread, which the check fails closed on."""
+    if any(k.arg is None for k in node.keywords) or any(isinstance(a, ast.Starred) for a in node.args):
+        return {"irreversible": None, "irreversible_why": "the arguments are spread (*args or **kwargs)"}
+    if len(node.args) > 4:
+        return {"irreversible": None, "irreversible_why": "a fifth positional argument; pass irreversible by keyword"}
+    kws = [k for k in node.keywords if k.arg == "irreversible"]
+    if not kws:
+        return {"irreversible": False}
+    try:
+        v = ev(m, kws[0].value)
+        if isinstance(v, bool):
+            return {"irreversible": v}
+    except Unresolved:
+        pass
+    return {"irreversible": None, "irreversible_why": "irreversible= is not a literal True or False or a module constant"}
 
 # ---- Review S1b: the class writers -------------------------------------------------------------
 # A held-class propose (above) proposes whatever class its held entry carries, so the lines that give a
@@ -896,6 +919,7 @@ for plugin in (sorted(os.listdir(root)) if os.path.isdir(root) else []):
                     cls_node = arg_of(node, "cls", 0)
                     site = {"plugin": plugin, "file": rel, "line": node.lineno, "accepts": accepted_answers(m, par, node)}
                     site.update(propose_class(m, cls_node) if cls_node is not None else {"class": None, "why": "no class argument"})
+                    site.update(propose_irreversible(m, node))
                     proposes.append(site)
                     continue
                 if not ((isinstance(fn, ast.Attribute) and fn.attr == "register_tool") or (isinstance(fn, ast.Name) and fn.id in aliases)):

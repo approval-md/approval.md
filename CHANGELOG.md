@@ -336,6 +336,19 @@ on the change above.
   APRV-518 git rules above) the pinned corpus reads `class-diff: none`: all
   304 calls unchanged, and the box check's 96 denied runs are the seven
   entries' own.
+- **The NEW-CALLS check reads `approval propose --irreversible` (APRV-537).**
+  An expected.json propose may say `irreversible: true` when the plugin
+  proposes with `irreversible=True`. The box then passes `--irreversible`, and
+  the decision and the card style are read as core reads them with SPEC.md §7's
+  floor: a `requested` answer is a minimal card under every setting (before
+  this, the check called the floored card "technical (anomaly)" and drew
+  supervised-live as "sampled"). P1 names the floor as limiting for a class the
+  template runs on its own. The extractor reads the flag at each propose site
+  (a literal or module constant; no keyword is false; any other spelling is
+  unread and fails closed), and the check holds the entry's flag to the code's.
+  The For Kicks entry is unchanged here: it takes the flag in the overlay PR
+  that lands the card. A core without the flag refuses it (`usage`), which the
+  check reads as a refused propose.
 
 ### Added
 

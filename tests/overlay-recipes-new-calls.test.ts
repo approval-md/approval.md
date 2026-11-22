@@ -627,6 +627,40 @@ test("M3 + S1: daemon proposes are extracted with their class (literal, constant
   assert.equal(run.corpus["proposes_unhooked"], undefined);
 });
 
+test("APRV-537: whether a propose passes irreversible=True is read at its site; any spelling it cannot read is unread", { skip: NO_BUN }, () => {
+  const bridge = [
+    'APPROVAL_CLASS = "marketplace.app.action"',
+    "FLOOR = True",
+    "def a(ap, key, held):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=True)",
+    "def b(ap, key, held):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=False)",
+    "def c(ap, key, held):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held)",
+    "def d(ap, key, held):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=FLOOR)",
+    "def e(ap, key, held, flag):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=flag)",
+    "def f(ap, key, held, kw):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, **kw)",
+    "def g(ap, key, held):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, True)",
+    "",
+  ].join("\n");
+  const run = extractFixture({ extra: { "plugins/village-bridge/_floor.py": bridge } });
+  assert.equal(run.status, 0, run.err);
+  const sites = (run.corpus["proposes"] as Json[]).filter((p) => p["file"] === "plugins/village-bridge/_floor.py");
+  assert.deepEqual(
+    sites.map((p) => [p["line"], p["irreversible"]]),
+    [[4, true], [6, false], [8, false], [10, true], [12, null], [14, null], [16, null]],
+  );
+  assert.match(String(sites.find((p) => p["line"] === 12)?.["irreversible_why"]), /not a literal True or False or a module constant/u);
+  assert.match(String(sites.find((p) => p["line"] === 14)?.["irreversible_why"]), /spread/u);
+  assert.match(String(sites.find((p) => p["line"] === 16)?.["irreversible_why"]), /fifth positional/u);
+  // The class is read as before, whatever the flag.
+  assert.ok(sites.every((p) => p["class"] === "marketplace.app.action"));
+});
+
 test("S1: a held entry's class is read from the module's guards, and the answers from a doc alias, a pair assignment and an if/elif chain", { skip: NO_BUN }, () => {
   // The av-events shape (_share_vote.py, _intent_approval.py): the class is the held entry's field,
   // the module's own guards name the classes it may carry, and the answer is read through `doc = answer.doc`.
