@@ -8247,6 +8247,309 @@ function strictestProtected(
   return best;
 }
 
+// ---------------------------------------------------------------------------
+// A glob in a WRITE target (GLOB-WRITE ruling, 22 Nov 2026)
+// ---------------------------------------------------------------------------
+
+/**
+ * {@link strictestProtected} for words a command WRITES through, where a word
+ * the shell may still glob (`globbed(word)` true) is judged by every guarded
+ * path its pattern could match as well as by its text.
+ *
+ * `echo x > ~/.hermes/auth.json` is `policy.core`, and `echo x >
+ * ~/.hermes/[!Z]uth.json` was `files.write.workspace`: bash and zsh write
+ * through a glob in a redirect target when it matches one file, and every shell
+ * writes through one in a `cp`, `mv`, `tee` or `ln` operand, so the second
+ * command overwrote the same organ with nothing gating it. The rule is that
+ * nothing here may be looser than the shell. The text rules of
+ * {@link protectedPathClass} cannot see a file a pattern names, so the pattern
+ * is OVER-approximated ({@link globGuardClass}): each construct may match
+ * anything it could match in any shell under any option, and the strictest
+ * class any guarded path it could match takes is the word's class. FAIL
+ * CLOSED: a word too large to judge is the stricter class.
+ *
+ * The path bound is the word as written, as for every other protected answer.
+ * `skipProse` keeps its meaning (a positional with whitespace in it that names
+ * a protected head is prose); a prose word is not offered the pattern reading.
+ */
+function strictestProtectedWrite(
+  words: readonly string[],
+  protectedPaths: readonly ProtectedPathEntry[],
+  globbed: (word: string) => boolean,
+  skipProse = false,
+): { surface: string; path: string } | null {
+  let best = strictestProtected(words, protectedPaths, skipProse);
+  for (const word of words) {
+    if (!globbed(word)) continue;
+    if (skipProse && /\s/u.test(word)) continue;
+    const surface = globGuardClass(word, protectedPaths);
+    if (surface === null) continue;
+    if (best === null || protectedRank(surface) < protectedRank(best.surface)) {
+      best = { surface, path: word };
+    }
+  }
+  return best;
+}
+
+/**
+ * Could the shell still glob part of this word? Any of `*`, `?`, `[`, a brace,
+ * zsh's `(…)`, `#`, `^`, `<…>`, `|`, or a `~` after the first character (zsh's
+ * exclusion). Read on the dequoted text, so a quoted metacharacter in a word
+ * that is otherwise inexact counts as well: the stricter reading.
+ */
+function hasGlobConstruct(word: string): boolean {
+  return /[*?[\]{}()#^<>|]/u.test(word) || word.slice(1).includes("~");
+}
+
+/**
+ * Segment names the guarded-path rules read ({@link protectedPathClass},
+ * {@link credentialSegments}, {@link hermesOrganClass}). A pattern segment that
+ * could match one of these (case folded) is judged with that name in its
+ * place. A rule added to those functions that reads a new segment name must
+ * add it here, or a pattern for it would be judged by its text alone; the
+ * glob-write tests pin one path per row.
+ */
+const GLOB_GUARD_NAMES: readonly string[] = [
+  ".",
+  "..",
+  ".approval",
+  "log",
+  "env",
+  "keys",
+  "vault",
+  ".hermes",
+  "profiles",
+  "auth.json",
+  ".env",
+  ".op.env",
+  "config.yaml",
+  "config.yml",
+  "agent-hooks",
+  "approval",
+  "hooks",
+  "hooks.json",
+  "hermes-agent",
+  "plugins",
+  "scripts",
+  "shell-hooks-allowlist.json",
+  ".claude",
+  ".cursor",
+  "agents",
+  ".grok",
+  ".muse",
+  ".codex",
+  "config.toml",
+  ".github",
+  "workflows",
+  ...CORE_FILENAMES,
+  ...PROTECTED_FILENAMES,
+];
+
+/**
+ * Prefixes the guarded-path rules match with `startsWith` (`.claude/settings*`,
+ * `.env.*`, `vault*`, `hooks*`, ...). A pattern segment that could match SOME
+ * name beginning with one is judged with the prefix itself in its place, which
+ * the same `startsWith` accepts.
+ */
+const GLOB_GUARD_PREFIXES: readonly string[] = [
+  "settings",
+  ".env.",
+  ".op.env.",
+  "env.",
+  "vault",
+  "hooks",
+  "shell-hooks-allowlist.json",
+];
+
+/** Most candidate paths one write-target word is judged as before it is judged unknown. */
+const GLOB_GUARD_CANDIDATE_CAP = 4096;
+/** Longest pattern segment, and most segments, read before the word is judged unknown. */
+const GLOB_GUARD_SEGMENT_CAP = 256;
+const GLOB_GUARD_SEGMENTS_CAP = 32;
+
+type GlobToken =
+  | { kind: "lit"; ch: string }
+  | { kind: "one" }
+  | { kind: "run" }
+  | { kind: "rest" }
+  | { kind: "bracket"; ends: number[] };
+
+/**
+ * One path segment of a pattern as an over-approximating token list.
+ *
+ * - `*` is any run, `?` any one character.
+ * - `[` is EITHER a literal `[` (an unclosed bracket is literal in every shell)
+ *   OR one character of any kind, the class ending at ANY later `]`: every
+ *   shell ends a class at one of them, so the union holds each shell's parse
+ *   (`[!]]`, `[]c]`, `[\]c]`, `[[:alpha:]]`, `[[!Z]]` all included).
+ * - `(…)` (zsh groups and qualifiers, bash extglob with its `?*+@!` prefix) and
+ *   `<…>` (zsh numeric ranges) are any run.
+ * - `#` (zsh extendedglob: zero or more of the atom before it) turns that atom
+ *   into a run.
+ * - `^` (zsh extendedglob negation) leaves the rest of the segment free.
+ */
+function globSegmentTokens(segment: string): GlobToken[] {
+  const tokens: GlobToken[] = [];
+  const brackets: number[] = [];
+  for (let at = 0; at < segment.length; at += 1) {
+    const ch = segment[at] as string;
+    if (ch === "*") tokens.push({ kind: "run" });
+    else if (ch === "?") tokens.push({ kind: "one" });
+    else if (ch === "^") tokens.push({ kind: "rest" });
+    else if (ch === "#") {
+      if (tokens.length > 0) tokens[tokens.length - 1] = { kind: "run" };
+      else tokens.push({ kind: "run" });
+    } else if (ch === "(" || ch === "<") {
+      const close = ch === "(" ? ")" : ">";
+      const previous = segment[at - 1];
+      if (ch === "(" && previous !== undefined && "?*+@!".includes(previous) && tokens.length > 0) tokens.pop();
+      let depth = 1;
+      let end = at + 1;
+      for (; end < segment.length && depth > 0; end += 1) {
+        if (segment[end] === ch) depth += 1;
+        else if (segment[end] === close) depth -= 1;
+      }
+      tokens.push({ kind: "run" });
+      at = end - 1;
+    } else if (ch === "[") {
+      brackets.push(tokens.length);
+      tokens.push({ kind: "bracket", ends: [] });
+    } else {
+      if (ch === "]") {
+        for (const open of brackets) (tokens[open] as { ends: number[] }).ends.push(tokens.length);
+      }
+      tokens.push({ kind: "lit", ch: ch.toLowerCase() });
+    }
+  }
+  return tokens;
+}
+
+/**
+ * Could `tokens` match `name` (case folded)? With `prefix`, could it match some
+ * name BEGINNING with `name`: every token can match some text, so reaching the
+ * end of `name` anywhere is enough. Memoized, so the time is bounded by tokens
+ * times name length times bracket ends.
+ */
+function globTokensMatch(tokens: readonly GlobToken[], name: string, prefix: boolean): boolean {
+  const text = name.toLowerCase();
+  const memo = new Map<number, boolean>();
+  const match = (ti: number, si: number): boolean => {
+    if (si === text.length && prefix) return true;
+    if (ti === tokens.length) return si === text.length;
+    const key = ti * (text.length + 1) + si;
+    const seen = memo.get(key);
+    if (seen !== undefined) return seen;
+    const token = tokens[ti] as GlobToken;
+    let result: boolean;
+    switch (token.kind) {
+      case "lit":
+        result = si < text.length && text[si] === token.ch && match(ti + 1, si + 1);
+        break;
+      case "one":
+        result = si < text.length && match(ti + 1, si + 1);
+        break;
+      case "run":
+        result = match(ti + 1, si) || (si < text.length && match(ti, si + 1));
+        break;
+      case "rest":
+        result = true;
+        break;
+      case "bracket":
+        result =
+          (si < text.length && text[si] === "[" && match(ti + 1, si + 1)) ||
+          (si < text.length && token.ends.some((end) => match(end + 1, si + 1)));
+        break;
+    }
+    memo.set(key, result);
+    return result;
+  };
+  return match(0, 0);
+}
+
+/**
+ * The strictest protected class a write-target pattern could reach, or `null`
+ * when no guarded path is within its reach (`out/*.log`).
+ *
+ * The word is brace-expanded first ({@link braceCandidates}; a group too large
+ * to expand is `policy.core`, as {@link protectedPathClass} answers it). A `~`
+ * after the first character may be zsh's exclusion, which drops the rest of the
+ * pattern, so the word cut there is judged as well. Each expansion is split
+ * into segments, and each segment stands for a set of names:
+ *
+ * - a segment with no construct: itself, and any guarded name equal to it with
+ *   case folded (a case-folding volume, `nocaseglob`);
+ * - a segment holding a variable: itself, as {@link protectedPathClass} reads
+ *   it (its `$X` rows are unchanged here);
+ * - a pattern segment: itself, and every guarded name or prefix
+ *   ({@link GLOB_GUARD_NAMES}, {@link GLOB_GUARD_PREFIXES}, and the segments of
+ *   the policy's own entries) its tokens could match;
+ * - a segment that may stand for SEVERAL directories (`**`, globstar; a
+ *   leftover brace, zsh's `braceccl`, whose range may make a `/`): nothing, any
+ *   one name, or any two names.
+ *
+ * Every combination is a candidate path, judged by {@link protectedPathClass};
+ * the strictest answers. More combinations than
+ * {@link GLOB_GUARD_CANDIDATE_CAP}, or a word over the segment caps, is the
+ * strictest class there is, `log.mutate`: a pattern that wide could name the
+ * log.
+ */
+function globGuardClass(word: string, protectedPaths: readonly ProtectedPathEntry[]): string | null {
+  const extraNames = protectedPaths.flatMap((entry) => parseProtectedEntry(entry)?.segments ?? []);
+  const names = [...new Set([...GLOB_GUARD_NAMES, ...extraNames])];
+  const words = [word];
+  for (let at = 1; at < word.length; at += 1) if (word[at] === "~") words.push(word.slice(0, at));
+  let strictest: string | null = null;
+  const consider = (surface: string | null): boolean => {
+    if (surface !== null && (strictest === null || protectedRank(surface) < protectedRank(strictest))) strictest = surface;
+    return strictest === "log.mutate";
+  };
+  for (const each of words) {
+    const expansions = braceCandidates(each);
+    if (expansions === null) {
+      if (consider("policy.core")) return strictest;
+      continue;
+    }
+    for (const expansion of expansions) {
+      const segments = expansion.split("/");
+      if (segments.length > GLOB_GUARD_SEGMENTS_CAP || segments.some((s) => s.length > GLOB_GUARD_SEGMENT_CAP)) {
+        return "log.mutate";
+      }
+      const choices: string[][][] = segments.map((segment) => {
+        if (segment.length === 0) return [[segment]];
+        if (segment.includes("$")) return [[segment]];
+        const spanning = segment.includes("**") || /[{}]/u.test(segment);
+        if (spanning) {
+          const out: string[][] = [[], [segment]];
+          for (const first of names) {
+            out.push([first]);
+            for (const second of names) out.push([first, second]);
+          }
+          return out;
+        }
+        const tokens = globSegmentTokens(segment);
+        const out: string[][] = [[segment]];
+        for (const name of names) if (name !== segment && globTokensMatch(tokens, name, false)) out.push([name]);
+        for (const name of GLOB_GUARD_PREFIXES) if (globTokensMatch(tokens, name, true)) out.push([name]);
+        return out;
+      });
+      let total = 1;
+      for (const choice of choices) total *= choice.length;
+      if (total > GLOB_GUARD_CANDIDATE_CAP) return "log.mutate";
+      const walk = (index: number, parts: string[]): boolean => {
+        if (index === choices.length) {
+          return consider(protectedPathClass(parts.join("/"), protectedPaths));
+        }
+        for (const choice of choices[index] as string[][]) {
+          if (walk(index + 1, [...parts, ...choice])) return true;
+        }
+        return false;
+      };
+      if (walk(0, [])) return strictest;
+    }
+  }
+  return strictest;
+}
+
 /**
  * The rules whose commands RUN CODE THIS RUNTIME DID NOT AUTHOR (APRV-193).
  *
@@ -8771,7 +9074,20 @@ function classifySegment(
   // aimed at (APRV-198); the RULE stays `redirect-protected`, because the
   // mechanism is unchanged and the hook's tiers and the channel's protected-path
   // view are keyed on the rule.
-  const redirected = strictestProtected(writeTargets, protectedPaths);
+  //
+  // GLOB-WRITE (22 Nov 2026): a target the shell may still glob is judged by
+  // every guarded path its pattern could match ({@link strictestProtectedWrite}),
+  // so `> ~/.hermes/[!Z]uth.json` is the organ write `> ~/.hermes/auth.json` is.
+  // `globbed` reads the lexer's own verdict: a word whose text is exactly what
+  // the shell hands over (`exact`) is never a pattern; any other word holding a
+  // glob construct may be one, and a word only contained in one (an option's
+  // attached value) counts with it.
+  const inexactWords = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)]
+    .filter((word) => !word.exact)
+    .map((word) => word.text);
+  const globbed = (text: string): boolean =>
+    hasGlobConstruct(text) && inexactWords.some((word) => word.includes(text));
+  const redirected = strictestProtectedWrite(writeTargets, protectedPaths, globbed);
   const bin = words[cursor];
   if (redirected !== null) {
     // APRV-503 recheck (SHOULD-FIX-R1): a segment that writes a protected path
@@ -9184,9 +9500,10 @@ function classifySegment(
   // A directory a download writes server-chosen names into is judged as the
   // directory: an organ directory, or the home root, is an organ write.
   const fetchedDirectories = fetched.directories.filter((directory) => directory !== ".");
-  const fetchedProtected = strictestProtected(
+  const fetchedProtected = strictestProtectedWrite(
     [...fetched.files, ...targetDirectories, ...fetchedDirectories],
     protectedPaths,
+    globbed,
   );
   if (fetchedProtected !== null) {
     return { ok: true, class: fetchedProtected.surface, rule: "protected-path", path: fetchedProtected.path };
@@ -9203,7 +9520,7 @@ function classifySegment(
   // named path already earns a class at least as strict (the log).
   const copyUnknown = copyFamily ? copyArgvUnknown(args, argFlags) : null;
   if (copyUnknown !== null) {
-    const named = strictestProtected([...positionals, ...readTargets], protectedPaths);
+    const named = strictestProtectedWrite([...positionals, ...readTargets], protectedPaths, globbed);
     if (named !== null && protectedRank(named.surface) <= protectedRank("policy.core")) {
       return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
     }
@@ -9258,7 +9575,10 @@ function classifySegment(
         also: deferredCredential,
       };
     }
-    const named = strictestProtected(judged, protectedPaths, true);
+    // GLOB-WRITE: a positional the shell may still glob is judged by every
+    // guarded path it could match, source and destination alike (the scan is
+    // direction-blind, above).
+    const named = strictestProtectedWrite(judged, protectedPaths, globbed, true);
     const fed = strictestProtected(readTargets, protectedPaths);
     const touched =
       fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))
