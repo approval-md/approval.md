@@ -1822,8 +1822,8 @@ appended.
 
 ## propose
 
-`approval propose --class <c> --key <k> --summary <s> --payload-json <json>`
-registers one action and requests it in one call (APRV-445, amended SPEC.md
+`approval propose --class <c> --key <k> --summary <s> --payload-json <json>
+[--irreversible]` registers one action and requests it in one call (APRV-445, amended SPEC.md
 §10.1). It exists for a requester that holds its payload in memory and has no
 file on the gate's machine: an agent in a sandbox reaching `approval serve`
 with the agent credential, which refuses every path flag. `--payload-json` is
@@ -1904,6 +1904,42 @@ on a `propose:` task is refused `task-is-proposal`.
 registered and answered at once with `decision: "autonomous"` (or
 `"supervised"`) and no approval record. Act, then record it with `start`.
 
+**`--irreversible`: an action that cannot be undone (APRV-537).** The flag
+says the proposed action cannot be taken back once done: an order placed and
+paid for, a message sent. It engages SPEC.md §7's irreversibility floor for the
+key, so a person decides whatever the resident's setting is:
+
+- The registration records `reversible: false` on the action, and so does the
+  request.
+- A class set to `autonomous`, `supervised-retro` or `supervised-live` is raised
+  to `manual` for this key. The answer is `decision: "requested"`, and the
+  person gets the same card `ask` and `manual` give, with the same words.
+- `start` refuses the key without that person's grant (`not-granted`), on the
+  grant path while the request is pending and on the policy path after it is
+  withdrawn, expired or rejected. After a grant, `start` spends it once
+  (`authorization: "grant"`).
+- `ask` and `manual` already ask, so nothing changes there. A `human-only`
+  class stays `human-only` (refused before anything is registered). The one
+  exception is the operator's, never the agent's: a class rule that sets
+  `allow_irreversible: true` keeps its own autonomy (SPEC.md §5.2, §7).
+
+The flag can only add scrutiny, and it sticks to the key. Once the registration
+or any request of the key says `reversible: false`, a later propose of the same
+key WITHOUT the flag is still floored, and so is a `start`. A later propose WITH
+the flag over a key first proposed without it files its request floored, and
+from that request on the key stays floored. A propose with the flag that finds
+a request still pending or decided answers from it and appends nothing, because
+that request already puts the key in front of a person; the floor is then
+recorded by the next request the key files. Without the flag nothing changes:
+the same answers, the same records, byte for byte. The answer's JSON has no new
+member.
+
+`approval serve` accepts `--irreversible` from the agent credential on
+`propose` (`{"flags":{"--irreversible":true}}`); every other flag off the
+agent list is still refused 403 `serve-flag-not-permitted`. A core before this
+flag refuses it: the CLI with a usage error (exit 2, `unknown flag
+--irreversible`), serve with 403 `serve-flag-not-permitted`.
+
 **`--json`** (one object on stdout):
 
 ```
@@ -1931,8 +1967,9 @@ whose request is pending or granted and unspent spends its harness grant: refuse
 pending or after a rejection, `expired` after the window, `policy-drift` under
 a re-attested policy. A key with no such request (none, or one withdrawn,
 expired, rejected or revoked, which binds nothing) is recorded as authorized by
-the policy itself: refused `not-granted` for a manual class and `class-human-only`
-for a human-only one, and charged against the budgets. A second start of one key
+the policy itself: refused `not-granted` for a manual class (and for a key
+proposed `--irreversible`, which SPEC.md §7's floor makes manual) and
+`class-human-only` for a human-only one, and charged against the budgets. A second start of one key
 is `already-executed`. The record carries `execution: "harness"`, which is why no
 `execution.completed` ever follows it.
 

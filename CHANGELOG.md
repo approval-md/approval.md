@@ -337,6 +337,39 @@ on the change above.
   304 calls unchanged, and the box check's 96 denied runs are the seven
   entries' own.
 
+### Added
+
+**`approval propose --irreversible` (APRV-537).** An agent can now say that
+the action it proposes cannot be undone, and a person then decides under every
+setting short of human-only. Until this, a proposal could not declare
+`reversible: false`, so under `autonomous`, `supervised-retro` and
+`supervised-live` the daemon answered `autonomous` or `supervised` and asked
+nobody; the For Kicks coffee order is the case it is for.
+
+- **The floor, for one key.** The flag engages SPEC.md §7's irreversibility
+  floor: the registration and the request record `reversible: false`, those
+  three settings resolve `manual` for the key, the answer is
+  `decision: "requested"`, and the person gets the same card `ask` and
+  `manual` give. `ask`, `manual` and `human-only` are unchanged, and a class
+  rule with `allow_irreversible: true` keeps its own autonomy (the operator's
+  permission, never the agent's).
+- **No start without the person's grant.** `approval start` refuses the key
+  `not-granted` on the grant path and on the policy path (after a withdrawal,
+  an expiry or a rejection); a grant is spent once, `authorization: "grant"`.
+  The write boundary reads the key's own records again, so a caller that does
+  not repeat the flag is floored all the same.
+- **The stricter value sticks.** Once the registration or any request of the
+  key says `reversible: false`, a later propose without the flag stays
+  floored. A later propose with the flag over a key first proposed without it
+  files its request floored, and the key stays floored from then on.
+- **On serve's agent allowlist.** `approval serve` accepts `--irreversible`
+  from the agent credential on `propose` and on nothing else; every other
+  off-list flag is still 403 `serve-flag-not-permitted`. A core without the
+  flag refuses it (CLI usage error, exit 2; serve 403), so a caller that
+  always sends it needs a fallback until the fleet runs this core.
+- **Nothing else moves.** Without the flag every answer and record is the
+  same, byte for byte, and the JSON answer gains no member.
+
 ## 0.4.8 — 2026-11-20
 
 0.4.8 carries everything merged since 0.4.7. On Telegram, a new request's
