@@ -130,12 +130,13 @@ test("cost: braces between the outputs, and a word of many pieces, are bounded",
 test("cost: the answers of the bounded walk are the old window reading's", () => {
   // `$(pwd)` classifies (a read); `$(:)` is refused, which would hide the answer.
   const READ_OUT = "$(pwd)";
+  // Each is timed too, so a slow build fails here at once, not after hours.
   // Spellings across an output's edge still count, however many outputs.
-  assert.deepEqual(pure(`echo x >> ${READ_OUT.repeat(1000)}.g${READ_OUT}it/config`), [DIR_WRITE]);
-  assert.deepEqual(pure(`echo x >> .g${READ_OUT.repeat(1000)}t/config`), [DIR_WRITE]);
-  assert.deepEqual(pure(`echo x >> .${"*".repeat(500)}${READ_OUT}t/config`), [DIR_WRITE]);
+  assert.deepEqual(bounded(`echo x >> ${READ_OUT.repeat(1000)}.g${READ_OUT}it/config`, "answer 1"), [DIR_WRITE]);
+  assert.deepEqual(bounded(`echo x >> .g${READ_OUT.repeat(1000)}t/config`, "answer 2"), [DIR_WRITE]);
+  assert.deepEqual(bounded(`echo x >> .${"*".repeat(500)}${READ_OUT}t/config`, "answer 3"), [DIR_WRITE]);
   // And ordinary words do not, however many outputs.
-  assert.deepEqual(pure(`echo x > out/${`${READ_OUT}-`.repeat(1000)}.txt`), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(bounded(`echo x > out/${`${READ_OUT}-`.repeat(1000)}.txt`, "answer 4"), ["files.write.workspace redirect-write"]);
 });
 
 test("cost: a run of glob characters in a target is bounded", () => {

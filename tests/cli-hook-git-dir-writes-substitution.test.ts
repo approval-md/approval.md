@@ -238,6 +238,10 @@ test("S1: a substitution body whose escapes decode to .git names it", () => {
   assert.deepEqual(pure("echo x >> \"$(printf '\\056git')/config\""), [DIR_WRITE]);
   assert.deepEqual(pure("echo x >> \"$(echo -e '\\0056git')/config\""), [DIR_WRITE]);
   assert.deepEqual(pure("cd \"$(printf '\\x2egit')\" && echo x >> config"), [READ_SHELL, DIR_WRITE]);
+  // A command whose printing is not rendered (a script a shell runs): the
+  // body's raw text is decoded too, both ways octal is written.
+  assert.deepEqual(pure("echo x >> \"$(sh -c 'printf \\x2egit')/config\""), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(sh -c 'echo -e \"\\0056git\"')/config\""), [DIR_WRITE]);
 });
 
 test("S1: escapes that do not decode to .git do not move", () => {
