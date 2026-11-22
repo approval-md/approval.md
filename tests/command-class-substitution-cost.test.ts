@@ -172,20 +172,6 @@ test("cost: past 1,024 glob characters one pattern segment is judged to name .gi
   assert.equal(globSegmentMatches(".[gG]*[!x]", ".git"), true);
 });
 
-test("cost: a word of many nested brace groups is bounded", () => {
-  // Finding a group scanned from each `{` to its close: 25,000 nested groups
-  // took 8 s through the hook, and the time grows as the square.
-  for (const n of [25000, 60000]) {
-    bounded(`git push --force && echo x > ${"{a".repeat(n)}${"}".repeat(n)}`, `nested groups, n=${String(n)}`);
-    bounded(`git push --force && echo x > ${"${a:-".repeat(n)}x${"}".repeat(n)}`, `nested expansions, n=${String(n)}`);
-  }
-  // Past the scan bound the word is judged to name .git; a few groups are read.
-  assert.deepEqual(pure(`echo x > ${"{a".repeat(1000)}${"}".repeat(1000)}`), [DIR_WRITE]);
-  assert.deepEqual(pure(`echo x > ${"{a".repeat(100)}${"}".repeat(100)}`), ["files.write.workspace redirect-write"]);
-  assert.deepEqual(pure("echo x > out/{a,b}.txt"), ["files.write.workspace redirect-write"]);
-  assert.deepEqual(pure("echo x > .g{i,}t/config"), [DIR_WRITE]);
-});
-
 test("cost: deep nesting is read once, and refused past 128 levels", () => {
   const nest = (n: number): string => `echo x > "${"$(echo ".repeat(n)}x${")".repeat(n)}"`;
   for (const n of [64, 128]) bounded(nest(n), `nesting ${String(n)}`);

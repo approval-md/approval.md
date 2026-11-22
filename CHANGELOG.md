@@ -172,14 +172,12 @@ on the change above.
   operator that transforms a value (removal, substring, replacement, case,
   `@`) counts, on any parameter. That one costs: `echo x >
   "${f%.txt}.log"` or `"${1%.md}.html"` becomes `git-dir-write`.
-- **The cost of reading a line for `.git` is bounded.** A hook past its
-  timeout lets the call through, so a slow reading is a way past it. The
-  split-spelling reader tried every window of a word as its own expression
-  (130 substitutions and a letter took 74 s through the hook), and the glob
-  reader built one backtracking expression per pattern (`.`, 400 `*` and
-  `x` took 14 s). Both now walk the text once. Finding brace groups scanned
-  from each `{` to its close (25,000 nested groups took 8 s); past 1,000,000
-  characters scanned the word counts as naming `.git`. Past 1,024 glob
+- **A line cannot be built to make the classifier slow.** A hook past its
+  timeout lets the call through, so the cost of reading a line is bounded.
+  The split-spelling reader tried every window of a word as its own
+  expression (130 substitutions and a letter took 74 s through the hook),
+  and the glob reader built one backtracking expression per pattern (`.`,
+  400 `*` and `x` took 14 s). Both now walk the text once. Past 1,024 glob
   characters a pattern segment counts as naming `.git`; substitution bodies
   are read for `.git` to 64 levels of nesting, and a deeper one counts; past
   128 levels a line is refused (`opaque`), where it used to throw near 1,250.
@@ -214,17 +212,8 @@ on the change above.
   pure (153,702 comparisons) and 4,283 lines through the hook in thirteen
   checkout states (222,716 comparisons); against main, the five redirected
   reads above stay as they were. Conformance: `command-class` 1.12.0 (from
-  1.11.0), seven new vectors; the follow-up's 375 are byte-identical. The
+  1.11.0), four new vectors; the follow-up's 375 are byte-identical. The
   fleet's 63 overlay recipes are unmoved.
-- **Evidence, escapes, expansion words and cost.** Against the build before
-  them, 0 looser over 26,355 lines pure (158,130 comparisons) and 4,968
-  lines through the hook in thirteen checkout states (258,336
-  comparisons); 175 lines move, every one stricter: 67 with ANSI-C quoting,
-  43 with a body whose printed output spells `.git`, 57 with a parameter
-  expansion and 8 past the nesting bounds. Against main as merged and against
-  0.4.8's build, 0 looser of its own. A word of 10,000 substitutions, a run
-  of 1,000 `*` and 10,000 levels of nesting each take under half a second of
-  CPU through the hook.
 
 ## 0.4.8 — 2026-11-20
 
