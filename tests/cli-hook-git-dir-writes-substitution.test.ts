@@ -292,6 +292,13 @@ test("known limit: two outputs that together spell .git are not read", () => {
   assert.deepEqual(pure('cd "$(printf .g)$(printf it)" && echo x >> config'), [READ_SHELL, REDIRECT]);
 });
 
+test("hook: printf's precision on %b decoded bytes, with its control (codex on 09a3acd7)", { skip }, () => {
+  const repo = checkout();
+  assert.ok(hook(`echo x > "$(printf '%.5b' '.g\\0itX')/config"`, repo).includes(DIR_WRITE));
+  assert.ok(hook(`echo x > $(printf '%.4s' '.gi*xyz')/config`, repo).includes(DIR_WRITE));
+  assert.deepEqual(hook(`echo x > "$(printf '%.6b' '.g\\0itX')/config"`, repo), [REDIRECT]);
+});
+
 test("hook: the S1 and S2 spellings are git-dir-write in a checkout", { skip }, () => {
   const repo = checkout();
   for (const command of [
@@ -460,4 +467,25 @@ test("source review S2: an ANSI-C string ends at a NUL, and a substitution drops
     assert.ok(pure(line).includes(DIR_WRITE), line);
   }
   assert.deepEqual(pure("echo x > $'notes\\0junk'.md"), [REDIRECT]);
+});
+
+test("security review of the precision fold: printed globs, and a NUL read three ways", () => {
+  for (const line of [
+    // A precision cuts a longer word to a glob, and the unquoted output is globbed.
+    `echo x > $(printf '%.4s' '.gi*xyz')/config`,
+    `echo x > $(printf '%.4s' '.g?tzz')/config`,
+    `echo x > $(printf '%.6s' '.gi[t]zz')/config`,
+    // A NUL as an end, in a body's escapes.
+    `echo x > "$(printf '\\x2egit\\0x')/config"`,
+  ]) {
+    assert.ok(pure(line).includes(DIR_WRITE), line);
+  }
+  // codex's SOURCE HOLD on 09a3acd7: %b's precision cuts before the NULs go.
+  assert.ok(pure(`echo x > "$(printf '%.5b' '.g\\0itX')/config"`).includes(DIR_WRITE));
+  assert.deepEqual(pure(`echo x > "$(printf '%.6b' '.g\\0itX')/config"`), [REDIRECT]);
+  // A * width takes its argument: a long line of them ends in time.
+  assert.ok(pure(`echo x > "$(printf '%*s' ${"4 x ".repeat(2000)})/config"`).includes(DIR_WRITE));
+  // A printed glob that cannot name .git, and a NUL in ordinary text, do not move.
+  assert.deepEqual(pure(`echo x > $(printf '%.5s' '*.logs')`), [REDIRECT]);
+  assert.deepEqual(pure(`echo x > "$(printf 'out\\0x').log"`), [REDIRECT]);
 });

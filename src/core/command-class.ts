@@ -5151,7 +5151,11 @@ function printedOutputs(segment: LexSegment): string[] | null {
         // review, S1). A literal precision cuts a string, as printf does:
         // `%.4s` of `.gitfoo` is `.git`. A width only pads with blanks.
         if (spec.includes("*")) {
-          took = true;
+          // Each `*` takes an argument, as the conversion does, so the passes
+          // end once the words run out (codex's cost note on 09a3acd7).
+          for (let star = spec.split("*").length - 1; star >= 0; star -= 1) {
+            if (args.shift() !== undefined) took = true;
+          }
           return "/.git/";
         }
         const precision = /\.([0-9]*)[a-zA-Z]$/u.exec(spec);
@@ -5163,7 +5167,10 @@ function printedOutputs(segment: LexSegment): string[] | null {
         const arg = args.shift();
         if (arg !== undefined) took = true;
         if (conversion === "s" || conversion === "q") return cut(unknown(arg ?? ""));
-        if (conversion === "b") return cut(decode(arg ?? ""));
+        // `%b` cuts the decoded bytes, NULs still in them, and the
+        // substitution drops the NULs after: `%.5b` of `.g\0itX` is
+        // `.g<NUL>it`, so `.git` (codex's SOURCE HOLD on 09a3acd7).
+        if (conversion === "b") return dropNuls(cut(decodeBackslashEscapes(unknown(arg ?? ""), zeroOctal)));
         if (conversion === "c") return unknown(arg ?? "").slice(0, 1);
         return SUBSTITUTION_SENTINEL;
       });
@@ -5202,7 +5209,17 @@ function bodyPrintsGit(segments: readonly LexSegment[]): boolean {
   return (
     printed &&
     readings.some(
-      (output) => GIT_SEGMENT_IN_TEXT.test(output.split(SUBSTITUTION_SENTINEL).join("/")) || wordJoinsGitAcrossSubstitution(output),
+      (output) =>
+        GIT_SEGMENT_IN_TEXT.test(output.split(SUBSTITUTION_SENTINEL).join("/")) ||
+        wordJoinsGitAcrossSubstitution(output) ||
+        // An unquoted substitution's output is still globbed: `.gi*`, `.g?t`
+        // or `.gi[t]` printed (a precision may cut a longer word to it)
+        // may name `.git` (the security review of the precision fold).
+        output
+          .split(SUBSTITUTION_SENTINEL)
+          .join(" ")
+          .split(/\s+/u)
+          .some((word) => /[*?[]/u.test(word) && mayNameGitDirectory(word)),
     )
   );
 }
@@ -5312,7 +5329,15 @@ function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): bo
     }
     // `printf '\x2egit'`, `echo -e '\0056git'`: escapes a command in the body
     // may decode, read both ways octal is written.
-    if (body.includes("\\") && [false, true].some((zeroOctal) => GIT_SEGMENT_IN_TEXT.test(dropNuls(decodeBackslashEscapes(body, zeroOctal))))) {
+    // A NUL is read three ways, the strict side of each: kept, dropped (a
+    // substitution drops it) and as an end (an ANSI-C string ends there).
+    if (
+      body.includes("\\") &&
+      [false, true].some((zeroOctal) => {
+        const decoded = decodeBackslashEscapes(body, zeroOctal);
+        return [decoded, dropNuls(decoded), cutAtNul(decoded)].some((text) => GIT_SEGMENT_IN_TEXT.test(text));
+      })
+    ) {
       return true;
     }
     const lexed = lex(body);
