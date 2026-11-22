@@ -174,6 +174,79 @@ on the change above.
 
 ### Added
 
+- **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536).**
+  `overlay-recipes-check.mjs --expected <expected.json> --tag-corpus <corpus>`
+  finds every call that is new or changed against the previous release (a new
+  recipe, other command bytes, or a call the CLASS-DIFF moved between the
+  cores) and requires its declared outcome: class, decision, `card_style:
+  minimal` for a card, and the decision in each settings cell (ask, autonomous,
+  supervised-retro, supervised-live with a fixed sampling secret, manual). The
+  real hook (and the daemon `propose` a plugin makes behind a call, as a For
+  Kicks order does) must give exactly it under the village default template.
+  An undeclared new call, a class or decision other than declared (an expected
+  card that runs auto included), an undeclared refusal, a technical card, a
+  stale or duplicate entry, a schema-invalid envelope input, or a limiting
+  entry without `accepted_by: "human:carter"` and a date exits 1. The extractor
+  gains `--with-envelopes`: each mini-app manifest operation as the exact
+  `village` call the hook sees, and every gated plugin tool with its registered
+  input schema; without the flag its output is unchanged.
+- **NEW-CALLS sees what the review found it blind to (B-167N review fold).**
+  - The extractor reads a plugin tool registered through a local name bound
+    from `getattr(ctx, "register_tool")` or in a loop over a literal list, and
+    a pattern added to or removed from `APPROVAL_GATED_TOOLS` needs a declared
+    entry; a gated pattern that reaches no call the box runs fails closed.
+  - Every operation the `village` schema accepts is a call, with a manifest or
+    without; one in neither of the bridge's operation lists is unmapped.
+  - Every daemon `propose` in a plugin that owns a gated tool is extracted with
+    its class and the answers the code after it goes on with; an entry must
+    declare it (`propose.source`, `propose.class`, `propose.accepts`), and an
+    answer the plugin refuses is a refused call. For Kicks refuses an order the
+    daemon answers `autonomous` or `supervised`; Gold Stars refuses
+    `supervised`.
+  - An acceptance dated after the run, a member named twice in
+    `expected.json`, and two recipes with one key and other bytes fail; the
+    check's entry point compares real paths.
+  - `expected.json` declares the calls new since the previous release on
+    overlay main `255f9291` (twelve eci-volunteers operations,
+    `kismet.web_link`, `zzz.schedule_posts`) and Gold Stars' send propose; the
+    For Kicks propose cites where the code proposes today.
+  - A red run's report says FAIL and why. A stale or unaccepted allowlist
+    entry, an unlisted deny or an unpinned `expected.json` used to exit 1 under
+    a `CLASS-DIFF PASS` line; the first line now reads `FAIL k OTHER` (or `FAIL
+    n BLOCKING, k OTHER`) with each reason listed under it and in the JSON's
+    `reasons` and `failed`, while a clean PASS and a blocking-only FAIL line are
+    unchanged.
+  - A daemon `propose` in a plugin that owns no gated tool is judged too. The
+    extractor used to list those apart (`proposes_unhooked`) and nothing
+    checked them; every propose site is now in `proposes`, and `gated_plugin`
+    only labels the report. A propose with no hooked call in front of it is
+    declared by an entry that holds `propose` alone, its `source` one line. A
+    class taken from a held entry's `class` field reads as the classes the
+    module's own guards compare that field with; the answers also read through
+    `doc = answer.doc`, a pair assignment, or an `if`/`elif` chain whose `else`
+    ends the flow. What the extractor cannot read fails closed, and so does a
+    corpus that still lists proposes apart. A comparison or chain counts only
+    where every path from the propose passes through it (after it, in the same
+    function, not under a branch, loop, try or with that can be skipped), and
+    a branch that returns or raises admits no answer; one anywhere else leaves
+    the answers unread. `self.propose(...)`, a bare `propose(...)`, a name
+    imported as `propose`, a `getattr` alias and a name bound from
+    `<x>.propose` are read as proposes; a propose passed, stored or wrapped
+    (a `functools.partial`) is an unread site. `expected.json` declares the four av-events sites (intent
+    publish, digest share, village vote) as eight entries; six are limiting
+    and wait for Carter's acceptance.
+  - The lines that decide which class a held entry gets are judged too. Such a
+    propose sends whatever class its entry was filed with, so filing an
+    inferred intention as stated (which publishes without asking) used to
+    leave the check green. The extractor now lists every class writer in a
+    plugin with such a propose (`class_writers`): a dict literal's `"class"`,
+    an assignment to `x["class"]`, `setdefault`, and a call that passes the
+    class to the function that stores it, followed across the plugin's modules
+    and through a module alias such as `ia = _ia()`. Each writer is declared
+    by file and function in `propose.writers` of an entry of its class; a
+    writer that appears, disappears or changes its class, one whose class
+    cannot be read, and a plugin with such a propose and no writer all fail.
+    `getattr(x, "propose")(...)` is now read as a propose too.
 - **CLASS-DIFF against the core the boxes run (B-167 release gate).**
   `overlay-recipes-check.mjs --diff <baseline core>` classifies the same corpus
   at a baseline core and at this one, over every recipe plus every `tools:`

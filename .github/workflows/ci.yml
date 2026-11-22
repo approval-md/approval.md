@@ -263,6 +263,15 @@ jobs:
     # a change to this workflow, a protected path (policy.edit.ci) that needs
     # Carter's grant or attest. The corpus is re-extracted from the overlay at
     # its pinned sha with the BASE branch's extractor, not this PR's.
+    #
+    # NEW-CALLS (B-167N, APRV-536): scripts/overlay-recipes-newcalls.mjs, pinned
+    # here like the other gate files. It runs when the overlay's class-diff job
+    # passes --expected (the overlay's expected.json) and --tag-corpus; this
+    # job's pinned corpus carries no envelopes, so it does not run it here.
+    # scripts/overlay-recipes/expected.json is the overlay's expected.json, byte
+    # for byte, pinned here like the allowlist (PIN_EXPECTED): the check refuses
+    # an overlay expected.json that is not this copy, so a changed declaration
+    # (an acceptance by human:carter included) lands here first.
     name: overlay recipes (consumer corpus)
     needs: classify
     if: always()
@@ -280,9 +289,11 @@ jobs:
       CORPUS_RECIPES: "63"
       PIN_CORPUS: "069cae876367a6c65613a645bbece0212583dde3d6e186454d5d4a9f287cb1c4"
       PIN_ALLOWLIST: "e1d73a1af14cc3c80e87b6d36409721e4a511a9e99d5f5283d9f1588e9ae64ac"
-      PIN_CHECK: "d4297064bbecef8ed56eb2adbe93915713b814b431e6d54bf2fd806dd407a5e8"
-      PIN_BOX: "c7b4c00b2e41e2ae7294d67c76ba7cd086c2f35a3b796c064714475fd47fa3ca"
-      PIN_EXTRACT: "d20bad05e8a81408fa3ee2a69bd14212f01170553a8a27c3e992908df9accfa6"
+      PIN_EXPECTED: "bb56b15408997e42c3019cc8f445056c6e0bcd51a3465206d0752095123e5fd5"
+      PIN_CHECK: "322e7c86d0fbafc0953b18719ab8b2aab8dc0b60532d290559e3ccd2833fd4d3"
+      PIN_BOX: "b9ab914808913bef08a22e0225e2024898be72a775fa34b9a85e0b5c60bb29cb"
+      PIN_EXTRACT: "41fa596e60b1260cd18127f060bd46edec8a440381b0e985ca89a928f536a1cc"
+      PIN_NEWCALLS: "e4415f968a16d5d11395a7d896aefddf437c85414fbe17ff7f9f6b5a26710b22"
     steps:
       # Depth 2: HEAD^1 is the base the change is measured against (a pull
       # request's merge commit's first parent, the queue's base, or the main a
@@ -309,9 +320,11 @@ jobs:
           }
           pin scripts/overlay-recipes/corpus.json "$PIN_CORPUS"
           pin scripts/overlay-recipes/allowlist.json "$PIN_ALLOWLIST"
+          pin scripts/overlay-recipes/expected.json "$PIN_EXPECTED"
           pin scripts/overlay-recipes-check.mjs "$PIN_CHECK"
           pin scripts/overlay-recipes-box.mjs "$PIN_BOX"
           pin scripts/overlay-recipes-extract.mjs "$PIN_EXTRACT"
+          pin scripts/overlay-recipes-newcalls.mjs "$PIN_NEWCALLS"
           n=$(node -p 'require("./scripts/overlay-recipes/corpus.json").recipes.length')
           if [ "$n" != "$CORPUS_RECIPES" ]; then
             echo "::error::the corpus holds $n recipes, not the $CORPUS_RECIPES this workflow pins"
@@ -332,7 +345,7 @@ jobs:
             skills
             workspace
             install
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
       - name: the committed corpus is the overlay's own extraction at that sha (base branch's extractor)
