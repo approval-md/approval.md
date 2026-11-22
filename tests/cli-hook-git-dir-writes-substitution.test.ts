@@ -439,6 +439,8 @@ test("source review S1: printf's precision cuts a string; a * width or precision
     `echo x > "$(printf '%.4b' '.gitfoo')/config"`,
     `echo x > "$(printf '%.*s' 4 '.gitfoo')/config"`,
     `echo x > "$(printf '%*s' 4 x)/config"`,
+    `echo x > "$(printf '%.4s' "$X")/config"`,
+    `echo x > "$(printf '%.4b' "$(cat f)")/config"`,
   ]) {
     assert.ok(pure(line).includes(DIR_WRITE), line);
   }
