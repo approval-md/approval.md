@@ -70,7 +70,8 @@ export const PINNED_FLAGS: readonly string[] = ["--dir", "--log", "--policy"];
  *
  * A positive list per verb, and short on purpose. The agent surface is seven
  * verbs; between them they need an action key, a decision deadline, a note,
- * a proposal's class, key, summary and inline payload, and `--json`. Everything else on those verbs is either the store (pinned), the
+ * a proposal's class, key, summary, inline payload and irreversibility, and
+ * `--json`. Everything else on those verbs is either the store (pinned), the
  * identity (`--as`, refused by the argv builder both transports share), a path
  * (refused below), or something nobody has decided a sandboxed harness should
  * have.
@@ -87,7 +88,11 @@ export const AGENT_FLAGS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ["withdraw", new Set(["--action", "--reason", "--note", "--json"])],
   // APRV-445. The payload travels as a string VALUE, which is the whole reason
   // these two verbs exist on this surface: a path would name the host's file.
-  ["propose", new Set(["--class", "--key", "--summary", "--payload-json", "--json"])],
+  // `--irreversible` (SPEC.md §7's floor for the key) is a boolean the agent
+  // states about its own action. It can only raise scrutiny: it asks a human
+  // under a class that would not have, and it sticks to the key, so no later
+  // call from this credential can lower it (§11.1 invariant 4).
+  ["propose", new Set(["--class", "--key", "--summary", "--payload-json", "--irreversible", "--json"])],
   ["start", new Set(["--action", "--payload-json", "--json"])],
 ]);
 

@@ -54,7 +54,7 @@ Usage:
   approval register   <task-file> [--as <id>] [--log <path>] [--json]
   approval request    <task> --action <key> [--as <id>] [--json]
   approval propose    --class <c> --key <k> --summary <s> --payload-json <j>
-                      [--as <id>] [--json]
+                      [--irreversible] [--as <id>] [--json]
   approval start      <task> --action <key> --payload-json <j> [--as <id>]
                       [--json]
   approval grant|reject|revoke <action-key> [--note <text>] [--as human:<id>] [--json]
@@ -864,7 +864,7 @@ export const PROPOSE_HELP = `approval propose — register and request one actio
 
 Usage:
   approval propose --class <c> --key <k> --summary <text> --payload-json <json>
-                   [--as <id>] [--policy <p>] [--dir <p>] [--log <p>] [--json]
+                   [--irreversible] [--as <id>] [--policy|--dir|--log <p>] [--json]
 
 Flags:
   --class <c>          an EXACT key of the policy's classes, opened to agents by
@@ -872,6 +872,7 @@ Flags:
   --key <k>            "<class>:<id>", recorded verbatim as action_key (≤1 KiB)
   --summary <text>     the line the approver reads (in the log, in cleartext)
   --payload-json <j>   the payload, a JSON object of at most 262144 bytes
+  --irreversible       it cannot be undone: SPEC.md §7's floor asks a person
   --as <id>            human:<id> or agent:<id>; else APPROVAL_HUMAN
 
 decision "requested": poll \`approval wait <task> --timeout 0\` (7 void or 3
