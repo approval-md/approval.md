@@ -4131,9 +4131,55 @@ interface SegmentPiece {
   literal: boolean;
 }
 
+/**
+ * Where the bracket scan of {@link segmentPieces} stops from each position of
+ * `pattern`, read in UTF-16 units as that scan reads them (codex S1 on #682).
+ *
+ * The scan walks forward from a start, stops at the first `]`, and jumps a
+ * POSIX element (`[:`, `[=` or `[.` to the next `:]`, `=]` or `.]`), or ends
+ * the pattern when that element never closes. Where it goes next depends only
+ * on where it is, so the walk from every position is filled in once, right to
+ * left: `close[i]` is where the walk from `i` stops (the pattern's length
+ * when no `]` ends it) and `posix[i]` whether it passed a POSIX element on the
+ * way. Scanning afresh from each `[` was n(n-1)/2 steps for a run of n
+ * unclosed `[`: 2,000 took 28 CPU ms and 50,000 took 14 CPU s.
+ */
+function bracketScans(pattern: string): { close: Int32Array; posix: Uint8Array } {
+  const length = pattern.length;
+  const close = new Int32Array(length + 1);
+  const posix = new Uint8Array(length + 1);
+  // `next[kind][i]`: where the next `<kind>]` starts at or after i, else -1,
+  // which is what `pattern.indexOf(`${kind}]`, i)` answered.
+  const next: Record<string, Int32Array> = {};
+  for (const kind of [":", "=", "."]) {
+    const ends = new Int32Array(length + 2).fill(-1);
+    for (let index = length - 2; index >= 0; index -= 1) {
+      ends[index] = pattern[index] === kind && pattern[index + 1] === "]" ? index : (ends[index + 1] as number);
+    }
+    next[kind] = ends;
+  }
+  close[length] = length;
+  for (let index = length - 1; index >= 0; index -= 1) {
+    const char = pattern[index];
+    const kind = pattern[index + 1];
+    if (char === "]") {
+      close[index] = index;
+    } else if (char === "[" && (kind === ":" || kind === "=" || kind === ".")) {
+      const end = (next[kind] as Int32Array)[index + 2] as number;
+      close[index] = end === -1 ? length : (close[end + 2] as number);
+      posix[index] = 1;
+    } else {
+      close[index] = close[index + 1] as number;
+      posix[index] = posix[index + 1] as number;
+    }
+  }
+  return { close, posix };
+}
+
 /** The pieces the old translation wrote for `pattern`, in order. */
 function segmentPieces(pattern: string): SegmentPiece[] {
   const pieces: SegmentPiece[] = [];
+  let scans: { close: Int32Array; posix: Uint8Array } | null = null;
   for (let at = 0; at < pattern.length; at += 1) {
     const char = pattern[at] as string;
     if (char === "\\" && at + 1 < pattern.length) {
@@ -4149,25 +4195,12 @@ function segmentPieces(pattern: string): SegmentPiece[] {
       // element (`[:alpha:]`, `[=g=]`, `[.g.]`) is skipped to its own close
       // and makes the expression match ANY one character, the strict side
       // (review of the second fold). Unclosed, the `[` is a literal.
-      let close = at + 1;
-      if (pattern[close] === "!" || pattern[close] === "^") close += 1;
-      if (pattern[close] === "]") close += 1;
-      let posix = false;
-      while (close < pattern.length && pattern[close] !== "]") {
-        const kind = pattern[close + 1];
-        if (pattern[close] === "[" && (kind === ":" || kind === "=" || kind === ".")) {
-          const end = pattern.indexOf(`${kind}]`, close + 2);
-          if (end === -1) {
-            posix = true;
-            close = pattern.length;
-            break;
-          }
-          posix = true;
-          close = end + 2;
-          continue;
-        }
-        close += 1;
-      }
+      let start = at + 1;
+      if (pattern[start] === "!" || pattern[start] === "^") start += 1;
+      if (pattern[start] === "]") start += 1;
+      scans ??= bracketScans(pattern);
+      const close = scans.close[start] as number;
+      const posix = scans.posix[start] === 1;
       if (close >= pattern.length) {
         // Unclosed: a literal `[`, unless a class inside it left the reading
         // uncertain, which the strict side reads as any characters.

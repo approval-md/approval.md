@@ -169,6 +169,48 @@ test("equivalence: globSegmentMatches answers as the old expression on seeded ra
   assert.ok(agreedTrue > 1_000, `true answers ${String(agreedTrue)}`);
 });
 
+/**
+ * Bracket shapes (codex S1 and caveat 2 on #682): malformed and POSIX
+ * brackets, `[]...]`, `[!...]`, `[^...]` and reversed ranges, each joined
+ * with stars and with one another. Patterns are one to four fragments drawn
+ * with a fixed seed; each is tested against a fixed list of names and against
+ * two names spelled from the pattern itself, so a literal `[` or `]` is
+ * matched as often as it is missed.
+ */
+const BRACKET_FRAGMENTS = [
+  "*", "**", "?", "[", "[[", "]", "[]", "[]a]", "[]]", "[!a]", "[^a]", "[!]", "[^]]", "[!]a]", "[a-c]", "[c-a]",
+  "[a-]", "[-a]", "[[:alpha:]]", "[[:alpha:]", "[[=g=]]", "[[.g.]]", "[[:", ":]", "=]", "[a", "a]", "[a[b]",
+  "[*]", "[?]", "[.]", "[!.]", "g", "G", ".", "a", "\\[", "\\*", "\\]", "[\\]", "[z-a]*", "*[", "[*",
+];
+const BRACKET_NAMES = [
+  "", ".git", ".GIT", "git", "a", "A", "b", "c", "g", "z", ".", "]", "[", "[]", "!", "^", "-", ":", "*", "?", "\\",
+  "a]", "[a", "ab", "abc", "ga", "]a", "[a-c]", "/", "a/b", "\n", "é",
+];
+
+/** A name spelled from `pattern`: `*` as `fill`, `?` as `one`, everything else as written. */
+function spelled(pattern: string, fill: string, one: string): string {
+  return pattern.replace(/\*/gu, fill).replace(/\?/gu, one);
+}
+
+test("equivalence: bracket shapes joined with stars answer as the old expression", () => {
+  const random = generator(0x683);
+  let checked = 0;
+  let matched = 0;
+  for (let index = 0; index < 4_000; index += 1) {
+    let pattern = "";
+    const parts = 1 + Math.floor(random() * 4);
+    for (let part = 0; part < parts; part += 1) pattern += BRACKET_FRAGMENTS[Math.floor(random() * BRACKET_FRAGMENTS.length)] as string;
+    for (const name of [...BRACKET_NAMES, spelled(pattern, "ab", "g"), spelled(pattern, "", "a")]) {
+      const expected = oracleSegmentMatches(pattern, name);
+      assert.equal(globSegmentMatches(pattern, name), expected, `pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`);
+      checked += 1;
+      if (expected) matched += 1;
+    }
+  }
+  assert.ok(checked === 4_000 * (BRACKET_NAMES.length + 2), String(checked));
+  assert.ok(matched > 5_000, `matched ${String(matched)}`);
+});
+
 test("cost: a long `*` run is matched in bounded CPU time", () => {
   // 8 `*` and 12 `z` against a directory's names took 36.7 CPU s through the
   // hook on a521a91d. About 50 CPU ms here for all of these; the bound is 10x.
@@ -188,4 +230,34 @@ test("cost: a long `*` run is matched in bounded CPU time", () => {
     }
   });
   assert.ok(ms < 500, `${ms.toFixed(1)} CPU ms, bound 500`);
+});
+
+test("cost: a run of unclosed `[` is scanned once, not once per `[` (codex S1 on #682)", () => {
+  // Each `[` scanned to the end of the pattern: n(n-1)/2 steps, 28 CPU ms at
+  // n = 2,000 and 2.3 CPU s at 20,000 on bfa73710 (14 s at 50,000; 32.5 s
+  // for this whole test). About 70 CPU ms here for all of these; the bound
+  // is 7x.
+  const ms = cpuMs(() => {
+    for (const length of [2_000, 20_000, 50_000]) {
+      for (const pattern of ["[".repeat(length), `*${"[".repeat(length)}*`, `${"[!".repeat(length / 2)}`, `${"[[:".repeat(length / 3)}`]) {
+        globSegmentMatches(pattern, ".git");
+        globSegmentMatches(pattern, "x");
+        mayNameGitDirectory(`a/${pattern}/b`);
+      }
+    }
+  });
+  assert.ok(ms < 500, `${ms.toFixed(1)} CPU ms, bound 500`);
+});
+
+test("cost: a class of many members is matched in bounded CPU time", () => {
+  const names = Array.from({ length: 20 }, (_, index) => `${"a".repeat(5_000)}Y${String(index)}`);
+  const ms = cpuMs(() => {
+    for (const members of [5_000, 50_000]) {
+      for (const name of names) assert.equal(globSegmentMatches(`*[${"z".repeat(members)}]X`, name), false);
+    }
+  });
+  // A guard: the `.git` reader tests each character with one cached
+  // one-character expression, so this was never P x N (11 CPU ms on
+  // bfa73710). About 16 CPU ms here; the bound is 9x.
+  assert.ok(ms < 150, `${ms.toFixed(1)} CPU ms, bound 150`);
 });

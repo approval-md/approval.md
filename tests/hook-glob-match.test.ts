@@ -128,6 +128,48 @@ test("equivalence: globPattern answers as the old expression on seeded random ca
   assert.ok(agreedTrue > 1_000, `true answers ${String(agreedTrue)}`);
 });
 
+/**
+ * Bracket shapes (codex S1 and caveat 2 on #682): malformed and POSIX
+ * brackets, `[]...]`, `[!...]`, `[^...]` and reversed ranges, each joined
+ * with stars and with one another. Patterns are one to four fragments drawn
+ * with a fixed seed; each is tested against a fixed list of names and against
+ * two names spelled from the pattern itself, so a literal `[` or `]` is
+ * matched as often as it is missed.
+ */
+const BRACKET_FRAGMENTS = [
+  "*", "**", "?", "[", "[[", "]", "[]", "[]a]", "[]]", "[!a]", "[^a]", "[!]", "[^]]", "[!]a]", "[a-c]", "[c-a]",
+  "[a-]", "[-a]", "[[:alpha:]]", "[[:alpha:]", "[[=g=]]", "[[.g.]]", "[[:", ":]", "=]", "[a", "a]", "[a[b]",
+  "[*]", "[?]", "[.]", "[!.]", "g", "G", ".", "a", "\\[", "\\*", "\\]", "[\\]", "[z-a]*", "*[", "[*",
+];
+const BRACKET_NAMES = [
+  "", ".git", ".GIT", "git", "a", "A", "b", "c", "g", "z", ".", "]", "[", "[]", "!", "^", "-", ":", "*", "?", "\\",
+  "a]", "[a", "ab", "abc", "ga", "]a", "[a-c]", "/", "a/b", "\n", "é",
+];
+
+/** A name spelled from `pattern`: `*` as `fill`, `?` as `one`, everything else as written. */
+function spelled(pattern: string, fill: string, one: string): string {
+  return pattern.replace(/\*/gu, fill).replace(/\?/gu, one);
+}
+
+test("equivalence: bracket shapes joined with stars answer as the old expression", () => {
+  const random = generator(0x682);
+  let checked = 0;
+  let matched = 0;
+  for (let index = 0; index < 4_000; index += 1) {
+    let pattern = "";
+    const parts = 1 + Math.floor(random() * 4);
+    for (let part = 0; part < parts; part += 1) pattern += BRACKET_FRAGMENTS[Math.floor(random() * BRACKET_FRAGMENTS.length)] as string;
+    for (const name of [...BRACKET_NAMES, spelled(pattern, "ab", "g"), spelled(pattern, "", "a")]) {
+      const expected = oracleGlobRegex(pattern).test(name);
+      assert.equal(globPattern(pattern).test(name), expected, `pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`);
+      checked += 1;
+      if (expected) matched += 1;
+    }
+  }
+  assert.ok(checked === 4_000 * (BRACKET_NAMES.length + 2), String(checked));
+  assert.ok(matched > 5_000, `matched ${String(matched)}`);
+});
+
 test("cost: one test of a long pattern is bounded, whatever it holds", () => {
   const long = [
     "*".repeat(100_000),
@@ -146,4 +188,36 @@ test("cost: one test of a long pattern is bounded, whatever it holds", () => {
   // About 125 CPU ms here for five 100,000-character patterns (the compile is
   // linear in the pattern); the bound is 8x that.
   assert.ok(ms < 1_000, `${ms.toFixed(1)} CPU ms, bound 1,000`);
+});
+
+test("cost: a class of many members is one binary search a character (codex caveat 2 on #682)", () => {
+  // Testing a character against every member was P x N comparisons a name:
+  // on bfa73710 these 20 names took 206 CPU ms at P = 5,000 and 1,956 for
+  // both sizes. About 55 CPU ms here for both (7 at P = 5,000; the rest is
+  // sorting 50,000 members once); the bound is 9x that.
+  const names = Array.from({ length: 20 }, (_, index) => `${"a".repeat(5_000)}Y${String(index)}`);
+  const ms = cpuMs(() => {
+    for (const members of [5_000, 50_000]) {
+      const compiled = globPattern(`*[${"z".repeat(members)}]X`);
+      for (const name of names) assert.equal(compiled.test(name), false);
+    }
+  });
+  assert.ok(ms < 500, `${ms.toFixed(1)} CPU ms, bound 500`);
+  // The merged ranges still answer as the members do.
+  const mixed = globPattern("[zb-dz-za-ab-c0-9_]");
+  for (const [name, expected] of [["a", true], ["d", true], ["e", false], ["z", true], ["5", true], ["_", true], ["y", false]] as const) {
+    assert.equal(mixed.test(name), expected, name);
+  }
+});
+
+test("cost: a run of unclosed `[` compiles in one pass", () => {
+  const ms = cpuMs(() => {
+    for (const length of [2_000, 20_000, 200_000]) {
+      const compiled = globPattern("[".repeat(length));
+      assert.equal(compiled.test(".git"), true, String(length)); // the refused expression matched every name
+    }
+  });
+  // The hook's reader never rescanned (an unclosed `[` ends the compile):
+  // about 9 CPU ms here, 35 on bfa73710; the bound is 10x.
+  assert.ok(ms < 100, `${ms.toFixed(1)} CPU ms, bound 100`);
 });

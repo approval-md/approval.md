@@ -124,3 +124,41 @@ test("cost: the whole hook classification of a long `*` run is bounded in CPU ti
     else process.env["HOME"] = savedHome;
   }
 });
+
+test("cost: a run of unclosed `[` and a class of many members, through the whole classification (codex on #682)", () => {
+  const { dir, home } = workspace();
+  // Two hundred names of 250 characters, beside the workspace's own, in the
+  // directory and in the home: what a class is tested against, character by
+  // character.
+  for (let index = 0; index < 200; index += 1) {
+    const name = `${String(index).padStart(3, "0")}${"a".repeat(247)}`;
+    writeFileSync(join(dir, name), "x\n", "utf8");
+    writeFileSync(join(home, ".hermes", name), "x\n", "utf8");
+  }
+  const savedHome = process.env["HOME"];
+  process.env["HOME"] = home;
+  try {
+    // On bfa73710: `echo x >` and 20,000 `[` took 2.8 CPU s (the `.git`
+    // reader scanned from every `[` to the end), and `cat` of `*[` + 5,000
+    // `z` + `]X` took 160 CPU ms (each character tested against every
+    // member). At most about 14 CPU ms a call here, so the bound is 7x.
+    // (50,000 members took 985 CPU ms through `cat` on bfa73710 and 31 here;
+    // tests/hook-glob-match bounds that size directly.)
+    const words = ["[".repeat(2_000), "[".repeat(20_000), `*[${"z".repeat(5_000)}]X`];
+    for (const word of words) {
+      // A `cat` of a long `[` run is left out: its cost is the kernel refusing
+      // a path that long (lstat through realpath, about 7 CPU ms a call,
+      // the same before and after this change), not either glob reader.
+      const reads = word.startsWith("*") ? [`cat ${word}`, `cat ~/.hermes/${word}`] : [];
+      for (const command of [`echo x > ${word}`, `echo x > ~/.hermes/${word}`, ...reads]) {
+        const ms = cpuMs(() => {
+          classifyForHook(command, [], dir, [], false, [dir]);
+        });
+        assert.ok(ms < BOUND_MS * 2, `${command.slice(0, 30)} (${String(word.length)} characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
+      }
+    }
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});

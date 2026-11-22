@@ -19,7 +19,11 @@
  * token positions the name read so far can reach. Runs of `*` collapse into
  * one token, and a name shorter than the component's one-character tokens is
  * refused before any walk, so one test costs at most (name length) x
- * (2 x name length + 1) token checks after a compile linear in the component.
+ * (2 x name length + 1) token checks after a compile linear in the component
+ * (a class's members sorted once, so each check is a binary search at most).
+ * The compile reads each item once: an unclosed `[` ends it (the old
+ * expression did not compile, so every name matches), so no `[` is scanned
+ * twice.
  *
  * {@link globPattern} is the hook's reader, with the accepted syntax and the
  * answers of `globRegex` for every component and name (tests/hook-glob-match
@@ -156,14 +160,40 @@ function classRanges(atoms: readonly number[]): number[] | null {
   return ranges;
 }
 
+/**
+ * A class as a token whose test is a binary search (codex caveat 2 on #682).
+ * The ranges are sorted and merged once, at compile time: testing each
+ * character against every member as written made `*[` + 5,000 `z` + `]X`
+ * against a 5,000-character name 25 million comparisons, one per member per
+ * character.
+ */
 function classToken(ranges: readonly number[]): GlobToken {
+  const pairs: Array<[number, number]> = [];
+  for (let index = 0; index < ranges.length; index += 2) pairs.push([ranges[index] as number, ranges[index + 1] as number]);
+  pairs.sort((left, right) => left[0] - right[0]);
+  const lows: number[] = [];
+  const highs: number[] = [];
+  for (const [low, high] of pairs) {
+    const last = highs.length - 1;
+    if (last >= 0 && low <= (highs[last] as number) + 1) {
+      if (high > (highs[last] as number)) highs[last] = high;
+    } else {
+      lows.push(low);
+      highs.push(high);
+    }
+  }
   return {
     run: false,
     matches: (code) => {
-      for (let index = 0; index < ranges.length; index += 2) {
-        if (code >= (ranges[index] as number) && code <= (ranges[index + 1] as number)) return true;
+      // The last merged range whose low end is at or below `code`.
+      let low = 0;
+      let high = lows.length - 1;
+      while (low <= high) {
+        const middle = (low + high) >> 1;
+        if ((lows[middle] as number) <= code) low = middle + 1;
+        else high = middle - 1;
       }
-      return false;
+      return high >= 0 && code <= (highs[high] as number);
     },
   };
 }
