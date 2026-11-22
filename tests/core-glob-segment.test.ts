@@ -86,6 +86,24 @@ function oracleSegmentMatches(pattern: string, name: string): boolean {
   }
 }
 
+/**
+ * Hold the reader to the oracle: equal, except that a pattern holding `[^`
+ * may match more (review-b's FINDING on #682: dash reads `^` as a member, so
+ * `.gi[^t]` names `.git` there, while bash and zsh negate; the reader now
+ * reads `[^...]` as any one character, and `[^]` as any name). It still
+ * matches every name the oracle matched.
+ */
+function assertAsOracle(pattern: string, name: string, label: string): boolean {
+  const expected = oracleSegmentMatches(pattern, name);
+  const actual = globSegmentMatches(pattern, name);
+  if (pattern.includes("[^")) {
+    if (expected) assert.equal(actual, true, `${label} (wider)`);
+  } else {
+    assert.equal(actual, expected, label);
+  }
+  return expected;
+}
+
 /** CPU milliseconds (user and system) spent in `run`. */
 function cpuMs(run: () => void): number {
   const start = process.cpuUsage();
@@ -121,7 +139,7 @@ test("equivalence: globSegmentMatches answers as the old expression on a fixed t
   let checked = 0;
   for (const pattern of patterns) {
     for (const name of names) {
-      assert.equal(globSegmentMatches(pattern, name), oracleSegmentMatches(pattern, name), `pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`);
+      assertAsOracle(pattern, name, `pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`);
       checked += 1;
     }
   }
@@ -147,9 +165,7 @@ test("equivalence: globSegmentMatches answers as the old expression on seeded ra
   for (let index = 0; index < cases; index += 1) {
     const pattern = draw(patternAlphabet, 8);
     const name = random() < 0.3 ? ".git" : draw(nameAlphabet, 7);
-    const expected = oracleSegmentMatches(pattern, name);
-    if (expected) matched += 1;
-    assert.equal(globSegmentMatches(pattern, name), expected, `case ${String(index)}: pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`);
+    if (assertAsOracle(pattern, name, `case ${String(index)}: pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`)) matched += 1;
   }
   assert.ok(matched > 150, `matched ${String(matched)}`);
 
@@ -165,9 +181,7 @@ test("equivalence: globSegmentMatches answers as the old expression on seeded ra
       else if (part.startsWith("\\")) name += part.slice(1);
       else name += random() < 0.5 ? part.toUpperCase() : part;
     }
-    const expected = oracleSegmentMatches(pattern, name);
-    if (expected) agreedTrue += 1;
-    assert.equal(globSegmentMatches(pattern, name), expected, `drawn match ${String(index)}: ${JSON.stringify(pattern)} ${JSON.stringify(name)}`);
+    if (assertAsOracle(pattern, name, `drawn match ${String(index)}: ${JSON.stringify(pattern)} ${JSON.stringify(name)}`)) agreedTrue += 1;
   }
   assert.ok(agreedTrue > 1_000, `true answers ${String(agreedTrue)}`);
 });
@@ -204,14 +218,24 @@ test("equivalence: bracket shapes joined with stars answer as the old expression
     const parts = 1 + Math.floor(random() * 4);
     for (let part = 0; part < parts; part += 1) pattern += BRACKET_FRAGMENTS[Math.floor(random() * BRACKET_FRAGMENTS.length)] as string;
     for (const name of [...BRACKET_NAMES, spelled(pattern, "ab", "g"), spelled(pattern, "", "a")]) {
-      const expected = oracleSegmentMatches(pattern, name);
-      assert.equal(globSegmentMatches(pattern, name), expected, `pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`);
+      const expected = assertAsOracle(pattern, name, `pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`);
       checked += 1;
       if (expected) matched += 1;
     }
   }
   assert.ok(checked === 4_000 * (BRACKET_NAMES.length + 2), String(checked));
   assert.ok(matched > 5_000, `matched ${String(matched)}`);
+});
+
+test("negation: `[^...]` names `.git` wherever dash would open it (review-b's FINDING on #682)", () => {
+  // dash reads `[^t]` as the members `^` and `t`: `.gi[^t]` opens `.git`.
+  // bash and zsh negate it: `.gi[^a]` opens `.git`. Both are now names of it.
+  for (const word of [".gi[^t]", ".gi[^a]", ".g[^]i]t", ".gi[^t]/config", "x/.g[^x]t/HEAD"]) {
+    assert.equal(mayNameGitDirectory(word), true, word);
+  }
+  // `[!...]` negates in every one of those shells: as before.
+  assert.equal(globSegmentMatches(".gi[!t]", ".git"), false);
+  assert.equal(globSegmentMatches(".gi[!a]", ".git"), true);
 });
 
 test("cost: a long `*` run is matched in bounded CPU time", () => {

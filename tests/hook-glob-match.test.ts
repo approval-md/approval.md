@@ -10,9 +10,20 @@
  * expression's answer (ported below as the oracle) over a fixed table and a
  * few thousand seeded random cases, and bound one test of a long pattern.
  * tests/hook-glob-cost.test.ts bounds the hook's passes, through hook.ts only.
+ *
+ * Where the old expression read a form unlike the shell (review-b's FINDING
+ * on 8c91e702: `[!x]` and `[^x]` were literal members, so
+ * `cat ~/.hermes/[!x]uth.json` was not a credential read), the reader now
+ * matches at least what the shell opens: a negated class is compared with
+ * bash, zsh and dash themselves (where installed), and every other changed
+ * form matches at least what the old expression matched.
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { globPattern } from "../src/core/glob-match.js";
@@ -31,6 +42,46 @@ function oracleGlobRegex(component: string): RegExp {
   } catch {
     return /^.*$/u;
   }
+}
+
+/**
+ * How the oracle holds for `pattern`: `"negated"` when it holds `[!` or `[^`
+ * (the old expression read those as members; tested against the shells
+ * below), `"equal"` when it holds none of the forms the reader now reads more
+ * widely (see src/core/glob-match.ts), else `"wider"`: the reader matches
+ * every name the old expression matched, and maybe more. Conservative: a
+ * pattern may be called `"wider"` and still answer equal.
+ */
+function oracleHolds(pattern: string): "negated" | "equal" | "wider" {
+  if (pattern.includes("[!") || pattern.includes("[^")) return "negated";
+  if (/[\\()|<>#~^]/u.test(pattern)) return "wider";
+  const chars = Array.from(pattern);
+  for (let at = 0; at < chars.length; at += 1) {
+    if (chars[at] !== "[") continue;
+    const close = chars.indexOf("]", at + 1);
+    if (close === -1) return "equal"; // unclosed: any name, before and after
+    const body = chars.slice(at + 1, close);
+    if (body.length === 0 || body.includes("[") || body.includes("?")) return "wider";
+    // A `-` between members is a range, which may now hold more.
+    if (body.slice(1, -1).includes("-") || (body.length > 1 && body[0] === "*" && body[1] === "-")) return "wider";
+    at = close;
+  }
+  return "equal";
+}
+
+/** Assert the reader against the oracle as {@link oracleHolds} says; true when it was compared for equality. */
+function againstOracle(pattern: string, name: string, label: string): boolean {
+  // An ASCII letter now matches either case (nocaseglob, case-insensitive volumes).
+  const holds = /[A-Z]/u.test(pattern + name) && oracleHolds(pattern) === "equal" ? "wider" : oracleHolds(pattern);
+  if (holds === "negated") return false;
+  const expected = oracleGlobRegex(pattern).test(name);
+  const actual = globPattern(pattern).test(name);
+  if (holds === "equal") {
+    assert.equal(actual, expected, label);
+    return true;
+  }
+  if (expected) assert.equal(actual, true, `${label} (wider: still matches what the old expression matched)`);
+  return false;
 }
 
 /** CPU milliseconds (user and system) spent in `run`: a shared runner's wall clock is no bound. */
@@ -57,14 +108,11 @@ test("equivalence: globPattern answers as the old expression on a fixed table", 
   ];
   let checked = 0;
   for (const pattern of patterns) {
-    const oracle = oracleGlobRegex(pattern);
-    const ours = globPattern(pattern);
     for (const name of names) {
-      assert.equal(ours.test(name), oracle.test(name), `pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`);
-      checked += 1;
+      if (againstOracle(pattern, name, `pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`)) checked += 1;
     }
   }
-  assert.ok(checked > 2_000, String(checked));
+  assert.ok(checked > 1_600, String(checked));
 });
 
 /** mulberry32: a fixed-seed generator, so every run draws the same cases. */
@@ -95,19 +143,26 @@ test("equivalence: globPattern answers as the old expression on seeded random ca
   };
   let matched = 0;
   let invalid = 0;
+  let equal = 0;
   const cases = 6_000;
   for (let index = 0; index < cases; index += 1) {
     const pattern = draw(patternAlphabet, 9);
     const name = draw(nameAlphabet, 8);
     const oracle = oracleGlobRegex(pattern);
+    if (oracleHolds(pattern) !== "equal" || /[A-Z]/u.test(pattern + name)) {
+      againstOracle(pattern, name, `case ${String(index)}: pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`);
+      continue;
+    }
+    equal += 1;
     if (oracle.source === "^.*$" && pattern !== "*") invalid += 1;
     const expected = oracle.test(name);
     if (expected) matched += 1;
     assert.equal(globPattern(pattern).test(name), expected, `case ${String(index)}: pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`);
   }
   // The draw reaches both answers and the refused-pattern fallback.
-  assert.ok(matched > 300, `matched ${String(matched)}`);
-  assert.ok(invalid > 300, `invalid ${String(invalid)}`);
+  assert.ok(equal > 1_500, `compared for equality ${String(equal)}`);
+  assert.ok(matched > 100, `matched ${String(matched)}`);
+  assert.ok(invalid > 100, `invalid ${String(invalid)}`);
 
   // Names drawn to match: a pattern's own characters, with each `*` and `?`
   // replaced by a short run, so the true side is tested as hard as the false.
@@ -122,8 +177,8 @@ test("equivalence: globPattern answers as the old expression on seeded random ca
       else name += part;
     }
     const expected = oracleGlobRegex(pattern).test(name);
+    if (!againstOracle(pattern, name, `drawn match ${String(index)}: ${JSON.stringify(pattern)} ${JSON.stringify(name)}`)) continue;
     if (expected) agreedTrue += 1;
-    assert.equal(globPattern(pattern).test(name), expected, `drawn match ${String(index)}: ${JSON.stringify(pattern)} ${JSON.stringify(name)}`);
   }
   assert.ok(agreedTrue > 1_000, `true answers ${String(agreedTrue)}`);
 });
@@ -161,13 +216,13 @@ test("equivalence: bracket shapes joined with stars answer as the old expression
     for (let part = 0; part < parts; part += 1) pattern += BRACKET_FRAGMENTS[Math.floor(random() * BRACKET_FRAGMENTS.length)] as string;
     for (const name of [...BRACKET_NAMES, spelled(pattern, "ab", "g"), spelled(pattern, "", "a")]) {
       const expected = oracleGlobRegex(pattern).test(name);
-      assert.equal(globPattern(pattern).test(name), expected, `pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`);
+      if (!againstOracle(pattern, name, `pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`)) continue;
       checked += 1;
       if (expected) matched += 1;
     }
   }
-  assert.ok(checked === 4_000 * (BRACKET_NAMES.length + 2), String(checked));
-  assert.ok(matched > 5_000, `matched ${String(matched)}`);
+  assert.ok(checked > 20_000, String(checked));
+  assert.ok(matched > 2_000, `matched ${String(matched)}`);
 });
 
 test("cost: one test of a long pattern is bounded, whatever it holds", () => {
@@ -220,4 +275,183 @@ test("cost: a run of unclosed `[` compiles in one pass", () => {
   // The hook's reader never rescanned (an unclosed `[` ends the compile):
   // about 9 CPU ms here, 35 on bfa73710; the bound is 10x.
   assert.ok(ms < 100, `${ms.toFixed(1)} CPU ms, bound 100`);
+});
+
+/**
+ * Each shell's script: from the directory `$1`, expand every pattern in the
+ * file `$2` (one a line, unquoted, never split) and print the matches as one
+ * line, each followed by `/`. bash and zsh drop a pattern that matches
+ * nothing (nullglob); dash keeps it as written, so only existing names count
+ * (no name holds `[`, so a pattern is never itself a name).
+ */
+const SHELL_SCRIPTS: ReadonlyArray<{ shell: string; args: (script: string) => string[]; script: string }> = [
+  {
+    shell: "bash",
+    args: (script) => ["--norc", "--noprofile", "-c", script, "glob"],
+    script: [
+      "shopt -s nullglob",
+      'cd "$1" || exit 3',
+      'while IFS= read -r p; do IFS=; set -- $p; unset IFS; for f in "$@"; do printf "%s/" "$f"; done; printf "\\n"; done < "$2"',
+    ].join("\n"),
+  },
+  {
+    shell: "zsh",
+    args: (script) => ["-f", "-c", script, "glob"],
+    script: [
+      "setopt nullglob",
+      'cd "$1" || exit 3',
+      'while IFS= read -r p; do ( for f in ${~p}; do printf "%s/" "$f"; done ) 2>/dev/null; printf "\\n"; done < "$2"',
+    ].join("\n"),
+  },
+  {
+    shell: "dash",
+    args: (script) => ["-c", script, "glob"],
+    script: [
+      'cd "$1" || exit 3',
+      'while IFS= read -r p; do IFS=; for f in $p; do [ -e "$f" ] && printf "%s/" "$f"; done; unset IFS; printf "\\n"; done < "$2"',
+    ].join("\n"),
+  },
+];
+
+/**
+ * What `shell` expands each pattern to in `dir`, in the C locale, or `null`
+ * when that shell is not installed (bash is required: CI has it).
+ */
+function shellExpansions(shell: (typeof SHELL_SCRIPTS)[number], dir: string, patternsFile: string, count: number): Set<string>[] | null {
+  const run = spawnSync(shell.shell, shell.args(shell.script).concat([dir, patternsFile]), {
+    encoding: "utf8",
+    env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", LC_ALL: "C", HOME: dir },
+    timeout: 60_000,
+  });
+  if (run.error !== undefined && (run.error as NodeJS.ErrnoException).code === "ENOENT") return null;
+  assert.equal(run.error, undefined, `${shell.shell}: ${String(run.error)}`);
+  assert.equal(run.status, 0, `${shell.shell} exit ${String(run.status)}: ${run.stderr}`);
+  const lines = run.stdout.split("\n").slice(0, count);
+  assert.equal(lines.length, count, `${shell.shell} printed ${String(lines.length)} lines for ${String(count)} patterns`);
+  return lines.map((line) => new Set(line.split("/").filter((name) => name.length > 0)));
+}
+
+test("negation: every `[!...]` and `[^...]` matches at least what bash, zsh and dash open, and is one character (review-b's FINDING)", () => {
+  const random = generator(0x682f);
+  const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)] as T;
+  // Made-up names in a scratch directory: no leading `.` (the shells never
+  // match one with a class; the reader does, the strict side), no `[`, `\\`
+  // or `/`. A case-insensitive file system folds `A` into `a`: the names
+  // tested are what the directory lists.
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-glob-shell-")));
+  try {
+    const dir = join(scratch, "names");
+    const nameAlphabet = ["a", "b", "e", "x", "z", "A", "Z", "1", "9", ".", "-", "_", "!", "^", "]", "*", "?", ":", "~"];
+    const wanted = new Set<string>(nameAlphabet.filter((char) => char !== "."));
+    for (const name of ["auth.json", "env", "xuth.json", "a.b", "e-x", "1_a"]) wanted.add(name);
+    while (wanted.size < 160) {
+      let name = pick(nameAlphabet.filter((char) => char !== "."));
+      const length = Math.floor(random() * 4);
+      for (let index = 0; index < length; index += 1) name += pick(nameAlphabet);
+      wanted.add(name);
+    }
+    mkdirSync(dir);
+    for (const name of wanted) writeFileSync(join(dir, name), "", "utf8");
+    const names = readdirSync(dir);
+
+    // Shapes the shells read alike: members, a leading `]`, ranges within one
+    // ASCII group, the POSIX classes, never a lone `-` between members.
+    // (`~`, `#` and the like make any name: zsh extended glob.)
+    const members = ["a", "b", "e", "x", "A", "1", ".", "_", "!", "^", "*", "?", ":"];
+    const ranges = ["a-e", "b-x", "A-Z", "0-9", "1-5", "x-z", "e-e"];
+    const classes = ["[:alpha:]", "[:digit:]", "[:upper:]", "[:lower:]", "[:punct:]", "[:alnum:]", "[:space:]", "[:xdigit:]"];
+    const negatedClass = (): string => {
+      let body = random() < 0.15 ? "]" : random() < 0.1 ? "-" : "";
+      const items = 1 + Math.floor(random() * 3);
+      for (let index = 0; index < items; index += 1) {
+        const kind = random();
+        body += kind < 0.55 ? pick(members) : kind < 0.8 ? pick(ranges) : pick(classes);
+      }
+      if (random() < 0.1) body += "-";
+      return `[!${body}]`;
+    };
+    const patterns: string[] = [];
+    for (let index = 0; index < 400; index += 1) {
+      let pattern = pick(["", "", "*", "?", "a", "x", "au"]) + negatedClass();
+      if (random() < 0.3) pattern += pick(["", "*", "?"]) + negatedClass();
+      pattern += pick(["", "", "*", "?", "e", "*e", "th.json", "nv"]);
+      // Some `[^...]`, which dash reads with `^` as a member.
+      if (index % 5 === 0) pattern = pattern.replace("[!", "[^");
+      patterns.push(pattern);
+    }
+    const patternsFile = join(scratch, "patterns.txt");
+    writeFileSync(patternsFile, `${patterns.join("\n")}\n`, "utf8");
+
+    const results = SHELL_SCRIPTS.map((shell) => ({ shell: shell.shell, sets: shellExpansions(shell, dir, patternsFile, patterns.length) }));
+    assert.ok(results[0]?.sets !== null && results[0]?.sets !== undefined, "bash is required for this test");
+    let shellMatches = 0;
+    let lengthChecked = 0;
+    for (const [index, pattern] of patterns.entries()) {
+      const compiled = globPattern(pattern);
+      const ours = new Set(names.filter((name) => compiled.test(name)));
+      for (const { shell, sets } of results) {
+        if (sets === null) continue;
+        shellMatches += (sets[index] as Set<string>).size;
+        for (const name of sets[index] as Set<string>) {
+          assert.ok(ours.has(name), `${shell} opens ${JSON.stringify(name)} for ${JSON.stringify(pattern)}; the reader does not`);
+        }
+      }
+      // Each class is still one character: a pattern with no `*` matches
+      // only names of its own length (the class not read as a run).
+      // (`[!]`, `[^]`, and a `?` or `[` inside a class, make any name.)
+      if (!pattern.includes("*") && !/\[[!^]\]/u.test(pattern) && !/\[[^\]]*[?[]/u.test(pattern)) {
+        const length = Array.from(pattern.replace(/\[[!^]\]?[^\]]*\]/gu, "c")).length;
+        for (const name of ours) assert.equal(Array.from(name).length, length, `${JSON.stringify(pattern)} matched ${JSON.stringify(name)}`);
+        lengthChecked += 1;
+      }
+    }
+    assert.ok(shellMatches > 2_000, `the shells matched ${String(shellMatches)} names in all`);
+    assert.ok(lengthChecked > 60, `length checked ${String(lengthChecked)}`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("negation: the forms the shells read apart, or this reader does not model, match any name", () => {
+  // The lead's ruling (L60812): strict where it cannot decide. Each of these
+  // can open auth.json in some shell, locale or option set.
+  for (const pattern of [
+    "[![:foo:]]uth.json", // an unknown class: zsh matches every character
+    "[!A-c]uth.json", // across groups: bash 3.2 under en_US.UTF-8 opens auth.json
+    "[!_-b]uth.json",
+    "[!z-a]uth.json", // reversed
+    "[![=a=]]uth.json",
+    "[![.a.]]uth.json",
+    "[![:alpha:]-z]uth.json",
+    "[!a[]uth.json",
+    "[!xuth.json", // unclosed
+    "[^]x]uth.json", // the shells close it in different places
+    "[]a]uth.json",
+    "[a[]uth.json",
+    "[a?]uth.json",
+    "[A-H]uth.json", // bash 3.2 under en_US.UTF-8 reads h into it
+    "[_-b]uth.json",
+    "[\\x]uth.json",
+    "\\auth.json",
+    "@(a)uth.json",
+    "!(x)uth.json",
+    "(a|x)uth.json",
+    "^x*",
+    "*~x",
+    "a#uth.json",
+    "<1-2>auth.json",
+  ]) {
+    assert.equal(globPattern(pattern).test("auth.json"), true, pattern);
+  }
+  // `[!x]` and `[^x]` are any one character: dash reads `^` as a member, and
+  // `[\\!a]` (an escaped `!`, a member to every shell) reaches this reader
+  // as `[!a]`, the lexer having removed the backslash.
+  for (const pattern of ["[^a]uth.json", "[!a]uth.json", "[!a-z]uth.json", "[!b-za]uth.json"]) {
+    assert.equal(globPattern(pattern).test("auth.json"), true, pattern);
+    assert.equal(globPattern(pattern).test("aauth.json"), false, `${pattern}: one character`);
+  }
+  // A letter matches either case (nocaseglob).
+  for (const pattern of ["?UTH.JSON", "[A]uth.json", "AUTH.json", "[a-c]UTH.json"]) {
+    assert.equal(globPattern(pattern).test("auth.json"), true, pattern);
+  }
 });

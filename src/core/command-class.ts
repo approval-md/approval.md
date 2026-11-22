@@ -4197,8 +4197,8 @@ function globElements(pattern: string): GlobElement[] | null {
         one("\\[");
         continue;
       }
-      // A bracket expression: a leading `!` or `^` negates it and a leading
-      // `]` is a member; a POSIX class, equivalence class or collating
+      // A bracket expression: a leading `!` negates it (a leading `^` is
+      // any one character, below) and a leading `]` is a member; a POSIX class, equivalence class or collating
       // element (`[:alpha:]`, `[=g=]`, `[.g.]`) is skipped to its own close
       // and makes the expression match ANY one character, the strict side
       // (review of the second fold). Unclosed, the `[` is a literal.
@@ -4238,7 +4238,20 @@ function globElements(pattern: string): GlobElement[] | null {
         continue;
       }
       let body = pattern.slice(at + 1, close);
-      const negated = body.startsWith("!") || body.startsWith("^");
+      if (body.startsWith("^")) {
+        // bash and zsh negate `[^...]`, dash reads `^` as a member (`.gi[^t]`
+        // names `.git` under dash): between them any one character. After
+        // `[^]` the shells close the class in different places: the strict
+        // side (review-b's FINDING on #682).
+        if (body.startsWith("^]")) {
+          globElementsCache = { pattern, elements: null };
+          return null;
+        }
+        one("[\\s\\S]");
+        at = close;
+        continue;
+      }
+      const negated = body.startsWith("!");
       if (negated) body = body.slice(1);
       one(`[${negated ? "^" : ""}${body.replace(/[\\\]^]/gu, "\\$&")}]`);
       at = close;

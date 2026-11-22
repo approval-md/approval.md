@@ -162,3 +162,55 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
     else process.env["HOME"] = savedHome;
   }
 });
+
+/** `count` characters drawn from letters and digits with a fixed seed: a class of few distinct members, written long. */
+function classMembers(count: number): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let state = 7;
+  let text = "";
+  for (let index = 0; index < count; index += 1) {
+    state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+    text += alphabet[state % alphabet.length] as string;
+  }
+  return text;
+}
+
+test("cost: a big class after a directory pattern over 250 directories is compiled once (review-b's M1 on 8c91e702)", () => {
+  const { dir, home } = workspace();
+  // 250 directories under dd/ (one mkdir an agent may run on its own), so the
+  // first component lists 250 bases and the class is tested in each.
+  for (let index = 0; index < 250; index += 1) mkdirSync(join(dir, "dd", `d${String(index)}`), { recursive: true });
+  writeFileSync(join(dir, "dd", "d1", "fileX"), "x\n", "utf8");
+  const savedHome = process.env["HOME"];
+  process.env["HOME"] = home;
+  try {
+    // On 8c91e702 the class was compiled (and its members sorted) once per
+    // base: through the real hook 14.3 CPU s at 125 KB and 28.4 at 250 KB,
+    // past 120 s at 500 KB and 1 MB (load 14 to 20). Each size is held to the
+    // same word in one directory, run first (the control: one compile, and
+    // every other pass the hook makes over a word that long, about 135 CPU ms
+    // at 1 MB here), so the bound follows the runner's speed: the fan-out may
+    // cost 3x the control plus BOUND_MS. Here it costs about 1.1x; on
+    // 8c91e702 the 20,000-member case, first so that build fails in about
+    // 2 CPU s, cost about 50x.
+    for (const members of [20_000, 500_000, 1_000_000 - 13]) {
+      const written = classMembers(members);
+      const control = cpuMs(() => {
+        classifyForHook(`cat *[${written}]X`, [], dir, [], false, [dir]);
+      });
+      const command = `cat dd/*/*[${written}]X`;
+      assert.equal(command.length, members + 13);
+      const ms = cpuMs(() => {
+        classifyForHook(command, [], dir, [], false, [dir]);
+      });
+      const bound = 3 * control + BOUND_MS;
+      assert.ok(
+        ms < bound,
+        `${String(members)} members over 250 directories: ${ms.toFixed(1)} CPU ms, bound ${bound.toFixed(1)} (control ${control.toFixed(1)})`,
+      );
+    }
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});

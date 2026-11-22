@@ -167,7 +167,7 @@ import {
   type EventRecord,
 } from "../core/log.js";
 import { settleTerminationGuards } from "../core/log-lock.js";
-import { globPattern } from "../core/glob-match.js";
+import { ANY_NAME, type GlobPattern, globPattern as compiledGlobPattern } from "../core/glob-match.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import {
@@ -3039,12 +3039,15 @@ function expandGlobPath(path: string): string[] | null {
   let current: string[] = [sep];
   for (const component of components) {
     const next: string[] = [];
+    // Compiled once for every base it is listed in (review-b's M1 on
+    // 8c91e702: a big class compiled once per base, up to 256 of them).
+    const pattern = hasGlobChars(component) ? globPattern(component) : null;
     for (const base of current) {
       if (component === "..") {
         next.push(dirname(base));
         continue;
       }
-      if (!hasGlobChars(component)) {
+      if (pattern === null) {
         next.push(join(base, component));
         continue;
       }
@@ -3055,7 +3058,6 @@ function expandGlobPath(path: string): string[] | null {
         if (!existsSync(base)) continue;
         return null;
       }
-      const pattern = globPattern(component);
       for (const name of names) if (pattern.test(name)) next.push(join(base, name));
     }
     if (next.length > 256) return null;
@@ -4087,6 +4089,51 @@ export function refineSkillScripts(
  * existed.
  */
 export function classifyForHook(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  cwd: string,
+  readRoots: readonly string[] = [],
+  execCode = false,
+  credentialCwds: readonly string[] = [],
+  noRuleSegments = false,
+): RefinedClassification {
+  const outer = shellOptionsSet;
+  shellOptionsSet = outer || setsShellOption(command);
+  try {
+    let judged = classifyForHookOnce(command, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments);
+    // Other readings of the same text, the stricter together: zsh's numeric
+    // glob where bash reads a redirect (a refusal of that reading stands), and,
+    // under a shell option, a group a word carries.
+    const zsh = zshNumericGlobReading(command);
+    if (zsh !== null) judged = together(judged, classifyForHookOnce(zsh, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments), true);
+    const grouped = shellOptionsSet ? optionGroupReading(command) : null;
+    if (grouped !== null) judged = together(judged, classifyForHookOnce(grouped, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments), false);
+    return judged;
+  } finally {
+    shellOptionsSet = outer;
+  }
+}
+
+/**
+ * Two readings of one command as one answer: every segment and class of
+ * both. A refusal of the first stands; a refusal of the second stands when
+ * `refusalStands`, else that reading adds nothing.
+ */
+function together(first: RefinedClassification, second: RefinedClassification, refusalStands: boolean): RefinedClassification {
+  if (!first.result.ok) return first;
+  if (!second.result.ok) return refusalStands ? second : first;
+  return {
+    result: {
+      ...first.result,
+      segments: [...first.result.segments, ...second.result.segments],
+      classes: [...new Set([...first.result.classes, ...second.result.classes])],
+    },
+    notes: [...first.notes, ...second.notes],
+  };
+}
+
+/** {@link classifyForHook} for one reading of the command. */
+function classifyForHookOnce(
   command: string,
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
@@ -8274,9 +8321,74 @@ function variableDecidesDirectory(text: string): boolean {
   return /[$`]/u.test(dirname(text)) || /^[$`]/u.test(basename(text));
 }
 
-/** `*`, `?` or `[` in a path word. */
+/**
+ * `*`, `?` or `[` in a path word. While {@link classifyForHook} judges a
+ * command that sets a shell option, also every character an option makes a
+ * glob (bash's extglob, zsh's extended glob, ksh glob and brace classes).
+ */
 function hasGlobChars(text: string): boolean {
-  return /[*?[]/u.test(text);
+  return (shellOptionsSet ? /[*?[\]^#~(){}<>|]/u : /[*?[]/u).test(text);
+}
+
+/**
+ * Does the command set a shell option (lead's ruling L60846 on #682)? `shopt`,
+ * `setopt`, `unsetopt`, `emulate`, `set -o` / `set +o`, or a shell started with
+ * `-O` / `-o`, anywhere in the text: an option set before a glob on the same
+ * line (nocaseglob, dotglob, globstar, extglob, zsh's extendedglob, kshglob,
+ * globdots, braceccl, ...) changes what the glob opens, and this hook does not
+ * model the options, so every glob in such a command matches any name. An
+ * option set by an EARLIER call, in a shell that persists between calls, is
+ * not in this text and is not seen here.
+ */
+function setsShellOption(command: string): boolean {
+  if (/(?:^|[^A-Za-z0-9_.-])(?:shopt|setopt|unsetopt|emulate)(?![A-Za-z0-9_.-])/u.test(command)) return true;
+  // One pass over the words (no regular expression that backtracks over a
+  // long line): after `set` or a shell's name in a segment, an option word
+  // holding `o` or `O` (`-o`, `+o`, `-eo`, bash's `-O`).
+  let afterSetter = false;
+  for (const word of command.split(/(?=[;&|\n])|\s+/u)) {
+    if (/^[;&|\n]/u.test(word)) afterSetter = false;
+    const name = word.replace(/^[;&|\n(]+/u, "").split("/").pop() ?? "";
+    if (SHELL_OPTION_SETTERS.has(name)) afterSetter = true;
+    else if (afterSetter && /^[-+][A-Za-z]*[oO]$/u.test(word)) return true;
+  }
+  return false;
+}
+
+/** `set` and the shells whose command line may set an option with `-o` / `-O`. */
+const SHELL_OPTION_SETTERS: ReadonlySet<string> = new Set(["set", "bash", "zsh", "sh", "ksh", "dash"]);
+
+/** Set by {@link classifyForHook} for the length of one call: see {@link setsShellOption}. */
+let shellOptionsSet = false;
+
+/** The hook's glob reader, or any name while the command sets a shell option. */
+function globPattern(component: string): GlobPattern {
+  return shellOptionsSet ? ANY_NAME : compiledGlobPattern(component);
+}
+
+/**
+ * The command as zsh reads a numeric glob in it (`p<->`, `p<1-9>`), which
+ * bash reads as a redirect (lead's ruling L60846): each `<N-M>` written as `*`,
+ * which matches at least every digit run. `null` when there is none.
+ */
+function zshNumericGlobReading(command: string): string | null {
+  if (!/<[0-9]*-[0-9]*>/u.test(command)) return null;
+  return command.replace(/<[0-9]*-[0-9]*>/gu, "*");
+}
+
+/**
+ * The command with each group a word carries (`~/(#i).HERMES`, `@(a|b)`,
+ * `x(#a1)`) and each zsh glob flag group (`(#i)`, at a word's start too)
+ * written as `*`, for a command that sets a shell option (zsh's extended
+ * glob, bash's extglob): the lexer reads a `(` inside a word as the start of
+ * a subshell or a syntax error, and `#` after it as a comment. `null` when
+ * there is none. A `(` after `$`, `<`, `>` or `=` (a substitution, a process
+ * substitution, an array) is left alone.
+ */
+function optionGroupReading(command: string): string | null {
+  const group = /(?<=[^\s;&|<>$=(])\([^()\s]*\)|\(#[^()\s]*\)/gu;
+  if (!group.test(command)) return null;
+  return command.replace(group, "*");
 }
 
 /** Names a credential file goes by, for a pattern to be tested against. */

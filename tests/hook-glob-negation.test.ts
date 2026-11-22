@@ -1,0 +1,287 @@
+/**
+ * A negated class on a credential path is a credential read, through the
+ * real hook (review-b's FINDING on #682 at 8c91e702, equal on main and 0.4.8).
+ *
+ * The hook's glob reader took `[!x]` and `[^x]` as the literal members `!`,
+ * `^` and `x`, so `cat ~/.hermes/[!x]uth.json` was `read.file.out_of_scope`
+ * while bash and zsh expand it to `~/.hermes/auth.json`, which is
+ * `account.credential` (human-only). The reader now negates `[!...]` as every
+ * shell does, reads `[^...]` as any one character (dash takes `^` as a
+ * member), and reads any form it does not model as matching any name (the
+ * lead's ruling L60812: strict where it cannot decide).
+ *
+ * Every credential file here is synthetic, in a scratch directory, and HOME
+ * points into that directory: nothing reads a real one. Spawn the compiled
+ * CLI; never hand-write log lines.
+ */
+
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { classifyForHook } from "../src/cli/hook.js";
+
+const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
+const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-glob-negation-")));
+
+after(() => {
+  rmSync(scratch, { recursive: true, force: true });
+});
+
+const POLICY = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: autonomous",
+  '  approval_ttl: "1h"',
+  "  on_expiry: reject",
+  "classes:",
+  "  policy.core:",
+  "    autonomy: human-only",
+  "  account.credential:",
+  "    autonomy: human-only",
+  "```",
+  "",
+].join("\n");
+
+interface Run {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+function runCli(args: string[], cwd: string, home: string, input = ""): Run {
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+  for (const name of ["APPROVAL_HUMAN", "HERMES_HOME", "APPROVAL_HERMES_HOME", "CDPATH"]) delete env[name];
+  const result = spawnSync(process.execPath, [CLI_ENTRY, ...args], { cwd, encoding: "utf8", env, input });
+  assert.equal(result.error, undefined, `spawn failed: ${String(result.error)}`);
+  return { code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
+}
+
+/** A gate with a synthetic approval home and a synthetic Hermes home under HOME. */
+const lab = ((): { dir: string; home: string } => {
+  const dir = join(scratch, "proj");
+  const home = join(scratch, "home");
+  mkdirSync(dir, { recursive: true });
+  mkdirSync(join(home, ".hermes"), { recursive: true });
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY, "utf8");
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir, home);
+  assert.equal(attested.code, 0, attested.stderr);
+  mkdirSync(join(dir, ".approval"), { recursive: true });
+  for (const name of ["env", "env.local"]) writeFileSync(join(dir, ".approval", name), "SYNTHETIC=1\n", "utf8");
+  for (const name of ["auth.json", ".env", ".env.local", ".op.env"]) writeFileSync(join(home, ".hermes", name), "SYNTHETIC=1\n", "utf8");
+  mkdirSync(join(home, ".hermes", "hermes-agent"), { recursive: true });
+  mkdirSync(join(home, ".hermes", "profiles", "p1"), { recursive: true });
+  writeFileSync(join(home, ".hermes", "hermes-agent", ".env"), "SYNTHETIC=1\n", "utf8");
+  for (const name of ["auth.json", ".env"]) writeFileSync(join(home, ".hermes", "profiles", "p1", name), "SYNTHETIC=1\n", "utf8");
+  mkdirSync(join(dir, ".approval", "keys"), { recursive: true });
+  for (const name of ["vault.enc", "keys/k1"]) writeFileSync(join(dir, ".approval", name), "SYNTHETIC=1\n", "utf8");
+  writeFileSync(join(dir, "README.md"), "# x\n", "utf8");
+  return { dir, home };
+})();
+
+/** The decision the Claude Code hook gives a Bash command, and its reason. */
+function claude(command: string): string {
+  const run = runCli(
+    ["hook", "claude-code", "--as", "agent:cc"],
+    lab.dir,
+    lab.home,
+    JSON.stringify({
+      hook_event_name: "PreToolUse",
+      session_id: "glob-negation",
+      tool_use_id: `cc-${String(Math.random()).slice(2)}`,
+      cwd: lab.dir,
+      tool_name: "Bash",
+      tool_input: { command },
+      transcript_path: "/dev/null",
+      permission_mode: "default",
+    }),
+  );
+  assert.equal(run.code, 0, run.stderr);
+  const parsed = JSON.parse(run.stdout) as { hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string } };
+  const output = parsed.hookSpecificOutput ?? {};
+  return `${output.permissionDecision ?? "?"}: ${output.permissionDecisionReason ?? ""}`;
+}
+
+/** The classes the hook's classification gives a command, in process (HOME pointed at the lab). */
+function classes(command: string, abstain = false): string[] {
+  const saved = process.env["HOME"];
+  process.env["HOME"] = lab.home;
+  try {
+    const judged = classifyForHook(command, [], lab.dir, [], false, [lab.dir], abstain) as {
+      result: { ok: boolean; classes?: string[]; code?: string };
+    };
+    return judged.result.ok ? (judged.result.classes ?? []) : [`refused:${judged.result.code ?? "?"}`];
+  } finally {
+    if (saved === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = saved;
+  }
+}
+
+test("FINDING: each credential path, spelled with [!x] or [^x], is denied through the real hook as the plain path is", () => {
+  // At 8c91e702 (and on main and 0.4.8) every negated spelling here was
+  // allowed as read.file.out_of_scope.
+  for (const [plain, spellings] of [
+    ["cat ~/.hermes/auth.json", ["cat ~/.hermes/[!x]uth.json", "cat ~/.hermes/[^x]uth.json", "cat ~/.hermes/[!b]uth.json"]],
+    ["cat .approval/env", ["cat .approval/[!x]nv", "cat .approval/[^x]nv"]],
+  ] as const) {
+    const expected = claude(plain);
+    assert.match(expected, /^deny: .*account\.credential/u, `${plain}: ${expected}`);
+    for (const command of spellings) {
+      const decision = claude(command);
+      assert.match(decision, /^deny: .*account\.credential/u, `${command}: ${decision}`);
+    }
+  }
+});
+
+test("FINDING: more negated spellings of the credential paths are credential reads", () => {
+  for (const command of [
+    "cat ~/.hermes/[!b-z]uth.json",
+    "cat ~/.hermes/[![:upper:]]uth.json",
+    "cat ~/.hermes/[!]x]uth.json",
+    "cat ~/.hermes/[!x][!x][!x][!x].json",
+    "cat ~/.hermes/.[!x]nv",
+    "cat ~/.hermes/.env[!x]local",
+    "cat ~/.hermes/[^a]uth.json", // dash reads `^` and `a` as members
+    "cat .approval/[!a-d]nv",
+    "cat .approval/e[!x]v.local",
+    "cat < .approval/[!x]nv",
+  ]) {
+    assert.ok(classes(command).includes("account.credential"), `${command}: ${JSON.stringify(classes(command))}`);
+  }
+});
+
+test("ruling L60812: a form the reader does not model, on a credential path, is a credential read or refused", () => {
+  for (const command of [
+    "cat ~/.hermes/[![:foo:]]uth.json", // an unknown class (zsh matches every character)
+    "cat ~/.hermes/[!A-c]uth.json", // across groups: bash 3.2 under en_US.UTF-8 opens auth.json
+    "cat ~/.hermes/[!z-a]uth.json", // reversed
+    "cat ~/.hermes/[![=a=]]uth.json",
+    "cat ~/.hermes/[!a[]uth.json", // a bracket inside a class
+    "cat ~/.hermes/[!xuth.json", // unclosed
+    "cat ~/.hermes/[^]x]uth.json", // the shells close it in different places
+    "cat ~/.hermes/[a[]uth.json",
+    "cat ~/.hermes/aut[A-H].json", // bash 3.2 under en_US.UTF-8 reads h into [A-H]
+    "cat ~/.hermes/.env[_-a]local", // and . into [_-a]
+    "cat ~/.hermes/[a\\]uth.json", // a backslash inside a class
+    "cat ~/.hermes/^x*", // zsh extended glob
+    "cat ~/.hermes/*~x",
+    "cat ~/.hermes/a#uth.js?",
+    "cat ~/.hermes/@(a)uth.json", // bash extglob
+    "cat ~/.hermes/!(x)uth.json",
+    "cat .approval/[!a-]]nv",
+    "cat .approval/e[?]v",
+  ]) {
+    const judged = classes(command);
+    assert.ok(
+      judged.includes("account.credential") || judged.some((each) => each.startsWith("refused:")),
+      `${command}: ${JSON.stringify(judged)}`,
+    );
+  }
+});
+
+test("an escaped or quoted `!` is a member to the shell, and the lexer drops the escape: any one character", () => {
+  // `[\\!a]` reaches the reader as `[!a]`; bash, zsh and dash all expand
+  // `~/.hermes/[\\!a]uth.json` to auth.json. So `[!a]` is any one character.
+  for (const command of ["cat ~/.hermes/[\\!a]uth.json", "cat ~/.hermes/[\"!\"a]uth.json", "cat ~/.hermes/[!a]uth.json", "cat .approval/[\\!e]nv"]) {
+    assert.ok(classes(command).includes("account.credential"), `${command}: ${JSON.stringify(classes(command))}`);
+  }
+  // A pattern naming no credential stays ordinary.
+  for (const command of ["cat README.m[!x]", "cat README.m[^x]", "cat ~/.hermes/[!a]uth.json.bak", "ls src/*.ts"]) {
+    assert.equal(classes(command).includes("account.credential"), false, `${command}: ${JSON.stringify(classes(command))}`);
+  }
+});
+
+/**
+ * Rows of build-2's glob shell-truth sweep (CLAIMS L60842) that were LOOSER
+ * at 8c91e702 and on main: a shell expands the word to a credential file and
+ * the hook allowed `cat <word>`. Ten of each group where it has ten.
+ */
+const SWEEP_ROWS: Record<string, readonly string[]> = {
+  // (1) negated classes (233 rows on 8c91e702).
+  negated: [
+    "~/.[!Z]ermes/auth.json",
+    "~/.[!A-Z]ermes/.env",
+    "~/.[!Z][!Z]rmes/.env.local",
+    "~/.[!!]ermes/.op.env",
+    "~/.hermes/*[!Z]ermes-agent/.env",
+    "~/.hermes/[!Z][!Z]ofiles/p1/auth.json",
+    "~/.hermes/[^A-Z]rofiles/p1/.env",
+    ".approval/[^A-Z]nv",
+    ".approval/*[!Z]nv.local",
+    ".approval/[!Z]eys/k1",
+  ],
+  // (2) bash 3.2 under en_US.UTF-8 reads [A-Z] as holding lower case (19 rows).
+  upperRange: [
+    "~/.[A-Z]ermes/auth.json",
+    "~/.[A-Z]ermes/.env",
+    "~/.hermes/.[A-Z]nv",
+    "~/.[A-Z]ermes/.env.local",
+    "~/.hermes/.[A-Z]nv.local",
+    "~/.[A-Z]ermes/.op.env",
+    "~/.hermes/.[A-Z]p.env",
+    "~/.[A-Z]ermes/hermes-agent/.env",
+    "~/.hermes/[A-Z]ermes-agent/.env",
+    "~/.hermes/hermes-agent/.[A-Z]nv",
+  ],
+  // (3) zsh numeric globs, which bash's parse (and the hook's) reads as a redirect (4 rows).
+  zshNumeric: [
+    "~/.hermes/profiles/p<->/auth.json",
+    "~/.hermes/profiles/p<0-9>/auth.json",
+    "~/.hermes/profiles/p<->/.env",
+    "~/.hermes/profiles/p<0-9>/.env",
+  ],
+};
+
+test("sweep L60842: the looser rows of the three option-free groups are credential reads", () => {
+  for (const [group, words] of Object.entries(SWEEP_ROWS)) {
+    for (const word of words) {
+      const judged = classes(`cat ${word}`);
+      assert.ok(judged.includes("account.credential"), `${group}: cat ${word}: ${JSON.stringify(judged)}`);
+    }
+  }
+  // Through the real hook, one of each.
+  for (const word of ["~/.[!Z]ermes/auth.json", "~/.[A-Z]ermes/auth.json", "~/.hermes/profiles/p<->/auth.json"]) {
+    const decision = claude(`cat ${word}`);
+    assert.match(decision, /^deny: .*account\.credential/u, `cat ${word}: ${decision}`);
+  }
+});
+
+test("sweep L60842 group (4): after a shell option set in the same command, every glob matches any name", () => {
+  // The classifier refuses `shopt` and `setopt` (unclassified) under the
+  // default policy; under `defaults.unclassified_command: abstain` they are
+  // stand-ins and the read beside them was read.shell at 8c91e702.
+  for (const [setup, word] of [
+    ["shopt -s nocaseglob", "~/.[A-Z]ermes/auth.json"],
+    ["setopt extendedglob globdots", "~/.hermes/^zz"],
+    ["setopt extendedglob", "~/.h##ermes/.env.local"],
+    ["setopt extendedglob", "~/(#a1).Zermes/.op.env"],
+    ["setopt extendedglob", "~/(#i).HERMES/hermes-agent/.env"],
+    ["setopt extendedglob", "~/.h##ermes/profiles/p1/auth.json"],
+    ["setopt extendedglob globdots", "~/.hermes/profiles/p1/^zz"],
+    ["shopt -s nocaseglob", ".approval/[A-Z]nv"],
+    ["setopt extendedglob", ".a^Z/env.local"],
+    ["setopt extendedglob", ".approval/v##ault.enc"],
+    ["setopt extendedglob", "(#i).APPROVAL/env"],
+    ["set -o extendedglob", "~/.Z#hermes/auth.json"],
+    ["bash -O extglob -c true", "~/.[A-Z]ermes/auth.json"],
+  ] as const) {
+    for (const command of [`${setup}\ncat ${word}`, `${setup}; cat ${word}`, `${setup} && cat ${word}`]) {
+      const judged = classes(command, true);
+      assert.ok(
+        judged.includes("account.credential") || judged.some((each) => each.startsWith("refused:")),
+        `${JSON.stringify(command)}: ${JSON.stringify(judged)}`,
+      );
+    }
+  }
+  // nocaseglob without the option line: a letter matches either case anyway.
+  assert.ok(classes("cat ~/.?ERMES/auth.json").includes("account.credential"));
+  // No option line, no change: an ordinary glob stays ordinary.
+  assert.equal(classes("cat ~/.hermes/notes*", true).includes("account.credential"), false);
+});
