@@ -3987,13 +3987,18 @@ const BRACE_LIMIT = 1024;
  * gives `.git` and `.gt`, `.{f..h}it` gives `.fit`, `.git` and `.hit`.
  * `null` past {@link BRACE_LIMIT}, which the caller judges the strict way. A
  * group with no comma and no sequence is kept as text, as the shell keeps it.
+ * Finding a group scans from each `{` to its close, so a word of many nested
+ * groups costs its length squared: past {@link BRACE_SCAN_LIMIT} characters
+ * scanned in all it is `null` too (25,000 nested groups took 8 s).
  */
 export function expandBraces(word: string, limit = BRACE_LIMIT): string[] | null {
   const done: string[] = [];
   const pending = [word];
+  const budget = { left: BRACE_SCAN_LIMIT };
   while (pending.length > 0) {
     const current = pending.pop() as string;
-    const group = braceGroup(current);
+    const group = braceGroup(current, budget);
+    if (budget.left < 0) return null;
     if (group === null) {
       done.push(current);
     } else {
@@ -4004,13 +4009,22 @@ export function expandBraces(word: string, limit = BRACE_LIMIT): string[] | null
   return done;
 }
 
-/** The first brace group of `word` the shell would expand, with its alternatives. */
-function braceGroup(word: string): { start: number; end: number; parts: string[] } | null {
+/** Past this many characters scanned for brace groups a word is judged as naming `.git`. */
+const BRACE_SCAN_LIMIT = 1_000_000;
+
+/**
+ * The first brace group of `word` the shell would expand, with its
+ * alternatives. Each character scanned is taken from `budget`; once it is
+ * spent the answer does not matter (the caller judges the word strictly).
+ */
+function braceGroup(word: string, budget: { left: number }): { start: number; end: number; parts: string[] } | null {
   for (let start = word.indexOf("{"); start !== -1; start = word.indexOf("{", start + 1)) {
     let depth = 0;
     const cuts: number[] = [];
     let end = -1;
     for (let at = start; at < word.length; at += 1) {
+      budget.left -= 1;
+      if (budget.left < 0) return null;
       const char = word[at];
       if (char === "\\") {
         at += 1;
