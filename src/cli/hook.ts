@@ -167,6 +167,7 @@ import {
   type EventRecord,
 } from "../core/log.js";
 import { settleTerminationGuards } from "../core/log-lock.js";
+import { globPattern } from "../core/glob-match.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import {
@@ -2762,7 +2763,7 @@ function steeredReadCouldNameCredential(
     if (hasGlobChars(segment)) {
       globs += 1;
       if (globs > STEERED_GLOB_CAP || segment.includes("**")) return true;
-      const pattern = globRegex(segment);
+      const pattern = globPattern(segment);
       const matched = representatives.filter((name) => pattern.test(name));
       if (matched.length > 0) alternatives = matched;
     }
@@ -3054,7 +3055,7 @@ function expandGlobPath(path: string): string[] | null {
         if (!existsSync(base)) continue;
         return null;
       }
-      const pattern = globRegex(component);
+      const pattern = globPattern(component);
       for (const name of names) if (pattern.test(name)) next.push(join(base, name));
     }
     if (next.length > 256) return null;
@@ -8278,22 +8279,6 @@ function hasGlobChars(text: string): boolean {
   return /[*?[]/u.test(text);
 }
 
-/** A shell glob component as an anchored regular expression. */
-function globRegex(component: string): RegExp {
-  let source = "";
-  for (const char of component) {
-    if (char === "*") source += ".*";
-    else if (char === "?") source += ".";
-    else if (char === "[" || char === "]") source += char;
-    else source += char.replace(/[.+^${}()|\\]/gu, "\\$&");
-  }
-  try {
-    return new RegExp(`^${source}$`, "u");
-  } catch {
-    return /^.*$/u;
-  }
-}
-
 /** Names a credential file goes by, for a pattern to be tested against. */
 const CREDENTIAL_NAMES: readonly string[] = [".env", ".env.local", ".op.env", "auth.json", "env", "vault.enc", "keys"];
 /** Names an organ goes by, beyond the credentials. */
@@ -8315,7 +8300,11 @@ const ORGAN_NAMES: readonly string[] = [
 function globCouldNameGateHome(path: string): boolean {
   return path
     .split(/[/\\]+/u)
-    .some((component) => hasGlobChars(component) && [".hermes", ".approval"].some((name) => globRegex(component).test(name)));
+    .some((component) => {
+      if (!hasGlobChars(component)) return false;
+      const pattern = globPattern(component);
+      return [".hermes", ".approval"].some((name) => pattern.test(name));
+    });
 }
 
 /** SF3a: a written pattern that could land on an organ. */
@@ -8333,11 +8322,13 @@ function globCouldNameOrgan(path: string): boolean {
       parent === ".hermes" ||
       hasGlobChars(parent) ||
       (components[index - 3] === ".hermes" && components[index - 2] === "profiles");
-    if (underHome && ORGAN_NAMES.some((name) => globRegex(component).test(name))) return true;
+    if (!underHome) continue;
+    const pattern = globPattern(component);
+    if (ORGAN_NAMES.some((name) => pattern.test(name))) return true;
   }
   const last = basename(path);
   if (!hasGlobChars(last)) return false;
-  const pattern = globRegex(last);
+  const pattern = globPattern(last);
   const parent = dirname(path);
   const parentIsHome =
     parent.split(/[/\\]+/u).some((segment) => segment === ".hermes" || segment === ".approval") ||
@@ -8379,9 +8370,9 @@ function globCouldNameCredential(path: string): boolean {
   for (let index = 0; index < components.length - 1; index += 1) {
     const component = components[index] as string;
     if (!hasGlobChars(component)) continue;
-    const names = GLOB_DIRECTORY_NAMES.filter(
-      (name) => globRegex(component).test(name) || globRegex(component.toLowerCase()).test(name),
-    );
+    const pattern = globPattern(component);
+    const lowered = globPattern(component.toLowerCase());
+    const names = GLOB_DIRECTORY_NAMES.filter((name) => pattern.test(name) || lowered.test(name));
     if (names.length > 0) choices.push({ index, names });
   }
   if (choices.length === 0) return false;
@@ -8424,7 +8415,10 @@ const GLOB_DIRECTORY_NAMING_CAP = 4;
 /** A last-component pattern that could name a credential file, or any pattern that could name a home. */
 function globNamesCredentialOrHome(path: string): boolean {
   const last = basename(path);
-  if (hasGlobChars(last) && CREDENTIAL_NAMES.some((name) => globRegex(last).test(name))) return true;
+  if (hasGlobChars(last)) {
+    const pattern = globPattern(last);
+    if (CREDENTIAL_NAMES.some((name) => pattern.test(name))) return true;
+  }
   return globCouldNameGateHome(path);
 }
 
@@ -8790,7 +8784,7 @@ function expandGlob(path: string): string[] | null {
   const parent = dirname(path);
   if (hasGlobChars(parent)) return null;
   try {
-    const pattern = globRegex(basename(path));
+    const pattern = globPattern(basename(path));
     return readdirSync(canonicalPath(parent))
       .filter((name) => pattern.test(name))
       .map((name) => join(parent, name));

@@ -49,6 +49,7 @@
  */
 
 import { isDateDisplay, isZoneValue } from "./date-argv.js";
+import { matchGlobTokens, singleCharacterTokens, type GlobToken } from "./glob-match.js";
 import { isUnreadablePushWord, parseGitPushArgv, splitGitPush } from "./git-push-argv.js";
 import {
   isBareInfo,
@@ -4101,21 +4102,47 @@ export function isPatternSegment(segment: string): boolean {
  * with `.` is matched only by a pattern that starts with a literal `.` or a
  * bracket expression holding one, as the shell's filename expansion requires,
  * so `*` never names `.git` while `.g*t` and `.[g]it` do. No shell and no
- * file system: the pattern is turned into an anchored expression.
+ * file system.
+ *
+ * B-HOOK-GLOB-LINEAR: the pattern used to become one anchored expression,
+ * `*` as `[^/]*`, and a run of `*` made the engine backtrack (8 `*` and 12
+ * `z` under `~/.hermes/` took 36.7 CPU s in the `.git` reader, past the
+ * hook's 60 s timeout at a few more). Each piece the translation writes
+ * stands for exactly one character or a run of them, so each is now its own
+ * one-character expression (same text, same `iu` flags, so the same letter
+ * case and the same refusals) and {@link matchGlobTokens} walks the name
+ * once. The answers are the old expression's: tests/core-glob-segment ports
+ * it as the oracle.
  */
 export function globSegmentMatches(pattern: string, name: string): boolean {
   if (!isPatternSegment(pattern)) return pattern.toLowerCase() === name.toLowerCase();
   if (name.startsWith(".") && (pattern.startsWith("*") || pattern.startsWith("?"))) return false;
-  let source = "";
+  const compiled = compiledSegment(pattern);
+  // A bracket expression this reader cannot turn into one: the strict side.
+  if (compiled === null) return true;
+  return matchGlobTokens(compiled.tokens, compiled.single, name);
+}
+
+/** One piece of the translation: the expression text for one character, and whether it repeats. */
+interface SegmentPiece {
+  source: string;
+  run: boolean;
+  /** A character written as itself or escaped, which may be half of a surrogate pair. */
+  literal: boolean;
+}
+
+/** The pieces the old translation wrote for `pattern`, in order. */
+function segmentPieces(pattern: string): SegmentPiece[] {
+  const pieces: SegmentPiece[] = [];
   for (let at = 0; at < pattern.length; at += 1) {
     const char = pattern[at] as string;
     if (char === "\\" && at + 1 < pattern.length) {
       at += 1;
-      source += (pattern[at] as string).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      pieces.push({ source: (pattern[at] as string).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), run: false, literal: true });
     } else if (char === "*") {
-      source += "[^/]*";
+      pieces.push({ source: "[^/]", run: true, literal: false });
     } else if (char === "?") {
-      source += "[^/]";
+      pieces.push({ source: "[^/]", run: false, literal: false });
     } else if (char === "[") {
       // A bracket expression: a leading `!` or `^` negates it and a leading
       // `]` is a member; a POSIX class, equivalence class or collating
@@ -4144,30 +4171,96 @@ export function globSegmentMatches(pattern: string, name: string): boolean {
       if (close >= pattern.length) {
         // Unclosed: a literal `[`, unless a class inside it left the reading
         // uncertain, which the strict side reads as any characters.
-        source += posix ? "[^/]*" : "\\[";
-        if (posix) break;
+        if (posix) {
+          pieces.push({ source: "[^/]", run: true, literal: false });
+          break;
+        }
+        pieces.push({ source: "\\[", run: false, literal: true });
         continue;
       }
       if (posix) {
-        source += "[^/]";
+        pieces.push({ source: "[^/]", run: false, literal: false });
         at = close;
         continue;
       }
       let body = pattern.slice(at + 1, close);
       const negated = body.startsWith("!") || body.startsWith("^");
       if (negated) body = body.slice(1);
-      source += `[${negated ? "^" : ""}${body.replace(/[\\\]^]/gu, "\\$&")}]`;
+      pieces.push({ source: `[${negated ? "^" : ""}${body.replace(/[\\\]^]/gu, "\\$&")}]`, run: false, literal: false });
       at = close;
     } else {
-      source += char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      pieces.push({ source: char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), run: false, literal: true });
     }
   }
-  try {
-    return new RegExp(`^${source}$`, "iu").test(name);
-  } catch {
-    // A bracket expression this reader cannot turn into one: the strict side.
-    return true;
+  return pieces;
+}
+
+/**
+ * `pattern` as tokens, or `null` when the old expression would not compile.
+ * One entry is cached: the `.git` reader tests one pattern against every
+ * entry of a directory (up to 100,000), and the compile is linear in the
+ * pattern, which may be long.
+ */
+function compiledSegment(pattern: string): { tokens: GlobToken[]; single: number } | null {
+  if (lastSegment !== null && lastSegment.pattern === pattern) return lastSegment.compiled;
+  const pieces = segmentPieces(pattern);
+  // The old loop read UTF-16 units, and the engine read the expression by
+  // code point: two literal halves of a surrogate pair were one character.
+  const merged: SegmentPiece[] = [];
+  for (const piece of pieces) {
+    const previous = merged[merged.length - 1];
+    if (
+      previous !== undefined &&
+      previous.literal &&
+      piece.literal &&
+      /^[\uD800-\uDBFF]$/u.test(previous.source) &&
+      /^[\uDC00-\uDFFF]$/u.test(piece.source)
+    ) {
+      merged[merged.length - 1] = { source: previous.source + piece.source, run: false, literal: true };
+    } else {
+      merged.push(piece);
+    }
   }
+  // One token per distinct piece, shared by every place it is written.
+  const shared = new Map<string, GlobToken>();
+  const tokens: GlobToken[] = [];
+  let compiled: { tokens: GlobToken[]; single: number } | null;
+  try {
+    for (const piece of merged) {
+      const previous = tokens[tokens.length - 1];
+      if (piece.run && previous?.run === true) continue; // `[^/]*[^/]*` is `[^/]*`
+      const key = `${piece.run ? "*" : "1"}${piece.source}`;
+      let token = shared.get(key);
+      if (token === undefined) {
+        token = segmentToken(new RegExp(`^(?:${piece.source})$`, "iu"), piece.run);
+        shared.set(key, token);
+      }
+      tokens.push(token);
+    }
+    compiled = { tokens, single: singleCharacterTokens(tokens) };
+  } catch {
+    compiled = null;
+  }
+  lastSegment = { pattern, compiled };
+  return compiled;
+}
+
+let lastSegment: { pattern: string; compiled: { tokens: GlobToken[]; single: number } | null } | null = null;
+
+/** A one-character expression as a token, its answers kept per character. */
+function segmentToken(expression: RegExp, run: boolean): GlobToken {
+  const seen = new Map<number, boolean>();
+  return {
+    run,
+    matches: (code) => {
+      let answer = seen.get(code);
+      if (answer === undefined) {
+        answer = expression.test(String.fromCodePoint(code));
+        seen.set(code, answer);
+      }
+      return answer;
+    },
+  };
 }
 
 /**
