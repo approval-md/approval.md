@@ -27,12 +27,19 @@
  * write-scope pass, so a segment it raises is not narrowed again.
  */
 
-import { existsSync, lstatSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync, type Dirent } from "node:fs";
 import { dirname, join, normalize, sep } from "node:path";
 
 import {
   commandSegmentShapes,
+  expandBraces,
   GATE_SELF_CLASS,
+  gitWriteTargets,
+  globSegmentMatches,
+  isPatternSegment,
+  mayNameGitDirectory,
+  readWriteSureTargets,
+  readWriteTargets,
   type ClassifiedSegment,
   type CommandClassification,
 } from "../core/command-class.js";
@@ -205,7 +212,9 @@ function fetchOutputValues(bin: string, args: readonly string[]): string[] {
     if (arg.startsWith("--")) {
       const equals = arg.indexOf("=");
       const name = equals === -1 ? arg : arg.slice(0, equals);
-      if (!long.includes(name)) continue;
+      // A long option may be given by any prefix of it (wget's getopt
+      // takes an unambiguous one): read every prefix as the option.
+      if (name.length < 3 || !long.some((option) => option.startsWith(name))) continue;
       if (equals !== -1) values.push(arg.slice(equals + 1));
       else if (next !== undefined) values.push(next);
       continue;
@@ -222,9 +231,133 @@ function fetchOutputValues(bin: string, args: readonly string[]): string[] {
   return values;
 }
 
-/** A word whose text is the path, with nothing the shell would still change. */
-function literalPath(word: string): boolean {
-  return word.length > 0 && !/[\s$`*?[\]{}~]/u.test(word.replace(/^~\//u, ""));
+/**
+ * A word whose text is the path, or a glob or brace pattern of paths (second
+ * review, S1): nothing a variable or a substitution would still change.
+ */
+function pathOrPattern(word: string): boolean {
+  return word.length > 0 && !/[\s$`~]/u.test(word.replace(/^~\//u, ""));
+}
+
+/** Does the word hold a glob or a brace group the shell would expand? */
+function isPattern(word: string): boolean {
+  return word.includes("{") || word.split("/").some(isPatternSegment);
+}
+
+/** Directory entries one expansion may visit, in all; past it, it gives up. */
+const ENTRY_LIMIT = 100_000;
+
+/**
+ * One path a pattern stands for: `"match"`, an entry a real listing
+ * returned; `"parent"`, the pattern itself under a listed directory, standing
+ * for the plain files there (a plain file lands where its parent does);
+ * `"literal"`, the whole word as written, which the shell uses as the name
+ * when the pattern matches nothing.
+ */
+interface Placed {
+  path: string;
+  from: "match" | "parent" | "literal";
+}
+
+/** The paths a pattern stands for, or why this step could not expand it. */
+type Expansion = { paths: Placed[] } | { giveUp: string };
+
+/** Keep every entry that is a directory or a link (one that may be descended or followed). */
+const DIRECTORY_OR_LINK = (entry: Dirent): boolean => entry.isDirectory() || entry.isSymbolicLink();
+
+/**
+ * The paths a glob or brace word names on disk from `base` (second review,
+ * S1), for walking: braces expanded first, then each pattern segment matched
+ * against its parent's entries with the classifier's own matcher. Every
+ * entry of a listing is read, and every matching directory or link (and an
+ * entry named `.git`) is kept, at the last segment too, since a directory may
+ * be a git directory under another name; only plain files are left to the
+ * pattern under their parent. Each path says where it came from
+ * ({@link Placed}), never read back from its text. It gives up past
+ * {@link ENTRY_LIMIT} entries visited in all, or when a parent cannot be
+ * read; the caller then judges a sure target the strict way and a possible
+ * one by its text (review of the second fold).
+ */
+function expandOnDisk(base: string, word: string): Expansion {
+  const words = word.includes("{") ? expandBraces(word) : [word];
+  if (words === null) return { giveUp: "more brace alternatives than this hook expands" };
+  const join2 = (place: string, name: string): string => (place === "/" ? `/${name}` : `${place}/${name}`);
+  const found: Placed[] = [];
+  let visited = 0;
+  for (const each of words) {
+    const start = each.startsWith("/") ? "/" : base;
+    const segments = each.split("/").filter((part) => part.length > 0);
+    found.push({ path: segments.reduce(join2, start), from: "literal" });
+    let places: Placed[] = [{ path: start, from: "match" }];
+    for (const segment of segments) {
+      if (!isPatternSegment(segment)) {
+        places = places.map((place) => ({ path: join2(place.path, segment), from: place.from }));
+        continue;
+      }
+      const next: Placed[] = [];
+      for (const place of places) {
+        if (place.from !== "match") continue;
+        let entries: Dirent[];
+        try {
+          entries = readdirSync(place.path, { withFileTypes: true });
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code ?? "an error";
+          if (code === "ENOENT" || code === "ENOTDIR") continue;
+          return { giveUp: `${place.path} cannot be listed (${code})` };
+        }
+        visited += entries.length;
+        if (visited > ENTRY_LIMIT) return { giveUp: `more than ${String(ENTRY_LIMIT)} entries to read` };
+        next.push({ path: join2(place.path, segment), from: "parent" });
+        for (const entry of entries) {
+          if (!globSegmentMatches(segment, entry.name)) continue;
+          if (DIRECTORY_OR_LINK(entry) || entry.name.toLowerCase() === ".git") next.push({ path: join2(place.path, entry.name), from: "match" });
+        }
+      }
+      places = next;
+    }
+    found.push(...places);
+  }
+  return { paths: found };
+}
+
+/** Does anything exist at `path` itself (a link counts, followed or not)? */
+function entryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The commands that copy or move a whole tree, `.git` entry included. */
+const TREE_COPIERS: ReadonlySet<string> = new Set(["cp", "mv", "rsync", "ditto"]);
+
+/**
+ * The SOURCE operands of a tree copy or move (second review, N2): every
+ * operand but the last, or every operand when a target directory is named by
+ * `-t` / `--target-directory`.
+ */
+function treeSources(bin: string, args: readonly string[]): string[] {
+  if (!TREE_COPIERS.has(bin)) return [];
+  const operands: string[] = [];
+  let targetNamed = false;
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") {
+      operands.push(...args.slice(at + 1));
+      break;
+    }
+    if ((bin === "cp" || bin === "mv") && (arg === "-t" || arg === "--target-directory")) {
+      targetNamed = true;
+      at += 1;
+      continue;
+    }
+    if ((bin === "cp" || bin === "mv") && (arg.startsWith("--target-directory=") || /^-[A-Za-z]*t./u.test(arg))) targetNamed = true;
+    if (arg.startsWith("-")) continue;
+    operands.push(arg);
+  }
+  return targetNamed ? operands : operands.slice(0, -1);
 }
 
 /** The command words that change the shell's directory, followed alike here. */
@@ -273,7 +406,27 @@ function directoryTargets(
   if (operands.length !== 1) return { targets: [], unknown: `\`${bin} ${operands.join(" ")}\` (two operands)` };
   const word = operands[0] as string;
   if (word === "-" || /^[+-]\d+$/u.test(word) || word.startsWith("-")) return { targets: [], unknown: `\`${bin} ${word}\`` };
-  if (/[$`*?[\]{}\\]/u.test(word)) return { targets: [], unknown: `\`${bin} ${word}\` (a word the shell may still change)` };
+  if (/[$`\\]/u.test(word) || (word.startsWith("~") && isPattern(word))) {
+    return { targets: [], unknown: `\`${bin} ${word}\` (a word the shell may still change)` };
+  }
+  if (isPattern(word)) {
+    // Second review, S1: a glob or brace directory is expanded on disk; one
+    // match is certain, several or none readable are not.
+    const expanded = expandOnDisk(dir, word);
+    if ("giveUp" in expanded) return { targets: [], unknown: `\`${bin} ${word}\` (a pattern this hook cannot expand: ${expanded.giveUp})` };
+    // Every entry a real listing matched; with none, the shell uses the word
+    // as a name, which is a target only when such an entry exists.
+    const matches = expanded.paths.filter((placed) => placed.from === "match").map((placed) => placed.path);
+    if (matches.length === 0) {
+      const literal = expanded.paths.filter((placed) => placed.from === "literal" && entryExists(placed.path)).map((placed) => placed.path);
+      if (literal.length === 0) return { targets: [], unknown: `\`${bin} ${word}\` (a pattern that matches nothing here)` };
+      return { targets: literal.flatMap(both), unknown: envChanged ? "a relative `cd` after the line may have changed PWD or CDPATH" : null };
+    }
+    return {
+      targets: matches.flatMap(both),
+      unknown: matches.length > 1 ? `\`${bin} ${word}\` (a pattern with ${String(matches.length)} matches)` : envChanged ? "a relative `cd` after the line may have changed PWD or CDPATH" : null,
+    };
+  }
   if (word === "~" || word.startsWith("~/")) {
     const targets = home === undefined ? [] : both(word === "~" ? home : `${home}/${word.slice(2)}`);
     return { targets, unknown: envChanged ? "a `cd` to HOME after the line may have changed HOME" : null };
@@ -371,11 +524,26 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
     const shape = shapes[0];
     if (shapes.length !== 1 || shape === undefined) continue;
     const bin = shape.bin === null ? null : (shape.bin.split("/").pop() ?? shape.bin);
-    const reads = segment.class.startsWith("read.") && bin !== "curl" && bin !== "wget";
-    // A read writes nothing but its redirection; `git`'s own words are not
-    // file writes (its rows classify what git writes).
-    const named = reads || segment.rule === "redirect-write" || bin === "git" ? [] : writeWords(shape.args).filter(literalPath);
-    const candidates = [...shape.writes.filter(literalPath), ...named];
+    const reads = segment.class.startsWith("read.") && bin !== "curl" && bin !== "wget" && bin !== "git";
+    // A read writes nothing but its redirection and the outputs it names
+    // itself (`sort -o`, `uniq in out`, sed's `w`: follow-up, item B);
+    // `git`'s own words are file writes only where git writes through them.
+    const gitWrites = bin === "git" ? gitWriteTargets(shape.args).filter(pathOrPattern) : [];
+    // A sed script's possible file is judged both as LITERAL text (sed
+    // expands nothing in it, so it keeps its blanks, a `$`, a backtick or a
+    // glob character, and is placed exactly as written) and as the shell
+    // word it may also be (an unquoted script word is expanded before sed
+    // sees it). The tag belongs to the candidate, never to its text: a
+    // redirection spelled the same (`sed -n 'w .g*t/x' f > .g*t/x`) is only
+    // a shell word.
+    const readsOnly = reads || segment.rule === "redirect-write";
+    const sedNames = bin === "sed" && readsOnly ? readWriteTargets(bin, shape.args).filter((word) => word.length > 0) : [];
+    const readOutputs = bin === null || bin === "sed" ? [] : readWriteTargets(bin, shape.args).filter(pathOrPattern);
+    const named = readsOnly ? readOutputs : bin === "git" ? gitWrites : writeWords(shape.args).filter(pathOrPattern);
+    const candidates: { word: string; literal: boolean }[] = [
+      ...[...shape.writes.filter(pathOrPattern), ...named].map((word) => ({ word, literal: false })),
+      ...sedNames.map((word) => ({ word, literal: true })),
+    ];
     // The words the segment surely writes: its redirection targets, and every
     // word of a segment the classifier already calls a file write. A word of
     // any other segment (a `curl -d` payload, a script argument) is only a
@@ -386,13 +554,46 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
       ...shape.writes,
       ...(segment.class.startsWith("files.") ? named : []),
       ...(bin === null ? [] : fetchOutputValues(bin, shape.args)),
+      ...gitWrites,
+      ...(bin === null ? [] : readWriteSureTargets(bin, shape.args)),
     ]);
-    if (candidates.length === 0) continue;
+    const sources = bin === null ? [] : treeSources(bin, shape.args).filter(pathOrPattern);
+    if (candidates.length === 0 && sources.length === 0) continue;
     let hit: { word: string; landed: string } | null = null;
     for (const dir of before) {
       const inGit = gitDirsOf(dir);
-      for (const word of candidates) {
+      // Each candidate where it is placed: a pattern by each name it expands
+      // to on disk, or by its text when it cannot be expanded.
+      const placed: { word: string; spelled: string }[] = [];
+      for (const candidate of candidates) {
+        const { word } = candidate;
+        // A sed name: placed as its literal text, AND judged below as the
+        // shell word it may also be (a hit from either counts).
+        if (candidate.literal) placed.push({ word, spelled: word });
         const spelled = word.startsWith("~/") && home !== undefined ? `${home}/${word.slice(2)}` : word;
+        if (!isPattern(spelled)) {
+          placed.push({ word, spelled });
+          continue;
+        }
+        const text = spelled.startsWith("/") ? spelled : `${dir}/${spelled}`;
+        if (mayNameGitDirectory(text)) {
+          hit = { word, landed: `${text} (a pattern that names .git)` };
+          break;
+        }
+        const expanded = expandOnDisk(dir, spelled);
+        if ("giveUp" in expanded) {
+          // Cannot be expanded: a sure target the strict way; a possible one
+          // was judged by its text just above.
+          if (sure.has(word)) {
+            hit = { word, landed: `a place this hook cannot determine (${expanded.giveUp})` };
+            break;
+          }
+          continue;
+        }
+        for (const each of expanded.paths) placed.push({ word, spelled: each.path });
+      }
+      if (hit !== null) break;
+      for (const { word, spelled } of placed) {
         const walked = physicalLanding(spelled.startsWith("/") ? spelled : `${dir}/${spelled}`);
         if ("unplaceable" in walked) {
           if (sure.has(word) || walked.unplaceable === "ELOOP") {
@@ -415,13 +616,51 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
         }
       }
       if (hit !== null) break;
+      // Second review, N2: a copy or move of a tree that carries a `.git` at
+      // its top (`cp -R /x/. .`, `rsync -a /x/ .`, `mv /x/.git .`) puts that
+      // git directory, its hooks and its config where it lands.
+      for (const word of sources) {
+        const spelled = word.startsWith("~/") && home !== undefined ? `${home}/${word.slice(2)}` : word;
+        let paths = [spelled.startsWith("/") ? spelled : `${dir}/${spelled}`];
+        if (isPattern(spelled)) {
+          const expanded = expandOnDisk(dir, spelled);
+          if ("giveUp" in expanded) {
+            if (sure.has(word)) {
+              hit = { word, landed: `a tree this hook cannot list (${expanded.giveUp})` };
+              break;
+            }
+            continue;
+          }
+          // The tree a copy reads: each real match, or the word as a name.
+          paths = expanded.paths
+            .filter((placed) => placed.from === "match" || (placed.from === "literal" && entryExists(placed.path)))
+            .map((placed) => placed.path);
+        }
+        for (const path of paths) {
+          const last = path.replace(/(?:\/\.?)+$/u, "").split("/").pop() ?? "";
+          let carries = last.toLowerCase() === ".git";
+          if (!carries) {
+            try {
+              carries = statSync(path).isDirectory() && existsSync(join(path, ".git"));
+            } catch {
+              carries = false;
+            }
+          }
+          if (carries) {
+            hit = { word, landed: `${path}, a tree that carries a .git entry` };
+            break;
+          }
+        }
+        if (hit !== null) break;
+      }
+      if (hit !== null) break;
     }
     if (hit === null) {
       // KNOWN LIMIT (measured: such lines are autonomous on 0.4.8 under this
       // repository's policy, so the strict answer would move ordinary lines).
       // A relative write after a directory change this step cannot place is
       // judged from the places it can name, as 0.4.8 judges it, and said so.
-      const relative = candidates.find((word) => !word.startsWith("/") && !word.startsWith("~/"));
+      const relative = candidates.map((candidate) => candidate.word).find((word) => !word.startsWith("/") && !word.startsWith("~/"));
       if (unknownBefore !== null && relative !== undefined) {
         notes.push(
           `git-dir-write: \`${segment.text}\` writes ${relative} after ${unknownBefore}, which this hook cannot place; it is judged from the directories it can name (known limit), and stays ${segment.class}`,
