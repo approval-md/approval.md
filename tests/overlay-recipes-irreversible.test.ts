@@ -22,8 +22,9 @@
  *      entry says so (argv read through a recording core), and a core that
  *      does not know the flag reads as a refused propose, never an error.
  *
- * The For Kicks entry of expected.json is read, never changed: it changes in
- * the overlay PR that lands the card.
+ * The For Kicks entry of expected.json carries the card outcome (overlay#629
+ * proposes with the flag): irreversible, a minimal card in every cell. Its
+ * acceptance is Carter's to give, so the field tests below fix their own.
  */
 
 import assert from "node:assert/strict";
@@ -80,6 +81,9 @@ const core = await loadCore(ROOT);
 test("validateExpected takes propose.irreversible true or false, and refuses anything else", () => {
   const errorsOf = (irreversible: unknown): string[] => {
     const entry = structuredClone(FK) as Json & { propose: Json };
+    // The field is under test here, not the acceptance (Carter's, filled when he gives it).
+    entry["accepted_by"] = "human:carter";
+    entry["accepted_at"] = "2026-11-22";
     if (irreversible === undefined) delete entry.propose["irreversible"];
     else entry.propose["irreversible"] = irreversible;
     return (validateExpected({ entries: [entry] }).errors as { message: string }[]).map((e) => e.message);
@@ -90,8 +94,8 @@ test("validateExpected takes propose.irreversible true or false, and refuses any
   for (const bad of ["true", 1, null]) {
     assert.match(errorsOf(bad).join("\n"), /propose\.irreversible must be true or false/u, JSON.stringify(bad));
   }
-  // The For Kicks entry is as #679 has it: no flag yet.
-  assert.equal(Object.prototype.hasOwnProperty.call(FK.propose, "irreversible"), false);
+  // The For Kicks entry declares the flag: overlay#629 proposes with irreversible=True.
+  assert.equal(FK.propose["irreversible"], true);
 });
 
 // ---------------------------------------------------------------------------
@@ -131,6 +135,16 @@ test("with irreversible, the For Kicks propose answered requested is a minimal c
     "supervised-live": "card, minimal",
     manual: "card, minimal",
   });
+});
+
+test("the For Kicks entry declares the card outcome the check decides with the flag, and no INTERIM acceptance", () => {
+  const p = FK.propose as unknown as Json & { matrix: Record<string, string> };
+  assert.equal(p["irreversible"], true);
+  assert.equal(p["decision"], "card");
+  assert.equal(p["card_style"], "minimal");
+  assert.deepEqual(p.matrix, Object.fromEntries((CELLS as string[]).map((cell) => [cell, "card"])));
+  for (const cell of CELLS as string[]) assert.equal(decided(cell, true), `${p.matrix[cell]}, ${String(p["card_style"])}`, cell);
+  assert.doesNotMatch(String(FK["reason"]), /INTERIM|refused/u);
 });
 
 test("without it, the same answer reads as it did before the floor (the page's decide679-floor-answers.json)", () => {
