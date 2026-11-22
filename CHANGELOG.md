@@ -131,7 +131,10 @@ on the change above.
   .gi? && ...`). `*` and `?` never match a leading dot, so `cd *` and `rm
   *.log` do not move. The hook expands a pattern on disk and walks every
   matching directory and link; past 100,000 entries, or under a directory it
-  cannot list, a sure target is judged the strict way.
+  cannot list, a sure target is judged the strict way. Brace groups are found
+  in one pass over the word: scanning from every `{` to its close took 3.7 CPU
+  seconds on `{` x 40,000, `a`, `}` x 40,000, and a line of about 320 KB
+  could outrun the hook's timeout.
 - **git's own write options.** `--output` (`git log --output=.git/config` was
   a read), `apply --directory` and `--build-fake-ancestor`, `worktree add
   <path>`, and `clone <dir>` and `--separate-git-dir` are write targets, read

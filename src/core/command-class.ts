@@ -3983,29 +3983,82 @@ export function expandBraces(word: string, limit = BRACE_LIMIT): string[] | null
   return done;
 }
 
+/**
+ * Where each `{` of `word` closes, and its commas at its own depth, from ONE
+ * pass (#677's own cost: scanning from every `{` to its close was quadratic,
+ * and `{` x 40,000, `a`, `}` x 40,000 took 3.7 CPU seconds, a minute near
+ * 160,000).
+ *
+ * The scan from a `{` at `start` skips the same escaped characters as a scan
+ * from the word's start does after `start` (the `{` itself is no backslash),
+ * so its depth at any later position is the word's depth there, minus the
+ * word's depth just after `start`, plus one. The group closes at the first `}`
+ * that brings the word's depth to one below that, and its commas are the
+ * unescaped commas at exactly that depth in between. A `{` the word-level scan
+ * skips as escaped is still a start, as `indexOf` finds it, with the depth
+ * unchanged.
+ */
+function braceIndex(word: string): {
+  depthAfter: Map<number, number>;
+  closes: Map<number, number[]>;
+  commas: Map<number, number[]>;
+} {
+  const depthAfter = new Map<number, number>();
+  const closes = new Map<number, number[]>();
+  const commas = new Map<number, number[]>();
+  const push = (map: Map<number, number[]>, key: number, at: number): void => {
+    const list = map.get(key);
+    if (list === undefined) map.set(key, [at]);
+    else list.push(at);
+  };
+  let depth = 0;
+  for (let at = 0; at < word.length; at += 1) {
+    const char = word[at];
+    if (char === "\\") {
+      if (word[at + 1] === "{") depthAfter.set(at + 1, depth);
+      at += 1;
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+      depthAfter.set(at, depth);
+    } else if (char === "}") {
+      depth -= 1;
+      push(closes, depth, at);
+    } else if (char === ",") {
+      push(commas, depth, at);
+    }
+  }
+  return { depthAfter, closes, commas };
+}
+
+/** The index of the first entry of the ascending `list` above `after`, or `list.length`. */
+function firstAbove(list: readonly number[], after: number): number {
+  let low = 0;
+  let high = list.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if ((list[middle] as number) > after) high = middle;
+    else low = middle + 1;
+  }
+  return low;
+}
+
 /** The first brace group of `word` the shell would expand, with its alternatives. */
 function braceGroup(word: string): { start: number; end: number; parts: string[] } | null {
+  if (!word.includes("{")) return null;
+  const index = braceIndex(word);
   for (let start = word.indexOf("{"); start !== -1; start = word.indexOf("{", start + 1)) {
-    let depth = 0;
+    const base = index.depthAfter.get(start) as number;
+    const closesAt = index.closes.get(base - 1) ?? [];
+    const next = firstAbove(closesAt, start);
+    if (next === closesAt.length) return null;
+    const end = closesAt[next] as number;
+    const commasAt = index.commas.get(base) ?? [];
     const cuts: number[] = [];
-    let end = -1;
-    for (let at = start; at < word.length; at += 1) {
-      const char = word[at];
-      if (char === "\\") {
-        at += 1;
-        continue;
-      }
-      if (char === "{") depth += 1;
-      if (char === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          end = at;
-          break;
-        }
-      }
-      if (char === "," && depth === 1) cuts.push(at);
+    for (let at = firstAbove(commasAt, start); at < commasAt.length && (commasAt[at] as number) < end; at += 1) {
+      cuts.push(commasAt[at] as number);
     }
-    if (end === -1) return null;
     const body = word.slice(start + 1, end);
     if (cuts.length > 0) {
       const parts: string[] = [];

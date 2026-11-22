@@ -512,8 +512,16 @@ test("recheck M(new): a brace sequence that collapses to one word is judged as t
   assert.deepEqual(classesOf("echo x > notes{1..1}.md"), ["files.write.workspace"]);
 });
 
+/** CPU milliseconds (user and system) spent in `run`: a shared runner's wall clock is no bound. */
+function cpuMs(run: () => void): number {
+  const start = process.cpuUsage();
+  run();
+  const used = process.cpuUsage(start);
+  return (used.user + used.system) / 1000;
+}
+
 test("recheck S(new): the brace expander is bounded and fails to the stricter class, never throws", () => {
-  const started = Date.now();
+  const start = process.cpuUsage();
   for (const word of [
     `out${"{a,b}".repeat(20000)}.txt`,
     `out${"{a,b}".repeat(2000)}.txt`,
@@ -532,7 +540,26 @@ test("recheck S(new): the brace expander is bounded and fails to the stricter cl
   // Deep unmatched or literal braces are linear, and literal.
   assert.deepEqual(classesOf(`echo x > ${"{".repeat(20000)}a${"}".repeat(20000)}`), ["files.write.workspace"]);
   assert.deepEqual(classesOf(`echo x > ${"{".repeat(60000)}`), ["files.write.workspace"]);
-  assert.ok(Date.now() - started < 10_000, `took ${String(Date.now() - started)} ms`);
+  // CPU time, not wall-clock (the wall clock failed twice on a busy runner at
+  // 10.3 s and 10.4 s). About 2 CPU s on a laptop; the bound is the old one.
+  const used = process.cpuUsage(start);
+  const ms = (used.user + used.system) / 1000;
+  assert.ok(ms < 10_000, `took ${ms.toFixed(0)} CPU ms`);
+});
+
+test("cost: nested literal braces are read in one pass, not one scan per brace", () => {
+  // Scanning from every `{` to its close was quadratic: `{` x 40,000, `a`,
+  // `}` x 40,000 took 3.7 CPU s, and a 320 KB line would pass the hook's 60 s
+  // timeout. One pass: about 20 ms at 40,000 and 80 ms at 160,000 here.
+  for (const n of [40_000, 160_000]) {
+    const line = `echo x > ${"{".repeat(n)}a${"}".repeat(n)}`;
+    let classes: string[] = [];
+    const ms = cpuMs(() => {
+      classes = classesOf(line);
+    });
+    assert.deepEqual(classes, ["files.write.workspace"], `n=${String(n)}`);
+    assert.ok(ms < 2_000, `n=${String(n)}: ${ms.toFixed(0)} CPU ms, bound 2,000`);
+  }
 });
 
 test("recheck S(open): every curl and wget write option reaches the landing check; unknowable targets fail closed", () => {
