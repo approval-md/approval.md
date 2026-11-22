@@ -692,6 +692,13 @@ test("APRV-537: whether a propose passes irreversible=True is read at its site; 
     "        ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=FLOOR)",
     "def p(ap, key, held):",
     "    return [ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=FLOOR) for FLOOR in (False,)]",
+    "def q(ap, key, held):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=1)",
+    "def r(ap, key, held):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=not False)",
+    "def s(ap, key, held):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=ONCE)",
+    "ONCE = True",
     "REBOUND = True",
     "import os",
     "if os.environ.get(\"X\"): REBOUND = False",
@@ -711,17 +718,19 @@ test("APRV-537: whether a propose passes irreversible=True is read at its site; 
   assert.deepEqual(
     sites.map((p) => [p["line"], p["irreversible"]]),
     [
-      [4, true], [6, false], [8, false], [10, true], [12, null], [14, null], [16, null],
-      // Review S1: a name the function shadows (h), takes as a parameter (i) or an enclosing function
-      // binds (o), one the module rebinds under an `if` (j) or through `global` (k), and a constant
-      // that is not a bool (l) are unread; a top-level alias of a once-bound constant is read (n).
-      [18, null], [20, null], [22, null], [24, null], [26, null], [28, true], [31, null],
-      // A propose written straight in a class body that binds the name, a method under that class
-      // (conservative: Python would read the module's there) and a comprehension target: unread.
+      // A literal True or False written at the call is read; no keyword is false.
+      [4, true], [6, false], [8, false],
+      // Fold 4: ANY name is unread, a module constant bound once at top level included (10, 46), since no
+      // reading of the source sees every way a name can be rebound (a shadow, an `if`, `global`, a class
+      // body, a comprehension, a match capture, a star import, a walrus, globals()).
+      [10, null], [12, null], [14, null], [16, null],
+      [18, null], [20, null], [22, null], [24, null], [26, null], [28, null], [31, null],
       [36, null], [38, null], [40, null],
+      // A constant that is not the literal True or False (1), and an expression (not False): unread.
+      [42, null], [44, null], [46, null],
     ],
   );
-  assert.match(String(sites.find((p) => p["line"] === 12)?.["irreversible_why"]), /not a literal True or False or a module constant/u);
+  assert.match(String(sites.find((p) => p["line"] === 12)?.["irreversible_why"]), /not the literal True or False written at the call \(a name is never followed\)/u);
   assert.match(String(sites.find((p) => p["line"] === 14)?.["irreversible_why"]), /spread/u);
   assert.match(String(sites.find((p) => p["line"] === 16)?.["irreversible_why"]), /fifth positional/u);
   // The class is read as before, whatever the flag.

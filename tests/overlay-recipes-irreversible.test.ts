@@ -203,7 +203,7 @@ const site = (irreversible: unknown): Json => ({
   accepts: ["requested"],
   gated_plugin: false,
   ...(irreversible === "absent" ? {} : { irreversible }),
-  ...(irreversible === null ? { irreversible_why: "irreversible= is not a literal True or False or a module constant" } : {}),
+  ...(irreversible === null ? { irreversible_why: "irreversible= is not the literal True or False written at the call (a name is never followed)" } : {}),
 });
 const onlyEntry = (irreversible?: boolean): Json => ({
   propose: {
