@@ -1234,6 +1234,8 @@ const NON_PATH_FLAGS = new Set([
   "--until", "--withdraw-on-timeout", "-h", "-n",
   // APRV-445: `propose` and `start`. The payload is a JSON VALUE, never a path.
   "--class", "--key", "--summary", "--payload-json",
+  // APRV-537: `propose --irreversible`, a boolean.
+  "--irreversible",
 ]);
 
 test("every path-typed flag on every published verb is pinned or confined", () => {

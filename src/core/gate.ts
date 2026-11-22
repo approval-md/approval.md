@@ -3381,6 +3381,15 @@ export interface WithdrawOptions extends GateOptions {
    * request refuses `duplicate-request`.
    */
   onlyIfVoid?: true;
+  /**
+   * Withdraw only a pending request of this proposal task whose key NO record
+   * yet declares irreversible (APRV-537: `propose --irreversible` over a
+   * request filed without the flag). Judged inside the retried
+   * read-check-append cycle, like `onlyIfVoid`, so two flagged retries racing
+   * cannot retract the floored request the other has just filed. A key
+   * already floored refuses `duplicate-request`.
+   */
+  onlyIfUnfloored?: string;
   /** Why the requester is retracting. Defaults to `cancelled`. */
   reason?: WithdrawReason;
   /** The requester's free-text elaboration, recorded in the payload. */
@@ -3520,6 +3529,14 @@ function attemptWithdraw(
         { state: derivation.state },
       );
     }
+  }
+
+  if (options.onlyIfUnfloored !== undefined && proposalIrreversible(read.records, options.onlyIfUnfloored, actionKey)) {
+    return refuse(
+      "duplicate-request",
+      `action ${actionKey} has a live request at seq ${String(derivation.requestSeq)} and the key is already declared irreversible, so the request was not withdrawn`,
+      { state: derivation.state },
+    );
   }
 
   if (derivation.requestActor !== actor) {
@@ -4271,6 +4288,17 @@ export interface HarnessStartInput {
    * Shape-checked by the event schema at the write boundary.
    */
   harness_tool?: string;
+  /**
+   * `false` when the action is declared irreversible: the class is resolved
+   * with SPEC.md §7's floor, so a nonmanual class without `allow_irreversible`
+   * resolves `manual` and this path, which records only what the policy itself
+   * authorizes, refuses it `not-granted`. `true` and absent do not engage it
+   * (a self-reported field raises scrutiny and never lowers it). For a
+   * proposal the attempt also reads the key's own records
+   * ({@link proposalIrreversible}), so a caller that omits it is floored all
+   * the same.
+   */
+  reversible?: boolean;
 }
 
 export type HarnessStartResult = { ok: true; record: EventRecord } | GateRefusal;
@@ -4399,7 +4427,13 @@ function attemptHarnessStart(
   if (!attested.ok) return attested;
 
   const load = parsePolicy(policyRead, options);
-  const resolution = resolve(load, input.cls);
+  // SPEC.md §7's floor, judged against the records this append is authorized
+  // by: the caller's declaration, or for a proposal the key's own registration
+  // and requests (the stricter value sticks; `proposalIrreversible`).
+  const irreversible =
+    input.reversible === false ||
+    (isProposalTask(input.task) && proposalIrreversible(read.records, input.task, input.actionKey));
+  const resolution = resolve(load, input.cls, irreversible ? { reversible: false } : {});
   // APRV-185, and the belt to the hook's braces exactly as the loop floor below
   // is: `approval hook claude-code` denies a human-only class before the harness
   // ever runs the command, and a caller that reaches this write boundary without
@@ -4419,7 +4453,9 @@ function attemptHarnessStart(
   if (resolution.autonomy === "manual") {
     return refuse(
       "not-granted",
-      `class ${input.cls} resolves to manual (${resolution.provenance}), and a manual action is authorized by a human's grant rather than by the policy. Request it and spend the grant; this path records only the executions the policy itself authorized.`,
+      resolution.floorApplied
+        ? `action ${input.actionKey} is declared irreversible (reversible: false), so SPEC.md §7's floor raises class ${input.cls} to manual, and a manual action is authorized by a human's grant rather than by the policy. Propose or request it and spend the grant; nothing was appended.`
+        : `class ${input.cls} resolves to manual (${resolution.provenance}), and a manual action is authorized by a human's grant rather than by the policy. Request it and spend the grant; this path records only the executions the policy itself authorized.`,
     );
   }
 
@@ -5148,6 +5184,45 @@ export interface ProposeInput {
   actionKey: string;
   summary: string;
   payload: unknown;
+  /**
+   * The proposer declares that the action cannot be undone (`approval propose
+   * --irreversible`). It engages SPEC.md §7's irreversibility floor for this
+   * key: the registration records `reversible: false`, the request resolves the
+   * class with the floor, and a start with no human grant is refused. A
+   * self-reported field that can only raise scrutiny (§11.1 invariant 4), and
+   * once any record of the key carries it, it sticks: a later propose without
+   * the flag does not make the key reversible again (see
+   * {@link proposalIrreversible}).
+   */
+  irreversible?: boolean;
+}
+
+/**
+ * Has `(task, actionKey)` been declared irreversible by any record of the log?
+ *
+ * A proposal's irreversibility is the STRICTER of every declaration made for
+ * the key, and it sticks: the registration's `reversible: false` (the first
+ * propose carried `--irreversible`), or `reversible: false` on any
+ * `approval.requested` filed for the key under this task (a later propose
+ * carried it, over a registration that did not). The log is append-only, so
+ * once either record exists no later call, with the flag or without it, can
+ * make the key reversible again. A declaration of `true`, or none, never
+ * lowers anything: it simply fails to raise.
+ *
+ * Read by `propose` (to resolve the decision) and by the policy start path
+ * (`startProposed` and, inside the attempt that appends,
+ * `attemptHarnessStart`), so the floor binds the start whether or not the
+ * proposer repeats the flag.
+ */
+export function proposalIrreversible(records: EventRecord[], task: string, actionKey: string): boolean {
+  const declared = registeredAction(records, task, actionKey);
+  if (declared.ok && declared.action.reversible === false) return true;
+  for (const record of records) {
+    if (record.event !== "approval.requested") continue;
+    if (record.task !== task || record.action_key !== actionKey) continue;
+    if (payloadOf(record)["reversible"] === false) return true;
+  }
+  return false;
 }
 
 /**
@@ -5220,6 +5295,24 @@ export type ProposeResult =
  * The same key with DIFFERENT bytes refuses: `duplicate-request` while a request
  * is live, `payload-mismatch` otherwise, because a key is bound to the bytes it
  * was first registered with and new bytes need a new key.
+ *
+ * ## Irreversible (`--irreversible`)
+ *
+ * `irreversible: true` declares that the action cannot be undone and engages
+ * SPEC.md §7's floor for the key: the registration records `reversible: false`,
+ * {@link request} resolves the class with the floor (an `autonomous`,
+ * `supervised-retro` or `supervised-live` class is raised to `manual` unless
+ * the attested policy sets `allow_irreversible: true` on it), so the answer is
+ * `requested` and a human is asked exactly as under `manual`; and the start
+ * path refuses a policy start for the key (`not-granted`). It never changes a
+ * `human-only` class. The stricter declaration wins and sticks: a later propose
+ * without the flag finds the earlier record and stays floored, and a later
+ * propose WITH the flag over a registration without it files its request with
+ * `reversible: false`, from which point the key is floored for good. A propose
+ * with the flag that finds a live or decided request answers from it and
+ * appends nothing (the request already puts the key in front of a human); the
+ * flag binds from the next record it writes. Nothing in the answer changes
+ * shape: a floored key answers `requested`, as a manual class does.
  */
 export function propose(
   logPath: string,
@@ -5332,6 +5425,13 @@ export function propose(
   });
 
   const existing = registeredAction(read.records, task, input.actionKey);
+  // SPEC.md §7's floor for this key: the flag on this call, or any earlier
+  // record of the key that declared it (the stricter value wins and sticks).
+  // The early refusals above use the ordinary resolution on purpose: the floor
+  // never changes `human-only`, and whether a harness launch is ruled is a
+  // question about the policy text, not about this action.
+  const irreversible =
+    input.irreversible === true || proposalIrreversible(read.records, task, input.actionKey);
   let registeredNow = false;
   let withdrewNow = false;
   if (existing.ok) {
@@ -5378,13 +5478,58 @@ export function propose(
         true,
       );
     }
+    // APRV-537 (the durable declaration). `--irreversible` on a retry over a
+    // PENDING request that was filed without it is recorded now, not at some
+    // later request: the pending question is taken back by its own requester
+    // and asked again below with `reversible: false`. From that record on the
+    // key is floored whatever a later call omits, so a withdraw followed by an
+    // unflagged propose cannot shed the declaration. The person is asked once
+    // more, about the same bytes, with the floor on the request they decide.
+    // Over a request a person has already DECIDED (granted, rejected, revoked)
+    // the declaration cannot be recorded: no record of the requester's may be
+    // filed over a person's answer, and the registration is written once. Such
+    // a call is REFUSED rather than answered, so a caller is never told
+    // `requested` for a key its flag did not floor. The answer stands for the
+    // key as it was proposed; the irreversible action is proposed under a new
+    // key, whose registration then carries the floor.
+    const undeclared =
+      input.irreversible === true && !proposalIrreversible(read.records, task, input.actionKey);
+    const declaresNow = standing === "requested" && undeclared;
+    if (undeclared && (standing === "granted" || standing === "rejected" || standing === "revoked")) {
+      return refuse(
+        "already-decided",
+        `action ${input.actionKey} was proposed without --irreversible and a person has already answered that request (${standing} at seq ${String(seqOf)}), so the declaration cannot be recorded for this key and the key is NOT floored. A key keeps what it was first proposed with: propose the irreversible action under a new key. Nothing was appended.`,
+        { state: derivation.state },
+      );
+    }
     if (
-      standing === "requested" ||
+      (standing === "requested" && !declaresNow) ||
       standing === "granted" ||
       standing === "rejected" ||
       standing === "revoked"
     ) {
       return answered("requested", standing, seqOf, true);
+    }
+    if (declaresNow) {
+      const retracted = withdraw(logPath, input.actionKey, actor, {
+        ...options,
+        onlyIfUnfloored: task,
+        reason: "superseded",
+        note: "the proposer has declared this action irreversible (--irreversible); the same proposal is asked again with SPEC.md section 7's floor recorded on the request",
+      });
+      if (!retracted.ok) {
+        // A concurrent caller withdrew it, re-asked it floored, or a human answered it.
+        if (
+          retracted.code === "request-withdrawn" ||
+          retracted.code === "already-decided" ||
+          retracted.code === "duplicate-request" ||
+          retracted.code === "expired"
+        ) {
+          return again(retracted);
+        }
+        return retracted;
+      }
+      withdrewNow = true;
     }
     if (standing === "void" && derivation.state === "requested") {
       // A pending question no human may decide any more. Taken back by its own
@@ -5424,6 +5569,9 @@ export function propose(
               summary: input.summary,
               idempotency_key: input.actionKey,
               payload_hash: hash,
+              // SPEC.md §6.2's own declaration field, so every reader of the
+              // registration (the start included) sees the floor.
+              ...(irreversible ? { reversible: false } : {}),
             },
           ],
         },
@@ -5459,6 +5607,11 @@ export function propose(
       payload: { value: input.payload },
       execution: "harness",
       agentProposal: true,
+      // `request` resolves the class with §7's floor and records
+      // `reversible: false` on the request, which is what makes a flag given
+      // only on a later propose stick (`proposalIrreversible`) and what the
+      // decision and the grant's spend re-resolve with.
+      ...(irreversible ? { reversible: false } : {}),
     },
     actor,
     options,
@@ -5470,6 +5623,23 @@ export function propose(
     return result;
   }
   if (result.record === null) {
+    // APRV-537: the policy answered for itself, so no request carries this
+    // call's flag. That is the operator's `allow_irreversible: true` (SPEC.md
+    // section 7), and it is fine when the REGISTRATION carries the declaration:
+    // the key stays floored if the operator later removes the permission. When
+    // the key was registered without the flag, nothing can record it now; the
+    // call is refused rather than answered `autonomous` for a key the flag did
+    // not floor.
+    if (
+      input.irreversible === true &&
+      !registeredNow &&
+      !proposalIrreversible(read.records, task, input.actionKey)
+    ) {
+      return refuse(
+        "task-already-registered",
+        `action ${input.actionKey} is already registered under task ${task} without --irreversible, and the policy authorizes its class on its own (allow_irreversible), so no request is filed that could record the declaration: the key is NOT floored. A key keeps what it was first proposed with: propose the irreversible action under a new key. Nothing was appended${withdrewNow ? " beyond the withdrawal of the void request" : ""}.`,
+      );
+    }
     return answered(
       result.autonomy === "autonomous" ? "autonomous" : "supervised",
       null,
@@ -5608,6 +5778,12 @@ export function startProposed(
     if (!spent.ok) return spent;
     return { ok: true, task, actionKey, cls: declared.action.class, authorization: "grant", record: spent.record };
   }
+  // SPEC.md §7: a key declared irreversible (by its registration, or by a
+  // later propose's request) is floored to manual, so the policy path refuses
+  // it `not-granted` and only a human's grant can start it. The attempt that
+  // appends re-reads the same records itself; this passes what this read saw.
+  const irreversible =
+    declared.action.reversible === false || proposalIrreversible(read.records, task, actionKey);
   const started = startHarnessExecution(
     logPath,
     {
@@ -5616,6 +5792,7 @@ export function startProposed(
       cls: declared.action.class,
       payload_hash: hash,
       ...(declared.action.est_cost_usd === undefined ? {} : { est_cost_usd: declared.action.est_cost_usd }),
+      ...(irreversible ? { reversible: false } : {}),
     },
     actor,
     options,
