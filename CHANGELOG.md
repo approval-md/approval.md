@@ -153,13 +153,59 @@ on the change above.
 - **A tree that carries `.git`.** In the hook, a copy or move whose source
   holds a `.git` entry at its top (`cp -R /x/. .`, `rsync -a /x/ .`) is
   `git-dir-write`.
+- **`.git` spelled by a substitution.** Two more spellings count as the line
+  spelling `.git`. The first is git's own answer: a substitution that runs
+  `git rev-parse` with `--git-dir`, `--absolute-git-dir`,
+  `--git-common-dir`, `--git-path`, `--resolve-git-dir` or
+  `--shared-index-path` (so `cd "$(git rev-parse --git-dir)" && echo x >>
+  config` is `git-dir-write`). The second is a spelling split across the
+  substitution's edge: literal text and the output that can join into
+  `.git` (`$(printf .gi)t`, `.g$(printf it)`, `.$(echo g)it`). Words whose
+  literal text cannot be part of `.git` do not move (`out/$(date
+  +%F).txt`, `$(pwd)/build/x`), and neither does `git rev-parse
+  --show-toplevel` or `--short`. A substitution's body is read as a line of
+  its own, and a `bash -lc` script reads its own text too. Two more count:
+  an escape that decodes to `.git`, in an ANSI-C quoted string
+  (`$'\x2egit'`) or a substitution body (`$(printf '\x2egit')`; an ANSI-C
+  string ends at a NUL, a substitution drops NULs, and printf's precision
+  cuts a string, `%.4s` of `.gitfoo` being `.git`, and `%b`'s decoded
+  bytes before the NULs go; a cut of non-ASCII text, which printf counts in
+  bytes, and a printed glob such as `.gi*` count), and the
+  word a parameter expansion may carry (`${VAR:-.git}`, `${VAR=.git}`,
+  `${VAR:+.git}`). After a security review both fail closed: a word with
+  `$'…'` is read quote by quote and joined, an unclosed quote counts, what
+  `printf` and `echo` print is rendered from their words (`$(printf .g;
+  printf it)`), an unknown operator or an unclosed `${` counts, and every
+  operator that transforms a value (removal, substring, replacement, case,
+  `@`) counts, on any parameter. That one costs: `echo x >
+  "${f%.txt}.log"` or `"${1%.md}.html"` becomes `git-dir-write`.
+- **A line cannot be built to make the classifier slow.** A hook past its
+  timeout lets the call through, so the cost of reading a line is bounded.
+  The split-spelling reader tried every window of a word as its own
+  expression (130 substitutions and a letter took 74 s through the hook),
+  and the glob reader built one backtracking expression per pattern (`.`,
+  400 `*` and `x` took 14 s). Both now walk the text once. Past 1,024 glob
+  characters a pattern segment counts as naming `.git`; substitution bodies
+  are read for `.git` to 64 levels of nesting, and a deeper one counts; past
+  128 levels a line is refused (`opaque`), where it used to throw near 1,250.
+  The same holds for the readers of parameter words and of what `printf`
+  and `echo` print: a word is read to 32 levels of `${`, and a deeper one
+  counts; a `%` then zeros, an unclosed `${` run, and many words or flags
+  are each read once (each took 64 to 174 s through the hook before). A
+  word with outputs in it is brace-expanded to 16 alternatives, and past
+  that counts (`{a,b}$(pwd)` to 1 MB took 39 s at 1,024).
 - **Looser than the change above, by design.** A read whose only write is its
   redirection writes nothing through its own words: `cat .git/HEAD > /tmp/x`,
   `ls .git/hooks > list.txt` and the like are the workspace write 0.4.8 called
   them, not `git-dir-write`. A redirection into `.git`, and a non-read with a
   `.git` operand (`cp .git/config /tmp/c`), stay `git-dir-write`.
 - **Known limits.** A variable set in an earlier call, or a value built from
-  several expansions (`A=.g; B=it; cd $A$B`); an archive unpacked into the
+  several expansions (`A=.g; B=it; cd $A$B`), so `cd $VAR && echo x >>
+  config` stays; a `git rev-parse` option passed in a variable (`git
+  rev-parse $OPT`); two outputs that only together spell `.git`
+  (`"$(printf .g)$(printf it)/config"`), an encoding a command decodes
+  (`base64 -d`) and a plain variable beside literal text (`.g$X`);
+  an archive unpacked into the
   checkout (`tar -xf`, `unzip`); a git include file (`~/.gitconfig.local`);
   a `sed -f` script file; the push pass does not read `core.hooksPath`; and,
   as above, a relative write after a `cd` the hook cannot place.
@@ -171,6 +217,25 @@ on the change above.
   above. Conformance: `command-class` 1.11.0 (from 1.10.0), five new
   vectors; main's 370 are byte-identical. The fleet's 63 overlay recipes are
   unmoved.
+- **Evidence, substitution spellings.** Against the follow-up's own build,
+  0 looser, and 647 lines move, every one stricter (or the same rank under
+  the overlay's template): 646 carry one of the two spellings, and one is a
+  `bash -lc` script whose own assignment spells `.git`. Against 0.4.8's
+  build and against main as merged, 0 looser of its own, over 25,617 lines
+  pure (153,702 comparisons) and 4,283 lines through the hook in thirteen
+  checkout states (222,716 comparisons); against main, the five redirected
+  reads above stay as they were. Conformance: `command-class` 1.12.0 (from
+  1.11.0), seven new vectors; the follow-up's 375 are byte-identical. The
+  fleet's 63 overlay recipes are unmoved.
+- **Evidence, escapes and expansion words.** Against the build before them,
+  0 looser over 26,355 lines pure (158,130 comparisons) and 4,968 lines
+  through the hook in thirteen checkout states (258,336 comparisons); 175
+  lines move, every one stricter: 67 with ANSI-C quoting, 43 with a body
+  whose printed output spells `.git`, 57 with a parameter expansion and 8
+  past the nesting bounds. Against main as merged and against 0.4.8's build,
+  0 looser of its own. A word of 10,000 substitutions, a run of 1,000 `*`
+  and 10,000 levels of nesting each take under half a second of CPU through
+  the hook.
 
 ### Added
 

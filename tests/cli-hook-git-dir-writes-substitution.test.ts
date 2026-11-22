@@ -1,0 +1,496 @@
+/**
+ * APRV-518, a `.git` path spelled by a substitution: two spellings the line
+ * rule (second review, S3) did not count.
+ *
+ * Rule 1, git's own answer: a substitution body that runs `git rev-parse`
+ * with an option that prints the git directory or a path in it
+ * (`--git-dir`, `--absolute-git-dir`, `--git-common-dir`, `--git-path`,
+ * `--resolve-git-dir`, `--shared-index-path`) names `.git`.
+ * Rule 2, a spelling split across a substitution's edge: a word whose
+ * literal text and a substitution's output can join into a `.git` segment
+ * (`$(printf .gi)t`, `.g$(printf it)`, `$(printf .)git`, `.$(echo g)it`)
+ * names `.git`.
+ *
+ * On such a line a target that expands, or a relative one after a `cd` the
+ * text cannot place, is `git-dir-write`, in the pure classifier and so
+ * through the hook. Ordinary substitutions do not move. Hermetic: HOME is a
+ * fixture directory; git runs only to make checkouts, and no line is run.
+ */
+
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
+
+import { classifyForHook } from "../src/cli/hook.js";
+import { classifyCommand } from "../src/core/command-class.js";
+
+const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-git-dir-writes-subst-")));
+after(() => rmSync(scratch, { recursive: true, force: true }));
+
+const HOME = join(scratch, "home");
+mkdirSync(HOME);
+writeFileSync(join(HOME, ".gitconfig"), "[user]\n\tname = Dir Oracle\n\temail = oracle@example.invalid\n[init]\n\tdefaultBranch = main\n");
+process.env["HOME"] = HOME;
+process.env["GIT_CONFIG_NOSYSTEM"] = "1";
+delete process.env["GIT_CONFIG_GLOBAL"];
+delete process.env["GIT_DIR"];
+delete process.env["GIT_WORK_TREE"];
+delete process.env["CDPATH"];
+
+const GIT = spawnSync("git", ["--version"]).status === 0;
+const skip = GIT ? false : "no git binary";
+
+function git(cwd: string, ...args: string[]): void {
+  const ran = spawnSync("git", args, { cwd, encoding: "utf8", env: process.env });
+  assert.equal(ran.status, 0, `git ${args.join(" ")}: ${ran.stderr}`);
+}
+
+/** Every segment as `class rule`, pure; a refusal as `refused <code>`. */
+function pure(command: string): string[] {
+  const result = classifyCommand(command, []);
+  return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [`refused ${result.code}`];
+}
+
+/** Every segment as `class rule`, through the hook's refinements, in `cwd`. */
+function hook(command: string, cwd: string): string[] {
+  const result = classifyForHook(command, [], cwd).result;
+  return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [`refused ${result.code}`];
+}
+
+const DIR_WRITE = "vcs.history.rewrite git-dir-write";
+const READ_SHELL = "read.shell read-shell";
+const ASSIGNMENT = "read.shell assignment";
+const REDIRECT = "files.write.workspace redirect-write";
+
+let cases = 0;
+function checkout(): string {
+  cases += 1;
+  const dir = join(scratch, `case-${String(cases)}`, "repo");
+  mkdirSync(join(dir, "src"), { recursive: true });
+  git(dir, "init", "-q");
+  git(dir, "commit", "-q", "--allow-empty", "-m", "c0");
+  return dir;
+}
+
+// ---------------------------------------------------------------------------
+// Rule 1: git's own answer
+// ---------------------------------------------------------------------------
+
+test("rule 1: a cd into git rev-parse's git directory, then a relative write, is git-dir-write", () => {
+  assert.deepEqual(pure('cd "$(git rev-parse --git-dir)" && echo x >> config'), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure('cd "$(git rev-parse --git-path hooks)" && cp hook.sh pre-push'), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure("cd $(git rev-parse --git-dir) && echo x >> config"), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure('cd "$(git rev-parse --git-dir)"; echo x >> config'), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure('cd "$(git rev-parse --git-dir)/hooks" && cp hook.sh pre-push'), [READ_SHELL, DIR_WRITE]);
+});
+
+test("rule 1: a target built from git rev-parse's git directory is git-dir-write", () => {
+  assert.deepEqual(pure('echo x >> "$(git rev-parse --git-dir)/config"'), [DIR_WRITE]);
+  assert.deepEqual(pure('echo x >> "$(git rev-parse --git-dir)"/config'), [DIR_WRITE]);
+  assert.deepEqual(pure("D=$(git rev-parse --git-dir); echo x > $D/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure('mkdir -p "$(git rev-parse --git-path hooks)"'), [DIR_WRITE]);
+});
+
+test("rule 1: every option that prints the git directory or a path in it counts", () => {
+  for (const option of [
+    "--git-dir",
+    "--absolute-git-dir",
+    "--git-common-dir",
+    "--git-path hooks",
+    "--resolve-git-dir sub/.gitfile",
+    "--shared-index-path",
+    "--path-format=absolute --git-dir",
+    "--git-d",
+    "--git-$(echo dir)",
+  ]) {
+    assert.deepEqual(pure(`cd "$(git rev-parse ${option})" && echo x >> config`), [READ_SHELL, DIR_WRITE], option);
+  }
+  // Inside a shell the line wraps: the script reads its own text.
+  assert.deepEqual(pure("bash -lc 'cd \"$(git rev-parse --git-dir)\" && echo x >> config'"), [READ_SHELL, DIR_WRITE]);
+});
+
+test("rule 1: git rev-parse with an option that is not the git directory does not move", () => {
+  for (const option of ["--short HEAD", "--abbrev-ref HEAD", "--show-toplevel", "--show-cdup", "--verify HEAD", '"$REF"', "--short=$N HEAD"]) {
+    assert.deepEqual(pure(`cd "$(git rev-parse ${option})" && echo x > notes.txt`), [READ_SHELL, REDIRECT], option);
+  }
+  assert.deepEqual(pure('echo x > "$(git rev-parse --short HEAD)".txt'), [REDIRECT]);
+  assert.deepEqual(pure("B=$(git rev-parse --abbrev-ref HEAD); echo x > out/$B.txt"), [ASSIGNMENT, REDIRECT]);
+  assert.deepEqual(pure("echo x > $(git rev-parse --show-toplevel)/src/x"), [REDIRECT]);
+  assert.deepEqual(pure('cd "$(git rev-parse --show-toplevel)/src" && echo x >> a.ts'), [READ_SHELL, REDIRECT]);
+  // Reading the git directory, or writing its name to a literal file, writes nothing in it.
+  assert.deepEqual(pure('cat "$(git rev-parse --git-dir)/config"'), [READ_SHELL]);
+  assert.deepEqual(pure('echo "$(git rev-parse --git-dir)" > notes.txt'), [REDIRECT]);
+});
+
+test("rule 1: forms that were already strict stay so", () => {
+  // The backtick form is refused, as every backtick is.
+  assert.deepEqual(pure("cd `git rev-parse --git-dir` && echo x >> config"), ["refused opaque"]);
+  // A copy to a target the text cannot settle is the protected class already.
+  assert.deepEqual(pure('cp hook.sh "$(git rev-parse --git-path hooks)/pre-push"'), ["policy.core copy-target-unknown"]);
+  // --show-toplevel joined with a literal .git was counted by its own text.
+  assert.deepEqual(pure('echo x >> "$(git rev-parse --show-toplevel)/.git/config"'), [DIR_WRITE]);
+});
+
+// ---------------------------------------------------------------------------
+// Rule 2: a spelling split across a substitution's edge
+// ---------------------------------------------------------------------------
+
+test("rule 2: literal text and a substitution's output that join into .git name it", () => {
+  assert.deepEqual(pure("cd $(printf .gi)t && echo x >> config"), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> $(printf .gi)t/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> .g$(printf it)/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> $(printf .)git/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> .$(echo g)it/config"), [DIR_WRITE]);
+  assert.deepEqual(pure('cd "$(printf .gi)t" && echo x >> config'), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure("cd .g$(printf it) && echo x >> config"), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure("D=$(printf .gi)t; echo x >> $D/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("D=a:.g$(printf it); cd $D && echo x >> config"), [ASSIGNMENT, READ_SHELL, DIR_WRITE]);
+  // An output may hold a `/`: `.git` may begin inside one (`x/.gi` + `t`) or
+  // end inside one (`.g` + `it/x`), past literal text around it.
+  assert.deepEqual(pure("echo x >> x$(printf /.gi)t/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> .g$(printf it/)config"), [DIR_WRITE]);
+  // A glob or brace beside the substitution is read the broad way.
+  assert.deepEqual(pure("echo x >> .g$(printf i)?/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> .g{x,$(printf it)}/config"), [DIR_WRITE]);
+  // git's own write option, and a script a shell wrapper runs.
+  assert.deepEqual(pure("git log --output=.g$(printf it)/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("bash -lc 'cd $(printf .gi)t && echo x >> config'"), [READ_SHELL, DIR_WRITE]);
+  // The backtick form was refused before and is still.
+  assert.deepEqual(pure("echo x >> `printf .gi`t/config"), ["refused opaque"]);
+});
+
+test("both rules inside a substitution body: the body is read as a line of its own", () => {
+  assert.deepEqual(pure('echo x >> "$(echo $(printf .gi)t)/config"'), [DIR_WRITE]);
+  assert.deepEqual(pure("D=$(echo .g$(printf it)); cd $D && echo x >> config"), [ASSIGNMENT, READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure('D=$(cd "$(git rev-parse --git-dir)" && pwd); echo x >> $D/config'), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure('echo x > "$(echo $(date +%F))".txt'), [REDIRECT]);
+});
+
+test("rule 2: a word with a substitution whose literal text cannot join into .git does not move", () => {
+  assert.deepEqual(pure("echo x > out/$(date +%F).txt"), [REDIRECT]);
+  assert.deepEqual(pure("echo x > $(date +%s).dat"), [REDIRECT]);
+  assert.deepEqual(pure("echo x > report-$(date +%F)-v1.txt"), [REDIRECT]);
+  assert.deepEqual(pure("cp a $(pwd)/build/x"), ["policy.core copy-target-unknown"]);
+  assert.deepEqual(pure('echo x > "$(mktemp -d)"/f'), ["refused unclassified"]);
+  assert.deepEqual(pure("cp a v$(cat VERSION).tgz"), ["policy.core copy-target-unknown"]);
+  assert.deepEqual(pure("V=v$(cat VERSION); echo x > out/$V.txt"), [ASSIGNMENT, REDIRECT]);
+  assert.deepEqual(pure('cd "$(pwd)/build" && echo x > f'), [READ_SHELL, REDIRECT]);
+});
+
+// ---------------------------------------------------------------------------
+// The unknown-cd limit
+// ---------------------------------------------------------------------------
+
+test("known limit: a cd through a variable set in an earlier call still cannot be placed", () => {
+  assert.deepEqual(pure("cd $VAR && echo x >> config"), [READ_SHELL, REDIRECT]);
+  assert.deepEqual(pure('cd "$D" && echo x > f'), [READ_SHELL, REDIRECT]);
+});
+
+// ---------------------------------------------------------------------------
+// Through the hook, in a real checkout
+// ---------------------------------------------------------------------------
+
+test("hook: both spellings are git-dir-write in a checkout, and ordinary lines do not move", { skip }, () => {
+  const repo = checkout();
+  for (const command of [
+    'cd "$(git rev-parse --git-dir)" && echo x >> config',
+    'cd "$(git rev-parse --git-path hooks)" && cp hook.sh pre-push',
+    'echo x >> "$(git rev-parse --git-dir)/config"',
+    "D=$(git rev-parse --git-dir); echo x > $D/config",
+    'cd "$(git rev-parse --absolute-git-dir)" && echo x >> config',
+    "cd $(printf .gi)t && echo x >> config",
+    "echo x >> $(printf .gi)t/config",
+    "echo x >> .g$(printf it)/config",
+    "echo x >> $(printf .)git/config",
+    "echo x >> .$(echo g)it/config",
+  ]) {
+    assert.ok(hook(command, repo).includes(DIR_WRITE), command);
+  }
+  assert.deepEqual(hook("echo x > out/$(date +%F).txt", repo), [REDIRECT]);
+  assert.deepEqual(hook('cd "$(git rev-parse --show-toplevel)" && echo x > notes.txt', repo), [READ_SHELL, REDIRECT]);
+  assert.deepEqual(hook('echo x > "$(git rev-parse --short HEAD)".txt', repo), [REDIRECT]);
+  assert.deepEqual(hook("B=$(git rev-parse --abbrev-ref HEAD); echo x > out/$B.txt", repo), [ASSIGNMENT, REDIRECT]);
+  assert.deepEqual(hook("echo x > src/$(date +%s).log", repo), [REDIRECT]);
+});
+
+// ---------------------------------------------------------------------------
+// Review of the substitution fold: S1, an escape that decodes to .git
+// ---------------------------------------------------------------------------
+
+test("S1: an ANSI-C quoted string whose escapes decode to .git names it", () => {
+  assert.deepEqual(pure("echo x >> $'\\x2egit'/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("cd $'\\x2egit' && echo x >> config"), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure("tee -a $'\\x2egit/config' < f"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> $'.\\147it/config'"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> $'\\56git/config'"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> $'\\u002egit'/config"), [DIR_WRITE]);
+  // Joined to the word's own text on either side.
+  assert.deepEqual(pure("echo x >> .g$'\\x69't/config"), [DIR_WRITE]);
+  // Inside double quotes the shell leaves `$'…'` as written: read anyway, the strict side.
+  assert.deepEqual(pure("echo x >> \"$'\\x2egit'/config\""), [DIR_WRITE]);
+});
+
+test("S1: a substitution body whose escapes decode to .git names it", () => {
+  assert.deepEqual(pure("echo x >> \"$(printf '\\x2egit')/config\""), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(printf '\\056git')/config\""), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(echo -e '\\0056git')/config\""), [DIR_WRITE]);
+  assert.deepEqual(pure("cd \"$(printf '\\x2egit')\" && echo x >> config"), [READ_SHELL, DIR_WRITE]);
+  // A command whose printing is not rendered (a script a shell runs): the
+  // body's raw text is decoded too, both ways octal is written.
+  assert.deepEqual(pure("echo x >> \"$(sh -c 'printf \\x2egit')/config\""), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(sh -c 'echo -e \"\\0056git\"')/config\""), [DIR_WRITE]);
+});
+
+test("S1: escapes that do not decode to .git do not move", () => {
+  assert.deepEqual(pure("printf $'a\\tb\\n' > out.tsv"), [REDIRECT]);
+  assert.deepEqual(pure("printf '\\x41\\n' > out.txt"), [REDIRECT]);
+  assert.deepEqual(pure("echo \"$(printf '%s\\n' a b)\" > out.txt"), [REDIRECT]);
+  assert.deepEqual(pure("git commit -m $'subject\\n\\nbody about .gitignore'"), ["vcs.commit.branch git-commit"]);
+  assert.deepEqual(pure("sed -i '' $'s/a/b/' file.txt"), ["files.write.workspace sed-in-place"]);
+});
+
+// ---------------------------------------------------------------------------
+// Review of the substitution fold: S2, the word a parameter expansion carries
+// ---------------------------------------------------------------------------
+
+test("S2: a parameter expansion that may expand to .git names it", () => {
+  assert.deepEqual(pure("echo x >> ${VAR:-.git}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${VAR-.git}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${VAR:=.git}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${VAR:+.git}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure('echo x >> "${VAR:-.git}/config"'), [DIR_WRITE]);
+  assert.deepEqual(pure("cd ${VAR:-.git} && echo x >> config"), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure('cd "${VAR:-.git}" && echo x >> config'), [READ_SHELL, DIR_WRITE]);
+  // A pattern, a nested expansion, a substitution body, a split spelling.
+  assert.deepEqual(pure("echo x >> ${VAR:-.gi?}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${A:-${B:-.git}}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> $(echo ${VAR:-.git})/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${VAR:-.g$(printf it)}/config"), [DIR_WRITE]);
+});
+
+test("S2: a parameter expansion whose word is not .git does not move", () => {
+  assert.deepEqual(pure('echo x > "${OUT:-build}/log.txt"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${1:-out}.txt"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${DIR:-.}/out.txt"'), [REDIRECT]);
+  assert.deepEqual(pure("echo x > ${TMPDIR:-/tmp}/x.log"), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${XDG_CONFIG_HOME:-$HOME/.config}/app/f"'), [REDIRECT]);
+  // `:?` prints its word as an error and carries no value.
+  assert.deepEqual(pure("echo x >> ${VAR:?.git}/config"), [REDIRECT]);
+});
+
+// ---------------------------------------------------------------------------
+// Review of the substitution fold: S3, outputs that only together spell .git
+// ---------------------------------------------------------------------------
+
+test("known limit: two outputs that together spell .git are not read", () => {
+  // Each body alone spells no .git, and a piece made only of outputs is not
+  // judged: reading the bodies' joined output is left (S3).
+  assert.deepEqual(pure('echo x >> "$(printf .g)$(printf it)/config"'), [REDIRECT]);
+  assert.deepEqual(pure('cd "$(printf .g)$(printf it)" && echo x >> config'), [READ_SHELL, REDIRECT]);
+});
+
+test("hook: printf's precision on %b decoded bytes, with its control (codex on 09a3acd7)", { skip }, () => {
+  const repo = checkout();
+  assert.ok(hook(`echo x > "$(printf '%.5b' '.g\\0itX')/config"`, repo).includes(DIR_WRITE));
+  assert.ok(hook(`echo x > $(printf '%.4s' '.gi*xyz')/config`, repo).includes(DIR_WRITE));
+  assert.ok(hook(`echo x > "$(printf '%.7s' 'é/.gitfoo')/config"`, repo).includes(DIR_WRITE));
+  assert.deepEqual(hook(`echo x > "$(printf '%.6b' '.g\\0itX')/config"`, repo), [REDIRECT]);
+});
+
+test("hook: the S1 and S2 spellings are git-dir-write in a checkout", { skip }, () => {
+  const repo = checkout();
+  for (const command of [
+    "echo x >> $'\\x2egit'/config",
+    "cd $'\\x2egit' && echo x >> config",
+    "echo x >> \"$(printf '\\x2egit')/config\"",
+    "echo x >> ${VAR:-.git}/config",
+    "cd ${VAR:-.git} && echo x >> config",
+  ]) {
+    assert.ok(hook(command, repo).includes(DIR_WRITE), command);
+  }
+  assert.deepEqual(hook("printf $'a\\tb\\n' > out.tsv", repo), [REDIRECT]);
+  assert.deepEqual(hook('echo x > "${OUT:-build}/log.txt"', repo), [REDIRECT]);
+});
+
+// ---------------------------------------------------------------------------
+// Security review of the S1 and S2 folds, points a to e: each only stricter
+// ---------------------------------------------------------------------------
+
+test("security review a: every ANSI-C piece of a word is decoded and joined, quotes removed", () => {
+  assert.deepEqual(pure("echo x >> $'\\x2e'g''$'\\x69'\"t\"/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> $'\\x2e'\"g\"\"i\"\"t\"/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> $'\\x2e'gi\"t\"/config"), [DIR_WRITE]);
+  // A glob where the word is unquoted, and an output beside the string.
+  assert.deepEqual(pure("cd $'\\x2eg'i? && echo x >> config"), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> $'\\x2e'$(printf git)/config"), [DIR_WRITE]);
+  // A decoded `.` that is no segment's start is no `.git`.
+  assert.deepEqual(pure("echo x > a$'\\x2e'gitx"), [REDIRECT]);
+});
+
+test("security review b: quotes are tracked, and a quote that does not close is the strict side", () => {
+  // `$'` inside single quotes is text the shell leaves as written.
+  assert.deepEqual(pure("echo '$'\"'\"'\\x2egit' > \"$D\""), [REDIRECT]);
+  // The lexer and the shell disagree on `\'` inside `$'…'`: unreadable, strict.
+  assert.deepEqual(pure("echo $'x\\'' ' > \"$D\""), [DIR_WRITE]);
+});
+
+test("security review c: what printf or echo prints is read with quotes removed", () => {
+  assert.deepEqual(pure("echo x >> \"$(printf '\\x2e''git')/config\""), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(printf '%sgit' .)/config\""), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(printf '%s' .g it)/config\""), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(printf '\\x2e%s' git)/config\""), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(echo -e '\\x2e'\"git\")/config\""), [DIR_WRITE]);
+  // Two segments print in turn; an argument the text cannot read is an unknown output.
+  assert.deepEqual(pure('echo x >> "$(printf .g; printf it)/config"'), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> \"$(printf '%s%s' .g \"$X\")/config\""), [DIR_WRITE]);
+  // Printed text that cannot make .git does not move.
+  assert.deepEqual(pure("echo x > \"$(printf '%03d' 7).txt\""), [REDIRECT]);
+  assert.deepEqual(pure('echo "$(date +%F; echo .txt)" > out.txt'), [REDIRECT]);
+  assert.deepEqual(pure("echo x > \"$(printf '%s-%s' \"$a\" \"$b\").txt\""), [REDIRECT]);
+});
+
+test("security review d: the other parameter expansion operators", () => {
+  // A replacement's new text sits between unknown runs of the value.
+  assert.deepEqual(pure("G=xgit; echo x >> ${G/x/.}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${G//a/.}/config"), [DIR_WRITE]);
+  // Removal and substring, on a line whose text holds .git.
+  assert.deepEqual(pure("G=.gitx; echo x >> ${G%x}/config"), [ASSIGNMENT, DIR_WRITE]);
+  assert.deepEqual(pure("G=.gitx; echo x >> ${G:0:4}/config"), [ASSIGNMENT, DIR_WRITE]);
+  // @E decodes escapes the value may hold.
+  assert.deepEqual(pure("X='\\x2egit'; echo x >> ${X@E}/config"), [ASSIGNMENT, DIR_WRITE]);
+  // A length and plain expansions do not move. (A transforming operator on a
+  // variable the line does not set is strict now: point i below.)
+  assert.deepEqual(pure('echo x > "${#X}.txt"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${name}.${ext}"'), [REDIRECT]);
+});
+
+test("security review e: a nested expansion in an operator's word is an output that joins", () => {
+  assert.deepEqual(pure("echo x >> ${A:-.g${B}t}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> .g${A:-i}t/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${A:-.g$(printf i)t}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure('echo x > "${OUT:-${HOME}/out}/f"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${OUT:-out}.${EXT:-txt}"'), [REDIRECT]);
+});
+
+test("security review f: an operator after a special parameter is read as the operator", () => {
+  // `$!` and `$#` with a default word: `-` is the operator, not part of a name.
+  assert.deepEqual(pure("echo x >> ${!-.git}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${!-.g}it/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${#-.git}/config"), [DIR_WRITE]);
+  // An indirection with an operator after it counts, the strict side.
+  assert.deepEqual(pure("echo x >> ${!REF:-.git}/config"), [DIR_WRITE]);
+  // `${!-}` and `${#-}` are an indirection and a length of `$-`.
+  assert.deepEqual(pure('echo x > "out/${#-}.txt"'), [REDIRECT]);
+  // A length and a plain indirection stay unknown values.
+  assert.deepEqual(pure('echo x > "${#X}.txt"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "out/${!REF}.txt"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "out/${#arr[@]}.txt"'), [REDIRECT]);
+});
+
+test("security review g to q: every operator that transforms a value counts", () => {
+  // Removal, substring, replacement and case changes, on a name the line does
+  // not set, on a positional, a special parameter, an array element.
+  for (const line of [
+    'echo x > "${f%.txt}.log"',
+    'echo x > "${f/.txt/.md}"',
+    'echo x > "out/${NAME,,}.txt"',
+    'echo x > "out/${f: -3}.txt"',
+    'echo x > "${1%.md}.html"',
+    "echo x >> ${@#x}/config",
+    "echo x >> ${A[0]%x}/config",
+    "echo x >> ${!-.g}it/config",
+  ]) {
+    assert.deepEqual(pure(line), [DIR_WRITE], line);
+  }
+  // And on a name the line itself sets, however it is spelled: no value is
+  // worked out (the exact evaluator is a carry).
+  for (const line of [
+    "G='.gi''tx'; echo x >> ${G%x}/config",
+    "G=$'\\x2egitx'; echo x >> ${G:0:4}/config",
+    "D=.gi?x; echo x >> ${D%x}/config",
+    "D=it; echo x >> ${D/#/.g}/config",
+    "D=xxxxxxxx.git; echo x >> ${D:010}/config",
+    "D=\u00e9.git; echo x >> ${D:1}/config",
+    'f=notes.txt; echo x > "${f%[]a-z].txt}.log"',
+    'f=notes.txt; echo x > "${f/@(notes)/x}.log"',
+    'D=x; echo "${D:=y}" > out.txt; echo x >> ${D%q}/config',
+    'f=notes.txt; echo x > "${f%.txt}.log"',
+  ]) {
+    assert.ok(pure(line).includes(DIR_WRITE), line);
+  }
+  // Lines that set a variable another way are refused already.
+  for (const line of [
+    "set -- .gitx; echo x >> ${1%x}/config",
+    "for D in .gi?x; do echo x >> ${D%x}/config; done",
+    "D=x; : ${D:=.git}; echo x >> ${D%q}/config",
+    'f=notes.txt; shopt -s nocasematch; echo x > "${f%.txt}.log"',
+  ]) {
+    assert.deepEqual(pure(line), ["refused unclassified"], line);
+  }
+  // A length, a plain expansion, an indirection and :? stay unknown values.
+  assert.deepEqual(pure('echo x > "${#X}.txt"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "out/${!REF}.txt"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${f}.bak"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${name}.${ext}"'), [REDIRECT]);
+  assert.deepEqual(pure("echo x >> ${VAR:?.git}/config"), [REDIRECT]);
+  // A read of a transformed name, or a write to a literal path, does not move.
+  assert.deepEqual(pure('cat "${f%.txt}.log"'), [READ_SHELL]);
+  assert.deepEqual(pure('echo "${f%.txt}" > names.txt'), [REDIRECT]);
+});
+
+test("source review S1: printf's precision cuts a string; a * width or precision is not modelled", () => {
+  for (const line of [
+    `echo x > "$(printf '%.4s' '.gitfoo')/config"`,
+    `echo x > "$(printf '%.4b' '.gitfoo')/config"`,
+    `echo x > "$(printf '%.*s' 4 '.gitfoo')/config"`,
+    `echo x > "$(printf '%*s' 4 x)/config"`,
+    `echo x > "$(printf '%.4s' "$X")/config"`,
+    `echo x > "$(printf '%.4b' "$(cat f)")/config"`,
+  ]) {
+    assert.ok(pure(line).includes(DIR_WRITE), line);
+  }
+  // A precision that cuts no .git, a width, and a number do not move.
+  assert.deepEqual(pure(`echo x > "$(printf '%s' '.gitfoo')/config"`), [REDIRECT]);
+  assert.deepEqual(pure(`echo x > "$(printf '%.3s' report.txt)"`), [REDIRECT]);
+  assert.deepEqual(pure(`echo x > "$(printf '%5s' abc)/config"`), [REDIRECT]);
+  assert.deepEqual(pure(`echo x > "out-$(printf '%05d' 7).log"`), [REDIRECT]);
+});
+
+test("source review S2: an ANSI-C string ends at a NUL, and a substitution drops NULs", () => {
+  for (const line of [
+    "echo x > $'.g\\0junk'it/config",
+    "echo x > $'.g\\x00junk'it/config",
+    `echo x > "$(printf '.g\\0it')/config"`,
+  ]) {
+    assert.ok(pure(line).includes(DIR_WRITE), line);
+  }
+  assert.deepEqual(pure("echo x > $'notes\\0junk'.md"), [REDIRECT]);
+});
+
+test("security review of the precision fold: printed globs, and a NUL read three ways", () => {
+  for (const line of [
+    // A precision cuts a longer word to a glob, and the unquoted output is globbed.
+    `echo x > $(printf '%.4s' '.gi*xyz')/config`,
+    `echo x > $(printf '%.4s' '.g?tzz')/config`,
+    `echo x > $(printf '%.6s' '.gi[t]zz')/config`,
+    // A NUL as an end, in a body's escapes.
+    `echo x > "$(printf '\\x2egit\\0x')/config"`,
+  ]) {
+    assert.ok(pure(line).includes(DIR_WRITE), line);
+  }
+  // codex's SOURCE HOLD on 09a3acd7: %b's precision cuts before the NULs go.
+  assert.ok(pure(`echo x > "$(printf '%.5b' '.g\\0itX')/config"`).includes(DIR_WRITE));
+  assert.deepEqual(pure(`echo x > "$(printf '%.6b' '.g\\0itX')/config"`), [REDIRECT]);
+  // codex's SOURCE HOLD on fc846a73: printf's precision counts bytes.
+  assert.ok(pure(`echo x > "$(printf '%.7s' 'é/.gitfoo')/config"`).includes(DIR_WRITE));
+  assert.ok(pure(`echo x > "$(printf '%.7b' 'é/.gitfoo')/config"`).includes(DIR_WRITE));
+  assert.deepEqual(pure(`echo x > "$(printf '%s' 'é/.gitfoo')/config"`), [REDIRECT]);
+  // A * width takes its argument: a long line of them ends in time.
+  assert.ok(pure(`echo x > "$(printf '%*s' ${"4 x ".repeat(2000)})/config"`).includes(DIR_WRITE));
+  // A printed glob that cannot name .git, and a NUL in ordinary text, do not move.
+  assert.deepEqual(pure(`echo x > $(printf '%.5s' '*.logs')`), [REDIRECT]);
+  assert.deepEqual(pure(`echo x > "$(printf 'out\\0x').log"`), [REDIRECT]);
+});
