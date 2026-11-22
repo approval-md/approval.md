@@ -131,7 +131,10 @@ on the change above.
   .gi? && ...`). `*` and `?` never match a leading dot, so `cd *` and `rm
   *.log` do not move. The hook expands a pattern on disk and walks every
   matching directory and link; past 100,000 entries, or under a directory it
-  cannot list, a sure target is judged the strict way.
+  cannot list, a sure target is judged the strict way. Brace groups are found
+  in one pass over the word: scanning from every `{` to its close took 3.7 CPU
+  seconds on `{` x 40,000, `a`, `}` x 40,000, and a line of about 320 KB
+  could outrun the hook's timeout.
 - **git's own write options.** `--output` (`git log --output=.git/config` was
   a read), `apply --directory` and `--build-fake-ancestor`, `worktree add
   <path>`, and `clone <dir>` and `--separate-git-dir` are write targets, read
@@ -223,6 +226,171 @@ on the change above.
   0 looser of its own. A word of 10,000 substitutions, a run of 1,000 `*`
   and 10,000 levels of nesting each take under half a second of CPU through
   the hook.
+
+### Added
+
+- **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536).**
+  `overlay-recipes-check.mjs --expected <expected.json> --tag-corpus <corpus>`
+  finds every call that is new or changed against the previous release (a new
+  recipe, other command bytes, or a call the CLASS-DIFF moved between the
+  cores) and requires its declared outcome: class, decision, `card_style:
+  minimal` for a card, and the decision in each settings cell (ask, autonomous,
+  supervised-retro, supervised-live with a fixed sampling secret, manual). The
+  real hook (and the daemon `propose` a plugin makes behind a call, as a For
+  Kicks order does) must give exactly it under the village default template.
+  An undeclared new call, a class or decision other than declared (an expected
+  card that runs auto included), an undeclared refusal, a technical card, a
+  stale or duplicate entry, a schema-invalid envelope input, or a limiting
+  entry without `accepted_by: "human:carter"` and a date exits 1. The extractor
+  gains `--with-envelopes`: each mini-app manifest operation as the exact
+  `village` call the hook sees, and every gated plugin tool with its registered
+  input schema; without the flag its output is unchanged.
+- **NEW-CALLS sees what the review found it blind to (B-167N review fold).**
+  - The extractor reads a plugin tool registered through a local name bound
+    from `getattr(ctx, "register_tool")` or in a loop over a literal list, and
+    a pattern added to or removed from `APPROVAL_GATED_TOOLS` needs a declared
+    entry; a gated pattern that reaches no call the box runs fails closed.
+  - Every operation the `village` schema accepts is a call, with a manifest or
+    without; one in neither of the bridge's operation lists is unmapped.
+  - Every daemon `propose` in a plugin that owns a gated tool is extracted with
+    its class and the answers the code after it goes on with; an entry must
+    declare it (`propose.source`, `propose.class`, `propose.accepts`), and an
+    answer the plugin refuses is a refused call. For Kicks refuses an order the
+    daemon answers `autonomous` or `supervised`; Gold Stars refuses
+    `supervised`.
+  - An acceptance dated after the run, a member named twice in
+    `expected.json`, and two recipes with one key and other bytes fail; the
+    check's entry point compares real paths.
+  - `expected.json` declares the calls new since the previous release on
+    overlay main `255f9291` (twelve eci-volunteers operations,
+    `kismet.web_link`, `zzz.schedule_posts`) and Gold Stars' send propose; the
+    For Kicks propose cites where the code proposes today.
+  - A red run's report says FAIL and why. A stale or unaccepted allowlist
+    entry, an unlisted deny or an unpinned `expected.json` used to exit 1 under
+    a `CLASS-DIFF PASS` line; the first line now reads `FAIL k OTHER` (or `FAIL
+    n BLOCKING, k OTHER`) with each reason listed under it and in the JSON's
+    `reasons` and `failed`, while a clean PASS and a blocking-only FAIL line are
+    unchanged.
+  - A daemon `propose` in a plugin that owns no gated tool is judged too. The
+    extractor used to list those apart (`proposes_unhooked`) and nothing
+    checked them; every propose site is now in `proposes`, and `gated_plugin`
+    only labels the report. A propose with no hooked call in front of it is
+    declared by an entry that holds `propose` alone, its `source` one line. A
+    class taken from a held entry's `class` field reads as the classes the
+    module's own guards compare that field with; the answers also read through
+    `doc = answer.doc`, a pair assignment, or an `if`/`elif` chain whose `else`
+    ends the flow. What the extractor cannot read fails closed, and so does a
+    corpus that still lists proposes apart. A comparison or chain counts only
+    where every path from the propose passes through it (after it, in the same
+    function, not under a branch, loop, try or with that can be skipped), and
+    a branch that returns or raises admits no answer; one anywhere else leaves
+    the answers unread. `self.propose(...)`, a bare `propose(...)`, a name
+    imported as `propose`, a `getattr` alias and a name bound from
+    `<x>.propose` are read as proposes; a propose passed, stored or wrapped
+    (a `functools.partial`) is an unread site. `expected.json` declares the four av-events sites (intent
+    publish, digest share, village vote) as eight entries; six are limiting
+    and wait for Carter's acceptance.
+  - The lines that decide which class a held entry gets are judged too. Such a
+    propose sends whatever class its entry was filed with, so filing an
+    inferred intention as stated (which publishes without asking) used to
+    leave the check green. The extractor now lists every class writer in a
+    plugin with such a propose (`class_writers`): a dict literal's `"class"`,
+    an assignment to `x["class"]`, `setdefault`, and a call that passes the
+    class to the function that stores it, followed across the plugin's modules
+    and through a module alias such as `ia = _ia()`. Each writer is declared
+    by file and function in `propose.writers` of an entry of its class; a
+    writer that appears, disappears or changes its class, one whose class
+    cannot be read, and a plugin with such a propose and no writer all fail.
+    `getattr(x, "propose")(...)` is now read as a propose too.
+- **CLASS-DIFF against the core the boxes run (B-167 release gate).**
+  `overlay-recipes-check.mjs --diff <baseline core>` classifies the same corpus
+  at a baseline core and at this one, over every recipe plus every `tools:`
+  line of the template (the box harness calls), and reports each call whose
+  class, decision (auto, sampled, card, human-only, refused) or card style
+  moves. An existing call moving from auto, sampled or card to human-only or
+  refused fails, unless the allowlist names it with a reason (an optional
+  `flip: {from, to}` narrows the entry to that move). The `overlay-recipes` job
+  now also re-extracts the corpus from the overlay at its pinned sha and fails
+  on any difference, installs the boxes' core from npm at a pinned integrity
+  (`BASELINE_CORE`, 0.4.8), and publishes the report (first line: the GATE
+  line) as the job summary and the `class-diff` artifact. Between 0.4.5 and
+  0.4.6, on the overlay the boxes ran on 19 October (`99d33417`), it reports
+  the eleven EdgeOS recipes moving `network.call` auto to `policy.core`
+  human-only: EDGEOS-BLOCK, caught before a tag. Every call is diffed in two
+  working directories, a neutral one and a box-like Hermes home (a `.hermes`
+  directory with a dummy `.env`, HERMES_HOME set to it), because the APRV-522
+  credential pass decides a reader's unexpanded `$` word by where it starts.
+  From the Hermes home, 0.4.6 also denies the `--url` EdgeOS recipes
+  (`-H "Authorization: Bearer $EDGEOS_API_KEY"` gains `account.credential`,
+  human-only under the template), and the diff reports those eleven as
+  blocking in that column.
+- **The class-diff runs the real hook in a box (B-167 fold 1, review-b's
+  refute).** Every shipped call now goes through each core's own `approval
+  hook hermes` (scripts/overlay-recipes-box.mjs), in a box layout:
+  HOME/.hermes with a dummy `.env`, `config.yaml`, the overlay's skills and
+  workspace, APPROVAL_HERMES_HOME set, and an attested store. Recipes run as
+  terminal calls at $HERMES_HOME, $HOME, workspace and unset; harness calls
+  run as Hermes tool envelopes (core's own tools plus every `tools:` line).
+  - **Blocking moves:** an existing call that loses autonomy (autonomous ->
+    supervised-retro, a higher live rate, auto -> card) or stops running.
+  - **Shadowed tools line:** a tools line newly shadowed by an earlier one
+    blocks.
+  - **The box check:** a shipped recipe the hook denies in the box fails
+    unless the allowlist lists it.
+  - **Acceptance by name:** every allowlist entry needs Carter's acceptance
+    (`accepted_by`, `accepted_at`), and a trivial reason is refused.
+  - **Pinned in CI:** ci.yml pins the gate's own files by sha256 and the
+    corpus by its count, and re-extracts the corpus with the base branch's
+    extractor.
+  - **Fail closed:** a hook run that exits 0 without an allow line is an
+    error, never an allow.
+- **Carded calls keep their class (B-167 fold 2).** A card's classes are
+  read from the request the hook opened in the box's store, so these now
+  block:
+  - a higher `live_rate`;
+  - supervised-live -> manual;
+  - a card falling from minimal to technical.
+
+  The box exports a fixed sampling value when the template names
+  `audit.sampling_secret_env`. Each concurrent worker has its own store, so
+  a lost log race can no longer read as a refusal.
+- **A card's request is bound to its call (B-167 fold 3).**
+  - The runner takes the request key from the hook's own `hook-timeout` deny,
+    looks it up in that call's store, and checks it against the call's tool and
+    command. It no longer guesses the task id.
+  - When the deny names no key, it matches by tool and command among what the
+    call appended.
+  - A card whose request cannot be bound is an error, and the gate exits 2.
+    A renamed or swapped task id is read correctly, and a card can no longer
+    fall to "class-diff: none".
+  - The sampling secret name may not be a box layout or runtime variable
+    (HOME, HERMES_HOME, PATH, `APPROVAL_*`, `NODE_*`); naming one exits 2.
+  - The minimal -> technical card rule compares per class.
+- **Cards are bound and read more strictly (B-167 folds 5 and 6).**
+  - A call that wrote its own request binds only to the rows it wrote. A deny
+    naming another call's request, even one with the same command, exits 2.
+  - A card whose bound request names no class that needs a human (every class
+    autonomous or supervised-retro) is an error, and the gate exits 2: the core
+    logged a class other than the one it carded on.
+  - When every class on the old card was minimal, a class new to the card at
+    another style blocks (one more technical card for the resident).
+  - Fold 6: a card whose bound request logs a class other than the one its key
+    names (core keys each action `<task>:<class>`) is an error, and the gate
+    exits 2, even when the logged class needs a human. A row of the bound task
+    keyed under another task with the same class is caught too.
+- **The class-diff baseline is 0.4.8, and the EdgeOS entries are gone (B-167,
+  rebuilt on 0.4.8).** `BASELINE_CORE` is npm approval-md@0.4.8 at its
+  pinned integrity, the core the boxes run since the 0.4.8 roll; it lives in
+  the `overlay-recipes` job of `ci.yml` and moves with the fleet, in the
+  approval.md PR after each roll. Under 0.4.7 (APRV-533, #666) the eleven
+  `--url` EdgeOS recipes became `network.call` at the Hermes home as
+  everywhere else, so their eleven hermes-home allowlist entries matched
+  nothing and failed as stale; they are deleted. Seven entries remain for
+  Carter's acceptance: agent-plaza, the four operator READMEs and the two
+  edge-india placeholder lines. From npm 0.4.8 to this tree (0.4.8 plus the
+  APRV-518 git rules above) the pinned corpus reads `class-diff: none`: all
+  304 calls unchanged, and the box check's 96 denied runs are the seven
+  entries' own.
 
 ## 0.4.8 — 2026-11-20
 
