@@ -212,8 +212,17 @@ on the change above.
   pure (153,702 comparisons) and 4,283 lines through the hook in thirteen
   checkout states (222,716 comparisons); against main, the five redirected
   reads above stay as they were. Conformance: `command-class` 1.12.0 (from
-  1.11.0), four new vectors; the follow-up's 375 are byte-identical. The
+  1.11.0), seven new vectors; the follow-up's 375 are byte-identical. The
   fleet's 63 overlay recipes are unmoved.
+- **Evidence, escapes and expansion words.** Against the build before them,
+  0 looser over 26,355 lines pure (158,130 comparisons) and 4,968 lines
+  through the hook in thirteen checkout states (258,336 comparisons); 175
+  lines move, every one stricter: 67 with ANSI-C quoting, 43 with a body
+  whose printed output spells `.git`, 57 with a parameter expansion and 8
+  past the nesting bounds. Against main as merged and against 0.4.8's build,
+  0 looser of its own. A word of 10,000 substitutions, a run of 1,000 `*`
+  and 10,000 levels of nesting each take under half a second of CPU through
+  the hook.
 
 ## 0.4.8 — 2026-11-20
 
