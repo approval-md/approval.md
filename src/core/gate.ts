@@ -3381,6 +3381,15 @@ export interface WithdrawOptions extends GateOptions {
    * request refuses `duplicate-request`.
    */
   onlyIfVoid?: true;
+  /**
+   * Withdraw only a pending request of this proposal task whose key NO record
+   * yet declares irreversible (APRV-537: `propose --irreversible` over a
+   * request filed without the flag). Judged inside the retried
+   * read-check-append cycle, like `onlyIfVoid`, so two flagged retries racing
+   * cannot retract the floored request the other has just filed. A key
+   * already floored refuses `duplicate-request`.
+   */
+  onlyIfUnfloored?: string;
   /** Why the requester is retracting. Defaults to `cancelled`. */
   reason?: WithdrawReason;
   /** The requester's free-text elaboration, recorded in the payload. */
@@ -3520,6 +3529,14 @@ function attemptWithdraw(
         { state: derivation.state },
       );
     }
+  }
+
+  if (options.onlyIfUnfloored !== undefined && proposalIrreversible(read.records, options.onlyIfUnfloored, actionKey)) {
+    return refuse(
+      "duplicate-request",
+      `action ${actionKey} has a live request at seq ${String(derivation.requestSeq)} and the key is already declared irreversible, so the request was not withdrawn`,
+      { state: derivation.state },
+    );
   }
 
   if (derivation.requestActor !== actor) {
@@ -5461,13 +5478,58 @@ export function propose(
         true,
       );
     }
+    // APRV-537 (the durable declaration). `--irreversible` on a retry over a
+    // PENDING request that was filed without it is recorded now, not at some
+    // later request: the pending question is taken back by its own requester
+    // and asked again below with `reversible: false`. From that record on the
+    // key is floored whatever a later call omits, so a withdraw followed by an
+    // unflagged propose cannot shed the declaration. The person is asked once
+    // more, about the same bytes, with the floor on the request they decide.
+    // Over a request a person has already DECIDED (granted, rejected, revoked)
+    // the declaration cannot be recorded: no record of the requester's may be
+    // filed over a person's answer, and the registration is written once. Such
+    // a call is REFUSED rather than answered, so a caller is never told
+    // `requested` for a key its flag did not floor. The answer stands for the
+    // key as it was proposed; the irreversible action is proposed under a new
+    // key, whose registration then carries the floor.
+    const undeclared =
+      input.irreversible === true && !proposalIrreversible(read.records, task, input.actionKey);
+    const declaresNow = standing === "requested" && undeclared;
+    if (undeclared && (standing === "granted" || standing === "rejected" || standing === "revoked")) {
+      return refuse(
+        "already-decided",
+        `action ${input.actionKey} was proposed without --irreversible and a person has already answered that request (${standing} at seq ${String(seqOf)}), so the declaration cannot be recorded for this key and the key is NOT floored. A key keeps what it was first proposed with: propose the irreversible action under a new key. Nothing was appended.`,
+        { state: derivation.state },
+      );
+    }
     if (
-      standing === "requested" ||
+      (standing === "requested" && !declaresNow) ||
       standing === "granted" ||
       standing === "rejected" ||
       standing === "revoked"
     ) {
       return answered("requested", standing, seqOf, true);
+    }
+    if (declaresNow) {
+      const retracted = withdraw(logPath, input.actionKey, actor, {
+        ...options,
+        onlyIfUnfloored: task,
+        reason: "superseded",
+        note: "the proposer has declared this action irreversible (--irreversible); the same proposal is asked again with SPEC.md section 7's floor recorded on the request",
+      });
+      if (!retracted.ok) {
+        // A concurrent caller withdrew it, re-asked it floored, or a human answered it.
+        if (
+          retracted.code === "request-withdrawn" ||
+          retracted.code === "already-decided" ||
+          retracted.code === "duplicate-request" ||
+          retracted.code === "expired"
+        ) {
+          return again(retracted);
+        }
+        return retracted;
+      }
+      withdrewNow = true;
     }
     if (standing === "void" && derivation.state === "requested") {
       // A pending question no human may decide any more. Taken back by its own
@@ -5561,6 +5623,23 @@ export function propose(
     return result;
   }
   if (result.record === null) {
+    // APRV-537: the policy answered for itself, so no request carries this
+    // call's flag. That is the operator's `allow_irreversible: true` (SPEC.md
+    // section 7), and it is fine when the REGISTRATION carries the declaration:
+    // the key stays floored if the operator later removes the permission. When
+    // the key was registered without the flag, nothing can record it now; the
+    // call is refused rather than answered `autonomous` for a key the flag did
+    // not floor.
+    if (
+      input.irreversible === true &&
+      !registeredNow &&
+      !proposalIrreversible(read.records, task, input.actionKey)
+    ) {
+      return refuse(
+        "task-already-registered",
+        `action ${input.actionKey} is already registered under task ${task} without --irreversible, and the policy authorizes its class on its own (allow_irreversible), so no request is filed that could record the declaration: the key is NOT floored. A key keeps what it was first proposed with: propose the irreversible action under a new key. Nothing was appended${withdrewNow ? " beyond the withdrawal of the void request" : ""}.`,
+      );
+    }
     return answered(
       result.autonomy === "autonomous" ? "autonomous" : "supervised",
       null,

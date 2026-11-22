@@ -371,6 +371,166 @@ test("without the flag first, then with it: the flag files the card, and the flo
   }
 });
 
+/** Re-tier the class to `autonomous` and attest the new bytes, as the operator. */
+function retierAutonomous(s: Store, ts: string): void {
+  writeFileSync(s.policyPath, policyText("autonomous"), "utf8");
+  const attested = appendAttestation(s.logPath, s.policyPath, "human:operator", { clock: fixedClock(ts) });
+  assert.equal(attested.ok, true, JSON.stringify(attested));
+}
+
+const eventsFor = (s: Store, key: string): string[] =>
+  records(s)
+    .filter((record) => record["action_key"] === key)
+    .map((record) => String(record["event"]));
+
+test("the flag on a retry over a PENDING unflagged request is recorded then: withdraw, an unflagged re-propose and an autonomous start cannot shed it", () => {
+  for (const cell of ["ask", "manual"] as const) {
+    const s = store(cell);
+    const key = `${CLS}:retry-flagged`;
+    const payload = order(30);
+    // 1. Without the flag: a person is asked, and nothing says irreversible.
+    const first = proposeOk(s, key, payload, false);
+    assert.deepEqual([first.decision, first.state], ["requested", "requested"]);
+    assert.equal(declared(s, key).requests[0]?.["reversible"], undefined);
+    // 2. The retry WITH the flag is not answered from the unfloored request: that request is
+    //    taken back as superseded and the same proposal is asked again, floored.
+    const flagged = proposeOk(s, key, payload, true, at(2));
+    assert.deepEqual([flagged.decision, flagged.state, flagged.idempotent], ["requested", "requested", false], cell);
+    assert.deepEqual(eventsFor(s, key), ["approval.requested", "approval.withdrawn", "approval.requested"]);
+    const withdrawn = records(s).find((record) => record["event"] === "approval.withdrawn");
+    assert.equal(payloadOf(withdrawn ?? {})["reason"], "superseded");
+    assert.equal(declared(s, key).requests[1]?.["reversible"], false, "the floor is on the request a person now decides");
+    // A second flagged retry, and an unflagged one, are plain retries: nothing appended.
+    const before = records(s).length;
+    assert.equal(proposeOk(s, key, payload, true, at(2)).idempotent, true);
+    assert.equal(proposeOk(s, key, payload, false, at(2)).idempotent, true);
+    assert.equal(records(s).length, before);
+    // 3. Withdrawn by the requester; the operator re-tiers the class to autonomous.
+    assert.equal(withdraw(s.logPath, key, AGENT, { ...s.options(at(3)), reason: "cancelled" }).ok, true);
+    retierAutonomous(s, at(4));
+    // 4. Proposed again WITHOUT the flag: still asked of a person, floored.
+    const again = proposeOk(s, key, payload, false, at(5));
+    assert.equal(again.decision, "requested", cell);
+    assert.equal(declared(s, key).requests[2]?.["reversible"], false);
+    // 5. And an autonomous start, with that request withdrawn too, is refused.
+    assert.equal(withdraw(s.logPath, key, AGENT, { ...s.options(at(6)), reason: "cancelled" }).ok, true);
+    const start = startProposed(s.logPath, first.task, key, payload, AGENT, s.options(at(7)));
+    assert.equal(start.ok ? "" : start.code, "not-granted", cell);
+  }
+});
+
+test("withdraw's onlyIfUnfloored takes back an unfloored pending request and refuses a floored one", () => {
+  const s = store("manual");
+  const plain = `${CLS}:guard-plain`;
+  const floored = `${CLS}:guard-floored`;
+  const a = proposeOk(s, plain, order(33), false);
+  const b = proposeOk(s, floored, order(34), true);
+  const kept = withdraw(s.logPath, floored, AGENT, { ...s.options(at(2)), onlyIfUnfloored: b.task, reason: "superseded" });
+  assert.equal(kept.ok ? "" : kept.code, "duplicate-request");
+  assert.deepEqual(eventsFor(s, floored), ["approval.requested"]);
+  const taken = withdraw(s.logPath, plain, AGENT, { ...s.options(at(2)), onlyIfUnfloored: a.task, reason: "superseded" });
+  assert.equal(taken.ok, true, JSON.stringify(taken));
+});
+
+test("the same holds for a pending request the supervised-live draw filed, and when it lapses instead of being withdrawn", () => {
+  // A payload the live draw SAMPLES without the flag: a person is asked, with no floor on record.
+  const probe = store("supervised-live");
+  let sampled: Record<string, unknown> | null = null;
+  for (let n = 100; n < 164 && sampled === null; n += 1) {
+    if (proposeOk(probe, `${CLS}:probe-${String(n)}`, order(n), false).decision === "requested") sampled = order(n);
+  }
+  assert.notEqual(sampled, null, "no sampled draw in 64 payloads at live_rate 0.5");
+  const s = store("supervised-live");
+  const key = `${CLS}:live-sampled`;
+  const first = proposeOk(s, key, sampled, false);
+  assert.equal(first.decision, "requested");
+  const flagged = proposeOk(s, key, sampled, true, at(2));
+  assert.deepEqual([flagged.decision, flagged.idempotent], ["requested", false]);
+  assert.equal(declared(s, key).requests[1]?.["reversible"], false);
+  assert.equal(withdraw(s.logPath, key, AGENT, { ...s.options(at(3)), reason: "cancelled" }).ok, true);
+  retierAutonomous(s, at(4));
+  const start = startProposed(s.logPath, first.task, key, sampled, AGENT, s.options(at(5)));
+  assert.equal(start.ok ? "" : start.code, "not-granted");
+
+  // Lapsed, not withdrawn: the 72 h window runs out on the floored request, with no expire record.
+  const t = store("manual");
+  const lapsing = `${CLS}:lapses`;
+  const a = proposeOk(t, lapsing, order(36), false);
+  assert.equal(proposeOk(t, lapsing, order(36), true, at(2)).idempotent, false);
+  const later = new Date(Date.parse(T0) + 80 * 3600 * 1000).toISOString();
+  const evenLater = new Date(Date.parse(T0) + 81 * 3600 * 1000).toISOString();
+  retierAutonomous(t, later);
+  const lapsedStart = startProposed(t.logPath, a.task, lapsing, order(36), AGENT, t.options(evenLater));
+  assert.equal(lapsedStart.ok ? "" : lapsedStart.code, "not-granted");
+});
+
+test("control for the order above: with no flagged retry the same key is the policy's after the re-tier", () => {
+  const s = store("manual");
+  const key = `${CLS}:retry-unflagged`;
+  const payload = order(31);
+  const first = proposeOk(s, key, payload, false);
+  assert.equal(proposeOk(s, key, payload, false, at(2)).idempotent, true);
+  assert.deepEqual(eventsFor(s, key), ["approval.requested"]);
+  assert.equal(withdraw(s.logPath, key, AGENT, { ...s.options(at(3)), reason: "cancelled" }).ok, true);
+  retierAutonomous(s, at(4));
+  assert.equal(proposeOk(s, key, payload, false, at(5)).decision, "autonomous");
+  const start = startProposed(s.logPath, first.task, key, payload, AGENT, s.options(at(7)));
+  assert.equal(start.ok ? start.authorization : start.code, "policy");
+});
+
+test("the flag over a request a person has DECIDED is refused, not acknowledged: nothing is filed and the caller is told the key is not floored", () => {
+  for (const verdict of ["grant", "reject", "revoke"] as const) {
+    const s = store("manual");
+    const key = `${CLS}:decided-${verdict}`;
+    const payload = order(32);
+    const first = proposeOk(s, key, payload, false);
+    assert.equal(decide(s.logPath, key, verdict === "revoke" ? "grant" : verdict, "human:resident", s.options(at(2))).ok, true);
+    if (verdict === "revoke") assert.equal(decide(s.logPath, key, "revoke", "human:resident", s.options(at(2))).ok, true);
+    const before = records(s).length;
+    const flagged = propose(s.logPath, { cls: CLS, actionKey: key, summary: "For Kicks order", payload, irreversible: true }, AGENT, s.options(at(3)));
+    assert.equal(flagged.ok ? "" : flagged.code, "already-decided", verdict);
+    assert.match(flagged.ok ? "" : flagged.message, /NOT floored[\s\S]*new key/);
+    assert.equal(records(s).length, before, "a person's answer is not written over");
+    // The unflagged retry still answers from the log, as before.
+    assert.equal(proposeOk(s, key, payload, false, at(3)).idempotent, true);
+    // A grant the person gave is still theirs to be spent.
+    if (verdict === "grant") {
+      const started = startProposed(s.logPath, first.task, key, payload, AGENT, s.options(at(4)));
+      assert.equal(started.ok ? started.authorization : started.code, "grant");
+    }
+    // The same action under a NEW key, flagged: registered floored, and no start without a grant
+    // after the operator re-tiers the class.
+    const fresh = proposeOk(s, `${key}:2`, payload, true, at(5));
+    assert.equal(declared(s, `${key}:2`).action?.["reversible"], false);
+    assert.equal(withdraw(s.logPath, `${key}:2`, AGENT, { ...s.options(at(6)), reason: "cancelled" }).ok, true);
+    retierAutonomous(s, at(7));
+    const start = startProposed(s.logPath, fresh.task, `${key}:2`, payload, AGENT, s.options(at(8)));
+    assert.equal(start.ok ? "" : start.code, "not-granted", verdict);
+  }
+});
+
+test("under allow_irreversible a key registered WITHOUT the flag refuses the flag later; registered WITH it, the floor outlives the permission", () => {
+  // Registered without the flag: the policy authorizes the class itself, no request is filed, so nothing can carry the flag.
+  const s = store("autonomous", ", allow_irreversible: true");
+  const key = `${CLS}:allow-late`;
+  const payload = order(35);
+  assert.equal(proposeOk(s, key, payload, false).decision, "autonomous");
+  const before = records(s).length;
+  const flagged = propose(s.logPath, { cls: CLS, actionKey: key, summary: "For Kicks order", payload, irreversible: true }, AGENT, s.options(at(2)));
+  assert.equal(flagged.ok ? "" : flagged.code, "task-already-registered");
+  assert.match(flagged.ok ? "" : flagged.message, /NOT floored[\s\S]*new key/);
+  assert.equal(records(s).length, before);
+  // Registered with the flag under the same permission: autonomous while it stands, floored once it is removed.
+  const key2 = `${CLS}:allow-first`;
+  const first = proposeOk(s, key2, payload, true, at(3));
+  assert.equal(first.decision, "autonomous");
+  assert.equal(declared(s, key2).action?.["reversible"], false);
+  assert.equal(proposeOk(s, key2, payload, true, at(3)).idempotent, true);
+  retierAutonomous(s, at(4));
+  const start = startProposed(s.logPath, first.task, key2, payload, AGENT, s.options(at(5)));
+  assert.equal(start.ok ? "" : start.code, "not-granted");
+});
+
 test("a flagged registration whose request was refused still floors the key: a later propose without the flag, and a start", () => {
   // `max_pending: 1` refuses the second request queue-full AFTER propose registered it, so the only
   // record of the flag for that key is its registration.

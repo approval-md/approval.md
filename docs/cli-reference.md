@@ -1927,10 +1927,36 @@ The flag can only add scrutiny, and it sticks to the key. Once the registration
 or any request of the key says `reversible: false`, a later propose of the same
 key WITHOUT the flag is still floored, and so is a `start`. A later propose WITH
 the flag over a key first proposed without it files its request floored, and
-from that request on the key stays floored. A propose with the flag that finds
-a request still pending or decided answers from it and appends nothing, because
-that request already puts the key in front of a person; the floor is then
-recorded by the next request the key files. Without the flag nothing changes:
+from that request on the key stays floored.
+
+The declaration is recorded when it is made, or the call is refused. A propose
+with the flag never answers `requested` or `autonomous` for a key it did not
+floor:
+
+- Over a request still PENDING that was filed without the flag, it takes that
+  request back (`approval.withdrawn`, reason `superseded`) and asks the same
+  proposal again with `reversible: false` on the new request, in the same call.
+  The person is asked once more about the same bytes, and a withdraw followed
+  by a propose without the flag cannot shed the floor.
+- Over a request a person has already DECIDED without the flag (granted,
+  rejected, revoked), it is refused `already-decided` and appends nothing. No
+  record of the proposer's is filed over a person's answer. The answer stands
+  for the key as it was proposed (a grant can still be spent), and that key is
+  not floored.
+- Over a key registered without the flag in a class the policy authorizes on
+  its own under `allow_irreversible: true`, it is refused
+  `task-already-registered` and appends nothing: no request is filed there, so
+  nothing could carry the flag. A key FIRST proposed with the flag under that
+  rule is registered `reversible: false` and answered `autonomous` as the
+  operator allowed; if the operator later removes the permission, that key is
+  floored.
+- Over a key that has already started, it answers what happened (`executed`).
+
+Both refusals say the same thing: a key keeps what it was first proposed with,
+so propose the irreversible action under a new key. One act, one key, flagged
+from its first propose, is the shape the flag is for.
+
+Without the flag nothing changes:
 the same answers, the same records, byte for byte. The answer's JSON has no new
 member.
 

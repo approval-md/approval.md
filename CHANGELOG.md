@@ -359,6 +359,19 @@ on the change above.
     key says `reversible: false`, a later propose without the flag stays
     floored. A later propose with the flag over a key first proposed without it
     files its request floored, and the key stays floored from then on.
+  - **Recorded when declared, or refused.** A flagged propose over a request
+    still pending that was filed without the flag withdraws it (`superseded`)
+    and asks again, floored, in the same call. Where nothing can record the
+    flag it is refused and appends nothing: `already-decided` over a request a
+    person answered without the flag, `task-already-registered` over a key
+    registered without it in a class running on `allow_irreversible: true`.
+    The refusal says the key is not floored and to propose under a new key.
+    A flagged propose is never answered `requested` or `autonomous` for a key
+    it did not floor.
+  - **Do not roll a box back past this core while a floored key is open.** A
+    core before this one verifies such a log and ignores the proposal's
+    `reversible: false` at `start`: after a withdraw it starts the key on the
+    policy, with no grant.
   - **On serve's agent allowlist.** `approval serve` accepts `--irreversible`
     from the agent credential on `propose` and on nothing else; every other
     off-list flag is still 403 `serve-flag-not-permitted`. A core without the
