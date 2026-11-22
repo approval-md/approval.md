@@ -236,6 +236,17 @@ test("cost: review-b's M2 on 2f4100fc, brace groups beside outputs to 1 MB, is b
     bounded(`${P}echo x > \${a:-${unit.repeat(n)}}`, `the same in a default word, ${String(size)} B`);
     bounded(`${P}echo x > \${a:-${"{a,b}".repeat(n)}}`, `brace groups in a default word, ${String(size)} B`);
   }
+  // codex on 1d42d749: groups of one alternative add steps but no words
+  // (96 CPU s at 220 KB before the step bound; main 2.5).
+  for (const n of [2000, 20000]) {
+    bounded(`${P}echo x > ${"{a..a}$(pwd)".repeat(n)}`, `one-alternative ranges beside outputs, n=${String(n)}`);
+  }
+  // In a default word main's own protected-path brace pass is most of the
+  // cost (about 4 CPU s at 110 KB, on main too), so this one stays smaller.
+  for (const n of [2000, 10000]) {
+    bounded(`${P}echo x > \${a:-${"{1..1}$(pwd)".repeat(n)}}`, `the same in a default word, n=${String(n)}`);
+  }
+  assert.deepEqual(pure("echo x >> .g{i..i}$(pwd)t/config"), [DIR_WRITE]);
   // Under the bound the expansion answers as before; past 16 alternatives, the strict side.
   assert.deepEqual(pure("echo x >> .g{i,}$(pwd)t/config"), [DIR_WRITE]);
   assert.deepEqual(pure(`echo x > out/${"{a,b}".repeat(4)}$(pwd).log`), ["files.write.workspace redirect-write"]);
@@ -275,7 +286,8 @@ test("cost: through the hook, in a checkout, the same lines are bounded", { skip
     ["nested defaults with outputs", `git push --force && echo x > ${"${a:-y$(pwd)".repeat(20000)}x${"}".repeat(20000)}`],
     ["printf % then zeros", `git push --force && echo x > "$(printf %${"0".repeat(250000)})"`],
     ["echo of unclosed ${", `git push --force && echo x > "$(echo '${"${".repeat(250000)}')"`],
-    ["brace groups and outputs, 1 MB", `git push --force && echo x > ${"{a,b}$(pwd)".repeat(90000)}`],
+    ["one-alternative ranges beside outputs", `git push --force && echo x > ${"{a..a}$(pwd)".repeat(10000)}`],
+    ["brace groups and outputs, 1 MB",`git push --force && echo x > ${"{a,b}$(pwd)".repeat(90000)}`],
     ["printf %0..0.0s of many words",`git push --force && echo x > "$(printf '%${"0".repeat(20000)}.0s'${" a".repeat(20000)})"`],
   ] as const) {
     notAlreadyOver(`hook, ${label}`);

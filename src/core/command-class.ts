@@ -3986,15 +3986,26 @@ const BRACE_LIMIT = 1024;
 const JOIN_BRACE_LIMIT = 16;
 
 /**
+ * Past this many expansion steps, the same: each step re-reads the word, and
+ * a group of one alternative (`{a..a}`) adds a step but no word (codex's
+ * SOURCE HOLD on 1d42d749).
+ */
+const JOIN_BRACE_STEPS = 64;
+
+/**
  * The words brace expansion makes of `word` (second review, S1): `.g{i,}t`
  * gives `.git` and `.gt`, `.{f..h}it` gives `.fit`, `.git` and `.hit`.
- * `null` past {@link BRACE_LIMIT}, which the caller judges the strict way. A
- * group with no comma and no sequence is kept as text, as the shell keeps it.
+ * `null` past {@link BRACE_LIMIT}, or past `steps` groups expanded, which the
+ * caller judges the strict way. A group with no comma and no sequence is kept
+ * as text, as the shell keeps it.
  */
-export function expandBraces(word: string, limit = BRACE_LIMIT): string[] | null {
+export function expandBraces(word: string, limit = BRACE_LIMIT, steps = Number.POSITIVE_INFINITY): string[] | null {
   const done: string[] = [];
   const pending = [word];
+  let taken = 0;
   while (pending.length > 0) {
+    taken += 1;
+    if (taken > steps) return null;
     const current = pending.pop() as string;
     const group = braceGroup(current);
     if (group === null) {
@@ -4317,7 +4328,7 @@ export function mayNameGitDirectory(word: string): boolean {
  * word (review-b's M2 on 2f4100fc).
  */
 function mayNameGitDirectoryBounded(word: string): boolean {
-  const words = word.split(SUBSTITUTION_SENTINEL).join("").includes("{") ? expandBraces(word, JOIN_BRACE_LIMIT) : [word];
+  const words = word.split(SUBSTITUTION_SENTINEL).join("").includes("{") ? expandBraces(word, JOIN_BRACE_LIMIT, JOIN_BRACE_STEPS) : [word];
   if (words === null) return true;
   return words.some((each) => pathSegments(each).some((segment) => globSegmentMatches(segment, ".git")));
 }
@@ -4853,7 +4864,7 @@ function wordJoinsGitAcrossSubstitution(text: string): boolean {
   // at most JOIN_BRACE_LIMIT of them, and past that counts as naming `.git`;
   // a word whose only braces are the outputs' own is not expanded at all
   // (review-b's M2 on 2f4100fc: `{a,b}$(pwd)` to 1 MB took 39 s at 1,024).
-  const words = text.split(SUBSTITUTION_SENTINEL).join("").includes("{") ? expandBraces(text, JOIN_BRACE_LIMIT) : [text];
+  const words = text.split(SUBSTITUTION_SENTINEL).join("").includes("{") ? expandBraces(text, JOIN_BRACE_LIMIT, JOIN_BRACE_STEPS) : [text];
   if (words === null) return true;
   for (const word of words) {
     for (const piece of word.split(/[/=:\s]/u)) {
