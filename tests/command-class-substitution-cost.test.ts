@@ -260,8 +260,11 @@ test("cost: review-b's M2 on 2f4100fc, brace groups beside outputs to 1 MB, is b
   const n = 90000;
   const word = `${P}echo x > ${unit.repeat(n)}`;
   nearControl(word, noOutputs(word), "brace groups and outputs, one word, 1 MB");
+  // A default word's control is a literal wrapper of the same length, so it
+  // skips the default-word reader as well as the outputs (codex on 03eaaae6).
+  const literalWrap = (body: string): string => `${P}echo x > zzzzz${noOutputs(body)}z`;
   const inDefault = `${P}echo x > \${a:-${unit.repeat(n)}}`;
-  nearControl(inDefault, noOutputs(inDefault), "the same in a default word, 1 MB");
+  nearControl(inDefault, literalWrap(unit.repeat(n)), "the same in a default word, 1 MB");
   const groups = `${P}echo x > \${a:-${"{a,b}".repeat(200000)}}`;
   nearControl(groups, `${P}echo x > zzzzz${"{a,b}".repeat(200000)}z`, "brace groups in a default word, 1 MB");
   // codex on 1d42d749: groups of one alternative add steps but no words
@@ -270,9 +273,13 @@ test("cost: review-b's M2 on 2f4100fc, brace groups beside outputs to 1 MB, is b
   const ranges = `${P}echo x > ${"{a..a}$(pwd)".repeat(20000)}`;
   nearControl(ranges, noOutputs(ranges), "one-alternative ranges beside outputs, n=20000");
   const rangesInDefault = `${P}echo x > \${a:-${"{1..1}$(pwd)".repeat(10000)}}`;
-  nearControl(rangesInDefault, noOutputs(rangesInDefault), "the same in a default word, n=10000");
+  nearControl(rangesInDefault, literalWrap("{1..1}$(pwd)".repeat(10000)), "the same in a default word, n=10000");
   assert.deepEqual(pure("echo x >> .g{i..i}$(pwd)t/config"), [DIR_WRITE]);
-  // The step bound: 63 groups of one alternative finish, 64 count.
+  // The step bound: 63 groups of one alternative finish, 64 count; in a word
+  // an outputs' join reads, and in a word a default rewrites (bash 3.2 reads
+  // `${a:-out}/{a..a}{a..a}.log` as `out/aa.log`).
+  assert.deepEqual(pure(`echo x > \${a:-out}/${"{a..a}".repeat(63)}.log`), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(pure(`echo x > \${a:-out}/${"{a..a}".repeat(64)}.log`), [DIR_WRITE]);
   assert.deepEqual(pure(`echo x > out/${"{a..a}".repeat(63)}$(pwd).log`), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure(`echo x > out/${"{a..a}".repeat(64)}$(pwd).log`), [DIR_WRITE]);
   // Under the bound the expansion answers as before; past 16 alternatives, the strict side.
