@@ -232,6 +232,12 @@ import {
   readCodexReportedOutcome,
 } from "./hook-codex.js";
 import { bindExecCodeCommand, bindExecuteCode, describeProgram } from "./hook-exec-code.js";
+import {
+  classifyDeadlineDetail,
+  classifyDeadlineMs,
+  HOOK_CLASSIFY_DEADLINE_CODE,
+  runWithinDeadline,
+} from "./hook-deadline.js";
 
 /** Identity accepted for the proposing side: a person or an agent. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -384,6 +390,25 @@ export const HOOK_DENY_CODES = [
    * recording grants on calls nobody holds.
    */
   "hook-harness-cap-too-short",
+  /**
+   * Classifying the call did not finish inside the hook's own deadline, so the
+   * call was not judged and is refused (`cli/hook-deadline.ts`).
+   *
+   * The harness bounds this process, and on Claude Code, Cursor, Grok Build and
+   * Muse Code (and on Hermes without `fail_closed`) a hook killed at that bound
+   * lets the tool call run. Classification is synchronous, so the wait's
+   * deadline cannot stop it; this one runs the classification under a `vm`
+   * watchdog that interrupts it, a backtracking regular expression included,
+   * and answers deny before the harness gives up. The deadline is 20 s, or a
+   * third of the effective harness cap when that is shorter.
+   *
+   * Distinct from `hook-timeout`, which says a question was asked and nobody
+   * answered it in time: here no question was asked, nothing was registered or
+   * appended, and the repair is a shorter command rather than a faster human.
+   * Distinct from `hook-opaque` and `hook-unclassified`, which say what the
+   * classifier concluded; this says it did not conclude.
+   */
+  "hook-classify-deadline",
   /** The gate refused intake; the gate's own code follows a colon. */
   "hook-gate-refused",
   /**
@@ -7224,6 +7249,31 @@ type ToolDescription =
   /** The classifier could not read it, or the input was malformed. */
   | { kind: "deny"; code: string; detail: string };
 
+/**
+ * `describe()` under the hook's own classification deadline: its answer when
+ * it finishes inside `deadlineMs`, and a `hook-classify-deadline` deny when it
+ * does not (see `cli/hook-deadline.ts`).
+ *
+ * Every pre-execution path that classifies a call goes through here, so a slow
+ * classification is refused in the harness's own deny format before the
+ * harness's timeout, which on most harnesses would let the call run. An answer
+ * that arrives in time is returned untouched, and a throw passes through to
+ * the caller's existing handling.
+ */
+function describeWithinDeadline(
+  harnessCapMs: number | null,
+  describe: () => ToolDescription,
+): ToolDescription {
+  const deadlineMs = classifyDeadlineMs(harnessCapMs);
+  const outcome = runWithinDeadline(deadlineMs, describe);
+  if (outcome.ok) return outcome.value;
+  return {
+    kind: "deny",
+    code: HOOK_CLASSIFY_DEADLINE_CODE,
+    detail: classifyDeadlineDetail(outcome.elapsedMs, deadlineMs),
+  };
+}
+
 function describeToolCall(
   input: HookInput,
   adapter: HarnessAdapter,
@@ -9251,6 +9301,8 @@ function* runBypass(
    * shape.
    */
   decidedOn: { records: EventRecord[]; head: { seq: number; hash: string } | null } | null,
+  /** The effective harness cap, which the classification deadline is derived from. */
+  harnessCapMs: number | null,
 ): GateSteps<number> {
   const codexCommand =
     adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
@@ -9265,34 +9317,42 @@ function* runBypass(
     ? null
     : `the policy did not load (${load.code}: ${load.message}), so no protected path beyond the built-ins was known here and no class could be resolved to human-only`;
 
-  const described = describeToolCall(
-    input,
-    adapter,
-    protectedPaths,
+  // APRV-347. The window suspends the POLICY, not the classification: a read
+  // outside the scope is described as one here too, so the bypass RECORD says
+  // what was actually authorized rather than calling it an ordinary read.
+  const bypassReadRoots = resolveReadRoots(
     cwd,
-    // APRV-347. The window suspends the POLICY, not the classification: a read
-    // outside the scope is described as one here too, so the bypass RECORD says
-    // what was actually authorized rather than calling it an ordinary read.
-    resolveReadRoots(
-      cwd,
-      policyRootOf(load, scope.root),
-      load.ok ? load.policy.read_scope?.roots : undefined,
-    ),
-    // APRV-499. The window suspends the policy's ANSWER, not its mapping: a
-    // mapped or unmapped tool is described under its class here too, so the
-    // bypass record names it.
-    load.ok ? load.policy : null,
-    // Fix round 1 (refutations S1 and B1): "not a gated tool" is believed only
-    // from an attested policy that loads. A policy that did not load, or one
-    // nobody attested, cannot say a tool is outside the gate, so the call is
-    // described under harness.tool.unmapped and the bypass records it: a
-    // window being open does not let a call run unrecorded.
+    policyRootOf(load, scope.root),
+    load.ok ? load.policy.read_scope?.roots : undefined,
+  );
+  // Fix round 1 (refutations S1 and B1): "not a gated tool" is believed only
+  // from an attested policy that loads. A policy that did not load, or one
+  // nobody attested, cannot say a tool is outside the gate, so the call is
+  // described under harness.tool.unmapped and the bypass records it: a
+  // window being open does not let a call run unrecorded.
+  const bypassUngated =
     unclaimedStanding(scope.options, cwd, input.toolName, decidedOn?.records ?? null).kind ===
-      "ungated",
-    // APRV-510: the window does not reach `exec.code`. Opening the class is a
-    // policy statement, and the window suspends the policy; an opaque program is
-    // the case this path already names as one nothing here can vouch for.
-    closedExecCodeGate("window"),
+    "ungated";
+  // Under the hook's own classification deadline, as on the closed path: a
+  // window suspends the policy's answer, and a call nothing finished judging
+  // has no answer to suspend.
+  const described = describeWithinDeadline(harnessCapMs, () =>
+    describeToolCall(
+      input,
+      adapter,
+      protectedPaths,
+      cwd,
+      bypassReadRoots,
+      // APRV-499. The window suspends the policy's ANSWER, not its mapping: a
+      // mapped or unmapped tool is described under its class here too, so the
+      // bypass record names it.
+      load.ok ? load.policy : null,
+      bypassUngated,
+      // APRV-510: the window does not reach `exec.code`. Opening the class is a
+      // policy statement, and the window suspends the policy; an opaque program is
+      // the case this path already names as one nothing here can vouch for.
+      closedExecCodeGate("window"),
+    ),
   );
   if (described.kind === "deny" || (described.kind === "gated" && described.abstain !== undefined)) {
     const refused = described.kind === "deny" ? described : (described.abstain as { code: string; detail: string });
@@ -9779,10 +9839,26 @@ function* runHarnessHook(
       // spawn, provided the hook is configured with `--dir` as the docs show
       // (otherwise `hookScope` runs `git rev-parse` to find the primary).
       const early = hookScope(parsed.flags, cwd);
-      if (
-        credentialReadGate(input.toolName, input.toolInput, cwd) === null &&
-        readToolGate(input.toolName, input.toolInput, resolveReadRoots(cwd, early.root), cwd) === null
-      ) {
+      // The read tool's path is judged where the disk lands it, which is work
+      // that grows with the path; under the classification deadline like
+      // every other judgment of a call, and refused when it runs out rather
+      // than handed on to the full path to run out a second time.
+      const deadlineMs = classifyDeadlineMs(harnessCapMs);
+      const fast = runWithinDeadline(
+        deadlineMs,
+        () =>
+          credentialReadGate(input.toolName, input.toolInput, cwd) === null &&
+          readToolGate(input.toolName, input.toolInput, resolveReadRoots(cwd, early.root), cwd) === null,
+      );
+      if (!fast.ok) {
+        return deny(
+          streams,
+          HOOK_CLASSIFY_DEADLINE_CODE,
+          classifyDeadlineDetail(fast.elapsedMs, deadlineMs),
+          adapter.kind,
+        );
+      }
+      if (fast.value) {
         return allow(streams, `${input.toolName} is not a gated tool`, adapter.kind, codexCommand);
       }
     }
@@ -9832,6 +9908,7 @@ function* runHarnessHook(
       // bypass record is appended against the head they ended at, so the
       // verdict and the record are one read of the log.
       looked.records === null ? null : { records: looked.records, head: looked.head },
+      harnessCapMs,
     );
   }
 
@@ -9994,15 +10071,21 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
   // both paths since APRV-214 (see `describeToolCall`): the open window
   // classifies exactly as the closed one does, and a second copy of this would
   // be a second answer to "what is this command".
-  const described = describeToolCall(
-    input,
-    adapter,
-    protectedPaths,
-    cwd,
-    readRoots,
-    load.policy,
-    true,
-    execGateOf(adapter, load.policy),
+  //
+  // Under the hook's own deadline: classification is synchronous, so nothing
+  // else can stop a slow one before the harness kills this process and, on
+  // most harnesses, runs the call unjudged.
+  const described = describeWithinDeadline(harnessCapMs, () =>
+    describeToolCall(
+      input,
+      adapter,
+      protectedPaths,
+      cwd,
+      readRoots,
+      load.policy,
+      true,
+      execGateOf(adapter, load.policy),
+    ),
   );
   if (described.kind === "deny") {
     return { permission: "deny", code: described.code, detail: described.detail };

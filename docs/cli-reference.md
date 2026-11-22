@@ -5812,6 +5812,12 @@ its own flags are not parsed as this verb's.
 - `hook-expired` — the TTL lapsed before a decision.
 - `hook-timeout` — no decision inside the wait (`--timeout`, clamped to what
   `--harness-cap` leaves after the 60s margin; APRV-423); the request stays live.
+- `hook-classify-deadline` — classifying the call did not finish inside the
+  hook's own deadline (20s, or a third of the effective harness cap when that is
+  shorter), so the call was not judged and is refused. Nothing is registered or
+  appended. The harness's own timeout would have killed the hook and, on most
+  harnesses, run the call; split the command or shorten the long path, glob
+  pattern or word that made it slow.
 - `hook-gate-refused:<c>` — the gate refused intake; `<c>` is its own frozen code
   (`policy-not-attested`, `budget-exceeded`, …).
 - `hook-policy-unavailable` — `APPROVAL.md` could not be loaded.

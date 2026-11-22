@@ -290,6 +290,42 @@ alone. The hook also now prints one stderr line when `--timeout` is not shorter
 than the cap it was told about. That is the check this document used to say the
 runtime could not make, because a hook was not told the cap it ran under.
 
+### When classification runs long: the hook's own deadline
+
+`--timeout` and `--harness-cap` bound the WAIT for a human. Classification
+comes before the wait and runs synchronously, so no timer could stop it: a
+command whose classification is slow in the length of some word (a path of tens
+of thousands of segments, a long run of glob stars over a large directory) ran
+until Claude Code killed the hook at `timeout`, and a killed hook is a
+non-blocking error, so the call ran unjudged.
+
+**The hook now refuses on its own deadline instead.** It classifies every call
+under a `vm` watchdog that interrupts the work wherever it is, a backtracking
+regular expression included, and when the deadline passes it answers an
+ordinary deny before Claude Code's timeout:
+
+```json
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"hook-classify-deadline: the hook stopped judging this call after 20.0s, its own deadline of 20.0s, so the call was not judged and is refused rather than left to the harness's timeout, which would let it run. Nothing was appended. Split the command into shorter commands, or shorten the long path, glob pattern or word that made it slow, and try again."}}
+```
+
+- **The deadline is 20s**, a third of Claude Code's 60s default hook timeout,
+  leaving the rest for start-up, the log read and the verdict on a loaded
+  machine. With `--harness-cap` it is a third of the effective cap when that is
+  shorter (a 30s cap gives 10s), and never more than 20s. It is wall time, and
+  it is a constant in `src/cli/hook-deadline.ts`
+  (`HOOK_CLASSIFY_DEADLINE_MS`), not a flag.
+- **Nothing is registered, requested or appended**, exactly as for
+  `hook-opaque`: no question was asked, so there is nothing for a human to
+  answer and no retry grace. The agent rewrites the command and tries again.
+- **A call that finishes in time gets the verdict it always got.** The deadline
+  wraps the same classification and adds well under a millisecond per call.
+- **It covers every pre-execution classification**: the shell command, file
+  tools, read tools (including the read fast path) and the open window's
+  bypass, on every adapter, each in that adapter's own deny format.
+- **What it does not shorten** is the wait that follows a classification that
+  finished in time: a call that took 15s to classify still waits the full
+  `--timeout` for a human after it.
+
 ## What the classifier decides
 
 `src/core/command-class.ts` is a pure function from a command line to classes.
@@ -1742,6 +1778,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-expired` | the TTL lapsed before a decision |
 | `hook-timeout` | no decision inside `--timeout` (clamped to what a stated or assumed harness ceiling leaves); the request stays OPEN, and a decision inside the RETRY GRACE authorizes an identical retry, once. Past the grace it authorizes nothing: the next gated call of this actor withdraws the question, and a retry does not carry a grant written after the grace ran out (APRV-410). Under a harness ceiling the deny names the instant the request expires |
 | `hook-harness-cap-too-short` | the `--harness-cap` this hook was told about does not clear the 60s margin, so no window is left for a human. Nothing registered, nothing requested, no prompt sent |
+| `hook-classify-deadline` | classifying the call did not finish inside the hook's own deadline (20s, or a third of the effective harness cap when that is shorter), so the call was not judged and is refused. The harness would otherwise have killed the hook and run the call (see "When classification runs long" in `docs/claude-code-hook.md`). Nothing registered, nothing appended; split the command or shorten the long path, glob pattern or word that made it slow |
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. On this surface the record IS the authorization, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it. The grant is spent by then: the retry costs one prompt and authorizes nothing meanwhile |
@@ -2253,7 +2290,10 @@ harness boundary, and none of them is reachable from inside this runtime:
    margin (a longer `--timeout` is reported once on stderr and shortened), so
    the hook answers `hook-timeout` before the kill even when it only adopted a
    question an earlier run opened, and the request's own window is shortened so
-   the lapse is recorded before the kill. What it still cannot do is stop the
+   the lapse is recorded before the kill. The classification before the wait
+   has its own deadline (20s, "When classification runs long" above), so a
+   slow classification is refused `hook-classify-deadline` before the kill
+   instead of being killed with it. What it still cannot do is stop the
    tool call once Claude Code has decided to run it.
 2. **Any non-zero exit that is not 2.** Exit 2 is a block with stderr as the
    reason; every other non-zero code is a non-blocking error and the tool runs.

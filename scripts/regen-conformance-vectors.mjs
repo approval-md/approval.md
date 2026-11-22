@@ -4990,7 +4990,15 @@ const SUITES = [
     // on the box branches on these strings. Stacked on 30.0.0; if another
     // lane's major merges first, the collision rule above applies and this
     // takes the next major on regeneration.
-    vectors_version: "31.0.0",
+    //
+    // 32.0.0 (the hook's classification deadline): `hook_deny_codes` gains
+    // `hook-classify-deadline`, after `hook-harness-cap-too-short`: the
+    // refusal a hook gives when classifying a call did not finish inside its
+    // own deadline, so the call was not judged. Major for the same reason as
+    // every bump here: the vector pins the whole array in definition order.
+    // If another lane's major merges first, the collision rule above applies
+    // and this takes the next major on regeneration.
+    vectors_version: "32.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",

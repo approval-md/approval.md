@@ -385,6 +385,27 @@ Consequences, in order of how much they cost:
    project's other adapters give an approver, and it is a property of the
    harness rather than a choice made here.
 
+**Classification has a deadline of its own, and the hook refuses on it.** Both
+timeouts above bound the hook process, and the wait's `--timeout` bounds only
+the wait for a human. Classification runs before that wait, synchronously, so
+until now a command that was slow to classify (a path of tens of thousands of
+segments, a long run of glob stars over a large directory) ran until Hermes
+killed the hook: blocked at the entry's `timeout` with `fail_closed: true` on a
+build that honours it, and run unjudged everywhere else. The hook now
+classifies under a `vm` watchdog that interrupts the work wherever it is, and
+answers its ordinary block, at exit 2, before Hermes's timeout:
+
+```json
+{"action":"block","message":"hook-classify-deadline: the hook stopped judging this call after 10.0s, its own deadline of 10.0s, so the call was not judged and is refused rather than left to the harness's timeout, which would let it run. Nothing was appended. Split the command into shorter commands, or shorten the long path, glob pattern or word that made it slow, and try again."}
+```
+
+The deadline is a third of the effective harness cap and never more than 20s:
+**10s** with no `--harness-cap` (the 30s `hook_callback_timeout` default), and
+**20s** under the recommended `--harness-cap 300s`. Nothing is registered or
+appended, so the agent rewrites the command and retries. A call that finishes
+in time gets exactly the verdict it got before. The constant is
+`HOOK_CLASSIFY_DEADLINE_MS` in `src/cli/hook-deadline.ts`.
+
 ### The effective window: 240s once you say so, and refused until you do (APRV-423)
 
 The 300s cap above is a ceiling on the hook PROCESS, and before APRV-423 it was

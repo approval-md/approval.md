@@ -182,6 +182,14 @@ which is why it is registered here as the relay's union is. If another branch
 claims 31.0.0 first, the collision rule below gives this change the next major
 at merge.
 
+It is **32.0.0** since the hook's classification deadline, which added
+`hook-classify-deadline` to `hook_deny_codes`, after
+`hook-harness-cap-too-short`: the refusal a harness hook gives when classifying
+a call did not finish inside the hook's own deadline (20s, or a third of the
+effective harness cap when that is shorter), so the call was not judged and
+nothing was appended. If another branch claims 32.0.0 first, the collision rule
+below gives this change the next major at merge.
+
 ## Changing the suite
 
 The vectors are generated, never hand-edited:
