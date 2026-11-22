@@ -179,6 +179,26 @@ on the change above.
   operator that transforms a value (removal, substring, replacement, case,
   `@`) counts, on any parameter. That one costs: `echo x >
   "${f%.txt}.log"` or `"${1%.md}.html"` becomes `git-dir-write`.
+- **The fold of #680's gate.** printf is read only when its format is a
+  literal word using `%s`, `%b`, `%c` and `%d` alone and every word after it
+  keeps its place (a literal word or a fully quoted plain scalar); `echo -e`
+  only when every word does; `printf` and `echo` named by the system's path
+  (`/usr/bin/printf`) are read. Anything else in a substitution body counts
+  as naming `.git`: `printf %.4ls .gitfoo` (bash skips the `l`), a format in
+  a variable (`F=%.4s; printf "$F" .gitfoo`, `printf $F`), `%q`, bash's
+  `%(…)T`, and words that may become no word or several (`printf
+  '%.4s%.0s' $u .gitfoo` is `.git` when `u` is empty). `echo` (zsh's
+  decodes escapes with no `-e`) and `%b` of a value the text cannot read
+  count too (`X='\056git'; echo x > "$(echo "$X")/config"`, a miss on
+  main), so `"$(echo $(date +%F))"` asks. zsh's subscripts and
+  modifiers count as operators: in braces any subscript but `[@]`/`[*]`,
+  and after an unbraced parameter any `[` or `:` and a letter (`$f[1,4]`,
+  `$f:r`, `$f:S/x/i/`, `$@:r`, and the flags `$=f`, `$~f`, `$^f`).
+  Evidence: the gate's 95 shell-truth cases and 79 more, in bash 3.2 and
+  zsh: 0 looser against #680, 34 lines that land in `.git` now counted (the
+  5 left are the known limits); over the gate's 3,668-line corpus, 0 looser
+  against #680 and 0.4.8, 9 lines stricter than #680. Conformance is
+  unchanged.
 - **A line cannot be built to make the classifier slow.** A hook past its
   timeout lets the call through, so the cost of reading a line is bounded.
   The split-spelling reader tried every window of a word as its own
