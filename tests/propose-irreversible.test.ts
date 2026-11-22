@@ -371,6 +371,29 @@ test("without the flag first, then with it: the flag files the card, and the flo
   }
 });
 
+test("a flagged registration whose request was refused still floors the key: a later propose without the flag, and a start", () => {
+  // `max_pending: 1` refuses the second request queue-full AFTER propose registered it, so the only
+  // record of the flag for that key is its registration.
+  const s = store("autonomous", ", limits: { max_pending: 1 }");
+  const first = proposeOk(s, `${CLS}:queue-a`, order(20), true);
+  assert.equal(first.decision, "requested");
+  const keyB = `${CLS}:queue-b`;
+  const refused = propose(s.logPath, { cls: CLS, actionKey: keyB, summary: "s", payload: order(21), irreversible: true }, AGENT, s.options(at(2)));
+  assert.equal(refused.ok ? "" : refused.code, "queue-full");
+  const b = declared(s, keyB);
+  assert.equal(b.action?.["reversible"], false, "registered, floored");
+  assert.equal(b.requests.length, 0, "no request: the registration is the only record of the flag");
+  // No start without a grant, though no request ever bound the key to the grant path.
+  const taskB = proposedTaskId(AGENT, CLS, keyB);
+  const start = startProposed(s.logPath, taskB, keyB, order(21), AGENT, s.options(at(3)));
+  assert.equal(start.ok ? "" : start.code, "not-granted");
+  // The queue frees; the same key proposed WITHOUT the flag is still asked of a person.
+  assert.equal(withdraw(s.logPath, `${CLS}:queue-a`, AGENT, { ...s.options(at(4)), reason: "cancelled" }).ok, true);
+  const later = proposeOk(s, keyB, order(21), false, at(5));
+  assert.equal(later.decision, "requested");
+  assert.equal(declared(s, keyB).requests[0]?.["reversible"], false);
+});
+
 test("a key already started on the policy answers what happened when the flag comes later", () => {
   const s = store("autonomous");
   const key = `${CLS}:already`;
