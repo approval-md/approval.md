@@ -1,13 +1,16 @@
 /**
  * The `.git` reader's glob match answers as its old expression did, in
- * bounded time (B-HOOK-GLOB-LINEAR).
+ * bounded time (B-HOOK-GLOB-LINEAR, kept after #680).
  *
  * `globSegmentMatches` (src/core/command-class.ts) turned a pattern into one
  * anchored expression (`*` as `[^/]*`, letter case ignored) and a run of `*`
- * made the engine backtrack. It now tests each piece of that expression as a
- * one-character expression and walks the name once. The old function is
- * ported below, verbatim but for its name and the inlined
- * `isPatternSegment`, as the oracle.
+ * made the engine backtrack. #680 (APRV-518) replaced it with its own walk
+ * over a pattern's elements, reading a run of unclosed `[` once and judging
+ * a pattern past 1,024 glob characters to match (the strict side). These
+ * tests hold that walk to the old expression: the old function is ported
+ * below, verbatim but for its name and the inlined `isPatternSegment`, as
+ * the oracle, on patterns well under that limit, and the cost cases bound it
+ * on both sides of the limit.
  */
 
 import assert from "node:assert/strict";
@@ -213,12 +216,15 @@ test("equivalence: bracket shapes joined with stars answer as the old expression
 
 test("cost: a long `*` run is matched in bounded CPU time", () => {
   // 8 `*` and 12 `z` against a directory's names took 36.7 CPU s through the
-  // hook on a521a91d. About 50 CPU ms here for all of these; the bound is 10x.
+  // hook on a521a91d. The 240 and 1,000 `*` cases are under #680's 1,024
+  // limit, so they are walked; the rest are past it and judged to match.
+  // About 15 CPU ms here for all of these; the bound is 30x.
   const names = [".git", "auth.json", "package-lock.json", "a".repeat(255), `${"ab".repeat(127)}z`];
   const patterns = [
     `${"*".repeat(8)}${"z".repeat(12)}`,
     `${"*".repeat(240)}${"z".repeat(12)}`,
-    `.${"*".repeat(2000)}${"z".repeat(12)}`,
+    `.${"*".repeat(1_000)}${"z".repeat(12)}`,
+    `.${"*".repeat(2_000)}${"z".repeat(12)}`,
     `${"?*".repeat(50_000)}`,
     `.${"*g".repeat(20_000)}`,
     `${"[[:alpha:]]*".repeat(5_000)}z`,
@@ -234,11 +240,12 @@ test("cost: a long `*` run is matched in bounded CPU time", () => {
 
 test("cost: a run of unclosed `[` is scanned once, not once per `[` (codex S1 on #682)", () => {
   // Each `[` scanned to the end of the pattern: n(n-1)/2 steps, 28 CPU ms at
-  // n = 2,000 and 2.3 CPU s at 20,000 on bfa73710 (14 s at 50,000; 32.5 s
-  // for this whole test). About 70 CPU ms here for all of these; the bound
-  // is 7x.
+  // n = 2,000 and 2.3 CPU s at 20,000 on bfa73710 (14 s at 50,000). #680
+  // reads a run once (1,000 here, under its limit) and judges a pattern past
+  // 1,024 glob characters without reading it. About 5 CPU ms here for all of
+  // these; the bound is 100x.
   const ms = cpuMs(() => {
-    for (const length of [2_000, 20_000, 50_000]) {
+    for (const length of [1_000, 2_000, 20_000, 50_000]) {
       for (const pattern of ["[".repeat(length), `*${"[".repeat(length)}*`, `${"[!".repeat(length / 2)}`, `${"[[:".repeat(length / 3)}`]) {
         globSegmentMatches(pattern, ".git");
         globSegmentMatches(pattern, "x");
@@ -257,7 +264,7 @@ test("cost: a class of many members is matched in bounded CPU time", () => {
     }
   });
   // A guard: the `.git` reader tests each character with one cached
-  // one-character expression, so this was never P x N (11 CPU ms on
-  // bfa73710). About 16 CPU ms here; the bound is 9x.
+  // one-character expression, so this was never P x N. About 7 CPU ms here
+  // (#680's walk); the bound is 20x.
   assert.ok(ms < 150, `${ms.toFixed(1)} CPU ms, bound 150`);
 });

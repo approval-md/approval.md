@@ -139,9 +139,9 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
   process.env["HOME"] = home;
   try {
     // On bfa73710: `echo x >` and 20,000 `[` took 2.8 CPU s (the `.git`
-    // reader scanned from every `[` to the end), and `cat` of `*[` + 5,000
-    // `z` + `]X` took 160 CPU ms (each character tested against every
-    // member). At most about 14 CPU ms a call here, so the bound is 7x.
+    // reader scanned from every `[` to the end; #680 now reads the run once),
+    // and `cat` of `*[` + 5,000 `z` + `]X` took 160 CPU ms (each character
+    // tested against every member, in this change's hook reader). At most about 14 CPU ms a call here, so the bound is 7x.
     // (50,000 members took 985 CPU ms through `cat` on bfa73710 and 31 here;
     // tests/hook-glob-match bounds that size directly.)
     const words = ["[".repeat(2_000), "[".repeat(20_000), `*[${"z".repeat(5_000)}]X`];

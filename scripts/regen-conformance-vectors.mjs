@@ -2195,6 +2195,48 @@ const commandClassVectors = [
     description: "a read of .git whose redirection writes elsewhere is a workspace write, not git-dir-write (APRV-518 follow-up, item A control)",
     input: { command: "cat .git/HEAD > /tmp/x" },
   },
+  {
+    id: "git-dir-write-rev-parse-git-dir",
+    description:
+      "a relative write after a cd into git rev-parse's own --git-dir answer is git-dir-write (APRV-518, a .git path spelled by a substitution)",
+    input: { command: 'cd "$(git rev-parse --git-dir)" && echo x >> config' },
+  },
+  {
+    id: "git-dir-write-split-across-substitution",
+    description:
+      "literal text and a substitution's output that join into .git make the write git-dir-write (APRV-518, a .git path spelled by a substitution)",
+    input: { command: "echo x >> .g$(printf it)/config" },
+  },
+  {
+    id: "git-dir-rev-parse-toplevel-unmoved",
+    description:
+      "a cd into git rev-parse --show-toplevel names the working tree, not .git: the relative write stays a workspace write (APRV-518 substitution fold control)",
+    input: { command: 'cd "$(git rev-parse --show-toplevel)" && echo x > notes.txt' },
+  },
+  {
+    id: "git-dir-substitution-word-unmoved",
+    description:
+      "a substitution inside a word whose literal text cannot join into .git leaves the write a workspace write (APRV-518 substitution fold control)",
+    input: { command: "echo x > out/$(date +%F).txt" },
+  },
+  {
+    id: "git-dir-write-ansi-c-quoting",
+    description:
+      "an ANSI-C quoted string whose escapes decode to .git makes the write git-dir-write (APRV-518, review of the substitution fold, S1)",
+    input: { command: "echo x >> $'\\x2egit'/config" },
+  },
+  {
+    id: "git-dir-write-parameter-expansion-word",
+    description:
+      "a parameter expansion whose word may be .git makes the write git-dir-write (APRV-518, review of the substitution fold, S2)",
+    input: { command: "echo x >> ${VAR:-.git}/config" },
+  },
+  {
+    id: "git-dir-parameter-expansion-word-unmoved",
+    description:
+      "a parameter expansion whose word is no .git leaves the write a workspace write (APRV-518, review of the substitution fold, S2 control)",
+    input: { command: 'echo x > "${OUT:-build}/log.txt"' },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",
@@ -5547,7 +5589,16 @@ const SUITES = [
     // into `.git`, and a read of `.git` redirected elsewhere, which is the
     // workspace write 0.4.8 called it. Regenerating over main's 1.10.0 leaves
     // all 370 byte-identical.
-    vectors_version: "1.11.0",
+    // 1.12.0 (APRV-518, a `.git` path spelled by a substitution): MINOR again,
+    // four new vectors and no expectation moved: a relative write after `cd
+    // "$(git rev-parse --git-dir)"`, a write through `.g$(printf it)`, and two
+    // controls, `cd "$(git rev-parse --show-toplevel)"` and `out/$(date
+    // +%F).txt`, which stay workspace writes. Regenerating over the
+    // follow-up's 1.11.0 leaves all 375 byte-identical. The review of that
+    // fold adds three more in the same unreleased 1.12.0: a write through
+    // `$'\x2egit'` and one through `${VAR:-.git}`, and a control,
+    // `"${OUT:-build}/log.txt"`, which stays a workspace write.
+    vectors_version: "1.12.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:

@@ -49,7 +49,6 @@
  */
 
 import { isDateDisplay, isZoneValue } from "./date-argv.js";
-import { matchGlobTokens, singleCharacterTokens, type GlobToken } from "./glob-match.js";
 import { isUnreadablePushWord, parseGitPushArgv, splitGitPush } from "./git-push-argv.js";
 import {
   isBareInfo,
@@ -2343,6 +2342,27 @@ export interface ClassifierContext {
    * {@link classifyCommand} for the whole line and its inner scripts.
    */
   lineNamesGit?: boolean;
+  /**
+   * The segments whose words, targets and substitution bodies the line's own
+   * reading for {@link lineNamesGit} already went through (review of the
+   * substitution fold, M1). Set by {@link classifyCommand}; a caller leaves
+   * it unset.
+   */
+  spelledSegments?: WeakSet<LexSegment>;
+  /**
+   * This text is a substitution body of such a segment on a line that does
+   * not spell `.git`, so reading it again would find nothing: the body was
+   * read, as a line of its own, by that line's reading. Set only by
+   * {@link classifySegment} for the substitutions it classifies, so a deep
+   * nesting is read once and not once per level.
+   */
+  bodyAlreadyRead?: boolean;
+  /**
+   * How many command substitutions this text sits inside (review of the
+   * substitution fold). Set by {@link classifySegment}; a caller leaves it
+   * unset.
+   */
+  substitutionDepth?: number;
 }
 
 /** Everything a refinement needs: the binary and the words that followed it. */
@@ -3962,16 +3982,32 @@ function namesGitDirectory(word: string): boolean {
 /** Past this many brace alternatives a word is judged as naming `.git`. */
 const BRACE_LIMIT = 1024;
 
+/** Past this many brace alternatives a word with outputs in it is judged as joining into `.git`. */
+const JOIN_BRACE_LIMIT = 16;
+
+/**
+ * Past this many expansion steps, the same: each step re-reads the word, and
+ * a group of one alternative (`{a..a}`) adds a step but no word (codex's
+ * SOURCE HOLD on 1d42d749). A step is one visit of the worklist: a group
+ * expanded, or a finished word, so 63 one-alternative groups finish and 64
+ * count.
+ */
+const JOIN_BRACE_STEPS = 64;
+
 /**
  * The words brace expansion makes of `word` (second review, S1): `.g{i,}t`
  * gives `.git` and `.gt`, `.{f..h}it` gives `.fit`, `.git` and `.hit`.
- * `null` past {@link BRACE_LIMIT}, which the caller judges the strict way. A
- * group with no comma and no sequence is kept as text, as the shell keeps it.
+ * `null` past {@link BRACE_LIMIT}, or past `steps` visits of its worklist (a
+ * group expanded or a word finished), which the caller judges the strict way. A group with no comma and no sequence is kept
+ * as text, as the shell keeps it.
  */
-export function expandBraces(word: string, limit = BRACE_LIMIT): string[] | null {
+export function expandBraces(word: string, limit = BRACE_LIMIT, steps = Number.POSITIVE_INFINITY): string[] | null {
   const done: string[] = [];
   const pending = [word];
+  let taken = 0;
   while (pending.length > 0) {
+    taken += 1;
+    if (taken > steps) return null;
     const current = pending.pop() as string;
     const group = braceGroup(current);
     if (group === null) {
@@ -4096,6 +4132,135 @@ export function isPatternSegment(segment: string): boolean {
   return /[*?[]/u.test(segment);
 }
 
+/** Past this many glob characters one pattern segment is judged to match. */
+const GLOB_ELEMENT_LIMIT = 1024;
+
+/**
+ * One element of a glob pattern segment: a run of any characters but `/`
+ * (`*`, and an unclosed bracket expression holding a class), or exactly one
+ * character, tested by the expression source of that one character.
+ */
+type GlobElement = { star: true } | { star: false; source: string; test?: RegExp };
+
+/** The last pattern read into elements, so a disk walk reads it once. */
+let globElementsCache: { pattern: string; elements: GlobElement[] | null } | null = null;
+
+/**
+ * A glob pattern segment as elements (review of the substitution fold, M1),
+ * read exactly as the anchored expression this matcher used to build was:
+ * an escaped character is itself, `*` a run, `?` one character, a bracket
+ * expression one character (any one when it holds a POSIX class), an
+ * unclosed `[` a literal unless a class inside it left the reading uncertain
+ * (then a run, and nothing after it is read). Runs next to each other are
+ * one. `null` past {@link GLOB_ELEMENT_LIMIT} glob characters, or when a
+ * bracket expression cannot be turned into an expression: the caller judges
+ * both the strict way.
+ */
+function globElements(pattern: string): GlobElement[] | null {
+  if (globElementsCache !== null && globElementsCache.pattern === pattern) return globElementsCache.elements;
+  let globs = 0;
+  for (let at = 0; at < pattern.length; at += 1) {
+    const char = pattern[at];
+    if ((char === "*" || char === "?" || char === "[") && (globs += 1) > GLOB_ELEMENT_LIMIT) {
+      globElementsCache = { pattern, elements: null };
+      return null;
+    }
+  }
+  const elements: GlobElement[] = [];
+  const star = (): void => {
+    if (elements[elements.length - 1]?.star !== true) elements.push({ star: true });
+  };
+  const one = (source: string): void => {
+    // A surrogate pair split over two units is one character, as it was in
+    // the one expression.
+    const last = elements[elements.length - 1];
+    if (last !== undefined && !last.star && /^[\uD800-\uDBFF]$/u.test(last.source) && /^[\uDC00-\uDFFF]$/u.test(source)) {
+      last.source += source;
+      return;
+    }
+    elements.push({ star: false, source });
+  };
+  // Once a `[` is unclosed with no class inside, every later `[` is too: its
+  // scan would visit the same characters. Read once, not once per `[`.
+  let unclosedFrom = -1;
+  for (let at = 0; at < pattern.length; at += 1) {
+    const char = pattern[at] as string;
+    if (char === "\\" && at + 1 < pattern.length) {
+      at += 1;
+      one((pattern[at] as string).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"));
+    } else if (char === "*") {
+      star();
+    } else if (char === "?") {
+      one("[^/]");
+    } else if (char === "[") {
+      if (unclosedFrom !== -1 && at > unclosedFrom) {
+        one("\\[");
+        continue;
+      }
+      // A bracket expression: a leading `!` or `^` negates it and a leading
+      // `]` is a member; a POSIX class, equivalence class or collating
+      // element (`[:alpha:]`, `[=g=]`, `[.g.]`) is skipped to its own close
+      // and makes the expression match ANY one character, the strict side
+      // (review of the second fold). Unclosed, the `[` is a literal.
+      let close = at + 1;
+      if (pattern[close] === "!" || pattern[close] === "^") close += 1;
+      if (pattern[close] === "]") close += 1;
+      let posix = false;
+      while (close < pattern.length && pattern[close] !== "]") {
+        const kind = pattern[close + 1];
+        if (pattern[close] === "[" && (kind === ":" || kind === "=" || kind === ".")) {
+          const end = pattern.indexOf(`${kind}]`, close + 2);
+          if (end === -1) {
+            posix = true;
+            close = pattern.length;
+            break;
+          }
+          posix = true;
+          close = end + 2;
+          continue;
+        }
+        close += 1;
+      }
+      if (close >= pattern.length) {
+        // Unclosed: a literal `[`, unless a class inside it left the reading
+        // uncertain, which the strict side reads as any characters.
+        if (posix) {
+          star();
+          break;
+        }
+        unclosedFrom = at;
+        one("\\[");
+        continue;
+      }
+      if (posix) {
+        one("[^/]");
+        at = close;
+        continue;
+      }
+      let body = pattern.slice(at + 1, close);
+      const negated = body.startsWith("!") || body.startsWith("^");
+      if (negated) body = body.slice(1);
+      one(`[${negated ? "^" : ""}${body.replace(/[\\\]^]/gu, "\\$&")}]`);
+      at = close;
+    } else {
+      one(char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"));
+    }
+  }
+  let result: GlobElement[] | null = elements;
+  for (const element of elements) {
+    if (element.star || !element.source.startsWith("[")) continue;
+    try {
+      element.test = new RegExp(`^${element.source}$`, "iu");
+    } catch {
+      // A bracket expression this reader cannot turn into one: the strict side.
+      result = null;
+      break;
+    }
+  }
+  globElementsCache = { pattern, elements: result };
+  return result;
+}
+
 /**
  * Does the glob `pattern` (one path segment: `*`, `?`, `[...]`) match the
  * file name `name`, letter case ignored (second review, S1)? A name starting
@@ -4104,196 +4269,46 @@ export function isPatternSegment(segment: string): boolean {
  * so `*` never names `.git` while `.g*t` and `.[g]it` do. No shell and no
  * file system.
  *
- * B-HOOK-GLOB-LINEAR: the pattern used to become one anchored expression,
- * `*` as `[^/]*`, and a run of `*` made the engine backtrack (8 `*` and 12
- * `z` under `~/.hermes/` took 36.7 CPU s in the `.git` reader, past the
- * hook's 60 s timeout at a few more). Each piece the translation writes
- * stands for exactly one character or a run of them, so each is now its own
- * one-character expression (same text, same `iu` flags, so the same letter
- * case and the same refusals) and {@link matchGlobTokens} walks the name
- * once. The answers are the old expression's: tests/core-glob-segment ports
- * it as the oracle.
+ * The pattern is walked over the name as a set of positions, one element at
+ * a time, so the cost is the elements read times the name's length (review
+ * of the substitution fold, M1: the one anchored expression it used to build
+ * backtracked, and `.` and 400 `*` and `x` took 14 s). The walk stops when no
+ * position is left. Past {@link GLOB_ELEMENT_LIMIT} glob characters a
+ * pattern is judged to match, the strict side (the one expression failed to
+ * build past about ten thousand, and was then judged to match too).
  */
 export function globSegmentMatches(pattern: string, name: string): boolean {
   if (!isPatternSegment(pattern)) return pattern.toLowerCase() === name.toLowerCase();
   if (name.startsWith(".") && (pattern.startsWith("*") || pattern.startsWith("?"))) return false;
-  const compiled = compiledSegment(pattern);
-  // A bracket expression this reader cannot turn into one: the strict side.
-  if (compiled === null) return true;
-  return matchGlobTokens(compiled.tokens, compiled.single, name);
-}
-
-/** One piece of the translation: the expression text for one character, and whether it repeats. */
-interface SegmentPiece {
-  source: string;
-  run: boolean;
-  /** A character written as itself or escaped, which may be half of a surrogate pair. */
-  literal: boolean;
-}
-
-/**
- * Where the bracket scan of {@link segmentPieces} stops from each position of
- * `pattern`, read in UTF-16 units as that scan reads them (codex S1 on #682).
- *
- * The scan walks forward from a start, stops at the first `]`, and jumps a
- * POSIX element (`[:`, `[=` or `[.` to the next `:]`, `=]` or `.]`), or ends
- * the pattern when that element never closes. Where it goes next depends only
- * on where it is, so the walk from every position is filled in once, right to
- * left: `close[i]` is where the walk from `i` stops (the pattern's length
- * when no `]` ends it) and `posix[i]` whether it passed a POSIX element on the
- * way. Scanning afresh from each `[` was n(n-1)/2 steps for a run of n
- * unclosed `[`: 2,000 took 28 CPU ms and 50,000 took 14 CPU s.
- */
-function bracketScans(pattern: string): { close: Int32Array; posix: Uint8Array } {
-  const length = pattern.length;
-  const close = new Int32Array(length + 1);
-  const posix = new Uint8Array(length + 1);
-  // `next[kind][i]`: where the next `<kind>]` starts at or after i, else -1,
-  // which is what `pattern.indexOf(`${kind}]`, i)` answered.
-  const next: Record<string, Int32Array> = {};
-  for (const kind of [":", "=", "."]) {
-    const ends = new Int32Array(length + 2).fill(-1);
-    for (let index = length - 2; index >= 0; index -= 1) {
-      ends[index] = pattern[index] === kind && pattern[index + 1] === "]" ? index : (ends[index + 1] as number);
-    }
-    next[kind] = ends;
-  }
-  close[length] = length;
-  for (let index = length - 1; index >= 0; index -= 1) {
-    const char = pattern[index];
-    const kind = pattern[index + 1];
-    if (char === "]") {
-      close[index] = index;
-    } else if (char === "[" && (kind === ":" || kind === "=" || kind === ".")) {
-      const end = (next[kind] as Int32Array)[index + 2] as number;
-      close[index] = end === -1 ? length : (close[end + 2] as number);
-      posix[index] = 1;
-    } else {
-      close[index] = close[index + 1] as number;
-      posix[index] = posix[index + 1] as number;
-    }
-  }
-  return { close, posix };
-}
-
-/** The pieces the old translation wrote for `pattern`, in order. */
-function segmentPieces(pattern: string): SegmentPiece[] {
-  const pieces: SegmentPiece[] = [];
-  let scans: { close: Int32Array; posix: Uint8Array } | null = null;
-  for (let at = 0; at < pattern.length; at += 1) {
-    const char = pattern[at] as string;
-    if (char === "\\" && at + 1 < pattern.length) {
-      at += 1;
-      pieces.push({ source: (pattern[at] as string).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), run: false, literal: true });
-    } else if (char === "*") {
-      pieces.push({ source: "[^/]", run: true, literal: false });
-    } else if (char === "?") {
-      pieces.push({ source: "[^/]", run: false, literal: false });
-    } else if (char === "[") {
-      // A bracket expression: a leading `!` or `^` negates it and a leading
-      // `]` is a member; a POSIX class, equivalence class or collating
-      // element (`[:alpha:]`, `[=g=]`, `[.g.]`) is skipped to its own close
-      // and makes the expression match ANY one character, the strict side
-      // (review of the second fold). Unclosed, the `[` is a literal.
-      let start = at + 1;
-      if (pattern[start] === "!" || pattern[start] === "^") start += 1;
-      if (pattern[start] === "]") start += 1;
-      scans ??= bracketScans(pattern);
-      const close = scans.close[start] as number;
-      const posix = scans.posix[start] === 1;
-      if (close >= pattern.length) {
-        // Unclosed: a literal `[`, unless a class inside it left the reading
-        // uncertain, which the strict side reads as any characters.
-        if (posix) {
-          pieces.push({ source: "[^/]", run: true, literal: false });
-          break;
+  const elements = globElements(pattern);
+  if (elements === null) return true;
+  const chars = Array.from(name);
+  // live[p]: the first p characters of the name are matched so far.
+  let live = new Uint8Array(chars.length + 1);
+  live[0] = 1;
+  for (const element of elements) {
+    const next = new Uint8Array(chars.length + 1);
+    let any = false;
+    if (element.star) {
+      for (let p = 0; p <= chars.length; p += 1) {
+        if (live[p] === 1 || (p > 0 && next[p - 1] === 1 && chars[p - 1] !== "/")) {
+          next[p] = 1;
+          any = true;
         }
-        pieces.push({ source: "\\[", run: false, literal: true });
-        continue;
       }
-      if (posix) {
-        pieces.push({ source: "[^/]", run: false, literal: false });
-        at = close;
-        continue;
-      }
-      let body = pattern.slice(at + 1, close);
-      const negated = body.startsWith("!") || body.startsWith("^");
-      if (negated) body = body.slice(1);
-      pieces.push({ source: `[${negated ? "^" : ""}${body.replace(/[\\\]^]/gu, "\\$&")}]`, run: false, literal: false });
-      at = close;
     } else {
-      pieces.push({ source: char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), run: false, literal: true });
-    }
-  }
-  return pieces;
-}
-
-/**
- * `pattern` as tokens, or `null` when the old expression would not compile.
- * One entry is cached: the `.git` reader tests one pattern against every
- * entry of a directory (up to 100,000), and the compile is linear in the
- * pattern, which may be long.
- */
-function compiledSegment(pattern: string): { tokens: GlobToken[]; single: number } | null {
-  if (lastSegment !== null && lastSegment.pattern === pattern) return lastSegment.compiled;
-  const pieces = segmentPieces(pattern);
-  // The old loop read UTF-16 units, and the engine read the expression by
-  // code point: two literal halves of a surrogate pair were one character.
-  const merged: SegmentPiece[] = [];
-  for (const piece of pieces) {
-    const previous = merged[merged.length - 1];
-    if (
-      previous !== undefined &&
-      previous.literal &&
-      piece.literal &&
-      /^[\uD800-\uDBFF]$/u.test(previous.source) &&
-      /^[\uDC00-\uDFFF]$/u.test(piece.source)
-    ) {
-      merged[merged.length - 1] = { source: previous.source + piece.source, run: false, literal: true };
-    } else {
-      merged.push(piece);
-    }
-  }
-  // One token per distinct piece, shared by every place it is written.
-  const shared = new Map<string, GlobToken>();
-  const tokens: GlobToken[] = [];
-  let compiled: { tokens: GlobToken[]; single: number } | null;
-  try {
-    for (const piece of merged) {
-      const previous = tokens[tokens.length - 1];
-      if (piece.run && previous?.run === true) continue; // `[^/]*[^/]*` is `[^/]*`
-      const key = `${piece.run ? "*" : "1"}${piece.source}`;
-      let token = shared.get(key);
-      if (token === undefined) {
-        token = segmentToken(new RegExp(`^(?:${piece.source})$`, "iu"), piece.run);
-        shared.set(key, token);
+      element.test ??= new RegExp(`^${element.source}$`, "iu");
+      for (let p = 0; p < chars.length; p += 1) {
+        if (live[p] === 1 && element.test.test(chars[p] as string)) {
+          next[p + 1] = 1;
+          any = true;
+        }
       }
-      tokens.push(token);
     }
-    compiled = { tokens, single: singleCharacterTokens(tokens) };
-  } catch {
-    compiled = null;
+    if (!any) return false;
+    live = next;
   }
-  lastSegment = { pattern, compiled };
-  return compiled;
-}
-
-let lastSegment: { pattern: string; compiled: { tokens: GlobToken[]; single: number } | null } | null = null;
-
-/** A one-character expression as a token, its answers kept per character. */
-function segmentToken(expression: RegExp, run: boolean): GlobToken {
-  const seen = new Map<number, boolean>();
-  return {
-    run,
-    matches: (code) => {
-      let answer = seen.get(code);
-      if (answer === undefined) {
-        answer = expression.test(String.fromCodePoint(code));
-        seen.set(code, answer);
-      }
-      return answer;
-    },
-  };
+  return live[chars.length] === 1;
 }
 
 /**
@@ -4304,6 +4319,18 @@ function segmentToken(expression: RegExp, run: boolean): GlobToken {
  */
 export function mayNameGitDirectory(word: string): boolean {
   const words = word.includes("{") ? expandBraces(word) : [word];
+  if (words === null) return true;
+  return words.some((each) => pathSegments(each).some((segment) => globSegmentMatches(segment, ".git")));
+}
+
+/**
+ * {@link mayNameGitDirectory} for the words the substitution fold reads (a
+ * parameter's word, an ANSI-C string): past {@link JOIN_BRACE_LIMIT} brace
+ * alternatives the strict answer, since each one re-reads and copies the
+ * word (review-b's M2 on 2f4100fc).
+ */
+function mayNameGitDirectoryBounded(word: string): boolean {
+  const words = word.split(SUBSTITUTION_SENTINEL).join("").includes("{") ? expandBraces(word, JOIN_BRACE_LIMIT, JOIN_BRACE_STEPS) : [word];
   if (words === null) return true;
   return words.some((each) => pathSegments(each).some((segment) => globSegmentMatches(segment, ".git")));
 }
@@ -4694,23 +4721,743 @@ function gitWriteRefinement(
 const GIT_SEGMENT_IN_TEXT = /(?:^|[^A-Za-z0-9_.-])\.git(?:$|[^A-Za-z0-9_.-])/iu;
 
 /**
+ * The `git rev-parse` options that print a path to, or inside, the git
+ * directory (APRV-518, substitution fold), read from git 2.50.1's manual:
+ * `--git-dir`, `--absolute-git-dir`, `--git-common-dir`, `--git-path
+ * <path>`, `--resolve-git-dir <path>` (a gitfile's repository) and
+ * `--shared-index-path` (a file in it). The options that print the working
+ * tree (`--show-toplevel`, `--show-cdup`, `--show-prefix`,
+ * `--show-superproject-working-tree`), a word (`--is-*`, `--show-*-format`,
+ * `--local-env-vars`) or an object name are not here.
+ */
+const GIT_DIR_QUERY_OPTIONS: readonly string[] = [
+  "--git-dir",
+  "--absolute-git-dir",
+  "--git-common-dir",
+  "--git-path",
+  "--resolve-git-dir",
+  "--shared-index-path",
+];
+
+/**
+ * Does one segment of a substitution body ask git for its own directory
+ * (APRV-518, substitution fold): a `rev-parse` (any case, also as
+ * `git-rev-parse` or inside an alias value such as `alias.d=rev-parse
+ * --git-dir`) followed by one of {@link GIT_DIR_QUERY_OPTIONS}? An option is
+ * read by any prefix of three characters or more (`--git-d`), and an option
+ * name the text cannot read (`--git-$(echo dir)`, `-$X`) counts, as does a
+ * verb it cannot read (`git $(echo rev-parse) --git-dir`). A bare `$X`
+ * operand is a revision, as it almost always is, and does not count; nor
+ * does a value the text cannot read after a readable name (`--short=$N`).
+ */
+function asksGitForItsDirectory(segment: LexSegment): boolean {
+  const tokens = segment.words.flatMap((word) => word.text.split(/\s+/u)).filter((token) => token.length > 0);
+  const unreadable = (token: string): boolean => /[$`*?[]/u.test(token);
+  let verb = false;
+  for (const token of tokens) {
+    const name = (token.startsWith("-") ? token.split("=")[0] : token) as string;
+    const option =
+      name.startsWith("--") &&
+      name.length >= 3 &&
+      GIT_DIR_QUERY_OPTIONS.some((each) => each.startsWith(name.toLowerCase()));
+    if (verb && (option || (name.startsWith("-") && unreadable(name)))) return true;
+    if (/(?:^|[=!/-])rev-parse$/iu.test(token) || unreadable(token)) verb = true;
+  }
+  return false;
+}
+
+/**
+ * The positions of `.git` a literal character may stand at, any letter case,
+ * as a set of bits (bit `p` for the character at index `p`).
+ */
+function gitLetterPositions(char: string): number {
+  switch (char) {
+    case ".":
+      return 0b0001;
+    case "g":
+    case "G":
+      return 0b0010;
+    case "i":
+    case "I":
+      return 0b0100;
+    case "t":
+    case "T":
+      return 0b1000;
+    default:
+      return 0;
+  }
+}
+
+/** Every position of `.git`, start to end, as a set of bits. */
+const GIT_POSITIONS_ALL = 0b11111;
+
+/** A run of any text from the lowest position in `positions` on. */
+function anyRunFrom(positions: number): number {
+  return positions === 0 ? 0 : GIT_POSITIONS_ALL & ~((positions & -positions) - 1);
+}
+
+/**
+ * The positions of `.git` reachable after one literal run of a word, from
+ * `positions` (bit `p` set: the first `p` characters of `.git` are matched),
+ * its glob characters read the broad way (APRV-518, substitution fold): `*`
+ * any run, `?` and a closed bracket expression any one character, anything
+ * else itself in any letter case. A hand-written set walk over the four
+ * characters of `.git`, so its cost is the run's length times a constant:
+ * no expression is built from the line's text, and nothing backtracks
+ * (review of the substitution fold, M1).
+ */
+function stepGitThroughRun(positions: number, run: string): number {
+  // The walk stops when no position is left, so an unclosed `[` (a literal,
+  // which `.git` does not hold) ends it: its scan for a `]` runs once.
+  for (let at = 0; at < run.length && positions !== 0; at += 1) {
+    const char = run[at] as string;
+    if (char === "*") {
+      positions = anyRunFrom(positions);
+      continue;
+    }
+    if (char === "?") {
+      positions = (positions << 1) & GIT_POSITIONS_ALL;
+      continue;
+    }
+    if (char === "[") {
+      let close = at + 1;
+      if (run[close] === "!" || run[close] === "^") close += 1;
+      if (run[close] === "]") close += 1;
+      const closeAt = run.indexOf("]", close);
+      if (closeAt !== -1) {
+        positions = (positions << 1) & GIT_POSITIONS_ALL;
+        at = closeAt;
+        continue;
+      }
+    }
+    positions = ((positions & gitLetterPositions(char)) << 1) & GIT_POSITIONS_ALL;
+  }
+  return positions;
+}
+
+/**
+ * Can literal text and a substitution's output JOIN into a `.git` segment
+ * of this word (APRV-518, substitution fold)? `$(printf .gi)t`,
+ * `.g$(printf it)`, `$(printf .)git`, `.$(echo g)it`. The output is unknown
+ * and may hold a `/`, so a `.git` segment may begin inside one output and
+ * end inside another; what the text fixes is the literal run between them.
+ * So, for each piece of the word between `/`, `=`, `:` and blanks that holds
+ * both a substitution and a literal character: does `.git` match a window of
+ * it that starts at the piece's start or inside an output, ends at its end
+ * or inside an output, and holds at least one literal character, each output
+ * read as any text and each glob character the broad way? A piece made only
+ * of outputs (`$(pwd)/build`) does not count: the output alone would spell
+ * `.git`, and its body is judged for that. Neither do pieces whose literal
+ * text cannot be part of `.git` (`out/$(date +%F).txt`, `v$(cat V).tgz`).
+ *
+ * Every window is tried in ONE walk of the piece (review of the substitution
+ * fold, M1: a window at a time, each an expression of `.*` runs, grew as
+ * about the fifth power of the outputs). Two sets of `.git` positions are
+ * carried: windows with no literal character yet, and windows with one. A
+ * window starts at the piece's start or inside any output (any position,
+ * since the output's own text comes first); an output carries every window
+ * on through any text; a window holding a literal character that reaches an
+ * output may end inside it; one that reaches the piece's end must stand at
+ * the end of `.git`. The cost is the word's length times a constant.
+ */
+function wordJoinsGitAcrossSubstitution(text: string): boolean {
+  if (!text.includes(SUBSTITUTION_SENTINEL)) return false;
+  // Each expansion re-reads and copies the whole word, so this reading takes
+  // at most JOIN_BRACE_LIMIT of them, and past that counts as naming `.git`;
+  // a word whose only braces are the outputs' own is not expanded at all
+  // (review-b's M2 on 2f4100fc: `{a,b}$(pwd)` to 1 MB took 39 s at 1,024).
+  const words = text.split(SUBSTITUTION_SENTINEL).join("").includes("{") ? expandBraces(text, JOIN_BRACE_LIMIT, JOIN_BRACE_STEPS) : [text];
+  if (words === null) return true;
+  for (const word of words) {
+    for (const piece of word.split(/[/=:\s]/u)) {
+      const runs = piece.split(SUBSTITUTION_SENTINEL);
+      if (runs.length === 1 || runs.join("").length === 0) continue;
+      // Bit p: the first p characters of `.git` are matched.
+      let bare = 0b1;
+      let holding = 0;
+      for (let at = 0; at < runs.length; at += 1) {
+        if (at > 0) {
+          // An output: a window holding a literal character ends inside it.
+          if (holding !== 0) return true;
+          // Every window goes on through it, and a new one starts in it.
+          bare = GIT_POSITIONS_ALL;
+        }
+        const run = runs[at] as string;
+        if (run.length === 0) continue;
+        holding = stepGitThroughRun(bare | holding, run);
+        bare = 0;
+      }
+      if ((holding & 0b10000) !== 0) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * How deep command substitutions may nest before a line is refused (review
+ * of the substitution fold): far past any command an agent writes, and far
+ * short of the call stack's own limit.
+ */
+const SUBSTITUTION_NESTING_LIMIT = 128;
+
+/** How many levels of nested substitution bodies the line's `.git` reading reads. */
+const SUBSTITUTION_READ_DEPTH = 64;
+
+/**
+ * `text` with its backslash escapes decoded (review of the substitution
+ * fold, S1), as bash's `$'…'` and `printf` read them: `\xHH`, `\uHHHH`,
+ * `\UHHHHHHHH`, `\cX`, the letter escapes, and octal, read as `\NNN` (bash,
+ * a `printf` format) or, with `zeroOctal`, as `\0NNN` (`echo -e`, `printf
+ * %b`). An escape it does not know is kept as written.
+ */
+function decodeBackslashEscapes(text: string, zeroOctal: boolean): string {
+  const letters: Readonly<Record<string, string>> = {
+    a: "\u0007",
+    b: "\b",
+    e: "\u001B",
+    E: "\u001B",
+    f: "\f",
+    n: "\n",
+    r: "\r",
+    t: "\t",
+    v: "\v",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "?": "?",
+  };
+  let out = "";
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at] as string;
+    const next = text[at + 1];
+    if (char !== "\\" || next === undefined) {
+      out += char;
+      continue;
+    }
+    const digits = (from: number, pattern: RegExp, most: number): string => {
+      let end = from;
+      while (end < text.length && end - from < most && pattern.test(text[end] as string)) end += 1;
+      return text.slice(from, end);
+    };
+    let code: number | null = null;
+    let used = 0;
+    if (next === "x" || next === "u" || next === "U") {
+      const hex = digits(at + 2, /[0-9A-Fa-f]/u, next === "x" ? 2 : next === "u" ? 4 : 8);
+      if (hex.length > 0) [code, used] = [Number.parseInt(hex, 16), 1 + hex.length];
+    } else if (zeroOctal ? next === "0" : /[0-7]/u.test(next)) {
+      const octal = zeroOctal ? digits(at + 2, /[0-7]/u, 3) : digits(at + 1, /[0-7]/u, 3);
+      [code, used] = [Number.parseInt(octal === "" ? "0" : octal, 8), zeroOctal ? 1 + octal.length : octal.length];
+    } else if (next === "c" && text[at + 2] !== undefined) {
+      [code, used] = [(text.charCodeAt(at + 2) & 0x1f), 2];
+    } else if (letters[next] !== undefined) {
+      out += letters[next];
+      at += 1;
+      continue;
+    }
+    if (code === null || code > 0x10ffff) {
+      out += char;
+      continue;
+    }
+    out += String.fromCodePoint(code);
+    at += used;
+  }
+  return out;
+}
+
+/**
+ * An ANSI-C string ends at a decoded NUL (bash keeps nothing after it in that
+ * quote; the word goes on after the closing quote): `$'.g\0junk'it` is `.git`
+ * (#680's source review, S2).
+ */
+function cutAtNul(decoded: string): string {
+  const at = decoded.indexOf("\0");
+  return at === -1 ? decoded : decoded.slice(0, at);
+}
+
+/** A command substitution drops the NUL bytes of its output: `$(printf '.g\0it')` is `.git`. */
+function dropNuls(decoded: string): string {
+  return decoded.replace(/\0/gu, "");
+}
+
+/**
+ * The first, broader reading of an ANSI-C quoted string, kept beside
+ * {@link ansiCQuotingSpellsGit} so the fold only adds: every `$'` of the raw
+ * text, quotes around it or not, decoded with up to five characters on
+ * either side. It also reads a `$'` the shell leaves as written (inside
+ * single or double quotes), the strict side.
+ */
+function ansiCQuotingNearSpellsGit(raw: string): boolean {
+  const delimiter = /[\s;&|()<>]/u;
+  let close = -1;
+  for (let open = raw.indexOf("$'"); open !== -1; open = raw.indexOf("$'", close + 1)) {
+    close = open + 2;
+    while (close < raw.length && raw[close] !== "'") close += raw[close] === "\\" ? 2 : 1;
+    if (close >= raw.length) return true;
+    let from = open;
+    while (from > 0 && open - from < 5 && !delimiter.test(raw[from - 1] as string)) from -= 1;
+    let to = close + 1;
+    while (to < raw.length && to - close <= 5 && !delimiter.test(raw[to] as string)) to += 1;
+    const before = raw.slice(from, open).replace(/["']/gu, "");
+    const after = raw.slice(close + 1, to).replace(/["']/gu, "");
+    const body = raw.slice(open + 2, close);
+    for (const zeroOctal of [false, true]) {
+      const decoded = decodeBackslashEscapes(body, zeroOctal);
+      if (GIT_SEGMENT_IN_TEXT.test(`${before}${cutAtNul(decoded)}${after}`)) return true;
+      if (GIT_SEGMENT_IN_TEXT.test(`${before}${dropNuls(decoded)}${after}`)) return true;
+    }
+  }
+  return false;
+}
+
+/** Glob and brace characters escaped, so quoted text is read as itself. */
+function quotedForGlob(text: string): string {
+  return text.replace(/[*?[\]{}\\]/gu, "\\$&");
+}
+
+/**
+ * Does a word of this raw segment text that holds an ANSI-C quoted string
+ * spell `.git` once the shell has read it (review of the substitution fold,
+ * S1, and its security review, points a and b)? The lexer keeps a `$'…'`
+ * undecoded, so no other reading sees the `.git` it spells. The raw text is
+ * read as the shell reads it, quote by quote: each `$'…'` is decoded (both
+ * ways octal is written), quotes are removed, and the pieces of a word are
+ * joined; a substitution stands as an unknown output. A word that holds a
+ * `$'…'` then names `.git` when its text has a `.git` segment, when it is a
+ * pattern `.git` matches (globs only where unquoted), or when its literal
+ * text and an output join into `.git`. A quote or substitution that does not
+ * close is unreadable, and the strict side.
+ */
+function ansiCQuotingSpellsGit(raw: string): boolean {
+  if (!raw.includes("$'")) return false;
+  // Two readings, octal as `\NNN` and as `\0NNN`; each as text and as a
+  // pattern (quoted characters escaped).
+  const text = ["", ""];
+  const glob = ["", ""];
+  let ansi = false;
+  const add = (literal: string, quoted: boolean): void => {
+    for (const r of [0, 1]) {
+      text[r] += literal;
+      glob[r] += quoted ? quotedForGlob(literal) : literal;
+    }
+  };
+  const flush = (): boolean => {
+    const names =
+      ansi &&
+      [0, 1].some(
+        (r) =>
+          GIT_SEGMENT_IN_TEXT.test((text[r] as string).split(SUBSTITUTION_SENTINEL).join("/")) ||
+          (glob[r] as string).split(":").some(mayNameGitDirectoryBounded) ||
+          wordJoinsGitAcrossSubstitution(text[r] as string),
+      );
+    text[0] = text[1] = glob[0] = glob[1] = "";
+    ansi = false;
+    return names;
+  };
+  for (let at = 0; at < raw.length; at += 1) {
+    const char = raw[at] as string;
+    if (/[\s;&|()<>]/u.test(char)) {
+      if (flush()) return true;
+      continue;
+    }
+    if (char === "\\") {
+      if (at + 1 < raw.length) add(raw[at + 1] as string, true);
+      at += 1;
+      continue;
+    }
+    if (char === "'") {
+      const close = raw.indexOf("'", at + 1);
+      if (close === -1) return true;
+      add(raw.slice(at + 1, close), true);
+      at = close;
+      continue;
+    }
+    if (char === "$" && raw[at + 1] === "'") {
+      let close = at + 2;
+      while (close < raw.length && raw[close] !== "'") close += raw[close] === "\\" ? 2 : 1;
+      if (close >= raw.length) return true;
+      const body = raw.slice(at + 2, close);
+      for (const r of [0, 1]) {
+        const decoded = cutAtNul(decodeBackslashEscapes(body, r === 1));
+        text[r] += decoded;
+        glob[r] += quotedForGlob(decoded);
+      }
+      ansi = true;
+      at = close;
+      continue;
+    }
+    if (char === '"' || (char === "$" && raw[at + 1] === '"')) {
+      let close = char === "$" ? at + 2 : at + 1;
+      let inner = "";
+      for (; close < raw.length && raw[close] !== '"'; close += 1) {
+        const ch = raw[close] as string;
+        if (ch === "\\" && close + 1 < raw.length) {
+          inner += DOUBLE_QUOTE_ESCAPES.has(raw[close + 1] as string) ? (raw[close + 1] as string) : `\\${raw[close + 1] as string}`;
+          close += 1;
+          continue;
+        }
+        if (ch === "$" && raw[close + 1] === "(") {
+          const scan = readSubstitution(raw, close + 1);
+          if (scan === null) return true;
+          inner += SUBSTITUTION_SENTINEL;
+          close = scan.end;
+          continue;
+        }
+        if (ch === "`") {
+          const end = raw.indexOf("`", close + 1);
+          if (end === -1) return true;
+          inner += SUBSTITUTION_SENTINEL;
+          close = end;
+          continue;
+        }
+        inner += ch;
+      }
+      if (close >= raw.length) return true;
+      add(inner, true);
+      at = close;
+      continue;
+    }
+    if (char === "$" && raw[at + 1] === "(") {
+      const scan = readSubstitution(raw, at + 1);
+      if (scan === null) return true;
+      add(SUBSTITUTION_SENTINEL, false);
+      at = scan.end;
+      continue;
+    }
+    if (char === "`") {
+      const end = raw.indexOf("`", at + 1);
+      if (end === -1) return true;
+      add(SUBSTITUTION_SENTINEL, false);
+      at = end;
+      continue;
+    }
+    add(char, false);
+  }
+  return flush();
+}
+
+/** The most characters of a `printf` body's output that are rendered. */
+const PRINTED_OUTPUT_LIMIT = 65_536;
+
+/** A private-use mark {@link printedOutputs} sets an unclosed `${` aside with. */
+const SET_ASIDE = String.fromCharCode(0xe000);
+
+/**
+ * What `printf` or `echo` in a substitution body may print (review of the
+ * substitution fold, S1, and its security review, point c), read from the
+ * body's lexed words, quotes already removed: `echo` joins its words,
+ * `printf` fills its format from its words (`%s`, `%q` and `%c` take a word as
+ * it is, `%b` decodes it, `%%` is a `%`, any other conversion is an unknown
+ * output), and every escape is decoded, both ways octal is written. A word
+ * the text cannot read (`$X`) stands as an unknown output. Past
+ * {@link PRINTED_OUTPUT_LIMIT} characters the output counts as naming
+ * `.git`. `null` when the segment runs neither.
+ */
+function printedOutputs(segment: LexSegment): string[] | null {
+  const all = segment.words.slice(bashAssignmentCount(segment.words)).map((word) => word.text);
+  // Read by index, not by shifts: a run of thousands of `command` or `-n`
+  // words then costs its length, not its square (review-b's M1 on b085cd91).
+  let start = 0;
+  while (all[start] === "command" || all[start] === "builtin") start += 1;
+  const name = (all[start] ?? "").toLowerCase();
+  const words = all.slice(start + 1);
+  if (name !== "echo" && name !== "printf") return null;
+  const unknown = (word: string): string => {
+    // A `${` with no `}` after it cannot close, and the scan for its close
+    // would run to the end from each one (review-b's M1 on b085cd91: 500 KB
+    // of `${` took 114 s). Each is set aside first, then put back as text.
+    const close = word.lastIndexOf("}");
+    const tail = word.slice(close + 1);
+    const setAside = tail.includes("${");
+    // The mark itself in such a word: not read, and counts (the strict side).
+    if (setAside && word.includes(SET_ASIDE)) return "/.git/";
+    const text = setAside ? `${word.slice(0, close + 1)}${tail.replaceAll("${", `$${SET_ASIDE}`)}` : word;
+    const read = text.replace(/\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@*#?$!-]|`[^`]*`/gu, SUBSTITUTION_SENTINEL);
+    return setAside ? read.replaceAll(`$${SET_ASIDE}`, "${") : read;
+  };
+  const outputs: string[] = [];
+  for (const zeroOctal of [false, true]) {
+    const decode = (word: string): string => dropNuls(decodeBackslashEscapes(unknown(word), zeroOctal));
+    if (name === "echo") {
+      let newline = "\n";
+      let first = 0;
+      while (first < words.length && /^-[neE]+$/u.test(words[first] as string)) {
+        if ((words[first] as string).includes("n")) newline = "";
+        first += 1;
+      }
+      outputs.push(`${words.slice(first).map(decode).join(" ")}${newline}`);
+      continue;
+    }
+    const args = [...words];
+    if (args[0] === "--") args.shift();
+    if (args[0] === "-v") args.splice(0, 2);
+    const format = decode(args.shift() ?? "");
+    // The words are read by index: a shift per conversion made a line of
+    // many words cost the square of its length (review-b's M1 on b085cd91).
+    let next = 0;
+    const take = (): string | undefined => (next < args.length ? args[next++] : undefined);
+    // The format is parsed once, into its text and its conversions; each
+    // pass then walks the pieces, not the format, so a long spec with many
+    // words costs their sum, not their product (codex's SOURCE HOLD on
+    // ef0531c0: `%` with many 0 flags, `.0s`, and many words).
+    type Conversion = { conversion: string; stars: number; precision: number | null };
+    const pieces: (string | Conversion)[] = [];
+    let last = 0;
+    // A width starts with 1 to 9 or `*` (a 0 is a flag), so the flag and
+    // width runs cannot both take a 0 and a `%` then zeros is read once
+    // (review-b's M1 on b085cd91: 250 KB of them took 64 s).
+    for (const match of format.matchAll(/%(%|[-+ #0]*(?:[1-9*][0-9*]*)?(?:\.([0-9*]*))?([a-zA-Z]))/gu)) {
+      const [whole, spec, precision, conversion] = match as unknown as [string, string, string | undefined, string | undefined];
+      pieces.push(format.slice(last, match.index));
+      last = match.index + whole.length;
+      if (spec === "%") {
+        pieces.push("%");
+        continue;
+      }
+      pieces.push({
+        conversion: conversion as string,
+        stars: spec.split("*").length - 1,
+        precision: precision === undefined ? null : Number(precision || "0"),
+      });
+    }
+    pieces.push(format.slice(last));
+    const render = (piece: Conversion, took: () => void): string => {
+      // A `*` width or precision takes its value from an argument: the
+      // output is not modelled, and counts as naming `.git` (#680's source
+      // review, S1). A literal precision cuts a string, as printf does:
+      // `%.4s` of `.gitfoo` is `.git`. A width only pads with blanks.
+      if (piece.stars > 0) {
+        // Each `*` takes an argument, as the conversion does, so the passes
+        // end once the words run out (codex's cost note on 09a3acd7).
+        for (let star = piece.stars; star >= 0; star -= 1) {
+          if (take() !== undefined) took();
+        }
+        return "/.git/";
+      }
+      // A precision cuts only text whose characters are known: cutting an
+      // unknown value (a variable, a substitution) could leave any prefix of
+      // it, so that counts as naming `.git` (the security review of this fold).
+      // printf counts bytes, not characters, so a cut of non-ASCII text
+      // counts too (codex's SOURCE HOLD on fc846a73: `%.7s` of `é/.gitfoo`
+      // is `é/.git`).
+      const cut = (text: string): string =>
+        piece.precision === null
+          ? text
+          : text.includes(SUBSTITUTION_SENTINEL) || /[\u0080-\u{10FFFF}]/u.test(text)
+            ? "/.git/"
+            : text.slice(0, piece.precision);
+      const arg = take();
+      if (arg !== undefined) took();
+      if (piece.conversion === "s" || piece.conversion === "q") return cut(unknown(arg ?? ""));
+      // `%b` cuts the decoded bytes, NULs still in them, and the
+      // substitution drops the NULs after: `%.5b` of `.g\0itX` is
+      // `.g<NUL>it`, so `.git` (codex's SOURCE HOLD on 09a3acd7).
+      if (piece.conversion === "b") return dropNuls(cut(decodeBackslashEscapes(unknown(arg ?? ""), zeroOctal)));
+      if (piece.conversion === "c") return unknown(arg ?? "").slice(0, 1);
+      return SUBSTITUTION_SENTINEL;
+    };
+    let out = "";
+    // Each pass of the format takes words; it repeats while words are left,
+    // as printf does, and stops once a pass takes none.
+    for (let pass = 0; pass === 0 || next < args.length; pass += 1) {
+      let took = false;
+      const mark = (): void => {
+        took = true;
+      };
+      for (const piece of pieces) out += typeof piece === "string" ? piece : render(piece, mark);
+      if (!took) break;
+      // Past this many characters the rest is not rendered: it counts as
+      // naming `.git`, the strict side, so the cost stays the line's own.
+      if (out.length > PRINTED_OUTPUT_LIMIT) {
+        out += "/.git/";
+        break;
+      }
+    }
+    outputs.push(out);
+  }
+  return outputs;
+}
+
+/**
+ * Does what a substitution body prints spell `.git` (review of the
+ * substitution fold, security review point c)? The body's output is the
+ * output of its segments in turn: what `printf` and `echo` print
+ * ({@link printedOutputs}), and any other segment's an unknown output, as is
+ * a segment whose output is piped on (the next one prints instead). So
+ * `$(printf .g; printf it)` is `.git`. Both readings of octal are tried.
+ */
+function bodyPrintsGit(segments: readonly LexSegment[]): boolean {
+  const readings = ["", ""];
+  let printed = false;
+  segments.forEach((segment, index) => {
+    const outputs = printedOutputs(segment);
+    const piped = segments[index + 1]?.stdinFed === true;
+    for (const r of [0, 1]) {
+      readings[r] += outputs === null || piped ? SUBSTITUTION_SENTINEL : (outputs[r] as string);
+    }
+    if (outputs !== null && !piped) printed = true;
+  });
+  return (
+    printed &&
+    readings.some(
+      (output) =>
+        GIT_SEGMENT_IN_TEXT.test(output.split(SUBSTITUTION_SENTINEL).join("/")) ||
+        wordJoinsGitAcrossSubstitution(output) ||
+        // An unquoted substitution's output is still globbed: `.gi*`, `.g?t`
+        // or `.gi[t]` printed (a precision may cut a longer word to it)
+        // may name `.git` (the security review of the precision fold).
+        output
+          .split(SUBSTITUTION_SENTINEL)
+          .join(" ")
+          .split(/\s+/u)
+          // Bounded, as the fold's other readers are (review-b's M3 on 689d4f88).
+          .some((word) => /[*?[]/u.test(word) && mayNameGitDirectoryBounded(word)),
+    )
+  );
+}
+
+/** How many `${` levels {@link expansionWordNamesGit} reads; a deeper word counts as naming `.git`. */
+const EXPANSION_READ_DEPTH = 32;
+
+/**
+ * Does a parameter expansion in this word carry `.git` (review of the
+ * substitution fold, S2, and its security review, points d and e)? Each
+ * `${…}` is read by its operator:
+ * - a word it may expand to (`:-`, `-`, `:=`, `=`, `:+`, `+`) is judged as an
+ *   assignment's value is, and stands for the expansion in the word around
+ *   it, so `.g${V:-i}t` is `.git`;
+ * - `:?`, `?`, a length (`${#X}`) and an indirection (`${!X}`) carry no
+ *   new text, and stand as an unknown value as `$V` does;
+ * - every other operator transforms the value (removal, substring,
+ *   replacement, case, `@`; points d and f to q), and counts;
+ * - a `${` that does not close counts.
+ * A nested expansion stands, inside another's word, as the text it may
+ * carry or as an unknown output.
+ */
+function expansionWordNamesGit(text: string): boolean {
+  if (!text.includes("${")) return false;
+  const valueNamesGit = (value: string): boolean =>
+    GIT_SEGMENT_IN_TEXT.test(value.split(SUBSTITUTION_SENTINEL).join("/")) ||
+    value.split(":").some(mayNameGitDirectoryBounded) ||
+    wordJoinsGitAcrossSubstitution(value);
+  const open: string[] = [""];
+  let rewritten = false;
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at] as string;
+    if (char === "$" && text[at + 1] === "{") {
+      // Each closing `}` reads its whole word again, so past
+      // EXPANSION_READ_DEPTH levels the word counts as naming `.git`, the
+      // strict side, and the cost stays the line's length times the depth
+      // (review-b's M1 on b085cd91: 20,000 levels took 90 s).
+      if (open.length > EXPANSION_READ_DEPTH) return true;
+      open.push("");
+      at += 1;
+      continue;
+    }
+    if (char !== "}" || open.length === 1) {
+      open[open.length - 1] += char;
+      continue;
+    }
+    const inner = open.pop() as string;
+    // Inside another expansion's word a value is an unknown output that may
+    // join the text around it; in the word itself it stays a variable, as
+    // `.g$X` does (a known limit).
+    const unknownValue = open.length > 1 ? SUBSTITUTION_SENTINEL : "$V";
+    let standIn: string;
+    const name = /^(?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?|[0-9]+|[@*#?$!-])/u.exec(inner);
+    const rest = name === null ? null : inner.slice(name[0].length);
+    if (`\${${inner}}` === SUBSTITUTION_SENTINEL) {
+      standIn = SUBSTITUTION_SENTINEL;
+    } else if (rest === null) {
+      return true;
+    } else if (rest === "" || /^[!#](?:[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?|[0-9]+|[@*#?$!-])$/u.test(inner)) {
+      // A plain expansion, a length, an indirection (`${#X}`, `${!X}`, read
+      // only when that is ALL it is, so `${!-.git}`, the default of `$!`,
+      // is the operator it is): an unknown value.
+      standIn = unknownValue;
+    } else if (/^:?[-=+]/u.test(rest)) {
+      const value = rest.replace(/^:?[-=+]/u, "");
+      if (valueNamesGit(value)) return true;
+      standIn = value;
+      rewritten = true;
+    } else if (/^:?\?/u.test(rest)) {
+      // `:?` and `?` give the value itself or stop the shell: as `$V`.
+      standIn = unknownValue;
+    } else {
+      // Every other operator transforms the value (removal, substring,
+      // replacement, case, `@`), on any parameter (a name, a positional, a
+      // special parameter, an array element): it counts as naming `.git`
+      // (security review, points d and f to q). Working the result out
+      // exactly was tried and left as a carry: each review round found
+      // another shell corner.
+      return true;
+    }
+    open[open.length - 1] += standIn;
+  }
+  if (open.length > 1) return true;
+  return rewritten && valueNamesGit(open[0] as string);
+}
+
+/**
  * Does the line spell a `.git` segment where the shell may carry it to a
  * later word (second review, S3): an assignment's value, the body of a
  * command substitution, or a quoted string? A literal unquoted `.git` word
- * is judged where it stands and does not count.
+ * is judged where it stands and does not count. The substitution fold adds
+ * two spellings: a body that asks git for its directory
+ * ({@link asksGitForItsDirectory}), and a word whose literal text and
+ * substitution output join into `.git` ({@link wordJoinsGitAcrossSubstitution}).
+ * The review of that fold adds two more: an ANSI-C quoted string or what
+ * `printf` or `echo` in a substitution body prints, escapes decoded
+ * ({@link ansiCQuotingSpellsGit}, {@link printedOutputs}), and what a
+ * parameter expansion may carry (`${VAR:-.git}`, `${G/x/.}`,
+ * {@link expansionWordNamesGit}).
+ *
+ * Substitution bodies are read this way to {@link SUBSTITUTION_READ_DEPTH}
+ * levels; a deeper one counts as naming `.git`, the strict side, so the
+ * reading's cost and its depth on the call stack stay bounded.
  */
-function lineSpellsGitIndirectly(segments: readonly LexSegment[]): boolean {
+function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): boolean {
   // A substitution body's words, each read as a path the shell may still
-  // expand (`$(echo .gi?)`).
-  const bodyNamesGit = (body: string): boolean =>
-    GIT_SEGMENT_IN_TEXT.test(body) || body.split(/[\s;&|()]+/u).some((token) => mayNameGitDirectory(token.replace(/["']/gu, "")));
+  // expand (`$(echo .gi?)`); its own segments read as a line of their own
+  // (a nested substitution, an assignment in it, a split spelling); and a
+  // `git rev-parse --git-dir` in it. A body that does not lex is unreadable,
+  // and the strict side.
+  const bodyNamesGit = (body: string): boolean => {
+    if (depth >= SUBSTITUTION_READ_DEPTH) return true;
+    if (GIT_SEGMENT_IN_TEXT.test(body) || body.split(/[\s;&|()]+/u).some((token) => mayNameGitDirectory(token.replace(/["']/gu, "")))) {
+      return true;
+    }
+    // `printf '\x2egit'`, `echo -e '\0056git'`: escapes a command in the body
+    // may decode, read both ways octal is written.
+    // A NUL is read three ways, the strict side of each: kept, dropped (a
+    // substitution drops it) and as an end (an ANSI-C string ends there).
+    if (
+      body.includes("\\") &&
+      [false, true].some((zeroOctal) => {
+        const decoded = decodeBackslashEscapes(body, zeroOctal);
+        return [decoded, dropNuls(decoded), cutAtNul(decoded)].some((text) => GIT_SEGMENT_IN_TEXT.test(text));
+      })
+    ) {
+      return true;
+    }
+    const lexed = lex(body);
+    if (!lexed.ok) return true;
+    return (
+      lexed.segments.some(asksGitForItsDirectory) ||
+      bodyPrintsGit(lexed.segments) ||
+      lineSpellsGitIndirectly(lexed.segments, depth + 1)
+    );
+  };
   return segments.some((segment) => {
     const assignments = bashAssignmentCount(segment.words);
     const words = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
     return (
+      ansiCQuotingSpellsGit(segment.text) ||
+      ansiCQuotingNearSpellsGit(segment.text) ||
       segment.bodySubstitutions.some(bodyNamesGit) ||
       words.some((word, index) => {
         if (word.substitutions.some(bodyNamesGit)) return true;
+        if (wordJoinsGitAcrossSubstitution(word.text)) return true;
+        if (expansionWordNamesGit(word.text)) return true;
         // An assignment's VALUE is judged as a target is, patterns and braces
         // included (`D=.gi?`, `D=.g{i,}t`, `D='.[g]it'`): an unquoted `$D`
         // later expands it. Its words after `:` (a PATH-like list) too.
@@ -7919,15 +8666,30 @@ function classifySegment(
   // `read.shell`. It tightens a `read.shell` answer below, as a named target
   // would.
   let substitutedEscape: { path: string; rule: string } | null = null;
+  // Review of the substitution fold, M1: a body the line's reading already
+  // went through, on a line that spells no `.git`, is not read again.
+  const bodyAlreadyRead = context.lineNamesGit === false && context.spelledSegments?.has(segment) === true;
+  const substitutionDepth = (context.substitutionDepth ?? 0) + 1;
   for (const word of expanded) {
     for (const inner of word.substitutions) {
+      // Review of the substitution fold: past this depth the recursion is
+      // refused, not run until the call stack gives out (which it did near
+      // 1,250 levels, on main too, with a thrown error instead of an answer).
+      if (substitutionDepth > SUBSTITUTION_NESTING_LIMIT) {
+        return {
+          ok: false,
+          code: "opaque",
+          detail: `command substitutions nested more than ${String(SUBSTITUTION_NESTING_LIMIT)} deep are not read by this classifier`,
+        };
+      }
       // A substitution keeps today's refusal: the no-rule stand-in is for the
       // command's own segments only.
-      const nested = classifyCommand(
-        inner,
-        protectedPaths,
-        context.noRuleSegments === true ? { ...context, noRuleSegments: false } : context,
-      );
+      const nested = classifyCommand(inner, protectedPaths, {
+        ...context,
+        ...(context.noRuleSegments === true ? { noRuleSegments: false } : {}),
+        bodyAlreadyRead,
+        substitutionDepth,
+      });
       if (!nested.ok) {
         return {
           ok: false,
@@ -8882,10 +9644,18 @@ export function classifyCommand(
   // relative write after `cd .git` is judged where it lands.
   let shellDir: ShellDir | null = context.shellDir === undefined ? SHELL_DIR_START : context.shellDir;
   // Second review, S3: the line may carry `.git` to a write through a variable
-  // or a substitution it sets itself.
-  const lineNamesGit = context.lineNamesGit ?? lineSpellsGitIndirectly(lexed.segments);
-  context = { ...context, lineNamesGit };
-  execContext = { ...execContext, lineNamesGit };
+  // or a substitution it sets itself. An inner script (`bash -c '…'`, a
+  // substitution body) reads its own text too, on top of what its line
+  // spells: a spelling inside single quotes is no substitution to the outer
+  // line, and is one to the script (substitution fold).
+  // A substitution body the line's reading already went through is not read
+  // again (review of the substitution fold, M1): that reading found nothing,
+  // and this one would find the same.
+  const lineNamesGit =
+    context.lineNamesGit === true || (context.bodyAlreadyRead !== true && lineSpellsGitIndirectly(lexed.segments));
+  const spelledSegments = new WeakSet<LexSegment>(lexed.segments);
+  context = { ...context, lineNamesGit, spelledSegments, bodyAlreadyRead: false };
+  execContext = { ...execContext, lineNamesGit, spelledSegments, bodyAlreadyRead: false };
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };

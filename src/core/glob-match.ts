@@ -1,17 +1,15 @@
 /**
- * Shell glob components matched in bounded time (B-HOOK-GLOB-LINEAR).
+ * The hook's glob components matched in bounded time (B-HOOK-GLOB-LINEAR).
  *
- * Both glob readers in the hook used to compile a component into one anchored
- * regular expression and test names with it: the credential and organ passes
- * in src/cli/hook.ts (`globRegex`: `*` as `.*`) and the `.git` reader in
- * src/core/command-class.ts (`globSegmentMatches`: `*` as `[^/]*`). A
- * component of many `*` made the engine backtrack, at a cost that grows with
- * (stars + name length) choose (name length) for each name tested. `cat` with
- * 240 `*` and 12 `z` spent 35.7 CPU s in the credential pass from a directory
- * holding `env` and `keys`, and with `auth.json` beside them 40 `*` took
- * 31 CPU s and 240 did not finish in 100 s; `echo x > ~/.hermes/` and 8 `*`
- * and 12 `z` spent 36.7 CPU s in the `.git` reader. Claude Code's hook
- * timeout is 60 s, and a hook stopped by it lets the call through.
+ * The credential and organ passes in src/cli/hook.ts compiled each glob
+ * component into one anchored regular expression (`globRegex`: `*` as `.*`)
+ * and tested names with it. A component of many `*` made the engine
+ * backtrack, at a cost that grows with (stars + name length) choose (name
+ * length) for each name tested: `cat` with 240 `*` and 12 `z` spent 35.7 CPU s
+ * in the credential pass from a directory holding `env` and `keys`, and with
+ * `auth.json` beside them 40 `*` took 31 CPU s. Claude Code's hook timeout is
+ * 60 s, and a hook stopped by it lets the call through. (The `.git` reader in
+ * src/core/command-class.ts had the same fault; #680 gave it its own walk.)
  *
  * {@link matchGlobTokens} replaces the backtracking with a set-of-positions
  * walk: a component is a list of tokens, each either one character from a
@@ -20,10 +18,9 @@
  * one token, and a name shorter than the component's one-character tokens is
  * refused before any walk, so one test costs at most (name length) x
  * (2 x name length + 1) token checks after a compile linear in the component
- * (a class's members sorted once, so each check is a binary search at most).
- * The compile reads each item once: an unclosed `[` ends it (the old
- * expression did not compile, so every name matches), so no `[` is scanned
- * twice.
+ * (a class's members sorted once, so each check is a binary search). The
+ * compile reads each item once: an unclosed `[` ends it (the old expression
+ * did not compile, so every name matches), so no `[` is scanned twice.
  *
  * {@link globPattern} is the hook's reader, with the accepted syntax and the
  * answers of `globRegex` for every component and name (tests/hook-glob-match
@@ -51,7 +48,7 @@ export interface GlobPattern {
  * One position of a compiled component: a single character from a set, or,
  * when `run` is true, any number of characters from it (a `*`).
  */
-export interface GlobToken {
+interface GlobToken {
   readonly run: boolean;
   matches(code: number): boolean;
 }
@@ -64,7 +61,7 @@ function closeOverRuns(tokens: readonly GlobToken[], reached: Uint8Array): void 
 }
 
 /** How many of `tokens` take exactly one character: the shortest name that can match. */
-export function singleCharacterTokens(tokens: readonly GlobToken[]): number {
+function singleCharacterTokens(tokens: readonly GlobToken[]): number {
   let single = 0;
   for (const token of tokens) if (!token.run) single += 1;
   return single;
@@ -74,7 +71,7 @@ export function singleCharacterTokens(tokens: readonly GlobToken[]): number {
  * Does the whole of `name` (read by code point) match `tokens`? `single` is
  * {@link singleCharacterTokens} of `tokens`, counted once by the caller.
  */
-export function matchGlobTokens(tokens: readonly GlobToken[], single: number, name: string): boolean {
+function matchGlobTokens(tokens: readonly GlobToken[], single: number, name: string): boolean {
   const codes: number[] = [];
   for (const char of name) codes.push(char.codePointAt(0) as number);
   if (codes.length < single) return false;
