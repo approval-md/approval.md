@@ -292,8 +292,8 @@ jobs:
       PIN_EXPECTED: "bb56b15408997e42c3019cc8f445056c6e0bcd51a3465206d0752095123e5fd5"
       PIN_CHECK: "79a523a10c1d7cef2c7fd5466953745809316451224ddc657b21ec2cdbc80bd9"
       PIN_BOX: "e2c4060c2a1c99cd2008eb4d926bd6579378d2f43bdaeffe71a4d8ff19552a5e"
-      PIN_EXTRACT: "8da80d3daafb2c34154f715adeac55feb6910ff111143b894c2b8448c291884f"
-      PIN_NEWCALLS: "eab4d6bc0a4d5af9c780d695b0aa2aba16c6a6bdb4691d2b720593272b6375d5"
+      PIN_EXTRACT: "2d0b6a0b02fb36b04aa4f10ddd555b99e2faacef43d8b2b9dbcc43eb998b6331"
+      PIN_NEWCALLS: "9a5e5e5b348fcb084324a95c03f23872b40169df2c1b82f98e0cf4eabddb1908"
     steps:
       # Depth 2: HEAD^1 is the base the change is measured against (a pull
       # request's merge commit's first parent, the queue's base, or the main a

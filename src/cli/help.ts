@@ -877,7 +877,7 @@ Flags:
 
 decision "requested": poll \`approval wait <task> --timeout 0\` (7 void or 3
 expired: propose again). "autonomous"/"supervised": act, then \`approval start\`.
-A retry appends nothing (idempotent:true) unless the answer can't be used.
+A retry appends nothing unless unusable; late --irreversible: re-ask or refusal.
 
 ${GATE_CODES_POINTER}
 ${JSON_ERRORS}

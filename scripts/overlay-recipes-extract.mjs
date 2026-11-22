@@ -536,11 +536,75 @@ def propose_class(m, node):
                 pass
     return {"class": None, "why": "the class is not a literal, a module constant or a class template"}
 
+def binds_name(node, name):
+    """Does this statement or expression node bind the name in the scope it sits in (not descending into
+    nested functions, lambdas or classes, which are scopes of their own)?"""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, (ast.Store, ast.Del)):
+            return True
+        if isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names:
+            return True
+        if isinstance(n, (ast.Import, ast.ImportFrom)) and any((a.asname or a.name.split(".")[0]) == name for a in n.names):
+            return True
+        if isinstance(n, ast.ExceptHandler) and n.name == name:
+            return True
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if n.name == name:
+                return True
+            continue
+        if isinstance(n, ast.Lambda):
+            continue
+        stack.extend(ast.iter_child_nodes(n))
+    return False
+
+def function_binds(fn, name):
+    a = fn.args
+    params = [x.arg for x in a.posonlyargs + a.args + a.kwonlyargs] + [x.arg for x in (a.vararg, a.kwarg) if x is not None]
+    if name in params:
+        return True
+    body = fn.body if isinstance(fn.body, list) else [fn.body]
+    return any(binds_name(stmt, name) for stmt in body)
+
+def module_constant_once(m, name, depth=0):
+    """Review S1 (APRV-537 fold 1): a Name is a module constant only when the module binds it exactly
+    ONCE, by a plain top-level assignment (or a sibling import of a name that is one), and no function
+    of the module rebinds it through 'global'. A second binding anywhere at module level (an 'if', a
+    'try', a loop, an augmented assignment) makes the value depend on the run, so it is unread."""
+    if depth > 8:
+        return False
+    tree = m["tree"]
+    hits = [stmt for stmt in tree.body if binds_name(stmt, name) and not (isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and stmt.name != name)]
+    if len(hits) != 1:
+        return False
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Global) and name in n.names:
+            return False
+    stmt = hits[0]
+    count = sum(1 for n in ast.walk(stmt) if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, (ast.Store, ast.Del)))
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name) and count == 1:
+        value = stmt.value
+    elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.value is not None and count == 1:
+        value = stmt.value
+    elif isinstance(stmt, ast.ImportFrom) and stmt.level == 1 and stmt.module and name in m["imports"]:
+        target, orig = m["imports"][name]
+        return os.path.isfile(target) and module_constant_once(load(target), orig, depth + 1)
+    else:
+        return False
+    if isinstance(value, ast.Name):
+        return module_constant_once(m, value.id, depth + 1)
+    return isinstance(value, ast.Constant)
+
 def propose_irreversible(m, node):
     """APRV-537: whether a propose asks core for the SPEC section 7 floor ('approval propose
     --irreversible'), read as the keyword 'irreversible=' with a literal True or False or a module
     constant that is one. No such keyword is False. Anything else (a local name, an expression, a
-    fifth positional, '*args' or '**kwargs') is unread, which the check fails closed on."""
+    fifth positional, '*args' or '**kwargs') is unread, which the check fails closed on.
+
+    Review S1: a name counts as a module constant only when no enclosing function binds it (a
+    parameter, an assignment, 'global' or 'nonlocal') and the module binds it once, at top level
+    (module_constant_once). A name a function shadows, or one a module-level 'if' rebinds, is unread."""
     if any(k.arg is None for k in node.keywords) or any(isinstance(a, ast.Starred) for a in node.args):
         return {"irreversible": None, "irreversible_why": "the arguments are spread (*args or **kwargs)"}
     if len(node.args) > 4:
@@ -548,13 +612,26 @@ def propose_irreversible(m, node):
     kws = [k for k in node.keywords if k.arg == "irreversible"]
     if not kws:
         return {"irreversible": False}
+    unread = {"irreversible": None, "irreversible_why": "irreversible= is not a literal True or False or a module constant"}
+    value = kws[0].value
+    if isinstance(value, ast.Name):
+        par = info(m)["par"]
+        scope = enclosing(par, node, SCOPES)
+        while scope is not None:
+            if function_binds(scope, value.id):
+                return unread
+            scope = enclosing(par, scope, SCOPES)
+        if not module_constant_once(m, value.id):
+            return unread
+    elif not isinstance(value, ast.Constant):
+        return unread
     try:
-        v = ev(m, kws[0].value)
+        v = ev(m, value)
         if isinstance(v, bool):
             return {"irreversible": v}
     except Unresolved:
         pass
-    return {"irreversible": None, "irreversible_why": "irreversible= is not a literal True or False or a module constant"}
+    return unread
 
 # ---- Review S1b: the class writers -------------------------------------------------------------
 # A held-class propose (above) proposes whatever class its held entry carries, so the lines that give a

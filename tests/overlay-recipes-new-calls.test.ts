@@ -627,6 +627,29 @@ test("M3 + S1: daemon proposes are extracted with their class (literal, constant
   assert.equal(run.corpus["proposes_unhooked"], undefined);
 });
 
+test("APRV-537 fold 1 (S2): a propose whose flag flips is a new site against the previous release, in both directions", () => {
+  const site = (irreversible?: boolean | null): Json => ({
+    plugin: "village-bridge",
+    file: "plugins/village-bridge/_order.py",
+    line: 12,
+    class: "marketplace.app.action",
+    ...(irreversible === undefined ? {} : { irreversible }),
+  });
+  const newSites = (head: Json, tag: Json): number =>
+    ((changeSet({ corpus: { recipes: [], envelopes: [], proposes: [head] }, tagCorpus: { recipes: [], envelopes: [], proposes: [tag] } }) as unknown as { newProposes: Json[] }).newProposes).length;
+  // The same site, the same flag: unchanged. A corpus from before the field reads as no flag.
+  assert.equal(newSites(site(false), site(false)), 0);
+  assert.equal(newSites(site(true), site(true)), 0);
+  assert.equal(newSites(site(false), site()), 0);
+  assert.equal(newSites(site(), site(false)), 0);
+  // The flag starts, stops, or becomes unreadable: a new site, so no unchanged-call waiver.
+  assert.equal(newSites(site(true), site(false)), 1);
+  assert.equal(newSites(site(true), site()), 1);
+  assert.equal(newSites(site(false), site(true)), 1);
+  assert.equal(newSites(site(null), site(false)), 1);
+  assert.equal(newSites(site(null), site(true)), 1);
+});
+
 test("APRV-537: whether a propose passes irreversible=True is read at its site; any spelling it cannot read is unread", { skip: NO_BUN }, () => {
   const bridge = [
     'APPROVAL_CLASS = "marketplace.app.action"',
@@ -645,6 +668,32 @@ test("APRV-537: whether a propose passes irreversible=True is read at its site; 
     "    ap.propose(APPROVAL_CLASS, key, \"s\", held, **kw)",
     "def g(ap, key, held):",
     "    ap.propose(APPROVAL_CLASS, key, \"s\", held, True)",
+    "def h(ap, key, held):",
+    "    FLOOR = False; ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=FLOOR)",
+    "def i(ap, key, held, FLOOR=False):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=FLOOR)",
+    "def j(ap, key, held):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=REBOUND)",
+    "def k(ap, key, held):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=SET_BY_GLOBAL)",
+    "def l(ap, key, held):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=ONE)",
+    "def n(ap, key, held):",
+    "    ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=ALIAS)",
+    "def o(ap, key, held):",
+    "    def inner():",
+    "        ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=FLOOR)",
+    "    FLOOR = False",
+    "    inner()",
+    "REBOUND = True",
+    "import os",
+    "if os.environ.get(\"X\"): REBOUND = False",
+    "SET_BY_GLOBAL = True",
+    "def setter():",
+    "    global SET_BY_GLOBAL",
+    "    SET_BY_GLOBAL = False",
+    "ONE = 1",
+    "ALIAS = FLOOR",
     "",
   ].join("\n");
   const run = extractFixture({ extra: { "plugins/village-bridge/_floor.py": bridge } });
@@ -652,7 +701,13 @@ test("APRV-537: whether a propose passes irreversible=True is read at its site; 
   const sites = (run.corpus["proposes"] as Json[]).filter((p) => p["file"] === "plugins/village-bridge/_floor.py");
   assert.deepEqual(
     sites.map((p) => [p["line"], p["irreversible"]]),
-    [[4, true], [6, false], [8, false], [10, true], [12, null], [14, null], [16, null]],
+    [
+      [4, true], [6, false], [8, false], [10, true], [12, null], [14, null], [16, null],
+      // Review S1: a name the function shadows (h), takes as a parameter (i) or an enclosing function
+      // binds (o), one the module rebinds under an `if` (j) or through `global` (k), and a constant
+      // that is not a bool (l) are unread; a top-level alias of a once-bound constant is read (n).
+      [18, null], [20, null], [22, null], [24, null], [26, null], [28, true], [31, null],
+    ],
   );
   assert.match(String(sites.find((p) => p["line"] === 12)?.["irreversible_why"]), /not a literal True or False or a module constant/u);
   assert.match(String(sites.find((p) => p["line"] === 14)?.["irreversible_why"]), /spread/u);

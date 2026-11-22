@@ -623,7 +623,12 @@ export function changeSet({ corpus, tagCorpus, movedKeys = new Set() }) {
   for (const g of tagGated) if (!headGated.has(g)) status.set(gatedKey(g), { kind: "gated", status: "removed (ungated)", where: "install/install_approval.ts", command: g });
   // Review M3: a daemon propose whose file and class (or class template) the
   // previous release did not have.
-  const siteId = (x) => `${String(x.file)}\u0000${String(x.class ?? x.template ?? (Array.isArray(x.classes) ? x.classes.join("|") : ""))}`;
+  // APRV-537 fold 1 (review S2): the flag is part of what the site is. A propose that starts or stops
+  // passing irreversible=True, or passes it in a form that cannot be read, is a NEW site against the
+  // previous release, so an undated acceptance cannot ride the unchanged-call waiver. A corpus from an
+  // extractor before the field has no member, which reads as no flag (false).
+  const flagId = (x) => (x.irreversible === true ? "\u0000irreversible" : x.irreversible === null ? "\u0000irreversible?" : "");
+  const siteId = (x) => `${String(x.file)}\u0000${String(x.class ?? x.template ?? (Array.isArray(x.classes) ? x.classes.join("|") : ""))}${flagId(x)}`;
   const tagSites = new Set((tagCorpus.proposes ?? []).map(siteId));
   status.newProposes = (corpus.proposes ?? []).filter((x) => !tagSites.has(siteId(x)));
   status.duplicates = duplicates;
