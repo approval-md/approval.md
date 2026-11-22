@@ -1039,11 +1039,14 @@ it is; and a `${` that does not close counts. Inside an operator's word a nested
 expansion is an unknown output, and a default word stands for its expansion
 (`.g${A:-i}t`).
 
-The cost of reading a line is bounded. Each word and each glob pattern is
-walked once against the four characters of `.git` (or a file name), so a word
-of 10,000 substitutions or a run of 1,000 `*` takes well under a second of
-CPU. Past 1,024 glob characters one pattern segment is judged to name
-`.git`. Substitution bodies are read for `.git` to 64 levels of nesting, and
+The cost of reading a line for `.git` is bounded. Each word and each glob
+pattern is walked once against the four characters of `.git` (or a file
+name), so a word of 10,000 substitutions or a run of 1,000 `*` takes well
+under a second of CPU. Past 1,024 glob characters one pattern segment is
+judged to name `.git`. A word's brace groups are looked for over at most
+1,000,000 characters of scanning (each group's text counts again, so about
+800 nested groups reach it), and past that the word is judged to name `.git`.
+Substitution bodies are read for `.git` to 64 levels of nesting, and
 a deeper body counts as naming it. Past 128 levels of nesting the line is
 refused (`opaque`), where it used to run until the call stack gave out.
 
