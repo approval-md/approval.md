@@ -559,6 +559,8 @@ def binds_name(node, name):
         stack.extend(ast.iter_child_nodes(n))
     return False
 
+NAME_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
 def function_binds(fn, name):
     a = fn.args
     params = [x.arg for x in a.posonlyargs + a.args + a.kwonlyargs] + [x.arg for x in (a.vararg, a.kwarg) if x is not None]
@@ -615,12 +617,21 @@ def propose_irreversible(m, node):
     unread = {"irreversible": None, "irreversible_why": "irreversible= is not a literal True or False or a module constant"}
     value = kws[0].value
     if isinstance(value, ast.Name):
+        # Every enclosing scope that could bind the name: functions and lambdas, a class body (a propose
+        # written straight in it reads the class's own name), and a comprehension's targets. Conservative
+        # on purpose: a class or comprehension further out that binds the name makes it unread too.
         par = info(m)["par"]
-        scope = enclosing(par, node, SCOPES)
+        scope = enclosing(par, node, NAME_SCOPES)
         while scope is not None:
-            if function_binds(scope, value.id):
+            if isinstance(scope, SCOPES):
+                bound = function_binds(scope, value.id)
+            elif isinstance(scope, ast.ClassDef):
+                bound = any(binds_name(stmt, value.id) for stmt in scope.body)
+            else:
+                bound = any(binds_name(g.target, value.id) for g in scope.generators)
+            if bound:
                 return unread
-            scope = enclosing(par, scope, SCOPES)
+            scope = enclosing(par, scope, NAME_SCOPES)
         if not module_constant_once(m, value.id):
             return unread
     elif not isinstance(value, ast.Constant):

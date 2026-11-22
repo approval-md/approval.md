@@ -685,6 +685,13 @@ test("APRV-537: whether a propose passes irreversible=True is read at its site; 
     "        ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=FLOOR)",
     "    FLOOR = False",
     "    inner()",
+    "class Shop:",
+    "    FLOOR = False",
+    "    answer = ap.propose(APPROVAL_CLASS, \"k\", \"s\", {}, irreversible=FLOOR)",
+    "    def method(self, ap, key, held):",
+    "        ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=FLOOR)",
+    "def p(ap, key, held):",
+    "    return [ap.propose(APPROVAL_CLASS, key, \"s\", held, irreversible=FLOOR) for FLOOR in (False,)]",
     "REBOUND = True",
     "import os",
     "if os.environ.get(\"X\"): REBOUND = False",
@@ -698,7 +705,9 @@ test("APRV-537: whether a propose passes irreversible=True is read at its site; 
   ].join("\n");
   const run = extractFixture({ extra: { "plugins/village-bridge/_floor.py": bridge } });
   assert.equal(run.status, 0, run.err);
-  const sites = (run.corpus["proposes"] as Json[]).filter((p) => p["file"] === "plugins/village-bridge/_floor.py");
+  const sites = (run.corpus["proposes"] as Json[])
+    .filter((p) => p["file"] === "plugins/village-bridge/_floor.py")
+    .sort((x, y) => Number(x["line"]) - Number(y["line"]));
   assert.deepEqual(
     sites.map((p) => [p["line"], p["irreversible"]]),
     [
@@ -707,6 +716,9 @@ test("APRV-537: whether a propose passes irreversible=True is read at its site; 
       // binds (o), one the module rebinds under an `if` (j) or through `global` (k), and a constant
       // that is not a bool (l) are unread; a top-level alias of a once-bound constant is read (n).
       [18, null], [20, null], [22, null], [24, null], [26, null], [28, true], [31, null],
+      // A propose written straight in a class body that binds the name, a method under that class
+      // (conservative: Python would read the module's there) and a comprehension target: unread.
+      [36, null], [38, null], [40, null],
     ],
   );
   assert.match(String(sites.find((p) => p["line"] === 12)?.["irreversible_why"]), /not a literal True or False or a module constant/u);
