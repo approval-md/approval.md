@@ -5162,8 +5162,15 @@ function printedOutputs(segment: LexSegment): string[] | null {
         // A precision cuts only text whose characters are known: cutting an
         // unknown value (a variable, a substitution) could leave any prefix of
         // it, so that counts as naming `.git` (the security review of this fold).
+        // printf counts bytes, not characters, so a cut of non-ASCII text
+        // counts too (codex's SOURCE HOLD on fc846a73: `%.7s` of `é/.gitfoo`
+        // is `é/.git`).
         const cut = (text: string): string =>
-          precision === null ? text : text.includes(SUBSTITUTION_SENTINEL) ? "/.git/" : text.slice(0, Number(precision[1] || "0"));
+          precision === null
+            ? text
+            : text.includes(SUBSTITUTION_SENTINEL) || /[\u0080-\u{10FFFF}]/u.test(text)
+              ? "/.git/"
+              : text.slice(0, Number(precision[1] || "0"));
         const arg = args.shift();
         if (arg !== undefined) took = true;
         if (conversion === "s" || conversion === "q") return cut(unknown(arg ?? ""));

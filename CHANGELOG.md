@@ -169,7 +169,8 @@ on the change above.
   (`$'\x2egit'`) or a substitution body (`$(printf '\x2egit')`; an ANSI-C
   string ends at a NUL, a substitution drops NULs, and printf's precision
   cuts a string, `%.4s` of `.gitfoo` being `.git`, and `%b`'s decoded
-  bytes before the NULs go; a printed glob such as `.gi*` counts), and the
+  bytes before the NULs go; a cut of non-ASCII text, which printf counts in
+  bytes, and a printed glob such as `.gi*` count), and the
   word a parameter expansion may carry (`${VAR:-.git}`, `${VAR=.git}`,
   `${VAR:+.git}`). After a security review both fail closed: a word with
   `$'…'` is read quote by quote and joined, an unclosed quote counts, what

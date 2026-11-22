@@ -296,6 +296,7 @@ test("hook: printf's precision on %b decoded bytes, with its control (codex on 0
   const repo = checkout();
   assert.ok(hook(`echo x > "$(printf '%.5b' '.g\\0itX')/config"`, repo).includes(DIR_WRITE));
   assert.ok(hook(`echo x > $(printf '%.4s' '.gi*xyz')/config`, repo).includes(DIR_WRITE));
+  assert.ok(hook(`echo x > "$(printf '%.7s' 'é/.gitfoo')/config"`, repo).includes(DIR_WRITE));
   assert.deepEqual(hook(`echo x > "$(printf '%.6b' '.g\\0itX')/config"`, repo), [REDIRECT]);
 });
 
@@ -483,6 +484,10 @@ test("security review of the precision fold: printed globs, and a NUL read three
   // codex's SOURCE HOLD on 09a3acd7: %b's precision cuts before the NULs go.
   assert.ok(pure(`echo x > "$(printf '%.5b' '.g\\0itX')/config"`).includes(DIR_WRITE));
   assert.deepEqual(pure(`echo x > "$(printf '%.6b' '.g\\0itX')/config"`), [REDIRECT]);
+  // codex's SOURCE HOLD on fc846a73: printf's precision counts bytes.
+  assert.ok(pure(`echo x > "$(printf '%.7s' 'é/.gitfoo')/config"`).includes(DIR_WRITE));
+  assert.ok(pure(`echo x > "$(printf '%.7b' 'é/.gitfoo')/config"`).includes(DIR_WRITE));
+  assert.deepEqual(pure(`echo x > "$(printf '%s' 'é/.gitfoo')/config"`), [REDIRECT]);
   // A * width takes its argument: a long line of them ends in time.
   assert.ok(pure(`echo x > "$(printf '%*s' ${"4 x ".repeat(2000)})/config"`).includes(DIR_WRITE));
   // A printed glob that cannot name .git, and a NUL in ordinary text, do not move.
