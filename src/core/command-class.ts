@@ -8292,13 +8292,74 @@ function strictestProtectedWrite(
 }
 
 /**
- * Could the shell still glob part of this word? Any of `*`, `?`, `[`, a brace,
- * zsh's `(…)`, `#`, `^`, `<…>`, `|`, or a `~` after the first character (zsh's
- * exclusion). Read on the dequoted text, so a quoted metacharacter in a word
- * that is otherwise inexact counts as well: the stricter reading.
+ * The operands a command WRITES through, for the pattern reading of
+ * {@link strictestProtectedWrite} (GLOB-WRITE). The positional scan stays
+ * direction-blind on text; the pattern reading is narrower, because a glob in a
+ * SOURCE operand is a read (`cp ./*.md docs/` copies the policy file out, it
+ * does not write it), and a read through a glob is the read jail's question.
+ *
+ * - `cp`, `ln`, `install`: the destination, the last operand (`-t DIR` is a
+ *   write target of its own, judged with the download outputs).
+ * - `mv`: every operand, since a moved source is a removed one.
+ * - the binaries whose effect on a named path is a write and nothing else
+ *   ({@link CREDENTIAL_WRITE_BINS}: `tee`, `rm`, `touch`, `truncate`, `chmod`,
+ *   ...), and `sed` in place: every operand.
+ *
+ * Anything else (git's path verbs, which stage rather than write the file, and
+ * every other row) keeps the text reading alone.
+ */
+function globWriteOperands(basename: string, args: readonly string[], positionals: readonly string[]): string[] {
+  if (basename === "cp" || basename === "ln" || basename === "install") {
+    const last = positionals[positionals.length - 1];
+    return last === undefined ? [] : [last];
+  }
+  if (basename === "git") return [];
+  return credentialWritesOnly(basename, args) ? [...positionals] : [];
+}
+
+/**
+ * Could the shell still glob part of this word? Any of `*`, `?`, `[`, zsh's
+ * `(…)`, `#`, `^`, `<…>`, `|`, or a `~` after the first character (zsh's
+ * exclusion), outside a `${…}` parameter expansion (whose operators are not a
+ * pattern on the path, and whose rows {@link protectedPathClass} reads as they
+ * were). Read on the dequoted text, so a quoted metacharacter in a word that is
+ * otherwise inexact counts as well: the stricter reading. A brace is not a
+ * glob: {@link braceCandidates} expands it wherever a path is judged.
  */
 function hasGlobConstruct(word: string): boolean {
-  return /[*?[\]{}()#^<>|]/u.test(word) || word.slice(1).includes("~");
+  const outside = maskParameters(word).text;
+  return /[*?[\]()#^<>|]/u.test(outside) || outside.slice(1).includes("~");
+}
+
+/**
+ * The word with each `${…}` (nesting counted) replaced by a placeholder that
+ * holds no `/` and no glob character, and the expansions it stands for, so a
+ * parameter's operators (`${f/.txt/.md}`, `${X:-/x}`, `${f#*.}`) are neither
+ * split as path segments nor read as a pattern. An unclosed `${` runs to the
+ * end of the word.
+ */
+function maskParameters(word: string): { text: string; held: string[] } {
+  const held: string[] = [];
+  let text = "";
+  for (let at = 0; at < word.length; at += 1) {
+    if (word[at] === "$" && word[at + 1] === "{") {
+      let depth = 0;
+      let end = at + 1;
+      for (; end < word.length; end += 1) {
+        if (word[end] === "{") depth += 1;
+        else if (word[end] === "}") {
+          depth -= 1;
+          if (depth === 0) break;
+        }
+      }
+      held.push(word.slice(at, end + 1));
+      text += `$\u0000${held.length - 1}\u0000`;
+      at = end;
+    } else {
+      text += word[at];
+    }
+  }
+  return { text, held };
 }
 
 /**
@@ -8363,8 +8424,13 @@ const GLOB_GUARD_PREFIXES: readonly string[] = [
 
 /** Most candidate paths one write-target word is judged as before it is judged unknown. */
 const GLOB_GUARD_CANDIDATE_CAP = 4096;
-/** Longest pattern segment, and most segments, read before the word is judged unknown. */
-const GLOB_GUARD_SEGMENT_CAP = 256;
+/**
+ * Most tokens one pattern segment is matched as (a run of `*` is one token);
+ * past it the segment may be any one name. The same bound as the `.git`
+ * reader's ({@link GLOB_ELEMENT_LIMIT}, 1,024).
+ */
+const GLOB_GUARD_TOKEN_CAP = 1024;
+/** Most segments one word is read as before it is judged unknown (`log.mutate`). */
 const GLOB_GUARD_SEGMENTS_CAP = 32;
 
 type GlobToken =
@@ -8393,7 +8459,10 @@ function globSegmentTokens(segment: string): GlobToken[] {
   const brackets: number[] = [];
   for (let at = 0; at < segment.length; at += 1) {
     const ch = segment[at] as string;
-    if (ch === "*") tokens.push({ kind: "run" });
+    // A run of `*` is one run (`a**b` is `a*b` to every shell).
+    if (ch === "*") {
+      if (tokens[tokens.length - 1]?.kind !== "run") tokens.push({ kind: "run" });
+    }
     else if (ch === "?") tokens.push({ kind: "one" });
     else if (ch === "^") tokens.push({ kind: "rest" });
     else if (ch === "#") {
@@ -8483,9 +8552,8 @@ function globTokensMatch(tokens: readonly GlobToken[], name: string, prefix: boo
  * - a pattern segment: itself, and every guarded name or prefix
  *   ({@link GLOB_GUARD_NAMES}, {@link GLOB_GUARD_PREFIXES}, and the segments of
  *   the policy's own entries) its tokens could match;
- * - a segment that may stand for SEVERAL directories (`**`, globstar; a
- *   leftover brace, zsh's `braceccl`, whose range may make a `/`): nothing, any
- *   one name, or any two names.
+ * - a segment that may stand for SEVERAL directories (`**`, globstar):
+ *   nothing, any one name, or any two names.
  *
  * Every combination is a candidate path, judged by {@link protectedPathClass};
  * the strictest answers. More combinations than
@@ -8510,14 +8578,17 @@ function globGuardClass(word: string, protectedPaths: readonly ProtectedPathEntr
       continue;
     }
     for (const expansion of expansions) {
-      const segments = expansion.split("/");
-      if (segments.length > GLOB_GUARD_SEGMENTS_CAP || segments.some((s) => s.length > GLOB_GUARD_SEGMENT_CAP)) {
-        return "log.mutate";
-      }
+      const masked = maskParameters(expansion);
+      const unmask = (path: string): string =>
+        path.replace(/\$\u0000(\d+)\u0000/gu, (_, index: string) => masked.held[Number(index)] ?? "");
+      const segments = masked.text.split("/");
+      if (segments.length > GLOB_GUARD_SEGMENTS_CAP) return "log.mutate";
       const choices: string[][][] = segments.map((segment) => {
         if (segment.length === 0) return [[segment]];
         if (segment.includes("$")) return [[segment]];
-        const spanning = segment.includes("**") || /[{}]/u.test(segment);
+        // globstar (bash) and zsh's recursive `**/` and `***/`: only a whole
+        // component is recursive; inside a name `**` is `*`.
+        const spanning = segment === "**" || segment === "***";
         if (spanning) {
           const out: string[][] = [[], [segment]];
           for (const first of names) {
@@ -8528,8 +8599,10 @@ function globGuardClass(word: string, protectedPaths: readonly ProtectedPathEntr
         }
         const tokens = globSegmentTokens(segment);
         const out: string[][] = [[segment]];
-        for (const name of names) if (name !== segment && globTokensMatch(tokens, name, false)) out.push([name]);
-        for (const name of GLOB_GUARD_PREFIXES) if (globTokensMatch(tokens, name, true)) out.push([name]);
+        // Past the cap the segment may be any one name: the stricter reading.
+        const wide = tokens.length > GLOB_GUARD_TOKEN_CAP;
+        for (const name of names) if (name !== segment && (wide || globTokensMatch(tokens, name, false))) out.push([name]);
+        for (const name of GLOB_GUARD_PREFIXES) if (wide || globTokensMatch(tokens, name, true)) out.push([name]);
         return out;
       });
       let total = 1;
@@ -8537,7 +8610,7 @@ function globGuardClass(word: string, protectedPaths: readonly ProtectedPathEntr
       if (total > GLOB_GUARD_CANDIDATE_CAP) return "log.mutate";
       const walk = (index: number, parts: string[]): boolean => {
         if (index === choices.length) {
-          return consider(protectedPathClass(parts.join("/"), protectedPaths));
+          return consider(protectedPathClass(unmask(parts.join("/")), protectedPaths));
         }
         for (const choice of choices[index] as string[][]) {
           if (walk(index + 1, [...parts, ...choice])) return true;
@@ -9494,6 +9567,9 @@ function classifySegment(
   // in a flag (`-t<dir>`, `--target-directory=<dir>`) is a write target too;
   // `-t <dir>` already reaches the positional scan below.
   const copyFamily = ["cp", "mv", "ln", "install"].includes(basename);
+  // GLOB-WRITE: the operands this command writes through, judged by pattern.
+  const writtenOperands = globWriteOperands(basename, args, positionals);
+  const globbedOperand = (text: string): boolean => writtenOperands.includes(text) && globbed(text);
   const targetDirectories = copyFamily ? copyTargetDirectories(args) : [];
   // Fix round 3 (S(open)): what the shell may still do to each argv word
   // (`argFlags`, and `fetched` from it, are read above the credential tier).
@@ -9520,7 +9596,7 @@ function classifySegment(
   // named path already earns a class at least as strict (the log).
   const copyUnknown = copyFamily ? copyArgvUnknown(args, argFlags) : null;
   if (copyUnknown !== null) {
-    const named = strictestProtectedWrite([...positionals, ...readTargets], protectedPaths, globbed);
+    const named = strictestProtectedWrite([...positionals, ...readTargets], protectedPaths, globbedOperand);
     if (named !== null && protectedRank(named.surface) <= protectedRank("policy.core")) {
       return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
     }
@@ -9575,10 +9651,9 @@ function classifySegment(
         also: deferredCredential,
       };
     }
-    // GLOB-WRITE: a positional the shell may still glob is judged by every
-    // guarded path it could match, source and destination alike (the scan is
-    // direction-blind, above).
-    const named = strictestProtectedWrite(judged, protectedPaths, globbed, true);
+    // GLOB-WRITE: an operand the command WRITES that the shell may still glob
+    // is judged by every guarded path it could match ({@link globWriteOperands}).
+    const named = strictestProtectedWrite(judged, protectedPaths, globbedOperand, true);
     const fed = strictestProtected(readTargets, protectedPaths);
     const touched =
       fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))

@@ -100,9 +100,12 @@ test("S1: a glob or brace target that .git matches is git-dir-write, any letter 
   assert.deepEqual(pure("echo x >> .[g]it/config"), [DIR_WRITE]);
   assert.deepEqual(pure("echo x >> .g{i,}t/config"), [DIR_WRITE]);
   assert.deepEqual(pure("cd .gi? && echo x >> config"), [READ_SHELL, DIR_WRITE]);
-  for (const command of ["echo x > .{f..h}it/config", "echo x > .G[I]T/config", "cd .GI? && echo x > config", "tee -a sub/.g*/hooks/pre-push", "echo x > {a,.git}/config"]) {
+  for (const command of ["echo x > .{f..h}it/config", "echo x > .G[I]T/config", "cd .GI? && echo x > config", "echo x > {a,.git}/config"]) {
     assert.ok(pure(command).includes(DIR_WRITE), command);
   }
+  // GLOB-WRITE (22 Nov 2026): `.g*` also matches `.grok`, whose `hooks/` is the
+  // Grok hook organ, so the stricter `policy.core` answers this one.
+  assert.deepEqual(pure("tee -a sub/.g*/hooks/pre-push"), ["policy.core protected-path"]);
 });
 
 test("S1: ordinary glob and brace lines do not move", () => {
