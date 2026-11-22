@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-17 06:49'
-updated_date: '2026-11-22 17:22'
+updated_date: '2026-11-22 19:42'
 labels:
   - classifier
   - security
@@ -79,4 +79,8 @@ Fourth security review of the fold: an unquoted format word (printf $F, printf $
 Fifth security review: the finer printf and zsh models are replaced by coarse fail-closed rules. printf in a substitution body is read only when its format is a literal word using %s, %b, %c and %d alone (flags, width, precision) and every word after it keeps its place (a literal word or a fully quoted plain scalar, no substitution); echo -e only when every word does; anything else counts as naming .git (length modifiers, %q, %Q, %(...)T, variable formats, words that may split, a backtick). zsh: in braces any subscript but [@]/[*], and after an unbraced parameter (any name, digit or special) any [ or a : then a letter or & counts. Over-ask cost on 22 constructed ordinary lines: 9 newly ask (unquoted printf words, %x/%q, a variable format, $USER:latest, $OUT[1], rsync to "$HOST:path/"). 168 shell-truth cases: 0 looser, 29 fixed; corpus 0 looser against main and 0.4.8.
 
 Sixth security review: every echo (zsh decodes escapes without -e) is read only when every word keeps its place and holds no unknown value; %b of an unknown value counts; zsh print with a word the text cannot read counts (and is refused already); an ANSI-C or locale word never keeps its place; a format whose escapes decode to a % counts; zsh flags before an unbraced name ($=f, $~f, $^f) count. The %b/echo findings are inherited from main (main says redirect-write for X='\056git'; echo x > "$(echo "$X")/config"). $(echo $(date +%F)) now asks. 174 shell-truth cases: 0 looser, 34 fixed; 11 of 22 constructed ordinary lines newly ask.
+
+Codex SOURCE HOLD on #683 (101630f2) folded: M1 (new in this fold) a printf or echo named by the system's path is also read as the unknown output main read it as, a body's third and fourth readings, so never looser than main (printf .g; /usr/bin/printf x). M2 (inherited) any \c in a printf format or word, or an echo word, counts. M3 (inherited) an inexact quoted word keeps its place only when its whole text is one plain scalar ("$SHA"); "\x2e""git" counts. N1 a % the parse did not take counts (printf %, '%s%', 'a%'); a parsed %% does not. Shell truth 196 cases: 0 looser vs main ffb5c32a and 0.4.8, 41 fixed, 5 known limits. Corpus 3,668: 0 looser vs main and 0.4.8, 9 stricter than main (unchanged). Faults g01-g07 and f01/f06 killed. Cost linear.
+
+review-b's read of #683 (101630f2, L60881) folded into the same commit: M1 a printer by any other path whose last name is printf, echo or print (/usr/bin//printf, /bin/../usr/bin/printf, ./printf) counts. S1 tests with a ':' before the parameter (:/../$f:r, $HOST:8080/$f:r) kill u5. N1 printf -v (and zsh print -v) makes the line count as spelling .git, so a target its variable reaches counts. N3 printf -v in a body is not read as output and counts. N2 is codex's M2. N6 CHANGELOG wording. Shell truth 211 cases: 0 looser vs main and 0.4.8, 53 fixed, 5 known limits. Corpus unchanged (0 looser, 9 stricter than main). Grid of 140,616 printer bodies: 0 looser than main, 0 misses of 505 landing lines (main misses 177).
 <!-- SECTION:NOTES:END -->

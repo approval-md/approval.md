@@ -5157,18 +5157,39 @@ const SET_ASIDE = String.fromCharCode(0xe000);
  * {@link PRINTED_OUTPUT_LIMIT} characters the output counts as naming
  * `.git`. `null` when the segment runs neither.
  */
-function printedOutputs(segment: LexSegment): string[] | null {
+function printerCommand(segment: LexSegment): { lexed: LexWord[]; start: number; name: string; byPath: boolean; otherPath: boolean } {
   const lexed = segment.words.slice(bashAssignmentCount(segment.words));
-  const all = lexed.map((word) => word.text);
   // Read by index, not by shifts: a run of thousands of `command` or `-n`
   // words then costs its length, not its square (review-b's M1 on b085cd91).
   let start = 0;
-  while (all[start] === "command" || all[start] === "builtin") start += 1;
+  while (lexed[start]?.text === "command" || lexed[start]?.text === "builtin") start += 1;
   // Named by its path too, when the path is the system's own binary
-  // (`/usr/bin/printf`, `/bin/echo`; #680's gate, M2). A program at any other
-  // path is whatever sits there, and its output stays unknown.
-  const command = all[start] ?? "";
-  const name = (isSystemBinWord(command, lexed[start]?.exact ?? false) ? (command.split("/").pop() ?? "") : command).toLowerCase();
+  // (`/usr/bin/printf`, `/bin/echo`; #680's gate, M2), written plainly.
+  const command = lexed[start]?.text ?? "";
+  const byPath = command.includes("/") && isSystemBinWord(command, lexed[start]?.exact ?? false);
+  const name = (byPath ? (command.split("/").pop() ?? "") : command).toLowerCase();
+  // Any other path whose last name is a printer (`/usr/bin//printf`,
+  // `/bin/../usr/bin/printf`, `./printf`) may run the system's own: what it
+  // prints is not read, and counts (review-b's read of #683, M1).
+  const otherPath = !byPath && command.includes("/") && /^(?:printf|echo|print)$/u.test((command.split("/").pop() ?? "").toLowerCase());
+  return { lexed, start, name, byPath, otherPath };
+}
+
+/**
+ * Does the segment run `printf -v` (bash, zsh) or zsh's `print -v`, which
+ * set a variable to what would be printed (review-b's read of #683, N1)? The
+ * line then counts as spelling `.git`, so a target the variable reaches
+ * (`printf -v d %.4s .gitfoo; echo x > "$d/config"`) counts.
+ */
+function assignsByPrinter(segment: LexSegment): boolean {
+  const { lexed, start, name, otherPath } = printerCommand(segment);
+  return (otherPath || name === "printf" || name === "print") && /^-[A-Za-z]*v/u.test(lexed[start + 1]?.text ?? "");
+}
+
+function printedOutputs(segment: LexSegment): string[] | null {
+  const { lexed, start, name, otherPath } = printerCommand(segment);
+  if (otherPath) return ["/.git/", "/.git/"];
+  const all = lexed.map((word) => word.text);
   const words = all.slice(start + 1);
   // zsh's `print` decodes escapes unless given `-r`: with a word the text
   // cannot read, what it prints counts (the sixth security review). Its
@@ -5180,7 +5201,10 @@ function printedOutputs(segment: LexSegment): string[] | null {
   }
   if (name !== "echo" && name !== "printf") return null;
   // Does each word stay one word in its place? A literal word does, and so
-  // does a fully quoted plain scalar (`"$SHA"`). Any other (an unquoted
+  // does a fully quoted plain scalar (`"$SHA"`, its whole text one name, an
+  // unknown value). A quoted word whose text is not the shell's (`"\x2e"`,
+  // whose backslash the lexer drops) is not read as literal text: its
+  // letters may print other bytes (codex's SOURCE HOLD on 101630f2, M3). Any other (an unquoted
   // variable, a glob or brace, `"$@"`, `${a[@]}`, an indirection `${!r}`,
   // zsh's flags `${(s: :)u}`, a substitution) may become no word or several,
   // and printf then pairs the words with other conversions than the text
@@ -5192,7 +5216,8 @@ function printedOutputs(segment: LexSegment): string[] | null {
         word.substitutions.length === 0 &&
         !word.text.includes(SUBSTITUTION_SENTINEL) &&
         !/\$['"]/u.test(word.text) &&
-        (word.exact || (word.quoted && !word.splits && !word.expands && !/\$\{?[@*!(]|\[[@*]\]|`/u.test(word.text))),
+        (word.exact ||
+          (word.quoted && !word.splits && !word.expands && /^\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]|\{(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)\})$/u.test(word.text))),
     );
   const unknown = (word: string): string => {
     // A `${` with no `}` after it cannot close, and the scan for its close
@@ -5222,7 +5247,14 @@ function printedOutputs(segment: LexSegment): string[] | null {
       // holds no value the text cannot read: an unknown value may decode to
       // `.git` (the fifth and sixth security reviews).
       const printed = words.slice(first).map(decode);
-      if (keeps.slice(first).some((one) => !one) || segment.text.includes("`") || printed.some((word) => word.includes(SUBSTITUTION_SENTINEL))) {
+      // A `\c` stops all output (zsh's `echo`, `echo -e`), which this reading
+      // does not model: it counts (codex's SOURCE HOLD on 101630f2, M2).
+      if (
+        keeps.slice(first).some((one) => !one) ||
+        segment.text.includes("`") ||
+        words.slice(first).some((word) => word.includes("\\c")) ||
+        printed.some((word) => word.includes(SUBSTITUTION_SENTINEL))
+      ) {
         outputs.push("/.git/");
         continue;
       }
@@ -5231,7 +5263,13 @@ function printedOutputs(segment: LexSegment): string[] | null {
     }
     const args = words.map((text, index) => ({ text, keeps: keeps[index] === true, exact: lexed[start + 1 + index]?.exact === true }));
     if (args[0]?.text === "--") args.shift();
-    if (args[0]?.text === "-v") args.splice(0, 2);
+    // `printf -v` sets a variable and prints nothing; what it sets is read
+    // by the line (assignsByPrinter). Its segment is not read, and counts
+    // (review-b's read of #683, N3).
+    if (/^-[A-Za-z]*v/u.test(args[0]?.text ?? "")) {
+      outputs.push("/.git/");
+      continue;
+    }
     const formatWord = args.shift();
     const format = decode(formatWord?.text ?? "");
     // The coarse rule (the fifth security review of the gate's fold, after
@@ -5248,7 +5286,12 @@ function printedOutputs(segment: LexSegment): string[] | null {
       (formatWord !== undefined && !(formatWord.exact && formatWord.keeps)) ||
       args.some((arg) => !arg.keeps) ||
       segment.text.includes("`") ||
-      percents(format) !== percents(formatWord?.text ?? "")
+      percents(format) !== percents(formatWord?.text ?? "") ||
+      // A `\c` (in `%b`'s words, and zsh's format) stops all output, which
+      // this reading does not model: it counts (codex's SOURCE HOLD on
+      // 101630f2, M2).
+      (formatWord?.text ?? "").includes("\\c") ||
+      args.some((arg) => arg.text.includes("\\c"))
     ) {
       outputs.push("/.git/");
       continue;
@@ -5263,6 +5306,10 @@ function printedOutputs(segment: LexSegment): string[] | null {
     // ef0531c0: `%` with many 0 flags, `.0s`, and many words).
     type Conversion = { conversion: string; stars: number; precision: number | null };
     const pieces: (string | Conversion)[] = [];
+    // Which text pieces are a parsed `%%`: a `%` in any other (`%`, `%s%`,
+    // `a%`) is one this reading did not take (codex's SOURCE HOLD on
+    // 101630f2, N1).
+    const parsedPercent = new Set<number>();
     let last = 0;
     // A width starts with 1 to 9 or `*` (a 0 is a flag), so the flag and
     // width runs cannot both take a 0 and a `%` then zeros is read once
@@ -5274,6 +5321,7 @@ function printedOutputs(segment: LexSegment): string[] | null {
       pieces.push(format.slice(last, match.index));
       last = match.index + whole.length;
       if (spec === "%") {
+        parsedPercent.add(pieces.length);
         pieces.push("%");
         continue;
       }
@@ -5288,8 +5336,8 @@ function printedOutputs(segment: LexSegment): string[] | null {
     // precision; any other conversion (`%q`, `%Q`, `%ls`, bash's `%(…)T`) or a
     // `%` this reading did not take counts (the fifth security review).
     if (
-      pieces.some((piece) =>
-        typeof piece === "string" ? piece !== "%" && piece.includes("%") : !/^[sbcd]$/u.test(piece.conversion),
+      pieces.some((piece, at) =>
+        typeof piece === "string" ? !parsedPercent.has(at) && piece.includes("%") : !/^[sbcd]$/u.test(piece.conversion),
       )
     ) {
       outputs.push("/.git/");
@@ -5367,13 +5415,18 @@ function printedOutputs(segment: LexSegment): string[] | null {
  * `$(printf .g; printf it)` is `.git`. Both readings of octal are tried.
  */
 function bodyPrintsGit(segments: readonly LexSegment[]): boolean {
-  const readings = ["", ""];
+  // Readings 2 and 3 read a printer named by its path (`/usr/bin/printf`)
+  // as main did before this fold read it, as an unknown output: a newly read
+  // printer then never makes the body's reading looser than it was (codex's
+  // SOURCE HOLD on 101630f2, M1: `printf .g; /usr/bin/printf x`).
+  const readings = ["", "", "", ""];
   let printed = false;
   segments.forEach((segment, index) => {
     const outputs = printedOutputs(segment);
     const piped = segments[index + 1]?.stdinFed === true;
-    for (const r of [0, 1]) {
-      readings[r] += outputs === null || piped ? SUBSTITUTION_SENTINEL : (outputs[r] as string);
+    const byPath = outputs !== null && printerCommand(segment).byPath;
+    for (const r of [0, 1, 2, 3]) {
+      readings[r] += outputs === null || piped || (r >= 2 && byPath) ? SUBSTITUTION_SENTINEL : (outputs[r % 2] as string);
     }
     if (outputs !== null && !piped) printed = true;
   });
@@ -5560,6 +5613,7 @@ function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): bo
     return (
       ansiCQuotingSpellsGit(segment.text) ||
       ansiCQuotingNearSpellsGit(segment.text) ||
+      assignsByPrinter(segment) ||
       segment.bodySubstitutions.some(bodyNamesGit) ||
       words.some((word, index) => {
         if (word.substitutions.some(bodyNamesGit)) return true;

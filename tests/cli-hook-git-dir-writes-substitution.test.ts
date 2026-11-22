@@ -543,8 +543,9 @@ test("gate M2: printf and echo named by the system's path are read as printf and
   ]) {
     assert.deepEqual(pure(line), [DIR_WRITE], line);
   }
-  // A program at any other path is whatever sits there: its output is unknown.
-  assert.deepEqual(pure('echo x > "$(./printf %.4s .gitfoo)/config"'), [REDIRECT]);
+  // A program by any other path named printf may be the system's own: what
+  // it prints counts (review-b's read of #683, M1).
+  assert.deepEqual(pure('echo x > "$(./printf %.4s .gitfoo)/config"'), [DIR_WRITE]);
   assert.deepEqual(pure('echo x > "$(/usr/bin/printf %s out)/report.txt"'), [REDIRECT]);
 });
 
@@ -669,4 +670,74 @@ test("sixth security review: an unknown value echo, %b or print may decode count
   // Literal echo and printf words keep their reading.
   assert.deepEqual(pure(`echo x > "$(echo out)/report.txt"`), [REDIRECT]);
   assert.deepEqual(pure(`echo x > "$(printf '%b' 'out')/report.txt"`), [REDIRECT]);
+});
+
+test("codex's SOURCE HOLD on 101630f2: a printer named by its path is never read looser than before; \\c; inexact words; a stray %", () => {
+  // M1 (new in this fold): main read `/usr/bin/printf` and `/bin/echo` as an
+  // unknown output, so each of these was git-dir-write there and stays so.
+  for (const line of [
+    `echo x > "$(printf .g; /usr/bin/printf x)/config"`,
+    `echo x > "$(printf .g; /usr/bin/printf it)/config"`,
+    `echo x > "$(printf .g; /bin/echo x)/config"`,
+    `echo x > "$(echo -n .g; /bin/echo -n x)/config"`,
+    `echo x > "$(/bin/echo -n .g; echo -n it)/config"`,
+    `echo x > "$(/usr/bin/printf .g; /usr/bin/printf it)/config"`,
+  ]) {
+    assert.ok(pure(line).includes(DIR_WRITE), line);
+  }
+  // M2 (inherited): a `\c` stops all output; the rest is not printed.
+  for (const line of [
+    `echo x > "$(printf '%b' '.g\\cXXX'; printf it)/config"`,
+    `echo x > "$(echo -e '.g\\cXX'; printf it)/config"`,
+    `echo x > "$(echo '.g\\cXX'; printf it)/config"`,
+    `echo x > "$(printf 'a\\c'; printf it)/config"`,
+  ]) {
+    assert.ok(pure(line).includes(DIR_WRITE), line);
+  }
+  // M3 (inherited): a quoted word whose text is not the shell's.
+  assert.deepEqual(pure(`echo x > "$(printf '%b' "\\x2e""git")/config"`), [DIR_WRITE]);
+  assert.deepEqual(pure(`echo x > "$(printf '%s' "\\x2e""git")/config"`), [DIR_WRITE]);
+  assert.deepEqual(pure(`echo x > "$(printf '%s' "$SHA-x")/config"`), [DIR_WRITE]);
+  // A fully quoted plain scalar keeps its place.
+  assert.deepEqual(pure(`echo x > "$(printf '%s' "$SHA")/config"`), [REDIRECT]);
+  assert.deepEqual(pure(`echo x > "$(printf '%s' "\${SHA}")/config"`), [REDIRECT]);
+  // N1: a `%` printf did not parse counts; a parsed `%%` does not.
+  for (const line of [`echo x > "$(printf %)/config"`, `echo x > "$(printf '%s%' a)/config"`, `echo x > "$(printf 'a%')/config"`]) {
+    assert.ok(pure(line).includes(DIR_WRITE), line);
+  }
+  assert.deepEqual(pure(`echo x > "$(printf '%s%%' a)/config"`), [REDIRECT]);
+  assert.deepEqual(pure(`echo x > "$(printf '%%')/config"`), [REDIRECT]);
+  // Ordinary lines keep their reading.
+  assert.deepEqual(pure(`echo x > "$(/usr/bin/printf .g; printf x)/config"`), [REDIRECT]);
+  assert.deepEqual(pure("echo x > out/$(printf '%s' abc)/config"), [REDIRECT]);
+});
+
+test("review-b's read of #683: a printer by any other path; a colon before the parameter; printf -v", () => {
+  // M1: a path whose last name is printf or echo, but not the system's own
+  // binary written plainly, may still run it: what it prints counts.
+  for (const path of ["/usr/bin//printf", "//usr/bin/printf", "/bin/../usr/bin/printf", "/usr/bin/./printf", "/./usr/bin/printf", "/usr/bin/../bin/printf", "./printf"]) {
+    assert.deepEqual(pure(`echo x > "$(${path} %.4s .gitfoo)/config"`), [DIR_WRITE], path);
+  }
+  assert.ok(pure(`echo x > "$(/bin//echo -n .gi; echo t)/config"`).includes(DIR_WRITE));
+  assert.deepEqual(pure(`echo x > "$(/usr/bin/printf %s out)/config"`), [REDIRECT]);
+  // S1: a word whose first `:` comes before the parameter (zsh reads `$f:r`).
+  assert.ok(pure("mkdir -p :; f=.git.x; echo x > :/../$f:r/config").includes(DIR_WRITE));
+  assert.ok(pure("f=.git.x; echo x > $HOST:8080/$f:r/config").includes(DIR_WRITE));
+  // N1: `printf -v` sets a variable to what it would print; a target the
+  // variable reaches counts.
+  for (const line of [
+    'printf -v d %.4s .gitfoo; echo x > "$d/config"',
+    `printf -v d '\\056git'; mkdir -p "$d/sub"`,
+    'printf -v d %s .git; cd "$d" && echo x > config',
+    // printf by another path.
+    '/usr/bin//printf -v d %s .git; echo x > "$d/config"',
+  ]) {
+    assert.ok(pure(line).includes(DIR_WRITE), line);
+  }
+  // zsh's print is refused as a command already.
+  assert.deepEqual(pure('print -v d .git; echo x > "$d/config"'), ["refused unclassified"]);
+  // N3: in a body, `printf -v` prints nothing; its segment is not read as output.
+  assert.deepEqual(pure(`echo x > "$(printf -v x '%s' y; printf '%.4s' .gitfoo)/config"`), [DIR_WRITE]);
+  // Without -v, a literal target does not move.
+  assert.deepEqual(pure("printf '%s' 1 > out.txt"), [REDIRECT]);
 });
