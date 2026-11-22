@@ -2170,6 +2170,31 @@ const commandClassVectors = [
     description: "a relative write after cd .git/.. lands outside it: an ordinary workspace write (S1 control)",
     input: { command: "cd .git/.. && echo x > notes.txt" },
   },
+  {
+    id: "git-dir-write-glob-target",
+    description: "a glob segment that .git matches is read as naming .git: git-dir-write (APRV-518 second review, S1)",
+    input: { command: "echo x >> .gi?/config" },
+  },
+  {
+    id: "git-dir-write-git-output-option",
+    description: "git's own --output writes a file, so a read verb writing into .git is git-dir-write (APRV-518 second review, S2)",
+    input: { command: "git diff --output=.git/hooks/pre-push" },
+  },
+  {
+    id: "git-dir-write-through-line-variable",
+    description: "a line that sets a variable to .git and writes through it is git-dir-write (APRV-518 second review, S3)",
+    input: { command: "D=.git; echo x >> $D/config" },
+  },
+  {
+    id: "git-dir-write-read-output-word",
+    description: "a read-class command's own output word into .git is git-dir-write (APRV-518 follow-up, item B)",
+    input: { command: "sort x -o .git/config" },
+  },
+  {
+    id: "git-dir-read-redirected-elsewhere-unmoved",
+    description: "a read of .git whose redirection writes elsewhere is a workspace write, not git-dir-write (APRV-518 follow-up, item A control)",
+    input: { command: "cat .git/HEAD > /tmp/x" },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",
@@ -5515,8 +5540,14 @@ const SUITES = [
     // and no-rule abstain checks added on 0.4.8 move no vector. The review
     // fold adds four more (sixteen in all, 370 vectors): a relative write after
     // `cd .git`, a bare redirection, an attached `-o` value, and the
-    // `cd .git/..` control. Still 1.10.0: the number is claimed at merge.
-    vectors_version: "1.10.0",
+    // `cd .git/..` control. 1.10.0 was claimed at merge with those 370.
+    // 1.11.0 (APRV-518 follow-up): MINOR again, five new vectors and no
+    // expectation moved: a glob target, git's own `--output`, a write through
+    // a variable the line sets to `.git`, a read's own output word (`sort -o`)
+    // into `.git`, and a read of `.git` redirected elsewhere, which is the
+    // workspace write 0.4.8 called it. Regenerating over main's 1.10.0 leaves
+    // all 370 byte-identical.
+    vectors_version: "1.11.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:

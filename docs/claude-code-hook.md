@@ -962,6 +962,46 @@ write after an unknown change is judged from the places the hook can name, as
 move ordinary lines (`cd "$D" && echo x > f` is autonomous today), so it waits
 for the owner.
 
+Patterns, git's own options and the line itself count too. A glob or brace
+target is read as a pattern: `.gi?/config`, `.[g]it/config` and
+`.g{i,}t/config` name `.git` (a POSIX class in brackets may match anything,
+and `*` or `?` never match a leading dot, so `cd *` does not), and the hook
+expands a pattern on disk and walks each matching directory or link. Past
+100,000 entries, or under a directory it cannot list, a sure target is
+judged the strict way. git's own options that write a file are write
+targets: `--output` of `diff`, `log`, `show` and every verb that takes it,
+`apply --directory` and `--build-fake-ancestor`, `worktree add <path>`, and
+`clone <dir>` and `--separate-git-dir`, read by any prefix of one letter or
+more, as git's option parser reads `apply` and `clone`. `format-patch`,
+`archive`, `bundle`, `init` and `config --file` have no row and stay refused.
+A read-class command that names a file it writes takes the same rules for
+that file: `sort -o` / `--output`, `uniq`'s second operand and `tree -o`;
+its class is otherwise a read. A sed script is not parsed, since every
+hand-written reading differs from BSD's or GNU's somewhere: a script with a
+`w` or `W` anywhere may write, and the rest of each such line and every
+word of the script are possible targets under the same rules, each judged
+both as its literal text (sed expands nothing in a `w` name) and as a shell
+word (the shell expands an unquoted script word first), a hit from either
+counting. This Mac's
+sed has no `e` command (GNU sed's runs a shell command); a script holding
+one is judged by the same text rule and is otherwise a read.
+A read whose only write is its redirection writes nothing through its own
+words, so `cat .git/HEAD > /tmp/x` is a workspace write and only a
+redirection into `.git` is `git-dir-write`. On a line that spells `.git` in
+an assignment's value (a pattern counts), a command substitution or a quoted
+string, a target that expands, or a relative one after a directory change
+the text cannot place, is `git-dir-write`. At hook level a copy or move
+whose source is a tree with a `.git` entry at its top (`cp -R /x/. .`,
+`rsync -a /x/ .`) is too.
+
+Known limits: a variable set in an EARLIER call, or a value built from
+several expansions on the line (`A=.g; B=it; cd $A$B`), cannot be seen; an
+archive unpacked into the checkout (`tar -xf`, `unzip`) is judged by its
+named directory only, not by what the archive holds; a git include file
+(`~/.gitconfig.local`, a path named by `include.path`) is judged as an
+ordinary file; a `sed -f` script file is not read. The push pass does not
+read `core.hooksPath`.
+
 **The hook reads the checkout before it answers a push.** After the pure
 classifier, `refinePushRepo` (`src/cli/push-repo.ts`) re-reads every `git push`
 segment under what the checkout says: `git rev-parse --git-common-dir`, `git

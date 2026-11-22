@@ -440,6 +440,8 @@ test("round 2, (2): after a segment that may change HOME, CDPATH, OLDPWD or PWD,
 
 test("round 2, (3): forms the hook does not model are unknown, never placed", { skip }, () => {
   const repo = checkout();
+  // A glob is expanded on disk (second review): with two matches it is unknown.
+  mkdirSync(join(repo, "sub2"));
   for (const command of [
     "cd a b && echo x > f",
     "cd +1 && echo x > f",

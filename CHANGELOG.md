@@ -121,6 +121,57 @@ ordinary workspace write.
   Conformance: `command-class` 1.10.0 (from 1.9.0), sixteen new vectors;
   main's 354 are byte-identical. The fleet's 63 overlay recipes are unmoved.
 
+**More ways to `.git` closed, and a read of `.git` no longer counted as a
+write into it (APRV-518 follow-up).** Each of these was as loose on 0.4.8 as
+on the change above.
+
+- **A glob or brace target.** A write or `cd` target segment holding `*`,
+  `?`, `[...]` or `{a,b}` is read as a pattern, and `.git` matching it is
+  `git-dir-write` (`.gi?/config`, `.[g]it/config`, `.g{i,}t/config`, `cd
+  .gi? && ...`). `*` and `?` never match a leading dot, so `cd *` and `rm
+  *.log` do not move. The hook expands a pattern on disk and walks every
+  matching directory and link; past 100,000 entries, or under a directory it
+  cannot list, a sure target is judged the strict way. Brace groups are found
+  in one pass over the word: scanning from every `{` to its close took 3.7 CPU
+  seconds on `{` x 40,000, `a`, `}` x 40,000, and a line of about 320 KB
+  could outrun the hook's timeout.
+- **git's own write options.** `--output` (`git log --output=.git/config` was
+  a read), `apply --directory` and `--build-fake-ancestor`, `worktree add
+  <path>`, and `clone <dir>` and `--separate-git-dir` are write targets, read
+  by any prefix of one letter or more.
+- **A read-class command's own output.** `sort -o` / `--output`, `uniq`'s
+  second operand and `tree -o` name a file they write; that file takes the
+  `.git` rules. A sed script is not parsed: one with a `w` or `W` anywhere
+  has the rest of each such line and every word as possible targets, each
+  judged both as literal text and as a shell word (`sed -n "w .git/config"
+  x`, `sed -n -e w.g{i,}t/config x`). Their class is otherwise unchanged:
+  `sort -o out.txt in.txt` is still a read.
+- **`.git` through the line.** On a line that spells `.git` in an
+  assignment's value (a pattern counts), a command substitution or a quoted
+  string, a target that expands (`D=.git; echo x >> $D/config`) or a
+  relative one after a `cd` the text cannot place is `git-dir-write`.
+- **A tree that carries `.git`.** In the hook, a copy or move whose source
+  holds a `.git` entry at its top (`cp -R /x/. .`, `rsync -a /x/ .`) is
+  `git-dir-write`.
+- **Looser than the change above, by design.** A read whose only write is its
+  redirection writes nothing through its own words: `cat .git/HEAD > /tmp/x`,
+  `ls .git/hooks > list.txt` and the like are the workspace write 0.4.8 called
+  them, not `git-dir-write`. A redirection into `.git`, and a non-read with a
+  `.git` operand (`cp .git/config /tmp/c`), stay `git-dir-write`.
+- **Known limits.** A variable set in an earlier call, or a value built from
+  several expansions (`A=.g; B=it; cd $A$B`); an archive unpacked into the
+  checkout (`tar -xf`, `unzip`); a git include file (`~/.gitconfig.local`);
+  a `sed -f` script file; the push pass does not read `core.hooksPath`; and,
+  as above, a relative write after a `cd` the hook cannot place.
+- **Evidence.** Against 0.4.8's build, 0 looser under this repository's
+  APPROVAL.md and the overlay's template policy: 23,823 lines pure (142,938
+  comparisons, 13,982 stricter) and 2,837 lines through the hook in thirteen
+  checkout states (147,524 comparisons, 21,690 stricter). Against main as
+  merged, the only looser lines are the five reads redirected elsewhere
+  above. Conformance: `command-class` 1.11.0 (from 1.10.0), five new
+  vectors; main's 370 are byte-identical. The fleet's 63 overlay recipes are
+  unmoved.
+
 ### Added
 
 - **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536).**
