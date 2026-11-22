@@ -432,3 +432,30 @@ test("security review g to q: every operator that transforms a value counts", ()
   assert.deepEqual(pure('cat "${f%.txt}.log"'), [READ_SHELL]);
   assert.deepEqual(pure('echo "${f%.txt}" > names.txt'), [REDIRECT]);
 });
+
+test("source review S1: printf's precision cuts a string; a * width or precision is not modelled", () => {
+  for (const line of [
+    `echo x > "$(printf '%.4s' '.gitfoo')/config"`,
+    `echo x > "$(printf '%.4b' '.gitfoo')/config"`,
+    `echo x > "$(printf '%.*s' 4 '.gitfoo')/config"`,
+    `echo x > "$(printf '%*s' 4 x)/config"`,
+  ]) {
+    assert.ok(pure(line).includes(DIR_WRITE), line);
+  }
+  // A precision that cuts no .git, a width, and a number do not move.
+  assert.deepEqual(pure(`echo x > "$(printf '%s' '.gitfoo')/config"`), [REDIRECT]);
+  assert.deepEqual(pure(`echo x > "$(printf '%.3s' report.txt)"`), [REDIRECT]);
+  assert.deepEqual(pure(`echo x > "$(printf '%5s' abc)/config"`), [REDIRECT]);
+  assert.deepEqual(pure(`echo x > "out-$(printf '%05d' 7).log"`), [REDIRECT]);
+});
+
+test("source review S2: an ANSI-C string ends at a NUL, and a substitution drops NULs", () => {
+  for (const line of [
+    "echo x > $'.g\\0junk'it/config",
+    "echo x > $'.g\\x00junk'it/config",
+    `echo x > "$(printf '.g\\0it')/config"`,
+  ]) {
+    assert.ok(pure(line).includes(DIR_WRITE), line);
+  }
+  assert.deepEqual(pure("echo x > $'notes\\0junk'.md"), [REDIRECT]);
+});

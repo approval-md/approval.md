@@ -4933,6 +4933,21 @@ function decodeBackslashEscapes(text: string, zeroOctal: boolean): string {
 }
 
 /**
+ * An ANSI-C string ends at a decoded NUL (bash keeps nothing after it in that
+ * quote; the word goes on after the closing quote): `$'.g\0junk'it` is `.git`
+ * (#680's source review, S2).
+ */
+function cutAtNul(decoded: string): string {
+  const at = decoded.indexOf("\0");
+  return at === -1 ? decoded : decoded.slice(0, at);
+}
+
+/** A command substitution drops the NUL bytes of its output: `$(printf '.g\0it')` is `.git`. */
+function dropNuls(decoded: string): string {
+  return decoded.replace(/\0/gu, "");
+}
+
+/**
  * The first, broader reading of an ANSI-C quoted string, kept beside
  * {@link ansiCQuotingSpellsGit} so the fold only adds: every `$'` of the raw
  * text, quotes around it or not, decoded with up to five characters on
@@ -4953,8 +4968,11 @@ function ansiCQuotingNearSpellsGit(raw: string): boolean {
     const before = raw.slice(from, open).replace(/["']/gu, "");
     const after = raw.slice(close + 1, to).replace(/["']/gu, "");
     const body = raw.slice(open + 2, close);
-    if (GIT_SEGMENT_IN_TEXT.test(`${before}${decodeBackslashEscapes(body, false)}${after}`)) return true;
-    if (GIT_SEGMENT_IN_TEXT.test(`${before}${decodeBackslashEscapes(body, true)}${after}`)) return true;
+    for (const zeroOctal of [false, true]) {
+      const decoded = decodeBackslashEscapes(body, zeroOctal);
+      if (GIT_SEGMENT_IN_TEXT.test(`${before}${cutAtNul(decoded)}${after}`)) return true;
+      if (GIT_SEGMENT_IN_TEXT.test(`${before}${dropNuls(decoded)}${after}`)) return true;
+    }
   }
   return false;
 }
@@ -5027,7 +5045,7 @@ function ansiCQuotingSpellsGit(raw: string): boolean {
       if (close >= raw.length) return true;
       const body = raw.slice(at + 2, close);
       for (const r of [0, 1]) {
-        const decoded = decodeBackslashEscapes(body, r === 1);
+        const decoded = cutAtNul(decodeBackslashEscapes(body, r === 1));
         text[r] += decoded;
         glob[r] += quotedForGlob(decoded);
       }
@@ -5108,7 +5126,7 @@ function printedOutputs(segment: LexSegment): string[] | null {
     word.replace(/\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@*#?$!-]|`[^`]*`/gu, SUBSTITUTION_SENTINEL);
   const outputs: string[] = [];
   for (const zeroOctal of [false, true]) {
-    const decode = (word: string): string => decodeBackslashEscapes(unknown(word), zeroOctal);
+    const decode = (word: string): string => dropNuls(decodeBackslashEscapes(unknown(word), zeroOctal));
     if (name === "echo") {
       let newline = "\n";
       while (words.length > 0 && /^-[neE]+$/u.test(words[0] as string)) {
@@ -5128,10 +5146,20 @@ function printedOutputs(segment: LexSegment): string[] | null {
       let took = false;
       out += format.replace(/%(%|[-+ #0]*[0-9*]*(?:\.[0-9*]*)?([a-zA-Z]))/gu, (whole, spec: string, conversion: string | undefined) => {
         if (spec === "%") return "%";
+        // A `*` width or precision takes its value from an argument: the
+        // output is not modelled, and counts as naming `.git` (#680's source
+        // review, S1). A literal precision cuts a string, as printf does:
+        // `%.4s` of `.gitfoo` is `.git`. A width only pads with blanks.
+        if (spec.includes("*")) {
+          took = true;
+          return "/.git/";
+        }
+        const precision = /\.([0-9]*)[a-zA-Z]$/u.exec(spec);
+        const cut = (text: string): string => (precision === null ? text : text.slice(0, Number(precision[1] || "0")));
         const arg = args.shift();
         if (arg !== undefined) took = true;
-        if (conversion === "s" || conversion === "q") return unknown(arg ?? "");
-        if (conversion === "b") return decode(arg ?? "");
+        if (conversion === "s" || conversion === "q") return cut(unknown(arg ?? ""));
+        if (conversion === "b") return cut(decode(arg ?? ""));
         if (conversion === "c") return unknown(arg ?? "").slice(0, 1);
         return SUBSTITUTION_SENTINEL;
       });
@@ -5280,7 +5308,7 @@ function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): bo
     }
     // `printf '\x2egit'`, `echo -e '\0056git'`: escapes a command in the body
     // may decode, read both ways octal is written.
-    if (body.includes("\\") && (GIT_SEGMENT_IN_TEXT.test(decodeBackslashEscapes(body, false)) || GIT_SEGMENT_IN_TEXT.test(decodeBackslashEscapes(body, true)))) {
+    if (body.includes("\\") && [false, true].some((zeroOctal) => GIT_SEGMENT_IN_TEXT.test(dropNuls(decodeBackslashEscapes(body, zeroOctal))))) {
       return true;
     }
     const lexed = lex(body);

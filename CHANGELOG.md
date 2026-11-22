@@ -166,7 +166,9 @@ on the change above.
   --show-toplevel` or `--short`. A substitution's body is read as a line of
   its own, and a `bash -lc` script reads its own text too. Two more count:
   an escape that decodes to `.git`, in an ANSI-C quoted string
-  (`$'\x2egit'`) or a substitution body (`$(printf '\x2egit')`), and the
+  (`$'\x2egit'`) or a substitution body (`$(printf '\x2egit')`; an ANSI-C
+  string ends at a NUL, a substitution drops NULs, and printf's precision
+  cuts a string, `%.4s` of `.gitfoo` being `.git`), and the
   word a parameter expansion may carry (`${VAR:-.git}`, `${VAR=.git}`,
   `${VAR:+.git}`). After a security review both fail closed: a word with
   `$'…'` is read quote by quote and joined, an unclosed quote counts, what
