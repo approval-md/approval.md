@@ -650,6 +650,13 @@ export function boxHeld(calls, allowlist) {
 }
 
 /**
+ * P1's `autonomyOf` over a loaded template: the class's resolved autonomy, and
+ * with `{ reversible: false }` the autonomy core's SPEC section 7 floor gives an
+ * irreversible propose of it (APRV-537).
+ */
+export const templateAutonomyOf = (core, load) => (cls, options = {}) => core.resolve(load, cls, options).autonomy;
+
+/**
  * B-167N: the envelopes and proposes a box runs for the new-calls check: every
  * corpus envelope (with its declared input when an entry names it), and every
  * entry's propose. `onlyDeclared` keeps just the declared ones (the matrix).
@@ -667,7 +674,7 @@ export function newCallJobs(c, validated, onlyDeclared = false) {
   }
   const proposals = validated.entries
     .filter((v) => v.entry.propose !== undefined && v.entry.propose !== null && typeof v.entry.propose === "object")
-    .map((v) => ({ key: `${v.key}#propose`, cls: v.entry.propose.class, actionKey: v.entry.propose.key, summary: v.entry.propose.summary, payload: v.entry.propose.payload, where: v.entry.propose.source, accepts: Array.isArray(v.entry.propose.accepts) ? v.entry.propose.accepts : null }));
+    .map((v) => ({ key: `${v.key}#propose`, cls: v.entry.propose.class, actionKey: v.entry.propose.key, summary: v.entry.propose.summary, payload: v.entry.propose.payload, where: v.entry.propose.source, accepts: Array.isArray(v.entry.propose.accepts) ? v.entry.propose.accepts : null, irreversible: v.entry.propose.irreversible === true }));
   return { envelopes, proposals };
 }
 
@@ -904,7 +911,7 @@ async function main() {
       }
       // Review M1: the calls a gated pattern may reach besides the corpus envelopes.
       const harness = { names: harnessCalls(toolsCandidate).map((c) => c.tool), matches: toolsCandidate.map((l) => String(l.match)) };
-      const result = judgeNewCalls({ corpus, tagCorpus, validated, head: after, cells, movedKeys, autonomyOf: (cls) => core.resolve(after.load, cls).autonomy, harness });
+      const result = judgeNewCalls({ corpus, tagCorpus, validated, head: after, cells, movedKeys, autonomyOf: templateAutonomyOf(core, after.load), harness });
       const meta = { core: core.version, tagLabel: arg("--tag-label") ?? `overlay ${tagCorpus.overlay.sha.slice(0, 12)}` };
       newCalls = { meta, result };
       if (result.findings.length > 0) {

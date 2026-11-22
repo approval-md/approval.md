@@ -290,10 +290,10 @@ jobs:
       PIN_CORPUS: "069cae876367a6c65613a645bbece0212583dde3d6e186454d5d4a9f287cb1c4"
       PIN_ALLOWLIST: "e1d73a1af14cc3c80e87b6d36409721e4a511a9e99d5f5283d9f1588e9ae64ac"
       PIN_EXPECTED: "bb56b15408997e42c3019cc8f445056c6e0bcd51a3465206d0752095123e5fd5"
-      PIN_CHECK: "322e7c86d0fbafc0953b18719ab8b2aab8dc0b60532d290559e3ccd2833fd4d3"
-      PIN_BOX: "b9ab914808913bef08a22e0225e2024898be72a775fa34b9a85e0b5c60bb29cb"
-      PIN_EXTRACT: "41fa596e60b1260cd18127f060bd46edec8a440381b0e985ca89a928f536a1cc"
-      PIN_NEWCALLS: "e4415f968a16d5d11395a7d896aefddf437c85414fbe17ff7f9f6b5a26710b22"
+      PIN_CHECK: "79a523a10c1d7cef2c7fd5466953745809316451224ddc657b21ec2cdbc80bd9"
+      PIN_BOX: "e2c4060c2a1c99cd2008eb4d926bd6579378d2f43bdaeffe71a4d8ff19552a5e"
+      PIN_EXTRACT: "ff3dbcaf87d865bba159c357e278f6de73dd64907106163a3a3cc210f5cedd7a"
+      PIN_NEWCALLS: "9a5e5e5b348fcb084324a95c03f23872b40169df2c1b82f98e0cf4eabddb1908"
     steps:
       # Depth 2: HEAD^1 is the base the change is measured against (a pull
       # request's merge commit's first parent, the queue's base, or the main a

@@ -597,6 +597,7 @@ export function commandPropose(argv: string[], streams: Streams, cwd: string): n
       "--key": "string",
       "--summary": "string",
       "--payload-json": "string",
+      "--irreversible": "boolean",
     },
     PROPOSE_HELP,
     streams,
@@ -636,7 +637,14 @@ export function commandPropose(argv: string[], streams: Streams, cwd: string): n
 
   const result = propose(
     logPath,
-    { cls, actionKey: key, summary, payload: payload.value },
+    {
+      cls,
+      actionKey: key,
+      summary,
+      payload: payload.value,
+      // SPEC.md §7's floor for this key; absent leaves the class's own autonomy.
+      ...(boolFlag(flags, "--irreversible") ? { irreversible: true } : {}),
+    },
     actor,
     gateOptions(flags, cwd),
   );
