@@ -5106,6 +5106,9 @@ function ansiCQuotingSpellsGit(raw: string): boolean {
 /** The most characters of a `printf` body's output that are rendered. */
 const PRINTED_OUTPUT_LIMIT = 65_536;
 
+/** A private-use mark {@link printedOutputs} sets an unclosed `${` aside with. */
+const SET_ASIDE = String.fromCharCode(0xe000);
+
 /**
  * What `printf` or `echo` in a substitution body may print (review of the
  * substitution fold, S1, and its security review, point c), read from the
@@ -5118,33 +5121,57 @@ const PRINTED_OUTPUT_LIMIT = 65_536;
  * `.git`. `null` when the segment runs neither.
  */
 function printedOutputs(segment: LexSegment): string[] | null {
-  const words = segment.words.slice(bashAssignmentCount(segment.words)).map((word) => word.text);
-  while (words[0] === "command" || words[0] === "builtin") words.shift();
-  const name = (words.shift() ?? "").toLowerCase();
+  const all = segment.words.slice(bashAssignmentCount(segment.words)).map((word) => word.text);
+  // Read by index, not by shifts: a run of thousands of `command` or `-n`
+  // words then costs its length, not its square (review-b's M1 on b085cd91).
+  let start = 0;
+  while (all[start] === "command" || all[start] === "builtin") start += 1;
+  const name = (all[start] ?? "").toLowerCase();
+  const words = all.slice(start + 1);
   if (name !== "echo" && name !== "printf") return null;
-  const unknown = (word: string): string =>
-    word.replace(/\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@*#?$!-]|`[^`]*`/gu, SUBSTITUTION_SENTINEL);
+  const unknown = (word: string): string => {
+    // A `${` with no `}` after it cannot close, and the scan for its close
+    // would run to the end from each one (review-b's M1 on b085cd91: 500 KB
+    // of `${` took 114 s). Each is set aside first, then put back as text.
+    const close = word.lastIndexOf("}");
+    const tail = word.slice(close + 1);
+    const setAside = tail.includes("${");
+    // The mark itself in such a word: not read, and counts (the strict side).
+    if (setAside && word.includes(SET_ASIDE)) return "/.git/";
+    const text = setAside ? `${word.slice(0, close + 1)}${tail.replaceAll("${", `$${SET_ASIDE}`)}` : word;
+    const read = text.replace(/\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@*#?$!-]|`[^`]*`/gu, SUBSTITUTION_SENTINEL);
+    return setAside ? read.replaceAll(`$${SET_ASIDE}`, "${") : read;
+  };
   const outputs: string[] = [];
   for (const zeroOctal of [false, true]) {
     const decode = (word: string): string => dropNuls(decodeBackslashEscapes(unknown(word), zeroOctal));
     if (name === "echo") {
       let newline = "\n";
-      while (words.length > 0 && /^-[neE]+$/u.test(words[0] as string)) {
-        if ((words.shift() as string).includes("n")) newline = "";
+      let first = 0;
+      while (first < words.length && /^-[neE]+$/u.test(words[first] as string)) {
+        if ((words[first] as string).includes("n")) newline = "";
+        first += 1;
       }
-      outputs.push(`${words.map(decode).join(" ")}${newline}`);
+      outputs.push(`${words.slice(first).map(decode).join(" ")}${newline}`);
       continue;
     }
     const args = [...words];
     if (args[0] === "--") args.shift();
     if (args[0] === "-v") args.splice(0, 2);
     const format = decode(args.shift() ?? "");
+    // The words are read by index: a shift per conversion made a line of
+    // many words cost the square of its length (review-b's M1 on b085cd91).
+    let next = 0;
+    const take = (): string | undefined => (next < args.length ? args[next++] : undefined);
     let out = "";
     // Each pass of the format takes words; it repeats while words are left,
     // as printf does, and stops once a pass takes none.
-    for (let pass = 0; pass === 0 || args.length > 0; pass += 1) {
+    for (let pass = 0; pass === 0 || next < args.length; pass += 1) {
       let took = false;
-      out += format.replace(/%(%|[-+ #0]*[0-9*]*(?:\.[0-9*]*)?([a-zA-Z]))/gu, (whole, spec: string, conversion: string | undefined) => {
+      // A width starts with 1 to 9 or `*` (a 0 is a flag), so the flag and
+      // width runs cannot both take a 0 and a `%` then zeros is read once
+      // (review-b's M1 on b085cd91: 250 KB of them took 64 s).
+      out += format.replace(/%(%|[-+ #0]*(?:[1-9*][0-9*]*)?(?:\.[0-9*]*)?([a-zA-Z]))/gu, (whole, spec: string, conversion: string | undefined) => {
         if (spec === "%") return "%";
         // A `*` width or precision takes its value from an argument: the
         // output is not modelled, and counts as naming `.git` (#680's source
@@ -5154,7 +5181,7 @@ function printedOutputs(segment: LexSegment): string[] | null {
           // Each `*` takes an argument, as the conversion does, so the passes
           // end once the words run out (codex's cost note on 09a3acd7).
           for (let star = spec.split("*").length - 1; star >= 0; star -= 1) {
-            if (args.shift() !== undefined) took = true;
+            if (take() !== undefined) took = true;
           }
           return "/.git/";
         }
@@ -5171,7 +5198,7 @@ function printedOutputs(segment: LexSegment): string[] | null {
             : text.includes(SUBSTITUTION_SENTINEL) || /[\u0080-\u{10FFFF}]/u.test(text)
               ? "/.git/"
               : text.slice(0, Number(precision[1] || "0"));
-        const arg = args.shift();
+        const arg = take();
         if (arg !== undefined) took = true;
         if (conversion === "s" || conversion === "q") return cut(unknown(arg ?? ""));
         // `%b` cuts the decoded bytes, NULs still in them, and the
@@ -5231,6 +5258,9 @@ function bodyPrintsGit(segments: readonly LexSegment[]): boolean {
   );
 }
 
+/** How many `${` levels {@link expansionWordNamesGit} reads; a deeper word counts as naming `.git`. */
+const EXPANSION_READ_DEPTH = 32;
+
 /**
  * Does a parameter expansion in this word carry `.git` (review of the
  * substitution fold, S2, and its security review, points d and e)? Each
@@ -5257,6 +5287,11 @@ function expansionWordNamesGit(text: string): boolean {
   for (let at = 0; at < text.length; at += 1) {
     const char = text[at] as string;
     if (char === "$" && text[at + 1] === "{") {
+      // Each closing `}` reads its whole word again, so past
+      // EXPANSION_READ_DEPTH levels the word counts as naming `.git`, the
+      // strict side, and the cost stays the line's length times the depth
+      // (review-b's M1 on b085cd91: 20,000 levels took 90 s).
+      if (open.length > EXPANSION_READ_DEPTH) return true;
       open.push("");
       at += 1;
       continue;

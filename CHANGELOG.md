@@ -188,6 +188,10 @@ on the change above.
   characters a pattern segment counts as naming `.git`; substitution bodies
   are read for `.git` to 64 levels of nesting, and a deeper one counts; past
   128 levels a line is refused (`opaque`), where it used to throw near 1,250.
+  The same holds for the readers of parameter words and of what `printf`
+  and `echo` print: a word is read to 32 levels of `${`, and a deeper one
+  counts; a `%` then zeros, an unclosed `${` run, and many words or flags
+  are each read once (each took 64 to 174 s through the hook before).
 - **Looser than the change above, by design.** A read whose only write is its
   redirection writes nothing through its own words: `cat .git/HEAD > /tmp/x`,
   `ls .git/hooks > list.txt` and the like are the workspace write 0.4.8 called

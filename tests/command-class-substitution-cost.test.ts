@@ -202,6 +202,43 @@ test("cost: deep nesting is read once, and refused past 128 levels", () => {
   for (const n of [64, 100]) bounded(`echo x > "${`$(echo ${fat} `.repeat(n)}x${")".repeat(n)}"`, `nesting ${String(n)}, wide words`);
 });
 
+test("cost: review-b's shapes on b085cd91 (nested defaults, printf and echo bodies) are bounded", () => {
+  const P = "git push --force && ";
+  // Each took 64 to 174 CPU s through the hook on b085cd91; main took under 0.6.
+  for (const n of [2000, 20000]) {
+    bounded(`${P}echo x > ${"${a:-y$(pwd)".repeat(n)}x${"}".repeat(n)}`, `nested defaults with outputs, n=${String(n)}`);
+  }
+  for (const n of [25000, 250000]) {
+    bounded(`${P}echo x > "$(printf %${"0".repeat(n)})"`, `printf % then zeros, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf %.${"1".repeat(n)})"`, `printf %. then digits, n=${String(n)}`);
+    bounded(`${P}echo x > "$(echo '${"${".repeat(n)}')"`, `echo of unclosed \${, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf %s '${"${".repeat(n)}')"`, `printf %s of unclosed \${, n=${String(n)}`);
+  }
+  for (const n of [40000, 400000]) {
+    bounded(`${P}echo x > "$(printf '%.0s'${" a".repeat(n)})"`, `printf %.0s of many words, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf '%s'${" a".repeat(n)})"`, `printf %s of many words, n=${String(n)}`);
+    bounded(`${P}echo x > "$(echo${" -n".repeat(n)} a)"`, `echo of many flags, n=${String(n)}`);
+    bounded(`${P}echo x > "$(${"command ".repeat(n)}printf a)"`, `many command words, n=${String(n)}`);
+  }
+});
+
+test("cost: the bounded readers answer as before under their bounds", () => {
+  // Read to 32 levels of `${`; a deeper word counts as naming .git.
+  const nest = (n: number, inner: string): string => `echo x > ${"${a:-".repeat(n)}${inner}${"}".repeat(n)}/f`;
+  assert.deepEqual(pure(nest(32, "out")), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(pure(nest(32, ".git")), [DIR_WRITE]);
+  assert.deepEqual(pure(nest(33, "out")), [DIR_WRITE]);
+  // An unclosed `${` set aside is put back as text: what it prints still counts.
+  assert.deepEqual(pure(`echo x > "$(printf '%s' 'a${"${".repeat(3)} .git')"`), [DIR_WRITE]);
+  assert.deepEqual(pure(`echo x > "$(printf '%s' 'a\${b} c')"`), ["files.write.workspace redirect-write"]);
+  // A 0 after the % is a flag, a width after it pads: neither prints .git.
+  assert.deepEqual(pure(`echo x > "$(printf '%05s' a)"`), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(pure(`echo x > "$(printf '%05.4s' .gitfoo)/config"`), [DIR_WRITE]);
+  // echo's flags are read by index and still decode.
+  assert.deepEqual(pure(`echo x > "$(echo -n -e '\\x2egit')/config"`), [DIR_WRITE]);
+  assert.deepEqual(pure(`echo x > "$(echo -n -e 'out')/config"`), ["files.write.workspace redirect-write"]);
+});
+
 test("cost: through the hook, in a checkout, the same lines are bounded", { skip }, () => {
   const repo = join(scratch, "repo");
   mkdirSync(repo, { recursive: true });
@@ -215,6 +252,9 @@ test("cost: through the hook, in a checkout, the same lines are bounded", { skip
     ["* run", `git push --force && echo x > .${"*".repeat(1000)}x`],
     ["*a run against a long name on disk", `git push --force && echo x > ${"*a".repeat(6)}b/f`],
     ["nesting", `git push --force && echo x > "${"$(echo ".repeat(10000)}x${")".repeat(10000)}"`],
+    ["nested defaults with outputs", `git push --force && echo x > ${"${a:-y$(pwd)".repeat(20000)}x${"}".repeat(20000)}`],
+    ["printf % then zeros", `git push --force && echo x > "$(printf %${"0".repeat(250000)})"`],
+    ["echo of unclosed ${", `git push --force && echo x > "$(echo '${"${".repeat(250000)}')"`],
   ] as const) {
     notAlreadyOver(`hook, ${label}`);
     const seconds = cpuSeconds(() => {
