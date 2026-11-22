@@ -274,6 +274,12 @@ test("cost: review-b's M2 on 2f4100fc, brace groups beside outputs to 1 MB, is b
   nearControl(ranges, noOutputs(ranges), "one-alternative ranges beside outputs, n=20000");
   const rangesInDefault = `${P}echo x > \${a:-${"{1..1}$(pwd)".repeat(10000)}}`;
   nearControl(rangesInDefault, literalWrap("{1..1}$(pwd)".repeat(10000)), "the same in a default word, n=10000");
+  // review-b's M3 on 689d4f88: a printed glob was read by the unbounded
+  // reader. Spelled with escapes, so main's own body check skips it: 0.11 CPU s
+  // at 20,000 groups, 19 unbounded.
+  for (const n of [5000, 20000]) {
+    bounded(`${P}echo x > "$(printf '${"\\x7ba..a\\x7d".repeat(n)}*')"`, `a printed glob of one-alternative groups, n=${String(n)}`);
+  }
   assert.deepEqual(pure("echo x >> .g{i..i}$(pwd)t/config"), [DIR_WRITE]);
   // The step bound: 63 groups of one alternative finish, 64 count; in a word
   // an outputs' join reads, and in a word a default rewrites (bash 3.2 reads
@@ -321,6 +327,9 @@ test("cost: through the hook, in a checkout, the same lines are bounded", { skip
     ["nested defaults with outputs", `git push --force && echo x > ${"${a:-y$(pwd)".repeat(20000)}x${"}".repeat(20000)}`],
     ["printf % then zeros", `git push --force && echo x > "$(printf %${"0".repeat(250000)})"`],
     ["echo of unclosed ${", `git push --force && echo x > "$(echo '${"${".repeat(250000)}')"`],
+    // 1,000 groups: past about 3,000 the hook's own credential pass (main's
+    // globRegex) throws building its expression, before this reader is timed.
+    ["a printed glob of one-alternative groups", `git push --force && echo x > "$(printf '${"\\x7ba..a\\x7d".repeat(1000)}*')"`],
     ["one-alternative ranges beside outputs", `git push --force && echo x > ${"{a..a}$(pwd)".repeat(2000)}`],
     ["brace groups and outputs, 100 KB", `git push --force && echo x > ${"{a,b}$(pwd)".repeat(9000)}`],
     ["printf %0..0.0s of many words",`git push --force && echo x > "$(printf '%${"0".repeat(20000)}.0s'${" a".repeat(20000)})"`],

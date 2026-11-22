@@ -5309,7 +5309,8 @@ function bodyPrintsGit(segments: readonly LexSegment[]): boolean {
           .split(SUBSTITUTION_SENTINEL)
           .join(" ")
           .split(/\s+/u)
-          .some((word) => /[*?[]/u.test(word) && mayNameGitDirectory(word)),
+          // Bounded, as the fold's other readers are (review-b's M3 on 689d4f88).
+          .some((word) => /[*?[]/u.test(word) && mayNameGitDirectoryBounded(word)),
     )
   );
 }
