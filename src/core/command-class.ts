@@ -8353,7 +8353,7 @@ function maskParameters(word: string): { text: string; held: string[] } {
         }
       }
       held.push(word.slice(at, end + 1));
-      text += `$\u0000${held.length - 1}\u0000`;
+      text += `$\uE000${held.length - 1}\uE000`;
       at = end;
     } else {
       text += word[at];
@@ -8580,7 +8580,7 @@ function globGuardClass(word: string, protectedPaths: readonly ProtectedPathEntr
     for (const expansion of expansions) {
       const masked = maskParameters(expansion);
       const unmask = (path: string): string =>
-        path.replace(/\$\u0000(\d+)\u0000/gu, (_, index: string) => masked.held[Number(index)] ?? "");
+        path.replace(/\$\uE000(\d+)\uE000/gu, (_, index: string) => masked.held[Number(index)] ?? "");
       const segments = masked.text.split("/");
       if (segments.length > GLOB_GUARD_SEGMENTS_CAP) return "log.mutate";
       const choices: string[][][] = segments.map((segment) => {

@@ -17,6 +17,31 @@ before a tag.
 
 ### Security
 
+**A glob in a write target to a guarded path stays guarded (GLOB-WRITE).**
+`echo x > ~/.hermes/auth.json` was `policy.core`, and the same write with a
+glob in any component (`~/.hermes/[!Z]uth.json`, `~/.[!Z]ermes/auth.json`,
+`~/.hermes/?uth.json`, `~/.h*/auth.json`, `.appr*/env`, `APPROVAL.m?`) was an
+ordinary `files.write.workspace`, while bash and zsh write through a glob in a
+redirect target that matches one file and every shell writes through one in a
+`cp`, `mv`, `tee`, `ln` or `install` operand. A write target the shell may
+still glob is now judged by every guarded path its pattern could match, over-
+approximated (each construct matches anything it could in any shell under any
+option, case folded), and takes the strictest class among them.
+
+- **Which words:** redirect targets (`>`, `>>`, `>|`, `&>`, `n>`), download
+  outputs and `-t` directories, the destination of `cp`, `ln` and `install`,
+  every `mv` operand, and every operand of `tee`, `rm`, `touch`, `truncate`,
+  `chmod`, `chown`, `mkdir`, `rmdir`, `dd`, `install` and `sed -i`. A glob in
+  a copy's SOURCE is a read and is left to the read jail (`cp ./*.md docs/`
+  stays a workspace write).
+- **Stricter than before:** a write pattern that COULD name a guarded file is
+  human-only even when no such file exists: `echo x > dist/*/x.txt` (`*` may be
+  `.approval`), `echo x > dist/*.md` (`APPROVAL.md`), `sed -i … *.md`, a whole
+  `**` component (`out/**/x.log` may be `out/.approval/log/x.log`:
+  `log.mutate`). A pattern that cannot reach one (`out/*.log`, `src/*.ts`)
+  keeps its class. More than 4,096 candidate paths, or 32 segments, is
+  `log.mutate`.
+
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),
 and the `git push m` after it read as an implicit `vcs.push.main` while it was
