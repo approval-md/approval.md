@@ -214,6 +214,10 @@ test("cost: review-b's shapes on b085cd91 (nested defaults, printf and echo bodi
     bounded(`${P}echo x > "$(echo '${"${".repeat(n)}')"`, `echo of unclosed \${, n=${String(n)}`);
     bounded(`${P}echo x > "$(printf %s '${"${".repeat(n)}')"`, `printf %s of unclosed \${, n=${String(n)}`);
   }
+  // codex on ef0531c0: a long spec and many words, the format read once per word.
+  for (const n of [20000, 200000]) {
+    bounded(`${P}echo x > "$(printf '%${"0".repeat(n)}.0s'${" a".repeat(n)})"`, `printf %0..0.0s of many words, n=${String(n)}`);
+  }
   for (const n of [40000, 400000]) {
     bounded(`${P}echo x > "$(printf '%.0s'${" a".repeat(n)})"`, `printf %.0s of many words, n=${String(n)}`);
     bounded(`${P}echo x > "$(printf '%s'${" a".repeat(n)})"`, `printf %s of many words, n=${String(n)}`);
@@ -255,6 +259,7 @@ test("cost: through the hook, in a checkout, the same lines are bounded", { skip
     ["nested defaults with outputs", `git push --force && echo x > ${"${a:-y$(pwd)".repeat(20000)}x${"}".repeat(20000)}`],
     ["printf % then zeros", `git push --force && echo x > "$(printf %${"0".repeat(250000)})"`],
     ["echo of unclosed ${", `git push --force && echo x > "$(echo '${"${".repeat(250000)}')"`],
+    ["printf %0..0.0s of many words", `git push --force && echo x > "$(printf '%${"0".repeat(20000)}.0s'${" a".repeat(20000)})"`],
   ] as const) {
     notAlreadyOver(`hook, ${label}`);
     const seconds = cpuSeconds(() => {

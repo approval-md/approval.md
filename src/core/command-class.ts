@@ -5163,51 +5163,75 @@ function printedOutputs(segment: LexSegment): string[] | null {
     // many words cost the square of its length (review-b's M1 on b085cd91).
     let next = 0;
     const take = (): string | undefined => (next < args.length ? args[next++] : undefined);
+    // The format is parsed once, into its text and its conversions; each
+    // pass then walks the pieces, not the format, so a long spec with many
+    // words costs their sum, not their product (codex's SOURCE HOLD on
+    // ef0531c0: `%` with many 0 flags, `.0s`, and many words).
+    type Conversion = { conversion: string; stars: number; precision: number | null };
+    const pieces: (string | Conversion)[] = [];
+    let last = 0;
+    // A width starts with 1 to 9 or `*` (a 0 is a flag), so the flag and
+    // width runs cannot both take a 0 and a `%` then zeros is read once
+    // (review-b's M1 on b085cd91: 250 KB of them took 64 s).
+    for (const match of format.matchAll(/%(%|[-+ #0]*(?:[1-9*][0-9*]*)?(?:\.([0-9*]*))?([a-zA-Z]))/gu)) {
+      const [whole, spec, precision, conversion] = match as unknown as [string, string, string | undefined, string | undefined];
+      pieces.push(format.slice(last, match.index));
+      last = match.index + whole.length;
+      if (spec === "%") {
+        pieces.push("%");
+        continue;
+      }
+      pieces.push({
+        conversion: conversion as string,
+        stars: spec.split("*").length - 1,
+        precision: precision === undefined ? null : Number(precision || "0"),
+      });
+    }
+    pieces.push(format.slice(last));
+    const render = (piece: Conversion, took: () => void): string => {
+      // A `*` width or precision takes its value from an argument: the
+      // output is not modelled, and counts as naming `.git` (#680's source
+      // review, S1). A literal precision cuts a string, as printf does:
+      // `%.4s` of `.gitfoo` is `.git`. A width only pads with blanks.
+      if (piece.stars > 0) {
+        // Each `*` takes an argument, as the conversion does, so the passes
+        // end once the words run out (codex's cost note on 09a3acd7).
+        for (let star = piece.stars; star >= 0; star -= 1) {
+          if (take() !== undefined) took();
+        }
+        return "/.git/";
+      }
+      // A precision cuts only text whose characters are known: cutting an
+      // unknown value (a variable, a substitution) could leave any prefix of
+      // it, so that counts as naming `.git` (the security review of this fold).
+      // printf counts bytes, not characters, so a cut of non-ASCII text
+      // counts too (codex's SOURCE HOLD on fc846a73: `%.7s` of `é/.gitfoo`
+      // is `é/.git`).
+      const cut = (text: string): string =>
+        piece.precision === null
+          ? text
+          : text.includes(SUBSTITUTION_SENTINEL) || /[\u0080-\u{10FFFF}]/u.test(text)
+            ? "/.git/"
+            : text.slice(0, piece.precision);
+      const arg = take();
+      if (arg !== undefined) took();
+      if (piece.conversion === "s" || piece.conversion === "q") return cut(unknown(arg ?? ""));
+      // `%b` cuts the decoded bytes, NULs still in them, and the
+      // substitution drops the NULs after: `%.5b` of `.g\0itX` is
+      // `.g<NUL>it`, so `.git` (codex's SOURCE HOLD on 09a3acd7).
+      if (piece.conversion === "b") return dropNuls(cut(decodeBackslashEscapes(unknown(arg ?? ""), zeroOctal)));
+      if (piece.conversion === "c") return unknown(arg ?? "").slice(0, 1);
+      return SUBSTITUTION_SENTINEL;
+    };
     let out = "";
     // Each pass of the format takes words; it repeats while words are left,
     // as printf does, and stops once a pass takes none.
     for (let pass = 0; pass === 0 || next < args.length; pass += 1) {
       let took = false;
-      // A width starts with 1 to 9 or `*` (a 0 is a flag), so the flag and
-      // width runs cannot both take a 0 and a `%` then zeros is read once
-      // (review-b's M1 on b085cd91: 250 KB of them took 64 s).
-      out += format.replace(/%(%|[-+ #0]*(?:[1-9*][0-9*]*)?(?:\.[0-9*]*)?([a-zA-Z]))/gu, (whole, spec: string, conversion: string | undefined) => {
-        if (spec === "%") return "%";
-        // A `*` width or precision takes its value from an argument: the
-        // output is not modelled, and counts as naming `.git` (#680's source
-        // review, S1). A literal precision cuts a string, as printf does:
-        // `%.4s` of `.gitfoo` is `.git`. A width only pads with blanks.
-        if (spec.includes("*")) {
-          // Each `*` takes an argument, as the conversion does, so the passes
-          // end once the words run out (codex's cost note on 09a3acd7).
-          for (let star = spec.split("*").length - 1; star >= 0; star -= 1) {
-            if (take() !== undefined) took = true;
-          }
-          return "/.git/";
-        }
-        const precision = /\.([0-9]*)[a-zA-Z]$/u.exec(spec);
-        // A precision cuts only text whose characters are known: cutting an
-        // unknown value (a variable, a substitution) could leave any prefix of
-        // it, so that counts as naming `.git` (the security review of this fold).
-        // printf counts bytes, not characters, so a cut of non-ASCII text
-        // counts too (codex's SOURCE HOLD on fc846a73: `%.7s` of `é/.gitfoo`
-        // is `é/.git`).
-        const cut = (text: string): string =>
-          precision === null
-            ? text
-            : text.includes(SUBSTITUTION_SENTINEL) || /[\u0080-\u{10FFFF}]/u.test(text)
-              ? "/.git/"
-              : text.slice(0, Number(precision[1] || "0"));
-        const arg = take();
-        if (arg !== undefined) took = true;
-        if (conversion === "s" || conversion === "q") return cut(unknown(arg ?? ""));
-        // `%b` cuts the decoded bytes, NULs still in them, and the
-        // substitution drops the NULs after: `%.5b` of `.g\0itX` is
-        // `.g<NUL>it`, so `.git` (codex's SOURCE HOLD on 09a3acd7).
-        if (conversion === "b") return dropNuls(cut(decodeBackslashEscapes(unknown(arg ?? ""), zeroOctal)));
-        if (conversion === "c") return unknown(arg ?? "").slice(0, 1);
-        return SUBSTITUTION_SENTINEL;
-      });
+      const mark = (): void => {
+        took = true;
+      };
+      for (const piece of pieces) out += typeof piece === "string" ? piece : render(piece, mark);
       if (!took) break;
       // Past this many characters the rest is not rendered: it counts as
       // naming `.git`, the strict side, so the cost stays the line's own.
