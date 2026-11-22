@@ -134,7 +134,9 @@ test("cost: the answers of the bounded walk are the old window reading's", () =>
   // Spellings across an output's edge still count, however many outputs.
   assert.deepEqual(bounded(`echo x >> ${READ_OUT.repeat(1000)}.g${READ_OUT}it/config`, "answer 1"), [DIR_WRITE]);
   assert.deepEqual(bounded(`echo x >> .g${READ_OUT.repeat(1000)}t/config`, "answer 2"), [DIR_WRITE]);
-  assert.deepEqual(bounded(`echo x >> .${"*".repeat(500)}${READ_OUT}t/config`, "answer 3"), [DIR_WRITE]);
+  // GLOB-WRITE (22 Nov 2026): an output beside a glob construct may hold a `/`
+  // and name any directory, the approval log's among them.
+  assert.deepEqual(bounded(`echo x >> .${"*".repeat(500)}${READ_OUT}t/config`, "answer 3"), ["log.mutate redirect-protected"]);
   // And ordinary words do not, however many outputs.
   assert.deepEqual(bounded(`echo x > out/${`${READ_OUT}-`.repeat(1000)}.txt`, "answer 4"), ["files.write.workspace redirect-write"]);
 });
@@ -302,7 +304,9 @@ test("cost: the bounded readers answer as before under their bounds", () => {
   const nest = (n: number, inner: string): string => `echo x > ${"${a:-".repeat(n)}${inner}${"}".repeat(n)}/f`;
   assert.deepEqual(pure(nest(32, "out")), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure(nest(32, ".git")), [DIR_WRITE]);
-  assert.deepEqual(pure(nest(33, "out")), [DIR_WRITE]);
+  // Past the depth the GLOB-WRITE reading of a write target's `${…}` defaults
+  // (22 Nov 2026) fails closed too, to the stricter `log.mutate`.
+  assert.deepEqual(pure(nest(33, "out")), ["log.mutate redirect-protected"]);
   // An unclosed `${` set aside is put back as text: what it prints still counts.
   assert.deepEqual(pure(`echo x > "$(printf '%s' 'a${"${".repeat(3)} .git')"`), [DIR_WRITE]);
   assert.deepEqual(pure(`echo x > "$(printf '%s' 'a\${b} c')"`), ["files.write.workspace redirect-write"]);

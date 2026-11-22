@@ -28,19 +28,31 @@ still glob is now judged by every guarded path its pattern could match, over-
 approximated (each construct matches anything it could in any shell under any
 option, case folded), and takes the strictest class among them.
 
-- **Which words:** redirect targets (`>`, `>>`, `>|`, `&>`, `n>`), download
-  outputs and `-t` directories, the destination of `cp`, `ln` and `install`,
-  every `mv` operand, and every operand of `tee`, `rm`, `touch`, `truncate`,
-  `chmod`, `chown`, `mkdir`, `rmdir`, `dd`, `install` and `sed -i`. A glob in
-  a copy's SOURCE is a read and is left to the read jail (`cp ./*.md docs/`
-  stays a workspace write).
+- **Which words (fail closed):** redirect targets (`>`, `>>`, `>|`, `&>`,
+  `n>`), download outputs and `-t` directories, every operand of a command
+  that is not a read (`tar -C`, `rsync`, `scp`, `gunzip`, `git add`,
+  `git checkout --`, `rm`, `chmod`), and a
+  read-class command's own outputs (`sort -o F`, `uniq in F`, sed's `w F`),
+  which were judged by nothing before, plain or not. `cp`, `ln` and `install`
+  are the one narrow row: their destination only, since a glob in a copy's
+  SOURCE is a read and is left to the read jail (`cp ./*.md docs/` stays a
+  workspace write).
+- **`${X:-WORD}` defaults:** the WORD of `:-`, `-`, `:=`, `=`, `:+`, `+`,
+  `:?`, `?` is a reading of its own, since the shell substitutes it and then
+  globs it (`echo x > ${X:-.approval/env}` was a workspace write). More than
+  eight such spans in one word, or a default nested three deep, is
+  `log.mutate`. zsh's `braceccl` class (`{a-z}`) is read as a class of its
+  characters, and a variable beside a glob construct may name anything.
 - **Stricter than before:** a write pattern that COULD name a guarded file is
-  human-only even when no such file exists: `echo x > dist/*/x.txt` (`*` may be
-  `.approval`), `echo x > dist/*.md` (`APPROVAL.md`), `sed -i … *.md`, a whole
+  human-only even when no such file exists, `*` matching a dot-name as it does
+  under `dotglob`: `rm -rf dist/*` and `chmod +x scripts/*` (`*` may be
+  `.approval`), `git add *` and `echo x > dist/*.md` (`APPROVAL.md`),
+  `sed -i … *.md`, a whole
   `**` component (`out/**/x.log` may be `out/.approval/log/x.log`:
   `log.mutate`). A pattern that cannot reach one (`out/*.log`, `src/*.ts`)
-  keeps its class. More than 4,096 candidate paths, or 32 segments, is
-  `log.mutate`.
+  keeps its class. More than 4,096 candidate paths, 32 segments or two
+  million matcher steps is `log.mutate`; the worst words measured cost about
+  0.1 CPU s.
 
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),

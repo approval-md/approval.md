@@ -219,11 +219,95 @@ test("cost: wide and long patterns are bounded and fail to the stricter class", 
   assert.equal(strictest("echo x > */*/*/*/*/x"), "log.mutate");
   // A long run of stars is one token.
   assert.deepEqual(classesOf(`echo x > out/${"*".repeat(50000)}.log`), ["files.write.workspace"]);
-  // Past the token cap a segment may be any one name.
-  assert.equal(strictest(`echo x > ${"?".repeat(1100)}`), "policy.core");
+  // A long pattern is matched exactly within the step budget: 1,100 `?` name
+  // only 1,100-character files.
+  assert.deepEqual(classesOf(`echo x > ${"?".repeat(1100)}`), ["files.write.workspace"]);
   // Many unclosed brackets and many bracket ends.
   classesOf(`echo x > out/${"[".repeat(1000)}x`);
   classesOf(`echo x > out/[${"]".repeat(1000)}`);
   const spent = process.cpuUsage(started);
   assert.ok((spent.user + spent.system) / 1e6 < 10, `took ${String((spent.user + spent.system) / 1e6)} s`);
+});
+
+// ---------------------------------------------------------------------------
+// Security review of the first push (22 Nov 2026): five findings, each pinned.
+// ---------------------------------------------------------------------------
+
+test("review 1: every operand of a command that is not a read is a write target (fail closed)", () => {
+  for (const command of [
+    "tar -xf a.tar -C .appr*",
+    "git checkout -- APPROVAL.m?",
+    "rsync a .appr*/env",
+    "scp a .appr*/env",
+    "gunzip .appr*/env.gz",
+  ]) {
+    assert.equal(strictest(command), "policy.core", command);
+  }
+  // The shell globs WHOLE words: a pattern inside an option word is handed to
+  // the program as written, so it is not a path the shell resolves.
+  assert.ok(!classesOf("npm test -- --grep=*").includes("policy.core"));
+  // A read-class command's own outputs: sort -o, uniq's second operand.
+  assert.equal(strictest("sort -o APPROVAL.m? x"), "policy.core");
+  assert.equal(strictest("sort -o APPROVAL.md x"), "policy.core");
+  assert.equal(strictest("uniq x .appr*/env"), "policy.core");
+  // The narrow row: a copy's source is a read.
+  assert.deepEqual(classesOf("cp ./*.md docs/"), ["files.write.workspace"]);
+});
+
+test("review 2: a ${X:-WORD} default (and := :+ - = +) is a reading of its own, globbed", () => {
+  for (const command of [
+    "echo x > ${X:-~/.h*/auth.json}",
+    "echo x > ${X:+.appr*/env}",
+    "echo x > ${X:=APPROVAL.m?}",
+    "echo x > ${X-.approval/env}",
+    "echo x > ${X:-.approval/env}",
+    "cp a ${X:-~/.hermes/?uth.json}",
+  ]) {
+    assert.equal(strictest(command), "policy.core", command);
+  }
+  assert.deepEqual(classesOf("echo x > ${OUT:-out}/x.log"), ["files.write.workspace"]);
+});
+
+test("review 2b: more ${…} operator spans than the cap, or a default nested too deep, is log.mutate", () => {
+  const spans = (n: number): string => Array.from({ length: n }, (_, k) => `\${X${String(k)}:-a}`).join("");
+  // At the cap (8) the readings are judged; one past it fails closed.
+  assert.deepEqual(classesOf(`echo x > out/${spans(8)}.log`), ["files.write.workspace"]);
+  assert.equal(strictest(`echo x > out/${spans(9)}.log`), "log.mutate");
+  // The guarded default past the cap is not lost.
+  assert.equal(strictest(`echo x > ${spans(8)}\${Y:-.approval/env}`), "log.mutate");
+  // Nested defaults are followed 32 deep (the `.git` reader's depth); 33 fails closed.
+  const nest = (n: number, inner: string): string => `echo x > ${"${a:-".repeat(n)}${inner}${"}".repeat(n)}/x.log`;
+  assert.equal(strictest("echo x > ${A:-${B:-.appr*/env}}"), "policy.core");
+  assert.equal(strictest(`echo x > ${"${a:-".repeat(32)}.appr*${"}".repeat(32)}/env`), "policy.core");
+  assert.deepEqual(classesOf(nest(32, "out")), ["files.write.workspace"]);
+  assert.equal(strictest(nest(33, "out")), "log.mutate");
+});
+
+test("review 3: a brace group brace expansion leaves (zsh braceccl) is a class of its characters", () => {
+  assert.equal(strictest("echo x > .{a-z}pproval/env"), "policy.core");
+  assert.equal(strictest("echo x > ~/.hermes/{a-z}uth.json"), "policy.core");
+  // A range over `/` may make directories.
+  assert.equal(strictest("echo x > {.-0}x"), "log.mutate");
+  // A class of other characters reaches nothing.
+  assert.deepEqual(classesOf("echo x > out/{0-9}.log"), ["files.write.workspace"]);
+});
+
+test("review 4: the matcher's work is bounded; exhausted, the word is log.mutate", () => {
+  const started = process.cpuUsage();
+  classesOf(`echo x > ${"[".repeat(5000)}${"]".repeat(5000)}`);
+  classesOf(`echo x > ${Array.from({ length: 32 }, () => "[".repeat(200) + "]".repeat(200)).join("/")}`);
+  classesOf(`echo x > ${Array.from({ length: 8 }, () => "${X:-" + "[".repeat(300) + "]".repeat(300) + "}").join("")}`);
+  const spent = process.cpuUsage(started);
+  assert.ok((spent.user + spent.system) / 1e6 < 10, `took ${String((spent.user + spent.system) / 1e6)} s`);
+});
+
+test("review 5: the parameter placeholder cannot be forged, and $ beside a glob is a pattern", () => {
+  // A word holding the private-use mark fails closed.
+  assert.equal(strictest("echo x > ab*"), "log.mutate");
+  // `$1`, `$9` are variables (their value is unseen, as on main); no collision.
+  assert.deepEqual(classesOf("echo x > ~/.hermes/$1uth.json.bak"), ["files.write.workspace"]);
+  assert.deepEqual(classesOf('echo x > "$9"'), ["files.write.workspace"]);
+  // A variable beside a glob construct may hold a `/`: it may name anything.
+  assert.equal(strictest("echo x > ${X}*"), "log.mutate");
+  assert.equal(strictest("echo x > ~/.hermes/$1*.json"), "log.mutate");
 });
