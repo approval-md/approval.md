@@ -226,6 +226,22 @@ test("cost: review-b's shapes on b085cd91 (nested defaults, printf and echo bodi
   }
 });
 
+test("cost: review-b's M2 on 2f4100fc, brace groups beside outputs to 1 MB, is bounded", () => {
+  const P = "git push --force && ";
+  const unit = "{a,b}$(pwd)";
+  // 39 CPU s through the hook at 1 MB on 2f4100fc (main 4.4); at 2 MB node died.
+  for (const size of [100_000, 1_000_000]) {
+    const n = Math.floor(size / unit.length);
+    bounded(`${P}echo x > ${unit.repeat(n)}`, `brace groups and outputs, one word, ${String(size)} B`);
+    bounded(`${P}echo x > \${a:-${unit.repeat(n)}}`, `the same in a default word, ${String(size)} B`);
+    bounded(`${P}echo x > \${a:-${"{a,b}".repeat(n)}}`, `brace groups in a default word, ${String(size)} B`);
+  }
+  // Under the bound the expansion answers as before; past 16 alternatives, the strict side.
+  assert.deepEqual(pure("echo x >> .g{i,}$(pwd)t/config"), [DIR_WRITE]);
+  assert.deepEqual(pure(`echo x > out/${"{a,b}".repeat(4)}$(pwd).log`), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(pure(`echo x > out/${"{a,b}".repeat(5)}$(pwd).log`), [DIR_WRITE]);
+});
+
 test("cost: the bounded readers answer as before under their bounds", () => {
   // Read to 32 levels of `${`; a deeper word counts as naming .git.
   const nest = (n: number, inner: string): string => `echo x > ${"${a:-".repeat(n)}${inner}${"}".repeat(n)}/f`;
@@ -259,7 +275,8 @@ test("cost: through the hook, in a checkout, the same lines are bounded", { skip
     ["nested defaults with outputs", `git push --force && echo x > ${"${a:-y$(pwd)".repeat(20000)}x${"}".repeat(20000)}`],
     ["printf % then zeros", `git push --force && echo x > "$(printf %${"0".repeat(250000)})"`],
     ["echo of unclosed ${", `git push --force && echo x > "$(echo '${"${".repeat(250000)}')"`],
-    ["printf %0..0.0s of many words", `git push --force && echo x > "$(printf '%${"0".repeat(20000)}.0s'${" a".repeat(20000)})"`],
+    ["brace groups and outputs, 1 MB", `git push --force && echo x > ${"{a,b}$(pwd)".repeat(90000)}`],
+    ["printf %0..0.0s of many words",`git push --force && echo x > "$(printf '%${"0".repeat(20000)}.0s'${" a".repeat(20000)})"`],
   ] as const) {
     notAlreadyOver(`hook, ${label}`);
     const seconds = cpuSeconds(() => {

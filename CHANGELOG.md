@@ -191,7 +191,9 @@ on the change above.
   The same holds for the readers of parameter words and of what `printf`
   and `echo` print: a word is read to 32 levels of `${`, and a deeper one
   counts; a `%` then zeros, an unclosed `${` run, and many words or flags
-  are each read once (each took 64 to 174 s through the hook before).
+  are each read once (each took 64 to 174 s through the hook before). A
+  word with outputs in it is brace-expanded to 16 alternatives, and past
+  that counts (`{a,b}$(pwd)` to 1 MB took 39 s at 1,024).
 - **Looser than the change above, by design.** A read whose only write is its
   redirection writes nothing through its own words: `cat .git/HEAD > /tmp/x`,
   `ls .git/hooks > list.txt` and the like are the workspace write 0.4.8 called

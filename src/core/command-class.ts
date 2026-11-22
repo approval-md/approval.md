@@ -3982,6 +3982,9 @@ function namesGitDirectory(word: string): boolean {
 /** Past this many brace alternatives a word is judged as naming `.git`. */
 const BRACE_LIMIT = 1024;
 
+/** Past this many brace alternatives a word with outputs in it is judged as joining into `.git`. */
+const JOIN_BRACE_LIMIT = 16;
+
 /**
  * The words brace expansion makes of `word` (second review, S1): `.g{i,}t`
  * gives `.git` and `.gt`, `.{f..h}it` gives `.fit`, `.git` and `.hit`.
@@ -4303,6 +4306,18 @@ export function globSegmentMatches(pattern: string, name: string): boolean {
  */
 export function mayNameGitDirectory(word: string): boolean {
   const words = word.includes("{") ? expandBraces(word) : [word];
+  if (words === null) return true;
+  return words.some((each) => pathSegments(each).some((segment) => globSegmentMatches(segment, ".git")));
+}
+
+/**
+ * {@link mayNameGitDirectory} for the words the substitution fold reads (a
+ * parameter's word, an ANSI-C string): past {@link JOIN_BRACE_LIMIT} brace
+ * alternatives the strict answer, since each one re-reads and copies the
+ * word (review-b's M2 on 2f4100fc).
+ */
+function mayNameGitDirectoryBounded(word: string): boolean {
+  const words = word.split(SUBSTITUTION_SENTINEL).join("").includes("{") ? expandBraces(word, JOIN_BRACE_LIMIT) : [word];
   if (words === null) return true;
   return words.some((each) => pathSegments(each).some((segment) => globSegmentMatches(segment, ".git")));
 }
@@ -4834,7 +4849,11 @@ function stepGitThroughRun(positions: number, run: string): number {
  */
 function wordJoinsGitAcrossSubstitution(text: string): boolean {
   if (!text.includes(SUBSTITUTION_SENTINEL)) return false;
-  const words = text.includes("{") ? expandBraces(text) : [text];
+  // Each expansion re-reads and copies the whole word, so this reading takes
+  // at most JOIN_BRACE_LIMIT of them, and past that counts as naming `.git`;
+  // a word whose only braces are the outputs' own is not expanded at all
+  // (review-b's M2 on 2f4100fc: `{a,b}$(pwd)` to 1 MB took 39 s at 1,024).
+  const words = text.split(SUBSTITUTION_SENTINEL).join("").includes("{") ? expandBraces(text, JOIN_BRACE_LIMIT) : [text];
   if (words === null) return true;
   for (const word of words) {
     for (const piece of word.split(/[/=:\s]/u)) {
@@ -5014,7 +5033,7 @@ function ansiCQuotingSpellsGit(raw: string): boolean {
       [0, 1].some(
         (r) =>
           GIT_SEGMENT_IN_TEXT.test((text[r] as string).split(SUBSTITUTION_SENTINEL).join("/")) ||
-          (glob[r] as string).split(":").some(mayNameGitDirectory) ||
+          (glob[r] as string).split(":").some(mayNameGitDirectoryBounded) ||
           wordJoinsGitAcrossSubstitution(text[r] as string),
       );
     text[0] = text[1] = glob[0] = glob[1] = "";
@@ -5304,7 +5323,7 @@ function expansionWordNamesGit(text: string): boolean {
   if (!text.includes("${")) return false;
   const valueNamesGit = (value: string): boolean =>
     GIT_SEGMENT_IN_TEXT.test(value.split(SUBSTITUTION_SENTINEL).join("/")) ||
-    value.split(":").some(mayNameGitDirectory) ||
+    value.split(":").some(mayNameGitDirectoryBounded) ||
     wordJoinsGitAcrossSubstitution(value);
   const open: string[] = [""];
   let rewritten = false;
