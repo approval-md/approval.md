@@ -3988,15 +3988,17 @@ const JOIN_BRACE_LIMIT = 16;
 /**
  * Past this many expansion steps, the same: each step re-reads the word, and
  * a group of one alternative (`{a..a}`) adds a step but no word (codex's
- * SOURCE HOLD on 1d42d749).
+ * SOURCE HOLD on 1d42d749). A step is one visit of the worklist: a group
+ * expanded, or a finished word, so 63 one-alternative groups finish and 64
+ * count.
  */
 const JOIN_BRACE_STEPS = 64;
 
 /**
  * The words brace expansion makes of `word` (second review, S1): `.g{i,}t`
  * gives `.git` and `.gt`, `.{f..h}it` gives `.fit`, `.git` and `.hit`.
- * `null` past {@link BRACE_LIMIT}, or past `steps` groups expanded, which the
- * caller judges the strict way. A group with no comma and no sequence is kept
+ * `null` past {@link BRACE_LIMIT}, or past `steps` visits of its worklist (a
+ * group expanded or a word finished), which the caller judges the strict way. A group with no comma and no sequence is kept
  * as text, as the shell keeps it.
  */
 export function expandBraces(word: string, limit = BRACE_LIMIT, steps = Number.POSITIVE_INFINITY): string[] | null {

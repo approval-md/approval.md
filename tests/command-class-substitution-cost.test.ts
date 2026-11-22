@@ -226,27 +226,55 @@ test("cost: review-b's shapes on b085cd91 (nested defaults, printf and echo bodi
   }
 });
 
+/**
+ * Classify `line` and a control of the same length that skips the reader
+ * under test, and fail if the line costs more than CONTROL_FACTOR times the
+ * control plus a second. Main's own passes over a long brace word cost
+ * seconds at 1 MB, about four times more on a CI runner than here, so a fixed
+ * bound cannot tell this code's cost from main's; the control can.
+ */
+const CONTROL_FACTOR = 8;
+function nearControl(line: string, control: string, label: string): void {
+  notAlreadyOver(label);
+  const base = cpuSeconds(() => {
+    pure(control);
+  });
+  const seconds = cpuSeconds(() => {
+    pure(line);
+  });
+  const ok = seconds < CONTROL_FACTOR * base + 1;
+  if (!ok) overBound = label;
+  assert.ok(ok, `${label}: ${seconds.toFixed(2)} CPU s, the control ${base.toFixed(2)}, factor ${String(CONTROL_FACTOR)}`);
+}
+
 test("cost: review-b's M2 on 2f4100fc, brace groups beside outputs to 1 MB, is bounded", () => {
   const P = "git push --force && ";
   const unit = "{a,b}$(pwd)";
-  // 39 CPU s through the hook at 1 MB on 2f4100fc (main 4.4); at 2 MB node died.
-  for (const size of [100_000, 1_000_000]) {
-    const n = Math.floor(size / unit.length);
-    bounded(`${P}echo x > ${unit.repeat(n)}`, `brace groups and outputs, one word, ${String(size)} B`);
-    bounded(`${P}echo x > \${a:-${unit.repeat(n)}}`, `the same in a default word, ${String(size)} B`);
-    bounded(`${P}echo x > \${a:-${"{a,b}".repeat(n)}}`, `brace groups in a default word, ${String(size)} B`);
-  }
+  // The control: each output spelled as text of the same length, so no word
+  // holds an output; for brace groups alone, the same groups outside the
+  // default word, so main's own brace pass still runs on them.
+  const noOutputs = (line: string): string => line.replaceAll("$(pwd)", "pwdpwd");
+  // 39 CPU s through the hook at 1 MB on 2f4100fc (main 4.4); at 2 MB node
+  // died. Here about 1 to 4 times the control; with the bound at 1,024, 15 to 34.
+  bounded(`${P}echo x > ${unit.repeat(9000)}`, "brace groups and outputs, one word, 100 KB");
+  const n = 90000;
+  const word = `${P}echo x > ${unit.repeat(n)}`;
+  nearControl(word, noOutputs(word), "brace groups and outputs, one word, 1 MB");
+  const inDefault = `${P}echo x > \${a:-${unit.repeat(n)}}`;
+  nearControl(inDefault, noOutputs(inDefault), "the same in a default word, 1 MB");
+  const groups = `${P}echo x > \${a:-${"{a,b}".repeat(200000)}}`;
+  nearControl(groups, `${P}echo x > zzzzz${"{a,b}".repeat(200000)}z`, "brace groups in a default word, 1 MB");
   // codex on 1d42d749: groups of one alternative add steps but no words
   // (96 CPU s at 220 KB before the step bound; main 2.5).
-  for (const n of [2000, 20000]) {
-    bounded(`${P}echo x > ${"{a..a}$(pwd)".repeat(n)}`, `one-alternative ranges beside outputs, n=${String(n)}`);
-  }
-  // In a default word main's own protected-path brace pass is most of the
-  // cost (about 4 CPU s at 110 KB, on main too), so this one stays smaller.
-  for (const n of [2000, 10000]) {
-    bounded(`${P}echo x > \${a:-${"{1..1}$(pwd)".repeat(n)}}`, `the same in a default word, n=${String(n)}`);
-  }
+  bounded(`${P}echo x > ${"{a..a}$(pwd)".repeat(2000)}`, "one-alternative ranges beside outputs, n=2000");
+  const ranges = `${P}echo x > ${"{a..a}$(pwd)".repeat(20000)}`;
+  nearControl(ranges, noOutputs(ranges), "one-alternative ranges beside outputs, n=20000");
+  const rangesInDefault = `${P}echo x > \${a:-${"{1..1}$(pwd)".repeat(10000)}}`;
+  nearControl(rangesInDefault, noOutputs(rangesInDefault), "the same in a default word, n=10000");
   assert.deepEqual(pure("echo x >> .g{i..i}$(pwd)t/config"), [DIR_WRITE]);
+  // The step bound: 63 groups of one alternative finish, 64 count.
+  assert.deepEqual(pure(`echo x > out/${"{a..a}".repeat(63)}$(pwd).log`), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(pure(`echo x > out/${"{a..a}".repeat(64)}$(pwd).log`), [DIR_WRITE]);
   // Under the bound the expansion answers as before; past 16 alternatives, the strict side.
   assert.deepEqual(pure("echo x >> .g{i,}$(pwd)t/config"), [DIR_WRITE]);
   assert.deepEqual(pure(`echo x > out/${"{a,b}".repeat(4)}$(pwd).log`), ["files.write.workspace redirect-write"]);
@@ -286,8 +314,8 @@ test("cost: through the hook, in a checkout, the same lines are bounded", { skip
     ["nested defaults with outputs", `git push --force && echo x > ${"${a:-y$(pwd)".repeat(20000)}x${"}".repeat(20000)}`],
     ["printf % then zeros", `git push --force && echo x > "$(printf %${"0".repeat(250000)})"`],
     ["echo of unclosed ${", `git push --force && echo x > "$(echo '${"${".repeat(250000)}')"`],
-    ["one-alternative ranges beside outputs", `git push --force && echo x > ${"{a..a}$(pwd)".repeat(10000)}`],
-    ["brace groups and outputs, 1 MB",`git push --force && echo x > ${"{a,b}$(pwd)".repeat(90000)}`],
+    ["one-alternative ranges beside outputs", `git push --force && echo x > ${"{a..a}$(pwd)".repeat(2000)}`],
+    ["brace groups and outputs, 100 KB", `git push --force && echo x > ${"{a,b}$(pwd)".repeat(9000)}`],
     ["printf %0..0.0s of many words",`git push --force && echo x > "$(printf '%${"0".repeat(20000)}.0s'${" a".repeat(20000)})"`],
   ] as const) {
     notAlreadyOver(`hook, ${label}`);
