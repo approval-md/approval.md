@@ -1447,6 +1447,10 @@ test("lead ruling L62013 (S2), fail closed: every command naming the bare organ 
     "export PATH=/tmp; mkdir .claude",
     "mkdir $X .claude",
     "mkdir -p $(echo -m 000) .claude",
+    'mkdir -p "$(echo x)" .claude',
+    'mkdir -p "$X" .claude',
+    "touch .claude{,}",
+    "touch .cla[u]de",
     "touch .cl*",
     "mkdir -p {.claude,x}",
     "touch ~/.claude/../.claude",
@@ -1457,6 +1461,9 @@ test("lead ruling L62013 (S2), fail closed: every command naming the bare organ 
   ]) {
     assert.ok(held(command), `${command} -> ${JSON.stringify(classifyCommand(command))}`);
   }
+  // zsh's exclusion pattern where the line may set options (`setopt` let through).
+  const zsh = classifyCommand("setopt extendedglob; touch .claude~x", [], { noRuleSegments: true });
+  assert.ok(zsh.ok && zsh.classes.includes("policy.core"), JSON.stringify(zsh));
   // Released to main's class: creating the folder, touching it (the plain form).
   for (const [command, main] of [
     ["mkdir .claude", "files.write.workspace"],
