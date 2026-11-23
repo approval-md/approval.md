@@ -565,8 +565,11 @@ test("lead ruling L62013, through the real hook: a folder takes its routed conte
 test("main #693, the hook's own deadline: the listing pass runs under it, and past it the classification is stopped and refused", async () => {
   // The classification that finds the directories to list is held to the
   // deadline it is given; past it the lister throws and classifies nothing.
+  // 64 KB of words before the pattern: the classification takes far longer
+  // than the one millisecond it is given, however warm the process is.
   const dir = project({ out: ["a.log"] });
-  await assert.rejects(listGlobWriteDirsFor("rm -f out/*", [dir], { deadlineAt: Date.now() - 1 }), GlobListingDeadline);
+  const long = `cat ${"notes.txt ".repeat(6_500)}> out/*.log`;
+  await assert.rejects(listGlobWriteDirsFor(long, [dir], { deadlineAt: Date.now() + 1 }), GlobListingDeadline);
   assert.ok((await listGlobWriteDirsFor("rm -f out/*", [dir], { deadlineAt: Date.now() + 60_000 })).size > 0);
 });
 
