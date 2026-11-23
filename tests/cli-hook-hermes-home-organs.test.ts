@@ -18,7 +18,29 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { describeDeadlineMs } from "../src/cli/hook.js";
+import { calibrationWork, REFERENCE_SECONDS, runner } from "./cost-runner.js";
+
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
+
+/**
+ * How slow this runner is by the CLOCK right now, other work on the machine
+ * included: the wall time of the cost runner's fixed work over its reference.
+ * The hook's deadline is a wall clock, so this, and not CPU time alone, says
+ * whether a read could have met it.
+ */
+function slownessNow(): number {
+  const began = performance.now();
+  calibrationWork();
+  return (performance.now() - began) / 1000 / REFERENCE_SECONDS;
+}
+
+/**
+ * Seconds the hook takes to read the brace word of the "brace bomb" row on the
+ * reference runner at rest: 2.0 s where the calibration takes 0.23 s, so about
+ * 4 s where it takes the reference 0.45 s.
+ */
+const BRACE_WORD_REFERENCE_SECONDS = 4;
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-hermes-home-organs-")));
 let counter = 0;
@@ -524,13 +546,41 @@ test("fix round 2 through the hook: single-collapse braces, every download outpu
     // S(new): a crafted brace word answers in bounded time, stricter, never hook-io.
     { tool: "terminal", input: { command: `echo x > out${"{a,b}".repeat(20000)}.txt`, workdir: workspace } },
   ];
+  // What a Hermes hook has to read a call under its default ceiling.
+  const budgetSeconds = describeDeadlineMs(30_000, {}) / 1000;
   for (const row of policyCore) {
+    const command = String(row.input["command"]);
+    const braceWord = command.length > 50_000;
+    const slowBefore = braceWord ? slownessNow() : 0;
     const run = ask(dir, row);
     const verdict = verdictOf(run);
     const label = JSON.stringify(row.input).slice(0, 160);
     assert.equal(verdict.permission, "deny", `${label}: ${run.stdout}`);
-    assert.ok(classesOf(run).includes("policy.core"), `${label}: ${verdict.message}`);
     assert.ok(!verdict.message.includes("hook-io"), `${label}: ${verdict.message}`);
+    if (verdict.message.startsWith("hook-deadline: ")) {
+      // The brace word takes seconds to read, and a full CI shard has read it
+      // in about sixteen. Past the hook's own deadline the answer is that deadline:
+      // a refusal in bounded time, which is what the row is for. It is
+      // accepted on two conditions (review of 259711a6, S5; lead L61951).
+      assert.ok(braceWord, `${label}: only the brace word may meet the deadline: ${verdict.message}`);
+      // 1. The runner is measured slow enough to explain it. Within a factor
+      //    of two: the load moves between the measurement and the read.
+      const slowness = Math.max(slowBefore, slownessNow());
+      const expected = BRACE_WORD_REFERENCE_SECONDS * slowness;
+      assert.ok(
+        expected * 2 >= budgetSeconds,
+        `the brace word met the hook's ${String(budgetSeconds)} s deadline on a runner measured to read it in about ${expected.toFixed(1)} s (clock slowness ${slowness.toFixed(2)}; ${runner().line})`,
+      );
+      // 2. The class is asserted all the same, by the reader with no deadline:
+      //    a slow runner hides no lost `policy.core`.
+      const classified = runCli(["hook", "classify", "--json", "--", command], String(row.input["workdir"]), "", row.env ?? {});
+      assert.equal(classified.code, 0, classified.stderr.slice(0, 400));
+      const classes = (JSON.parse(classified.stdout) as { classes?: string[] }).classes ?? [];
+      assert.ok(classes.includes("policy.core"), `${label}: without the deadline the classes are ${JSON.stringify(classes)}`);
+      console.log(`# hermes brace row: hook-deadline accepted at clock slowness ${slowness.toFixed(2)}; ${runner().line}`);
+      continue;
+    }
+    assert.ok(classesOf(run).includes("policy.core"), `${label}: ${verdict.message}`);
   }
   for (const row of [
     { tool: "terminal", input: { command: "cat h/.op.en{v..v}", workdir: dir } },
