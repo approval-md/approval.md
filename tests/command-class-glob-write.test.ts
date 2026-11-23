@@ -708,6 +708,32 @@ test("lead ruling L61195 (b): a copy, move or link into a directory is judged by
   assert.ok(!withListing("cp -r src/* out/", { "/w/src": ["a.ts", "lib"], "/w/out": [] }).includes("policy.core"));
 });
 
+test("lead ruling L61926: the main pass is main 324d87dc's answer, and it rides beside each raise", () => {
+  // Spelled out, not computed: a rule left on in the main pass would change
+  // both sides of an andMain pin together.
+  const pairs: readonly (readonly [string, readonly string[], readonly string[]])[] = [
+    // bareOrganDirectory
+    ["rm -rf .claude", ["files.write.workspace"], ["policy.core", "files.write.workspace"]],
+    ["mv .github gone", ["files.write.workspace"], ["policy.edit", "files.write.workspace"]],
+    ["chmod -R 000 .cursor", ["files.write.workspace"], ["policy.core", "files.write.workspace"]],
+    // a read command's own output (`sort -o`): main judged it by nothing
+    ["sort -o APPROVAL.md x", ["read.shell"], ["policy.core", "read.shell"]],
+  ];
+  for (const [command, main, head] of pairs) {
+    const mainPass = classifyCommandWithMainRules(command);
+    assert.ok(mainPass.ok, command);
+    assert.deepEqual(mainPass.classes, main, command);
+    assert.deepEqual(classesOf(command), head, command);
+  }
+  // Where a copy lands (copyLandings), by the listing.
+  const listed = { "/w": ["APPROVAL.md", "a.md"], "/w/docs": [] };
+  assert.deepEqual(withListing("cp ./*.md docs/", listed), ["policy.core", "files.write.workspace"]);
+  assert.deepEqual(withListing("cp -t docs/ AP*.md", listed), ["policy.core", "files.write.workspace"]);
+  assert.deepEqual(withListing("cp ./*.md docs/", { "/w": ["a.md"], "/w/docs": [] }), ["files.write.workspace"]);
+  // A zsh clobber form main does not read is refused in the main pass.
+  assert.equal(classifyCommandWithMainRules("echo x >>| ~/.hermes/auth.json").ok, false);
+});
+
 test("review-b S2: an option-dependent zsh form is literal text on a plain line", () => {
   assert.deepEqual(classesOf("rm -f *~"), andMain(["files.delete.out_of_scope"], "rm -f *~"));
   assert.deepEqual(classesOf("rm -f out/#x"), andMain(["files.write.workspace"], "rm -f out/#x"));
