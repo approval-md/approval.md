@@ -236,7 +236,7 @@ import {
   readCodexReportedOutcome,
 } from "./hook-codex.js";
 import { bindExecCodeCommand, bindExecuteCode, describeProgram } from "./hook-exec-code.js";
-import { globDiskFor, listGlobWriteDirsFor, type GlobListing } from "./glob-listing.js";
+import { globDiskFor, GlobListingDeadline, listGlobWriteDirsFor, type GlobListing } from "./glob-listing.js";
 
 /** Identity accepted for the proposing side: a person or an agent. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -7468,6 +7468,17 @@ function describeToolCall(
   deadlineMs: number,
   ...described: Parameters<typeof describeToolCallNow>
 ): ToolDescription {
+  // GLOB-WRITE: the listing pass ran first, under the same deadline, and
+  // spent part of it.
+  const listing = listingCostOf(described[8] ?? null);
+  if (listing.overran) {
+    describeDeadlinePassed = true;
+    return {
+      kind: "deny",
+      code: "hook-deadline",
+      detail: `this hook could not read the ${described[0].toolName} call within its own ${String(deadlineMs)}ms limit (finding the directories its write patterns glob in ran past it), so the call is refused rather than left to the harness's timeout, where a hook that is killed is a call that runs. Nothing was registered or requested. Make the call shorter, or do the same work in several calls.`,
+    };
+  }
   if (describeDeadlinePassed) {
     // A process that answers many calls (the Codex bridge): say what happened,
     // not that THIS call was too long.
@@ -7477,7 +7488,7 @@ function describeToolCall(
       detail: `an earlier call in this process outlasted the hook's own limit and was stopped part way through being read, so this process reads no further call and the ${described[0].toolName} call is refused. Nothing was registered or requested. Start the process again.`,
     };
   }
-  const ran = runUnderDeadline(deadlineMs, () => describeToolCallNow(...described));
+  const ran = runUnderDeadline(Math.max(1, deadlineMs - listing.spentMs), () => describeToolCallNow(...described));
   if (ran.ok) return ran.value;
   describeDeadlinePassed = true;
   return {
@@ -9791,6 +9802,43 @@ function* runBypass(
   );
 }
 
+/** The flags a harness hook takes ({@link runHarnessHook}). */
+const HARNESS_HOOK_FLAGS = {
+  ...COMMON_FLAGS,
+  ...POLICY_FLAGS,
+  "--log": "string",
+  "--as": "string",
+  "--timeout": "string",
+  "--interval": "string",
+  "--retry-grace": "string",
+  "--harness-cap": "string",
+} as const;
+
+/**
+ * The harness ceiling `argv` states or the adapter assumes, read the way
+ * {@link runHarnessHook} reads it (`--harness-cap`), for the listing pass that
+ * runs before it (GLOB-WRITE). An argv that does not parse states nothing; the
+ * hook itself refuses it after.
+ */
+function harnessCapOfArgv(argv: readonly string[], adapter: HarnessAdapter): number | null {
+  const parsed = parseFlags([...argv], HARNESS_HOOK_FLAGS);
+  const capText = parsed.ok ? stringFlag(parsed.flags, "--harness-cap") : null;
+  return effectiveHarnessCapMs(adapter, capText === null ? null : parseDuration(capText));
+}
+
+/**
+ * What the listing pass of one call cost (GLOB-WRITE, {@link commandHookYielding}),
+ * keyed by the listings it handed on. It runs before the call is described and
+ * after the harness started its timer, so its time comes out of the describe
+ * deadline and counts as reading time ({@link waitAfterRead}). `overran`: its
+ * classification was stopped at the deadline, and the call is refused.
+ */
+const listingCosts = new WeakMap<ReadonlyMap<string, GlobListing>, { spentMs: number; overran: boolean }>();
+
+function listingCostOf(globListings: ReadonlyMap<string, GlobListing> | null): { spentMs: number; overran: boolean } {
+  return (globListings === null ? undefined : listingCosts.get(globListings)) ?? { spentMs: 0, overran: false };
+}
+
 function* runHarnessHook(
   argv: string[],
   streams: Streams,
@@ -9808,16 +9856,7 @@ function* runHarnessHook(
     adapter.kind === "codex" || adapter.kind === "hermes"
       ? deny(streams, "hook-io", message, adapter.kind)
       : usageError(streams, message);
-  const parsed = parseFlags(argv, {
-    ...COMMON_FLAGS,
-    ...POLICY_FLAGS,
-    "--log": "string",
-    "--as": "string",
-    "--timeout": "string",
-    "--interval": "string",
-    "--retry-grace": "string",
-    "--harness-cap": "string",
-  });
+  const parsed = parseFlags(argv, HARNESS_HOOK_FLAGS);
   if (!parsed.ok) return configurationError(parsed.message);
   if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
     // APRV-243. Grok's help carries the `.grok/hooks/*.json` the human commits,
@@ -10386,7 +10425,8 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     execGateOf(adapter, load.policy),
     decide.globListings ?? null,
   );
-  const readMs = readClock() - readBeganMs;
+  // The listing pass (GLOB-WRITE) read before this did, on the same timer.
+  const readMs = readClock() - readBeganMs + listingCostOf(decide.globListings ?? null).spentMs;
   if (described.kind === "deny") {
     return { permission: "deny", code: described.code, detail: described.detail };
   }
@@ -10957,9 +10997,18 @@ export function commandHookYielding(
     // with their own deadline ({@link listGlobWriteDirsFor}); the classifier
     // stays pure and takes the result. Any failure lists nothing: the strict
     // answer. stdin is read once and handed to the steps as read.
+    //
+    // The pass classifies the command once to find the directories, and the
+    // harness's timer is already running: it is held to the describe deadline
+    // (#693) for the ceiling this call runs under, and what it spends comes out
+    // of that deadline and counts as reading time (`listingCosts`). Stopped at
+    // the deadline, the call is refused `hook-deadline`.
     const sub = argv[0];
     let readOnce = readStdin;
     let globListings: ReadonlyMap<string, GlobListing> | null = null;
+    const listingBegan = Date.now();
+    let overran = false;
+    let listed = false;
     try {
       if (sub !== undefined && isHarnessKind(sub)) {
         const raw = readStdin();
@@ -10971,14 +11020,30 @@ export function commandHookYielding(
           const perCall =
             adapter.shellCwdKey === undefined ? null : readString(parsedInput.input.toolInput, adapter.shellCwdKey);
           const cwds = [cwd, ...(perCall !== null && isAbsolute(perCall) ? [perCall] : [])];
-          if (command !== null) globListings = await listGlobWriteDirsFor(command, cwds);
+          if (command !== null) {
+            listed = true;
+            const deadlineAt = listingBegan + describeDeadlineMs(harnessCapOfArgv(argv.slice(1), adapter));
+            globListings = await listGlobWriteDirsFor(command, cwds, { deadlineAt });
+          }
         }
       } else if (sub === "classify") {
         const command = classifyArgvCommand(argv.slice(1));
         if (command !== null) globListings = await listGlobWriteDirsFor(command, [cwd]);
       }
-    } catch {
+    } catch (error) {
       globListings = null;
+      if (error instanceof GlobListingDeadline) {
+        // Stopped part way: nothing in this process is classified again.
+        describeDeadlinePassed = true;
+        overran = true;
+      }
+    }
+    if (overran) {
+      // No listing is read: this map only carries the refusal to the read.
+      globListings = new Map<string, GlobListing>();
+      listingCosts.set(globListings, { spentMs: Date.now() - listingBegan, overran: true });
+    } else if (listed && globListings !== null) {
+      listingCosts.set(globListings, { spentMs: Date.now() - listingBegan, overran: false });
     }
     return driveYielding(hookSteps(argv, streams, cwd, readOnce, null, globListings));
   })();
