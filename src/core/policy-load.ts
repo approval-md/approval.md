@@ -76,6 +76,7 @@ import {
 } from "./delegation.js";
 import type { ExecBlock } from "./exec-code.js";
 import { scanFences, type FenceScan } from "./md-fence.js";
+import { withNamesAsSpelled } from "./name-fold.js";
 // The routing floor (APRV-266) needs the resolver's own strictness table and
 // its own resolution of two classes, so this module imports the matcher that
 // imports this module's TYPES. The cycle is type-only in the other direction
@@ -1072,6 +1073,31 @@ export function loadPolicyText(
  *
  * `null` when the policy is clear; otherwise the message.
  */
+/**
+ * The routed `protected_paths` entries that name a BUILT-IN guarded path in
+ * another spelling (`.APPROVAL/x`, `Approval.md`, `.Claude/settings.json`):
+ * the floor below reads an entry as spelled and loads such a policy, as it did
+ * before names folded, while the classifier folds the entry and answers that
+ * path from its built-in tier first. One sentence per entry, for
+ * `approval policy check` to print; empty when there are none.
+ */
+export function protectedRouteSpellingNotes(load: PolicyLoadResult): string[] {
+  if (!load.ok) return [];
+  const notes: string[] = [];
+  for (const entry of load.policy.protected_paths ?? []) {
+    if (typeof entry === "string") continue;
+    const parsedEntry = parseProtectedEntry(entry);
+    if (parsedEntry === null || parsedEntry.routed === null) continue;
+    if (withNamesAsSpelled(() => builtinProtectedPathClass(entry.path)) !== null) continue;
+    const folded = builtinProtectedPathClass(entry.path);
+    if (folded === null) continue;
+    notes.push(
+      `protected_paths entry ${JSON.stringify(entry.path)} names a built-in ${folded} path in another spelling; the built-in class answers that path, and the route to ${JSON.stringify(parsedEntry.routed)} does not apply to it.`,
+    );
+  }
+  return notes;
+}
+
 export function checkProtectedRouteFloor(load: PolicyLoadResult): string | null {
   if (!load.ok) return null;
   const entries = load.policy.protected_paths ?? [];
@@ -1084,7 +1110,13 @@ export function checkProtectedRouteFloor(load: PolicyLoadResult): string | null 
     if (parsedEntry === null || parsedEntry.routed === null) {
       return `protected_paths entry ${JSON.stringify(entry.path)} routes to ${JSON.stringify(entry.class)}, which is not a \`policy.edit\` sub-class. A policy may name its own sub-classes under \`policy.edit\` and nothing else: the gate's own organs and the record of what happened are the runtime's to classify (SPEC.md §11.1 invariant 9).`;
     }
-    const builtin = builtinProtectedPathClass(entry.path);
+    // Decided on the entry AS SPELLED (`name-fold.ts`), as before names
+    // folded: no policy that loaded then is refused now. An entry spelled
+    // like a built-in path in another case (`.APPROVAL/x`, `Approval.md`)
+    // still matches commands folded, and the built-in tiers still answer
+    // before it, so its route never makes that path lighter;
+    // {@link protectedRouteSpellingNotes} names it for the author.
+    const builtin = withNamesAsSpelled(() => builtinProtectedPathClass(entry.path));
     if (builtin === "log.mutate" || builtin === "policy.core") {
       return `protected_paths entry ${JSON.stringify(entry.path)} routes a built-in ${builtin} path to ${JSON.stringify(parsedEntry.routed)}. That route can never fire — the runtime answers a path by the strictest surface it names, and ${builtin} is decided before any policy entry is read — so the policy is refused rather than loaded with a rule its author believes is in force.`;
     }

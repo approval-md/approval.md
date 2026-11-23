@@ -59,7 +59,7 @@ import { payloadHash } from "./payload.js";
 import { payloadStoreDirFor, storePayload } from "./payload-store.js";
 import type { ValidationError } from "./validate.js";
 import { HUMAN_ACTOR_RULE, reservedKindNote } from "./identity.js";
-import { foldFileName } from "./name-fold.js";
+import { eachNameReading, foldNameExact, nameListIncludes } from "./name-fold.js";
 
 /**
  * Actors permitted to attest. Deliberately narrower than the event schema's
@@ -711,8 +711,23 @@ export function appendOrganAttestation(
   );
 }
 
-/** Rules 2 to 4 of {@link appendOrganAttestation}, or `null` when the path passes. */
+/**
+ * Rules 2 to 4 of {@link appendOrganAttestation}, or `null` when the path
+ * passes. Passing is a grant, so it must pass in both name readings
+ * (`name-fold.ts`); the folded reading's refusal is reported first.
+ */
 function organPathRefusal(candidate: string): OrganAttestError | null {
+  return firstRefusal(eachNameReading(() => organPathRefusalAsRead(candidate)));
+}
+
+/** The first refusal of a check's name readings, or `null` when every reading passes. */
+function firstRefusal<T>(readings: readonly (T | null)[]): T | null {
+  for (const refusal of readings) if (refusal !== null) return refusal;
+  return null;
+}
+
+/** {@link organPathRefusal} in the current name reading. */
+function organPathRefusalAsRead(candidate: string): OrganAttestError | null {
   const normalized = normalizePathSpelling(candidate);
   if (normalized.length === 0 || isAbsolute(candidate) || normalized.split("/").includes("..")) {
     return {
@@ -750,13 +765,13 @@ function organPathRefusal(candidate: string): OrganAttestError | null {
 const POLICY_FILE_NAMES: readonly string[] = ["APPROVAL.md", "APPROVALS.md"];
 
 /**
- * Is `name` a policy filename, compared folded ({@link foldFileName}), as the
- * classifier compares it? It picks which refusal names the file: since names
- * fold, `approval.md` is the policy file to the classifier too.
+ * Is `name` a policy filename, compared as the classifier compares it (folded,
+ * or exactly in the as-spelled reading; `name-fold.ts`)? It picks which
+ * refusal names the file: since names fold, `approval.md` is the policy file
+ * to the classifier too.
  */
 function isPolicyFileName(name: string): boolean {
-  const folded = foldFileName(name);
-  return POLICY_FILE_NAMES.some((each) => foldFileName(each) === folded);
+  return nameListIncludes(POLICY_FILE_NAMES, foldNameExact(name));
 }
 
 /**
@@ -1036,8 +1051,20 @@ export function appendPathSignOff(
   );
 }
 
-/** Rules 2 to 5 of {@link appendPathSignOff}, or `null` when the path passes. */
+/**
+ * Rules 2 to 5 of {@link appendPathSignOff}, or `null` when the path passes.
+ * Passing is a grant, so it must pass in both name readings (`name-fold.ts`);
+ * the folded reading's refusal is reported first.
+ */
 function signOffPathRefusal(
+  candidate: string,
+  extra: readonly ProtectedPathEntry[],
+): PathSignOffError | null {
+  return firstRefusal(eachNameReading(() => signOffPathRefusalAsRead(candidate, extra)));
+}
+
+/** {@link signOffPathRefusal} in the current name reading. */
+function signOffPathRefusalAsRead(
   candidate: string,
   extra: readonly ProtectedPathEntry[],
 ): PathSignOffError | null {

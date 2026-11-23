@@ -23,9 +23,9 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import { protectedPathClass } from "../core/command-class.js";
+import { protectedPathClassReadings } from "../core/command-class.js";
 import { canonicalize } from "../core/jcs.js";
-import { foldFileName } from "../core/name-fold.js";
+import { foldNameLower } from "../core/name-fold.js";
 import type { PolicyLoadResult } from "../core/policy-load.js";
 import { resolve as resolvePolicy } from "../core/policy-match.js";
 import { payloadHash } from "../core/payload.js";
@@ -168,10 +168,15 @@ type ParsedOperation =
   | { kind: "delete"; path: string; expected: string }
   | { kind: "move"; from: string; to: string; expected: string };
 
+/**
+ * `cls` is the folded reading's class, the one the payload records; `also` is
+ * every other class a name reading gives the path (`name-fold.ts`), judged and
+ * given an action leg beside it.
+ */
 type ClassifiedOperation =
-  | { kind: "create"; path: string; after: Buffer; cls: string }
-  | { kind: "replace"; path: string; expected: string; after: Buffer; cls: string }
-  | { kind: "delete"; path: string; expected: string; cls: string }
+  | { kind: "create"; path: string; after: Buffer; cls: string; also: string[] }
+  | { kind: "replace"; path: string; expected: string; after: Buffer; cls: string; also: string[] }
+  | { kind: "delete"; path: string; expected: string; cls: string; also: string[] }
   | { kind: "move"; from: string; to: string; expected: string; classes: string[] };
 
 function refuse(
@@ -349,7 +354,7 @@ function endpoints(operation: ParsedOperation): string[] {
 
 function conflictPath(operations: readonly ParsedOperation[]): string | null {
   // Folded ({@link foldFileName}): APFS opens two spellings that fold alike as one file.
-  const all = operations.flatMap(endpoints).map((path) => ({ path, folded: foldFileName(path) }));
+  const all = operations.flatMap(endpoints).map((path) => ({ path, folded: foldNameLower(path) }));
   for (let left = 0; left < all.length; left += 1) {
     for (let right = left + 1; right < all.length; right += 1) {
       const a = all[left];
@@ -363,8 +368,17 @@ function conflictPath(operations: readonly ParsedOperation[]): string | null {
   return null;
 }
 
-function classFor(path: string, policy: Extract<PolicyLoadResult, { ok: true }>): string {
-  return protectedPathClass(path, policy.policy.protected_paths ?? []) ?? "files.write.workspace";
+/**
+ * Every class `path` takes in either name reading (`name-fold.ts`), the folded
+ * one first; each is judged, and each becomes an action leg.
+ */
+function classesFor(path: string, policy: Extract<PolicyLoadResult, { ok: true }>): string[] {
+  const found: string[] = [];
+  for (const cls of protectedPathClassReadings(path, policy.policy.protected_paths ?? [])) {
+    const each = cls ?? "files.write.workspace";
+    if (!found.includes(each)) found.push(each);
+  }
+  return found;
 }
 
 function classify(
@@ -374,22 +388,23 @@ function classify(
   const result: ClassifiedOperation[] = [];
   for (const operation of operations) {
     const paths = endpoints(operation);
-    const classes = paths.map((path) => classFor(path, policy));
-    for (let index = 0; index < classes.length; index += 1) {
-      const cls = classes[index];
+    const perPath = paths.map((path) => classesFor(path, policy));
+    for (let index = 0; index < perPath.length; index += 1) {
       const path = paths[index];
-      if (cls === undefined || path === undefined) continue;
-      const resolution = resolvePolicy(policy, cls, { reversible: false });
-      if (ALWAYS_HUMAN_ONLY.has(cls) || resolution.autonomy === "human-only") {
-        return refuse("class-human-only", `${path} resolves to human-only class ${cls}; no preimage was read`, path);
+      if (path === undefined) continue;
+      for (const cls of perPath[index] ?? []) {
+        const resolution = resolvePolicy(policy, cls, { reversible: false });
+        if (ALWAYS_HUMAN_ONLY.has(cls) || resolution.autonomy === "human-only") {
+          return refuse("class-human-only", `${path} resolves to human-only class ${cls}; no preimage was read`, path);
+        }
       }
     }
     if (operation.kind === "move") {
-      result.push({ ...operation, classes: [...new Set(classes)].sort() });
+      result.push({ ...operation, classes: [...new Set(perPath.flat())].sort() });
     } else {
-      const cls = classes[0];
+      const [cls, ...also] = perPath[0] ?? [];
       if (cls === undefined) return refuse("input-invalid", "operation has no classified endpoint");
-      result.push({ ...operation, cls });
+      result.push({ ...operation, cls, also });
     }
   }
   return result;
@@ -448,7 +463,7 @@ function checkSpelling(parent: string, name: string): "exact" | "alias" | "absen
       if (entry === null) break;
       count += 1;
       if (count > MAX_WORKSPACE_DIRECTORY_ENTRIES) return "unsafe";
-      if (foldFileName(entry.name) === foldFileName(name)) matches.push(entry.name);
+      if (foldNameLower(entry.name) === foldNameLower(name)) matches.push(entry.name);
     }
     if (matches.length === 0) return "absent";
     if (matches.length === 1 && matches[0] === name) return "exact";
@@ -650,7 +665,7 @@ export function planWorkspaceProposal(
   };
   const hash = payloadHash(payload);
   const classes = [...new Set(classified.flatMap((operation) =>
-    operation.kind === "move" ? operation.classes : [operation.cls]))].sort();
+    operation.kind === "move" ? operation.classes : [operation.cls, ...operation.also]))].sort();
   return {
     ok: true,
     plan: deepFreeze({
