@@ -917,8 +917,9 @@ test("under such a policy the real hook answers an ordinary write as main does, 
 test("a line of many folded segments costs about what the same line spelled canonically costs", () => {
   // Both readings run on the folded line and their segments are joined; the
   // join is keyed, so it stays linear in the number of segments. A ratio, for
-  // the same reason as the Hermes test above.
-  const SIZE = 256 * 1024;
+  // the same reason as the Hermes test above. 1 MiB: a scanning join stays
+  // cheap below about 10,000 segments and costs tens of seconds here.
+  const SIZE = 1024 * 1024;
   const fill = (unit: string): string => unit.repeat(Math.ceil(SIZE / unit.length)).slice(0, SIZE - 40);
   const cpu = (run: () => void): number => {
     const start = process.cpuUsage();
