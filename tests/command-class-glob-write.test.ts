@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyCommand, classifyCommandWithMainRules, containedInAny, globWriteListingDirs, realpathKey } from "../src/core/command-class.js";
+import { classifyCommand, classifyCommandWithMainRules, containedInAny, gitRemovedPaths, globWriteListingDirs, realpathKey } from "../src/core/command-class.js";
 
 const HUMAN_ONLY = new Set(["policy.core", "log.mutate", "account.credential"]);
 
@@ -1835,4 +1835,43 @@ test("security review of d3ecdd5e: find's leading options, rsync's remove spelli
   assert.deepEqual(withListing("git rm -r --cached build/", plain), ["vcs.commit.branch"]);
   assert.deepEqual(withListing("git rm -r --cached .", organ), ["vcs.commit.branch"]);
   assert.deepEqual(withListing("git rm src/a.ts", organ), ["vcs.commit.branch"]);
+});
+
+test("security review of cfe27ea2: git rm's --cached is an option only before --, and git clean's valued options are not paths", () => {
+  const organ = { "/w": [".claude", "src", "build"] };
+  const plain = { "/w": ["src", "build"], "/w/build": ["a.o"] };
+  // 1. After `--`, `--cached` is a pathspec: the removal is real.
+  for (const command of ["git rm -r -- . --cached", "git rm -r --cache .", "git rm -r --c .", "git rm --no-cached -r .", "git rm -r --unknown ."]) {
+    assert.ok(withListing(command, organ).includes("policy.core"), `${command} -> ${withListing(command, organ).join(",")}`);
+  }
+  // 2. git clean (refused by main today, so refused here; were it classified):
+  // -e's value is a pattern, and no pathspec is the whole tree.
+  for (const command of ["git clean -fdx -e keepme", "git clean -fd", "git clean -fd --exclude=x"]) {
+    assert.equal(classifyCommand(command).ok, false, command);
+  }
+  // The reader itself: what each removes from the disk.
+  for (const [argv, removed] of [
+    [["clean", "-fdx", "-e", "keepme"], ["."]],
+    [["clean", "-fdx", "-ekeepme"], ["."]],
+    [["clean", "-fd", "--exclude", "x"], ["."]],
+    [["clean", "-fd", "--exclude=x", "build/"], ["build/"]],
+    [["clean", "-fd"], ["."]],
+    [["clean", "-fd", "--exc", "x"], ["."]],
+    [["clean", "-n"], []],
+    [["clean", "--dry-run", "-fd"], []],
+    [["clean", "-fd", "build/"], ["build/"]],
+    [["rm", "-r", "--", ".claude", "--cached"], [".claude", "--cached"]],
+    [["rm", "-r", "--cached", "--", ".claude"], []],
+    [["rm", "--cache", "-r", ".claude"], ["."]],
+    [["rm", ".cl*"], ["."]],
+    [["rm", "--pathspec-from-file=f"], ["."]],
+    [["--no-pager", "rm", "x"], ["x"]],
+  ] as const) {
+    assert.deepEqual(gitRemovedPaths(argv), removed, argv.join(" "));
+  }
+  // The not-strict side keeps main's decision.
+  assert.deepEqual(withListing("git rm --cached -r build/", plain), ["vcs.commit.branch"]);
+  assert.deepEqual(withListing("git rm --cached -r .", organ), ["vcs.commit.branch"]);
+  assert.deepEqual(withListing("git rm -r -n .", organ), ["vcs.commit.branch"]);
+  assert.deepEqual(withListing("git rm -r build/", plain), ["vcs.commit.branch"]);
 });

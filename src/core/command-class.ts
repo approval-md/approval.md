@@ -9478,39 +9478,93 @@ function organParentOperands(
 /**
  * What a `git rm` or `git clean` removes from the disk, fail closed (security
  * review of d3ecdd5e, 3). The subcommand is found past git's global options
- * (main refuses a valued one such as `-C`, `-c` or `--git-dir`, so a line
- * that reaches here has none; one this reader does not know is `.`). `git rm`
+ * (main refuses a valued one such as `-C`, `-c` or `--git-dir`, and one its
+ * table does not know, so a line that reaches here has flags only). `git rm`
  * without `--cached` removes its pathspecs, `-r` or not (a symlink or a
  * submodule needs none); git expands a pathspec itself, so one with a glob
  * character or pathspec magic (`.cl*`, `:(glob).claude/**`) is `.`. With
  * `--cached` only the index changes: main's class. `git clean` removes
  * untracked files under its paths, `.` with none.
  */
-function gitRemovedPaths(args: readonly string[]): string[] {
+export function gitRemovedPaths(args: readonly string[]): string[] {
   let at = 0;
   for (; at < args.length; at += 1) {
     const arg = args[at] as string;
+    // Main refuses a global option that takes a value or that its table does
+    // not know (gitGlobalRefusal), so a word here is a flag it knows.
     if (!arg.startsWith("-")) break;
-    if (["-p", "-P", "--paginate", "--no-pager", "--no-replace-objects", "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks", "--bare"].includes(arg)) continue;
-    return ["."];
   }
   const sub = args[at];
-  const rest = args.slice(at + 1);
+  if (sub !== "rm" && sub !== "clean") return [];
+  // Each subcommand's options as `git <sub> -h` lists them on this Mac, spelled
+  // in full (an abbreviation or an option not listed: `.`, fail closed). An
+  // option is an option only before `--`; after it every word is a pathspec
+  // (`git rm -r -- .claude --cached` removes `.claude` and a file `--cached`).
+  const table =
+    sub === "rm"
+      ? { flags: "nqfr", valued: "", long: ["dry-run", "quiet", "cached", "force", "ignore-unmatch", "sparse", "pathspec-file-nul"], longValued: [] as string[] }
+      : { flags: "dfinqxX", valued: "e", long: ["dry-run", "quiet", "force", "interactive"], longValued: ["exclude"] };
   const operands: string[] = [];
   let ended = false;
-  for (const arg of rest) {
+  let cached = false;
+  let dryRun = false;
+  const rest = args.slice(at + 1);
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index] as string;
     if (!ended && arg === "--") {
       ended = true;
       continue;
     }
-    // Pathspecs read from a file or stdin: unknown, so `.`.
-    if (!ended && (arg.startsWith("--pathspec-from-file") || arg === "--pathspec-file-nul")) operands.push(".");
-    if (!ended && arg.startsWith("-")) continue;
+    if (!ended && arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      const full = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+      const negated = full.startsWith("no-") && (table.long.includes(full.slice(3)) || table.longValued.includes(full.slice(3)));
+      const name = negated ? full.slice(3) : full;
+      // Pathspecs read from a file: unknown, so `.`.
+      if (sub === "rm" && name === "pathspec-from-file") {
+        operands.push(".");
+        if (eq === -1) index += 1;
+        continue;
+      }
+      if (table.long.includes(name) && eq === -1) {
+        if (name === "cached") cached = !negated;
+        if (name === "dry-run") dryRun = !negated;
+        continue;
+      }
+      if (table.longValued.includes(name) && !negated) {
+        if (eq === -1) {
+          if (index + 1 >= rest.length) return ["."];
+          index += 1;
+        }
+        continue;
+      }
+      return ["."];
+    }
+    if (!ended && arg.startsWith("-") && arg.length > 1) {
+      for (let letter = 1; letter < arg.length; letter += 1) {
+        const char = arg[letter] as string;
+        if (table.flags.includes(char)) {
+          if (char === "n") dryRun = true;
+          continue;
+        }
+        if (table.valued.includes(char)) {
+          // `-e PAT` / `-ePAT`: an exclude pattern, never a path.
+          if (letter === arg.length - 1) {
+            if (index + 1 >= rest.length) return ["."];
+            index += 1;
+          }
+          break;
+        }
+        return ["."];
+      }
+      continue;
+    }
     operands.push(/[*?[]/u.test(arg) || arg.startsWith(":") ? "." : arg);
   }
-  if (sub === "rm") return rest.includes("--cached") ? [] : operands;
-  if (sub === "clean") return operands.length > 0 ? operands : ["."];
-  return [];
+  // A dry run removes nothing, and `--cached` only the index entries: main's class.
+  if (dryRun) return [];
+  if (sub === "rm") return cached ? [] : operands;
+  return operands.length > 0 ? operands : ["."];
 }
 
 /**
