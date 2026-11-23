@@ -432,7 +432,55 @@ test("dot-names: ANY option-setting construct on the line turns the relaxed read
     assert.ok(HUMAN_ONLY.has(cls) || cls.startsWith("refused:"), `${setter}${target} -> ${cls}`);
   }
   // A line with none of them keeps the default reading.
-  for (const line of [target, `cd out && ${target}`, `ls -la; ${target}`, `true && ${target}`]) {
+  for (const line of [target, `cd out && ${target}`, `ls; ${target}`, `true && ${target}`]) {
     assert.equal(lastClass(line), "files.write.workspace", line);
   }
+});
+
+test("dot-names: the relaxed reading is an allowlist of plain lines (lead ruling, 22 Nov 2026)", () => {
+  const target = "echo x > ~/*/auth.json";
+  for (const setter of [
+    "setopt GLOB_DOTS; ",
+    "setopt glob_dots; ",
+    "setopt Glob_Dots; ",
+    "options=(globdots on); ",
+    "options+=(globdots on); ",
+    "typeset -A options; ",
+    "declare -n o=x; ",
+    "printf -v x y; ",
+    "BASHOPTS=x; ",
+    "SHELLOPTS=x; ",
+    "BASH_ENV=x; ",
+    "export X; ",
+    "local x; ",
+    "readonly x; ",
+    "read x; ",
+    "let x; ",
+    "enable x; ",
+    "command x; ",
+    "exec x; ",
+    "find . -exec x ; ",
+    "xargs x < f; ",
+    "sudo x; ",
+    "nohup x; ",
+    "timeout 1 x; ",
+    "nice x; ",
+    "env x; ",
+    "ls -l; ",
+    "x -i; ",
+    "a=$'x'; ",
+    "a=$\"x\"; ",
+    "(x); ",
+  ]) {
+    const cls = lastClass(`${setter}${target}`);
+    assert.ok(HUMAN_ONLY.has(cls) || cls.startsWith("refused:"), `${setter}${target} -> ${cls}`);
+  }
+  // Builtin names count as a WHOLE word only: assets/ and dataset/ are plain.
+  assert.deepEqual(classesOf("echo x > assets/*/x.txt"), ["files.write.workspace"]);
+  assert.deepEqual(classesOf("echo x > dataset/*/x.txt"), ["files.write.workspace"]);
+  assert.deepEqual(classesOf("rm -rf assets/*.png"), ["files.delete.out_of_scope"]);
+  // `rm -rf assets/*` is NOT main's class, and not because of dots: `*` can be
+  // `APPROVAL.md`, which protectedPathClass guards at any depth (`rm
+  // assets/APPROVAL.md` is policy.core on main).
+  assert.equal(strictest("rm -rf assets/*"), "policy.core");
 });

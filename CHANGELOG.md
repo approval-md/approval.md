@@ -46,14 +46,16 @@ option, case folded), and takes the strictest class among them.
 - **Dot-names (lead ruling L60846):** `*`, `?`, `[...]` and a whole `**`
   reach `.approval`, `.hermes` and the other dot-names only through an
   explicit leading `.` (`.appr*`, `.[!Z]ermes`), as every shell's default
-  does, or when the same command line holds ANY option-setting construct,
-  whatever its arguments (fail closed: a name can be built at run time):
-  `shopt`, `set` with an option, `setopt`, `unsetopt`, `emulate`, `eval`,
-  `source`, `.`, `autoload`, `options[…]=`, `GLOBIGNORE=`, `BASH_ENV=`,
-  `ENV=`, `ZDOTDIR=`, a shell started with any option (`-l` and `-i` read
-  start-up files), a command word the shell still expands, any substitution
-  or ANSI-C quoting, a `(D)` qualifier. Set by an earlier call, or by the
-  user's own start-up file, it is a known limit. Case folding stays:
+  does. Only a PLAIN line gets that reading (an allowlist, fail closed): no
+  `$`, backtick, brace or parenthesis; no option name anywhere (`options`,
+  `dotglob`, `globdots`, `globignore`, `bashopts`, `shellopts`, `bash_env`,
+  `zdotdir`, quotes, backslashes and underscores removed, case folded); no
+  word that is a builtin which may set one (`shopt`, `set`, `setopt`,
+  `typeset`, `declare`, `printf`, `read`, `eval`, `source`, ...); no `.`
+  command; no shell or launcher (`bash`, `zsh`, `env`, `xargs`, `sudo`,
+  `find -exec`, ...); no `-l`/`-i` cluster. Any other line may match
+  dot-names. Set by an earlier call, or by the user's own start-up file, it
+  is a known limit. Case folding stays:
   `*` and `*.md` reach `APPROVAL.md` as bash does on a case-insensitive APFS
   volume.
 - **Stricter than before:** a write pattern that COULD name a guarded file is

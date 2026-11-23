@@ -2344,8 +2344,8 @@ export interface ClassifierContext {
   lineNamesGit?: boolean;
   /**
    * May the line itself turn on dot-name matching for its globs (GLOB-WRITE,
-   * lead ruling L60846)? True for ANY option-setting construct on the line,
-   * whatever its arguments ({@link lineMaySetDotglob}). Set by
+   * lead ruling L60846)? True unless the whole line is plain (an allowlist,
+   * {@link lineMaySetDotglob}). Set by
    * {@link classifyCommand} for the whole line and its inner scripts; without
    * it a pattern reaches a dot-name only through an explicit leading `.`, as
    * every shell's default does.
@@ -8260,61 +8260,58 @@ function strictestProtected(
 // A glob in a WRITE target (GLOB-WRITE ruling, 22 Nov 2026)
 // ---------------------------------------------------------------------------
 
-/** Shells whose invocation with any option may read start-up files or set glob options. */
-const DOTGLOB_SHELLS: readonly string[] = ["sh", "bash", "zsh", "dash", "ksh", "mksh", "yash", "posh", "fish"];
-/** Words that run the next word as a command in the same shell. */
-const DOTGLOB_WRAPPERS: readonly string[] = ["builtin", "command", "exec", "noglob", "nocorrect", "time", "nohup", "!"];
+/** Builtins and wrappers that may set a shell option: a WHOLE folded word (lead allowlist, 22 Nov 2026). */
+const DOTGLOB_SETTER_WORDS: readonly string[] = [
+  "shopt", "setopt", "unsetopt", "set", "emulate", "eval", "source", "autoload", "typeset", "declare",
+  "export", "local", "readonly", "read", "let", "printf", "builtin", "command", "exec", "enable",
+];
+/** Option names: a substring anywhere in the folded line. */
+const DOTGLOB_OPTION_NAMES = /options|dotglob|globdots|globignore|bashopts|shellopts|bashenv|zdotdir/u;
+/** Names whose assignment may set an option or load start-up files (folded, by prefix). */
+const DOTGLOB_ASSIGNED = /^(?:options|bashopts|shellopts|globignore|bashenv|env|zdotdir)/u;
+/** Programs that start a shell or run another command: any of them makes the line strict. */
+const DOTGLOB_LAUNCHERS: readonly string[] = [
+  "bash", "sh", "zsh", "dash", "ksh", "mksh", "yash", "posh", "fish", "env", "xargs", "sudo", "nohup", "timeout", "nice",
+];
 
 /**
  * May this command line turn on dot-name matching (bash `dotglob`, zsh
- * `GLOB_DOTS`)? FAIL CLOSED, and on purpose blind to arguments: an option name
- * can be built at run time (`$'\x64otglob'`, `${:-dotglob}`, `$(printf
- * dotglob)`, a brace group, zsh's `-4`), so the line counts as turning it on
- * when it holds ANY of:
+ * `GLOB_DOTS`)? An ALLOWLIST, fail closed (lead ruling, 22 Nov 2026): the
+ * default reading, where a pattern reaches a dot-name only through an explicit
+ * leading `.`, applies only to a PLAIN line. Anything else is `true`:
  *
- * - a substitution or ANSI-C quoting anywhere (`$(`, a backtick, `$'`, `<(`);
- * - an option-setting word, quoted or not: `shopt`, `setopt`, `unsetopt`,
- *   `emulate`, `eval`, `source`, `autoload`, an `options[…]` assignment, and the
- *   names `dotglob`, `globdots`, `glob_dots`;
- * - an assignment to `GLOBIGNORE` (bash sets `dotglob` with it), or to
- *   `BASH_ENV`, `ENV` or `ZDOTDIR` (start-up files);
- * - a command word that is `set` with any `-`/`+` option, the `.` builtin, a
- *   shell (`bash`, `zsh`, `sh`, ...) with any option (`-l` and `-i` read
- *   start-up files), or a word the shell still expands (`$X`, a brace group, a
- *   glob), which may be any of these;
- * - a `(…D…)` glob qualifier.
+ * - any `$` (expansion, ANSI-C `$'…'` and locale `$"…"` quoting), backtick,
+ *   brace, or parenthesis anywhere;
+ * - after removing quotes, backslashes and underscores and folding case: any
+ *   option name as a substring (`options`, `dotglob`, `globdots`,
+ *   `globignore`, `bashopts`, `shellopts`, `bashenv`, `zdotdir`); any WHOLE
+ *   word that is a builtin which may set one ({@link DOTGLOB_SETTER_WORDS});
+ *   an assignment to a name opening with `options`, `bashopts`, `shellopts`,
+ *   `globignore`, `bashenv`, `env` or `zdotdir`;
+ * - `.` as a command word; any word naming a shell or a launcher
+ *   ({@link DOTGLOB_LAUNCHERS}); find's `-exec`, `-execdir`, `-ok`; a
+ *   single-dash cluster holding `l` or `i` (a login or interactive shell).
  *
- * Only a line with none of them gets the default reading. A user's own
- * start-up file that sets the option for the agent's shell is state from
- * before the command, the "earlier call" known limit (lead ruling L60846).
+ * A user's own start-up file that sets the option for the agent's shell is
+ * state from before the command, the "earlier call" known limit (lead ruling
+ * L60846).
  */
 function lineMaySetDotglob(command: string): boolean {
-  if (/\$'|\$\(|`|[<>]\(/u.test(command)) return true;
-  if (/\([^()]*D[^()]*\)/u.test(command)) return true;
-  const plain = command.replace(/['"\\]/gu, "");
-  if (/shopt|setopt|unsetopt|emulate|eval|source|autoload|options\s*\[|dotglob|globdots|glob_dots|globignore|bash_env|zdotdir/iu.test(plain)) {
-    return true;
-  }
-  for (const piece of plain.split(/[;&|()\n]+/u)) {
+  if (/[$`{}()]/u.test(command)) return true;
+  const folded = command.replace(/['"\\_]/gu, "").toLowerCase();
+  if (DOTGLOB_OPTION_NAMES.test(folded)) return true;
+  for (const piece of folded.split(/[;&|\n]+/u)) {
     const words = piece.trim().split(/\s+/u).filter((word) => word.length > 0);
-    let at = 0;
-    while (at < words.length && (words[at] === "{" || words[at] === "}")) at += 1;
-    while (at < words.length && /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u.test(words[at] as string)) {
-      if (/^env\+?=/iu.test(words[at] as string)) return true;
-      at += 1;
-    }
-    while (at < words.length && DOTGLOB_WRAPPERS.includes(words[at] as string)) at += 1;
-    const head = words[at];
-    if (head === undefined) continue;
-    if (/[$*?[\]{}~]/u.test(head) || head === ".") return true;
-    // `set` or a shell anywhere in the piece (behind `env`, `sudo`, `xargs`),
-    // with any option after it.
-    for (let k = at; k < words.length; k += 1) {
-      const word = words[k] as string;
-      const name = (word.split("/").pop() ?? word).replace(/[0-9.]+$/u, "");
-      if ((name === "set" || DOTGLOB_SHELLS.includes(name)) && words.slice(k + 1).some((next) => /^[-+]/u.test(next))) {
-        return true;
-      }
+    if (words[0] === ".") return true;
+    for (const word of words) {
+      // A program named by an absolute path counts as its name (`/usr/bin/env`).
+      const name = word.startsWith("/") ? (word.split("/").pop() ?? word) : word;
+      if (DOTGLOB_SETTER_WORDS.includes(word) || DOTGLOB_SETTER_WORDS.includes(name)) return true;
+      if (DOTGLOB_LAUNCHERS.includes(name.replace(/[0-9.]+$/u, ""))) return true;
+      if (word === "-exec" || word === "-execdir" || word === "-ok" || word === "-okdir") return true;
+      if (/^-[a-z0-9]*[li]/u.test(word) && !word.startsWith("--")) return true;
+      const assigned = /^([a-z0-9[\]]+)\+?=/u.exec(word);
+      if (assigned !== null && DOTGLOB_ASSIGNED.test(assigned[1] as string)) return true;
     }
   }
   return false;
