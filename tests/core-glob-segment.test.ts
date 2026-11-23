@@ -17,10 +17,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { globSegmentMatches, mayNameGitDirectory } from "../src/core/command-class.js";
+import { foldNameLower } from "../src/core/name-fold.js";
 
 /** The matcher this replaced, from src/core/command-class.ts at a521a91d: the oracle. */
 function oracleSegmentMatches(pattern: string, name: string): boolean {
-  if (!/[*?[]/u.test(pattern)) return pattern.toLowerCase() === name.toLowerCase();
+  // A literal segment compares as #688 folds a guarded name (`name-fold.ts`):
+  // `ſ` opens `s` on APFS. The rest is the expression at a521a91d.
+  if (!/[*?[]/u.test(pattern)) return foldNameLower(pattern) === foldNameLower(name);
   if (name.startsWith(".") && (pattern.startsWith("*") || pattern.startsWith("?"))) return false;
   let source = "";
   for (let at = 0; at < pattern.length; at += 1) {
