@@ -389,7 +389,10 @@ const FIXTURES: readonly Fixture[] = [
     row: "rm",
     context: { globDisk: { cwd: "/w", home: "/h", listings: new Map([["/w", ["src", "dist"]]]) } },
   },
-  { command: "rm -rf $TARGET", class: "files.delete.out_of_scope", rule: "rm-unreadable-path", row: "rm" },
+  // A variable alone may name the working directory or the home, which may
+  // hold an organ directory (lead ruling L61587, parents): fail closed.
+  { command: "rm -rf $TARGET", class: "policy.core", rule: "protected-path", row: "rm" },
+  { command: "rm -rf $TARGET/x", class: "files.delete.out_of_scope", rule: "rm-unreadable-path", row: "rm" },
   { command: "rm -rf node_modules", class: "files.write.workspace", rule: "rm-workspace", row: "rm" },
 
   // -- scratch deletes (APRV-267) -------------------------------------------

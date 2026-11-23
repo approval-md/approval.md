@@ -1264,6 +1264,12 @@ test("lead ruling L61587, parents: a recursive delete, move or chmod of a direct
     "chmod -R 000 ~",
     "chmod -R --reference=x .",
     'mv "$PWD" ../x',
+    // Security review: a chmod of a parent without -R locks its organ
+    // directories too; a sibling through `..` is listed before it is passed;
+    // a substitution may print the working directory.
+    "chmod 000 .",
+    "rm -rf ../other-project",
+    "rm -rf $(echo x)",
   ]) {
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
@@ -1289,13 +1295,10 @@ test("lead ruling L61587, parents: a recursive delete, move or chmod of a direct
   for (const [command, main] of [
     ["rm -rf ./dist", "files.write.workspace"],
     ["rm -rf dist", "files.write.workspace"],
-    ["rm -rf ../other-project", "files.delete.out_of_scope"],
     ['rm -rf "$TMPDIR"/x', "files.delete.out_of_scope"],
-    ["rm -rf $(echo x)", "files.delete.out_of_scope"],
     ["rm -rf /tmp/x", "files.delete.out_of_scope"],
     ["rm .", "files.write.workspace"],
     ["rmdir .", "files.write.workspace"],
-    ["chmod 000 .", "files.write.workspace"],
     ["touch .", "files.write.workspace"],
     // rename(2) refuses `.` and `..` as a source: nothing moves.
     ["mv . x", "files.write.workspace"],
@@ -1303,4 +1306,55 @@ test("lead ruling L61587, parents: a recursive delete, move or chmod of a direct
     assert.deepEqual(classesOf(command), [main], command);
   }
   assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": ["x.js"] }), ["files.delete.out_of_scope"]);
+});
+
+test("security review of the parents rule (L61587), 1: a chmod mode that starts with '-', and chmod without -R", () => {
+  // A mode that starts with `-` is the mode, not an option; a chmod of a
+  //    parent without -R counts too (`chmod 000 .` locks every organ below).
+  for (const command of ["chmod -R -w .", "chmod -R -rwx ..", "chmod -R -w ~", "chmod -w .", "chmod 000 .", "chmod -R -- -w .", "chmod -fR a-w ."]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  assert.deepEqual(withListing("chmod -R -w .", { "/w": ["src", ".cache"] }), ["files.write.workspace"]);
+  assert.deepEqual(withListing("chmod 000 .", { "/w": [".claude"] }), ["policy.core"]);
+});
+
+test("security review of the parents rule (L61587), 2: `..` after a name", () => {
+  // `..` after a name: a path that comes back to (or above) the working
+  //    directory or the home, or a sibling reached through `..`, is read by
+  //    the listing; with none, fail closed.
+  for (const command of ["rm -rf sub/../..", "rm -rf ~/x/../..", "rm -rf ./a/../../", "rm -rf ../w", "rm -rf ../other-project"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  assert.deepEqual(withListing("rm -rf ../w", { "/": ["w", "h"], "/w": [".claude"], "/h": [] }), ["policy.core"]);
+  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": [".claude"] }), ["policy.core"]);
+  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": ["x.js"] }), ["files.delete.out_of_scope"]);
+  // A sibling that cannot be listed (missing, unreadable): strict.
+  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": "missing" }), ["policy.core"]);
+  assert.deepEqual(withListing("rm -rf ~/../other", { "/other": ["notes"] }), ["files.delete.out_of_scope"]);
+});
+
+test("security review of the parents rule (L61587), 3: a listed name in another letter case", () => {
+  // A listed name in another letter case is the same directory on a case-insensitive volume.
+  assert.deepEqual(withListing("rm -rf .", { "/w": [".Claude", "src"] }), ["policy.core"]);
+  assert.deepEqual(withListing("rm -rf .", { "/w": ["Approval.MD", "src"] }), ["policy.core"]);
+  assert.ok(withListing("rm -rf .", { "/w": [".GIT", "src"] }).includes("vcs.history.rewrite"));
+});
+
+test("security review of the parents rule (L61587), 4: an operand the text cannot read", () => {
+  // An operand the text cannot read may be the working directory: fail closed.
+  for (const command of ["rm -rf $X", 'rm -rf "$X"', "rm -rf ${X}/", "rm -rf $OLDPWD", "rm -rf $(pwd -P)", "rm -rf ${PWD}", 'rm -rf "$PWD/"', "chmod -R 000 $X", 'mv "$X" ../y']) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // `builtin pwd` and `command pwd` are refused by main (no rule for the
+  // wrapper); a refusal is stricter than any class and stays one.
+  for (const command of ["rm -rf $(builtin pwd)", "rm -rf $(command pwd)", "rm -rf $(command pwd -P)"]) {
+    const result = classifyCommand(command);
+    assert.ok(!result.ok || classesOf(command).includes("policy.core"), command);
+  }
+  assert.deepEqual(withListing("rm -rf $(pwd -P)", {}), ["policy.core"]);
+  // A variable with a named tail is not the directory itself: main's class.
+  assert.deepEqual(classesOf('rm -rf "$TMPDIR"/x'), ["files.delete.out_of_scope"]);
+  assert.deepEqual(classesOf("rm -rf $BUILD/dist"), ["files.delete.out_of_scope"]);
+  // Main refuses a substitution it cannot classify; that stays a refusal.
+  assert.equal(classifyCommand("rm -rf $(cmd)").ok, false);
 });

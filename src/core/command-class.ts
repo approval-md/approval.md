@@ -8943,12 +8943,35 @@ function organParentOperands(basename: string, args: readonly string[], position
       return last !== "." && last !== "..";
     });
   }
-  if (basename === "chmod") {
-    if (!recursive("R")) return [];
-    // The mode is the first operand unless `--reference` gives it.
-    return hasFlag(args, ["--reference"]) ? [...positionals] : positionals.slice(1);
-  }
+  if (basename === "chmod") return chmodFiles(args);
   return [];
+}
+
+/**
+ * chmod's files (security review of the parents rule, 1): its options are
+ * `-R`, `-c`, `-f`, `-v`, `-h`, `-H`, `-L`, `-P` and long `--…` ones; the
+ * first other word is the mode even when it starts with `-` (`chmod -R -w .`)
+ * unless `--reference=` gives it, and every word after is a file. A chmod of a
+ * parent counts with or without `-R`: `chmod 000 .` locks every organ
+ * directory below it, as `chmod 000 .claude` locks that one.
+ */
+function chmodFiles(args: readonly string[]): string[] {
+  const files: string[] = [];
+  let mode = hasFlag(args, ["--reference"]);
+  let ended = false;
+  for (const arg of args) {
+    if (!ended && arg === "--") {
+      ended = true;
+      continue;
+    }
+    if (!ended && (arg.startsWith("--") || /^-[RcfvhHLP]+$/u.test(arg))) continue;
+    if (!mode) {
+      mode = true;
+      continue;
+    }
+    files.push(arg);
+  }
+  return files;
 }
 
 /** The most directories on one parent's chain that are listed before the parent is judged strict. */
@@ -8972,7 +8995,20 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
   else if (pwd !== null) [base, rest] = ["cwd", operand.slice(pwd[0].length)];
   else if (pwdWord && operand.startsWith(SUBSTITUTION_SENTINEL)) [base, rest] = ["cwd", operand.slice(SUBSTITUTION_SENTINEL.length)];
   else if (operand.startsWith("/")) [base, rest] = ["root", operand];
-  else [base, rest] = ["cwd", operand];
+  else {
+    // An expansion the text cannot read (`$X`, `"$X"`, `${X}/`, `$OLDPWD`, a
+    // substitution), alone or with only `.`/`..` after it, may be the working
+    // directory or the home: fail closed (security review, 4). With a named
+    // tail (`"$TMPDIR"/x`) it is not one of them.
+    const variable = /^(?:\$[A-Za-z_][A-Za-z0-9_]*|\$\{[^}]*\}|\$[0-9?#@*!$-])/u.exec(operand);
+    const head = operand.startsWith(SUBSTITUTION_SENTINEL) ? SUBSTITUTION_SENTINEL : (variable?.[0] ?? null);
+    const unread = head === null ? null : [head, operand.slice(head.length)];
+    if (unread !== null) {
+      const tail = (unread[1] ?? "").split("/").filter((part) => part.length > 0);
+      return tail.every((part) => part === "." || part === "..") ? "unplaced" : null;
+    }
+    [base, rest] = ["cwd", operand];
+  }
   if (/[$*?[\]{}~`]/u.test(rest) || rest.includes(SUBSTITUTION_SENTINEL) || rest.includes(PARAMETER_MARK)) return null;
   const stack: string[] = [];
   for (const segment of rest.split("/")) {
@@ -8981,8 +9017,13 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
     else if (segment === ".." && base === "root") continue;
     else stack.push(segment);
   }
-  const ups = stack.length;
-  if (base !== "root" && stack.some((segment) => segment !== "..")) return null;
+  // Leading `..`s, then the names after them (security review, 2: `../w`,
+  // `~/../other`). Names with no `..` before them stay inside the working
+  // directory or the home (`./dist`, `~/build`): not a parent.
+  let ups = 0;
+  while (ups < stack.length && stack[ups] === "..") ups += 1;
+  const names = stack.slice(ups);
+  if (base !== "root" && ups === 0 && names.length > 0) return null;
   // Without the caller's disk: the working directory, the home, their
   // ancestors and `/` are parents of an organ directory the text cannot rule
   // out; any other absolute path is not judged here.
@@ -8994,14 +9035,16 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
     const from = base === "home" ? (disk.homeOk === false ? null : disk.home) : disk.relativeOk === false ? null : disk.cwd;
     if (from === null || !from.startsWith("/")) return "unplaced";
     const parts = from.split("/").filter((part) => part.length > 0);
-    if (ups > parts.length) target = "/";
-    else target = `/${parts.slice(0, parts.length - ups).join("/")}`;
+    target = `/${[...parts.slice(0, Math.max(0, parts.length - ups)), ...names].join("/")}`;
   }
   const holds = (dir: string | null): dir is string => dir !== null && dir.startsWith("/") && (dir === target || target === "/" || dir.startsWith(`${target}/`));
   const places = [disk.relativeOk === false ? null : disk.cwd, disk.homeOk === false ? null : disk.home].filter(holds);
-  if (base === "root" && places.length === 0) {
-    // An absolute path that holds neither the working directory nor the home
-    // is not a parent this rule knows; one that may hold them unplaced is.
+  if (places.length === 0) {
+    // A path reached through `..` that holds neither the working directory
+    // nor the home (a sibling: `../other-project`) is judged by its own
+    // listing. An absolute path that holds neither is not a parent this rule
+    // knows; one that may hold them unplaced is.
+    if (base !== "root") return disk.listingsOk === false ? "unplaced" : [target];
     return disk.relativeOk === false || disk.homeOk === false ? "unplaced" : null;
   }
   if (disk.listingsOk === false) return "unplaced";
@@ -9017,6 +9060,20 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
   return dirs.size > ORGAN_PARENT_CHAIN_CAP ? "unplaced" : [...dirs];
 }
 
+let guardedSpellings: Map<string, string[]> | null = null;
+
+/** The guarded spellings by their case-folded form, built once (a listing may hold 2,000 names). */
+function guardedSpellingsByFold(): Map<string, string[]> {
+  if (guardedSpellings !== null) return guardedSpellings;
+  const map = new Map<string, string[]>();
+  for (const spelling of [...Object.keys(ORGAN_DIRECTORIES), ...GLOB_GUARD_NAMES, ...CORE_FILENAMES, ...PROTECTED_FILENAMES]) {
+    const key = foldGuardedName(spelling);
+    map.set(key, [...(map.get(key) ?? []), spelling]);
+  }
+  guardedSpellings = map;
+  return map;
+}
+
 /**
  * The class a listed name gives the directory that holds it: an organ
  * directory ({@link ORGAN_DIRECTORIES}), a guarded name the path rule knows
@@ -9025,10 +9082,17 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
  * the parent rule does not depend on how the bare-directory rule is scoped.
  */
 function guardedEntryClass(name: string, protectedPaths: readonly ProtectedPathEntry[]): { protectedClass: string | null; git: boolean } {
-  let best: string | null = Object.hasOwn(ORGAN_DIRECTORIES, name) ? (ORGAN_DIRECTORIES[name] as string) : null;
-  const named = protectedPathClass(name, protectedPaths);
-  if (named !== null && (best === null || protectedRank(named) < protectedRank(best))) best = named;
-  return { protectedClass: best, git: foldGuardedName(name) === ".git" };
+  // Every guarded spelling equal to the name with case folded (security
+  // review, 3: `.Claude` is `.claude` on a case-insensitive volume).
+  const folded = foldGuardedName(name);
+  const spellings = [name, ...(guardedSpellingsByFold().get(folded) ?? [])];
+  let best: string | null = null;
+  for (const spelling of spellings) {
+    for (const cls of [Object.hasOwn(ORGAN_DIRECTORIES, spelling) ? (ORGAN_DIRECTORIES[spelling] as string) : null, protectedPathClass(spelling, protectedPaths)]) {
+      if (cls !== null && (best === null || protectedRank(cls) < protectedRank(best))) best = cls;
+    }
+  }
+  return { protectedClass: best, git: folded === ".git" };
 }
 
 /**
@@ -9050,7 +9114,10 @@ function organParentClass(
     if (named === null || protectedRank(surface) < protectedRank(named.surface)) named = { surface, path };
   };
   for (const operand of operands) {
-    const pwdWord = words.some((word) => word.text === operand && word.substitutions.length === 1 && word.substitutions[0]?.trim() === "pwd");
+    // `$(pwd)`, `$(pwd -P)`, `$(builtin pwd)`, `$(command pwd -L)` (security review, 4).
+    const pwdWord = words.some(
+      (word) => word.text === operand && word.substitutions.length === 1 && /^(?:(?:builtin|command)\s+)?pwd(?:\s+-[LP]+)*$/u.test(word.substitutions[0]?.trim() ?? ""),
+    );
     const dirs = organParentDirs(operand, pwdWord, disk);
     if (dirs === null) continue;
     if (dirs === "unplaced" || disk === undefined) {

@@ -167,29 +167,35 @@ by it, so `mkdir .claude`, `cp -r .claude backup/` and
 directory's class (lead ruling L61587).** `rm -rf "$PWD"`, `rm -rf ~`,
 `chmod -R 000 .` and `mv "$PWD" ../x` remove or lock every organ directory
 under them, and were `files.delete.out_of_scope` or an ordinary write. A
-recursive `rm`, a `mv` source, or a recursive `chmod` whose operand is the
-working directory (`.`, `./`, `$PWD`, `"$PWD"`, `${PWD}`, `$(pwd)`,
-`sub/..`), an ancestor of it (`..`, `../..`, `/`), the home (`~`, `~/`,
-`$HOME`) or an ancestor of the home now takes the strictest class among the
-guarded names the hook's listing shows there: an organ directory
-(`.claude`, `.cursor`, `.grok`, `.muse`: `policy.core`; `.github`:
-`policy.edit`), `.approval`, `.codex`, `.hermes`, `APPROVAL.md` and the other
-guarded files, or `.git` (`vcs.history.rewrite`). An ancestor is read
-together with every directory from it down to the working directory and the
-home. A directory that holds none keeps its class, unchanged from main
-(`rm -rf .` in a tree of sources is `files.delete.out_of_scope`). Fail
-closed, `policy.core`: no listing (every caller but the hook), a directory
-over the listing's 2,000-entry cap or unreadable, a line that may change
-directory or names `HOME`, a line with a substitution (`$(pwd)`), and a chain
-of more than 8 directories to list. Not a parent, and unchanged:
-`rm -rf ./dist`, `rm -rf ../other-project`, `rm -rf "$TMPDIR"/x`. `mv .`,
-`mv ./` and `mv sub/..` move nothing (rename(2) refuses them) and keep their
-class. Not covered (follow-up): `chmod` of a parent without `-R`, `rmdir .`,
-`find . -delete`, `chown`/`chgrp` (refused), and organ directories in a
-SIBLING tree under an ancestor (`rm -rf ..` lists only the chain to the
-working directory and the home). On macOS (and GNU) `rm -rf .`, `./`, `..`
-and `sub/..` refuse to run; they are judged by the rule anyway, as the
-ruling says.
+recursive `rm`, a `mv` source, or a `chmod` (with or without `-R`: `chmod 000
+.` locks every organ directory below too) whose operand is the working
+directory (`.`, `./`, `$PWD`, `"$PWD"`, `${PWD}`, `"$PWD/"`, `$(pwd)`, `$(pwd
+-P)`, `sub/..`, `../<this directory>`), an ancestor of it (`..`, `../..`,
+`sub/../..`, `/`), the home (`~`, `~/`, `$HOME`) or an ancestor of the home now
+takes the strictest class among the guarded names the hook's listing shows
+there: an organ directory (`.claude`, `.cursor`, `.grok`, `.muse`:
+`policy.core`; `.github`: `policy.edit`), `.approval`, `.codex`, `.hermes`,
+`APPROVAL.md` and the other guarded files, or `.git` (`vcs.history.rewrite`),
+in any case (`.Claude` is `.claude` on a case-insensitive volume). An ancestor
+is read together with every directory from it down to the working directory
+and the home. A path through `..` that names another directory
+(`../other-project`) is read by its own listing. A directory that holds none
+keeps its class, unchanged from main (`rm -rf .` in a tree of sources is
+`files.delete.out_of_scope`). A chmod mode that starts with `-` (`chmod -R -w
+.`) is the mode, not an option. Fail closed, `policy.core`: no listing (every
+caller but the hook), a directory over the listing's 2,000-entry cap,
+unreadable or missing, a line that may change directory or names `HOME`, an
+operand the text cannot read (`$X`, `"$X"`, `$OLDPWD`, `$(pwd)`, any other
+`$(...)`, alone or followed only by `.` or `..`), and a chain of more than 8
+directories to list. Not a parent, and unchanged: `rm -rf ./dist`, `rm -rf
+"$TMPDIR"/x`, `rm -rf $TARGET/x`. `mv .`, `mv ./` and `mv sub/..` move nothing
+(rename(2) refuses them) and keep their class; `rm -rf $(builtin pwd)` and
+`$(command pwd)` stay refused, as on main. Not covered (follow-up): `rmdir .`,
+`find . -delete`, `chown`/`chgrp` (refused), organ directories below the top
+of a sibling tree, and organ directories in a sibling tree under an ancestor
+(`rm -rf ..` lists only the chain to the working directory and the home). On
+macOS (and GNU) `rm -rf .`, `./`, `..` and `sub/..` refuse to run; they are
+judged by the rule anyway, as the ruling says.
 
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),
