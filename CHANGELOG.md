@@ -306,8 +306,8 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   its canonical spelling takes on main. Run for real in bash and zsh on APFS
   in a scratch folder, each case and fold spelling tried landed on the
   guarded file, and the dotless i and a fullwidth a did not.
-  Conformance: `command-class` 1.13.0 (from 1.12.0), ten new vectors; main's
-  382 are byte-identical.
+  Conformance: ten new `command-class` vectors; main's 382 are
+  byte-identical. The vectors version is bumped once, at the release cut.
 
 ### Added
 

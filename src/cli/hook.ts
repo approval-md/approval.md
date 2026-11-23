@@ -8383,7 +8383,13 @@ function globCouldNameCredential(path: string): boolean {
     const component = components[index] as string;
     if (!hasGlobChars(component)) continue;
     const names = GLOB_DIRECTORY_NAMES.filter(
-      (name) => globRegex(component).test(name) || globRegex(foldFileName(component)).test(name),
+      (name) =>
+        globRegex(component).test(name) ||
+        // The lowered pattern stays beside the folded one: folding a pattern
+        // decomposes a bracket range's end (`[P-\u00C9]`), so the fold alone
+        // could match less than the lowered pattern did.
+        globRegex(component.toLowerCase()).test(name) ||
+        globRegex(foldFileName(component)).test(name),
     );
     if (names.length > 0) choices.push({ index, names });
   }

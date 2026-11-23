@@ -326,6 +326,55 @@ test("grants stay exact: the skill-script shape and the install's .env.example",
   assert.equal(isCredentialPath("~/.hermes/hermes-agent/.env.EXAMPLE"), true);
 });
 
+test("the hook's on-disk passes fold: a home or key folder that exists, spelled with the long s", { skip }, () => {
+  // The hook also reads the disk: a recursive read's root, a glob's
+  // directory, a `cd` target. Made-up files stand in a fixture home and
+  // checkout; each line is classified, never run. APFS opens `.herme<U+017F>`
+  // as `.hermes`, so each spelling takes the canonical line's answer, and that
+  // answer names the credential the disk pass found.
+  const RESOLVED = "account.credential credential-path-resolved";
+  mkdirSync(join(HOME, ".hermes", "profiles", "p"), { recursive: true });
+  writeFileSync(join(HOME, ".hermes", ".env"), "MADE_UP=1\n");
+  writeFileSync(join(HOME, ".hermes", "profiles", "p", ".env"), "MADE_UP=1\n");
+  mkdirSync(join(HOME, ".hermes", "sub"));
+  writeFileSync(join(HOME, ".hermes", "sub", ".env"), "MADE_UP=1\n");
+  const dir = repo();
+  mkdirSync(join(dir, ".approval", "keys"), { recursive: true });
+  writeFileSync(join(dir, ".approval", "keys", "k1"), "made-up\n");
+  // A home in the checkout with no credential right under it: only the
+  // root's own kind can call a recursive read of it a credential read.
+  mkdirSync(join(dir, ".hermes", "profiles", "q"), { recursive: true });
+  writeFileSync(join(dir, ".hermes", "profiles", "q", ".env"), "MADE_UP=1\n");
+  try {
+    for (const [canonical, spelled] of [
+      ["grep -r x ~/.hermes", `grep -r x ~/.herme${LONG_S}`],
+      ["cat ~/.hermes/*", `cat ~/.herme${LONG_S}/*`],
+      ["cd ~/.hermes && cat .env", `cd ~/.herme${LONG_S} && cat .env`],
+      ["tar cf - ~/.hermes", `tar cf - ~/.herme${LONG_S}`],
+      ["cp -r ~/.hermes /tmp/x", `cp -r ~/.herme${LONG_S} /tmp/x`],
+      ["cd .approval/keys && cat k1", `cd .approval/key${LONG_S} && cat k1`],
+      // Each of the next five is decided by one compare of the hook alone
+      // (found by planting `toLowerCase()` back in each, one at a time): the
+      // read root's kind, the folder that holds a credential, the approval
+      // home's file names, the Hermes home and a credential file's name under
+      // an unresolved directory.
+      ["grep -r x .hermes", `grep -r x .herme${LONG_S}`],
+      ["grep -r x ~/.hermes/sub", `grep -r x ~/.herme${LONG_S}/sub`],
+      ["cat $H/keys", `cat $H/key${LONG_S}`],
+      ["cat $X/.hermes/$F", `cat $X/.herme${LONG_S}/$F`],
+      ["cat $X/y/auth.json", `cat $X/y/auth.j${LONG_S}on`],
+    ] as const) {
+      const want = hook(canonical);
+      assert.ok(want.includes(RESOLVED), `${canonical}: ${want.join(" ; ")}`);
+      assert.deepEqual(hook(spelled), want, spelled);
+    }
+  } finally {
+    rmSync(join(HOME, ".hermes"), { recursive: true, force: true });
+    rmSync(join(dir, ".approval"), { recursive: true, force: true });
+    rmSync(join(dir, ".hermes"), { recursive: true, force: true });
+  }
+});
+
 test("git ref names fold as file names: trunk and tag spellings", () => {
   assert.deepEqual(pure(`git push origin ma${LONG_S}ter`), pure("git push origin master"));
   assert.deepEqual(pure(`git push origin ma${LIGATURE_ST}er`), pure("git push origin master"));

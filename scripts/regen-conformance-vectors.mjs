@@ -5661,15 +5661,15 @@ const SUITES = [
     // fold adds three more in the same unreleased 1.12.0: a write through
     // `$'\x2egit'` and one through `${VAR:-.git}`, and a control,
     // `"${OUT:-build}/log.txt"`, which stays a workspace write.
-    // 1.13.0 (guarded names fold case on every platform): MINOR again, ten new
-    // vectors and no expectation moved: a policy file, approval home, log,
-    // harness settings and instructions write spelled in another case, one
-    // spelling each with the Kelvin sign, the long s and the fi ligature that
-    // APFS opens as the ASCII name, a credential read through a long-s home,
-    // and a control, `approval-notes.md`, which stays a workspace write.
-    // Regenerating over main's 1.12.0 leaves all 382 byte-identical. By the
-    // 1.4.0 rule the number is claimed at merge.
-    vectors_version: "1.13.0",
+    // Guarded names fold case on every platform: ten more vectors in the same
+    // unreleased 1.12.0, and no expectation moved: a policy file, approval
+    // home, log, harness settings and instructions write spelled in another
+    // case, one spelling each with the Kelvin sign, the long s and the fi
+    // ligature that APFS opens as the ASCII name, a credential read through a
+    // long-s home, and a control, `approval-notes.md`, which stays a workspace
+    // write. Regenerating over main's 382 leaves them byte-identical. The
+    // number is bumped once, at the release cut, for every change it carries.
+    vectors_version: "1.12.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:
