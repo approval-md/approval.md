@@ -9455,10 +9455,7 @@ function organParentOperands(
   // find: any -delete, -exec, -execdir or -ok (a test narrows what it deletes
   // to what matches, which may be `.claude/settings.json`: fail closed).
   if (basename === "find") return args.some((arg) => ["-delete", "-exec", "-execdir", "-ok", "-okdir"].includes(arg)) ? findStartPaths(args) : [];
-  // `git rm -r P` removes the tracked files under P from the disk (`--cached`
-  // leaves them there); `git clean` removes untracked ones.
-  if (basename === "git" && positionals[0] === "rm") return hasShortFlag(args, ["r"]) && !hasFlag(args, ["--cached"]) ? positionals.slice(1) : [];
-  if (basename === "git" && positionals[0] === "clean") return positionals.slice(1).length > 0 ? positionals.slice(1) : ["."];
+  if (basename === "git") return gitRemovedPaths(args);
   // tar `--remove-files` (any unique prefix, `--rem` on), or an option from
   // the environment (`TAR_OPTIONS=` before it): every operand.
   if (basename === "tar") {
@@ -9466,10 +9463,11 @@ function organParentOperands(
     const fromEnvironment = assignments.some((word) => word.text.startsWith("TAR_OPTIONS="));
     return removes || fromEnvironment ? [...positionals, ...(plan?.anyName ?? [])] : [];
   }
-  // rsync `--remove-source-files` (from `--remov`: `--rem` and `--remo` are
-  // ambiguous with `--remote-option`, which rsync refuses): its sources.
+  // rsync removing what it sent: its sources.
   if (basename === "rsync") {
-    const removes = args.some((arg) => /^--remov(?:e(?:-(?:s(?:o(?:u(?:r(?:c(?:e(?:-(?:f(?:i(?:l(?:es?)?)?)?)?)?)?)?)?)?)?)?)?)?$/u.test(arg.split("=")[0] as string));
+    // `--remove-source-files`, the older `--remove-sent-files`, or any prefix
+    // (openrsync on this Mac takes `--remov` and both spellings): fail closed.
+    const removes = args.some((arg) => arg.startsWith("--remov"));
     return removes ? [...(plan?.sources ?? positionals)] : [];
   }
   // zip `-m` / `--move`: deletes what it archives.
@@ -9477,16 +9475,86 @@ function organParentOperands(
   return [];
 }
 
-/** find's start paths: the words before its expression (and after `-H`, `-L`, `-P`). */
+/**
+ * What a `git rm` or `git clean` removes from the disk, fail closed (security
+ * review of d3ecdd5e, 3). The subcommand is found past git's global options
+ * (main refuses a valued one such as `-C`, `-c` or `--git-dir`, so a line
+ * that reaches here has none; one this reader does not know is `.`). `git rm`
+ * without `--cached` removes its pathspecs, `-r` or not (a symlink or a
+ * submodule needs none); git expands a pathspec itself, so one with a glob
+ * character or pathspec magic (`.cl*`, `:(glob).claude/**`) is `.`. With
+ * `--cached` only the index changes: main's class. `git clean` removes
+ * untracked files under its paths, `.` with none.
+ */
+function gitRemovedPaths(args: readonly string[]): string[] {
+  let at = 0;
+  for (; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (!arg.startsWith("-")) break;
+    if (["-p", "-P", "--paginate", "--no-pager", "--no-replace-objects", "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs", "--no-optional-locks", "--bare"].includes(arg)) continue;
+    return ["."];
+  }
+  const sub = args[at];
+  const rest = args.slice(at + 1);
+  const operands: string[] = [];
+  let ended = false;
+  for (const arg of rest) {
+    if (!ended && arg === "--") {
+      ended = true;
+      continue;
+    }
+    // Pathspecs read from a file or stdin: unknown, so `.`.
+    if (!ended && (arg.startsWith("--pathspec-from-file") || arg === "--pathspec-file-nul")) operands.push(".");
+    if (!ended && arg.startsWith("-")) continue;
+    operands.push(/[*?[]/u.test(arg) || arg.startsWith(":") ? "." : arg);
+  }
+  if (sub === "rm") return rest.includes("--cached") ? [] : operands;
+  if (sub === "clean") return operands.length > 0 ? operands : ["."];
+  return [];
+}
+
+/**
+ * find's start paths, fail closed (security review of d3ecdd5e, 1). Leading
+ * options: BSD's `-E -X -d -s -x` and `-H -L -P` are skipped, `-f PATH` is a
+ * start path, GNU's `-D OPTS` takes a value and `-O<n>` none. Then the words
+ * before the expression. No start path means `.` to GNU find (this Mac's
+ * /usr/bin/find, BSD, refuses it, as it refuses `-D` and `-O`: checked in a
+ * fixture), so it is `.`; a leading option this list does not know may change
+ * what is a path: `.`, the strict answer.
+ */
 function findStartPaths(args: readonly string[]): string[] {
   const paths: string[] = [];
-  for (const arg of args) {
-    if (["-H", "-L", "-P"].includes(arg)) continue;
+  let at = 0;
+  for (; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") {
+      at += 1;
+      break;
+    }
+    if (!arg.startsWith("-") || arg.length < 2) break;
+    if (/^-[EXdsxHLP]+$/u.test(arg)) continue;
+    if (arg === "-f" || arg === "-D") {
+      const value = args[at + 1];
+      if (value === undefined) return ["."];
+      if (arg === "-f") paths.push(value);
+      at += 1;
+      continue;
+    }
+    if (/^-O\d*$/u.test(arg)) continue;
+    // An expression primary (`-delete`, `-name`): the paths are over.
+    if (FIND_PRIMARY.test(arg)) break;
+    return ["."];
+  }
+  for (; at < args.length; at += 1) {
+    const arg = args[at] as string;
     if (arg.startsWith("-") || arg === "(" || arg === "!") break;
     paths.push(arg);
   }
-  return paths;
+  return paths.length === 0 ? ["."] : paths;
 }
+
+/** A find expression word: a primary or an operator, never a leading option. */
+const FIND_PRIMARY = /^-(?:[a-z]{2,}|a|o)$/u;
 
 /**
  * chmod's files (security review of the parents rule, 1): its options are

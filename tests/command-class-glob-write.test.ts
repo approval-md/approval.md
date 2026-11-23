@@ -1797,3 +1797,42 @@ test("lead ruling L62013 for the parents rule: a parent takes the classes of the
     assert.equal(classifyCommand(command).ok, false, command);
   }
 });
+
+test("security review of d3ecdd5e: find's leading options, rsync's remove spellings and git's pathspecs are read for the parents rule, fail closed", () => {
+  const organ = { "/w": [".claude", "src"] };
+  const plain = { "/w": ["src", "dist"], "/w/dist": ["a.o"] };
+  // 1. find: BSD's -E -X -d -s -x, -f PATH, GNU's -D OPTS and -O<n>; no start path is `.`.
+  for (const command of [
+    "find -E . -delete",
+    "find -x . -delete",
+    "find -s . -delete",
+    "find -d . -delete",
+    "find -f . -- -delete",
+    "find -D tree . -delete",
+    "find -O3 . -delete",
+    "find -delete",
+    "find -name '*.o' -delete",
+    "find -Z . -delete",
+  ]) {
+    assert.ok(withListing(command, organ).includes("policy.core"), `${command} -> ${withListing(command, organ).join(",")}`);
+  }
+  // 2. rsync: both spellings of removing what it sent, and any prefix.
+  for (const command of ["rsync -a --remove-sent-files ./ /tmp/x/", "rsync -a --remove-s ./ /tmp/x/", "rsync -a --remov ./ /tmp/x/"]) {
+    assert.ok(withListing(command, organ).includes("policy.core"), command);
+  }
+  // 3. git rm: without -r too, and a pathspec git expands itself is `.`.
+  for (const command of ["git rm .", "git rm -f .", "git rm ':(glob)**'", "git rm '.cl*'", "git rm -r -- '*'", "git rm --pathspec-from-file=list"]) {
+    assert.ok(withListing(command, organ).includes("policy.core"), `${command} -> ${withListing(command, organ).join(",")}`);
+  }
+  // git's valued global options are refused by main, before this rule.
+  for (const command of ["git -C sub rm -r .", "git -c core.x=y rm -r .", "git --git-dir=x --work-tree=. rm -r ."]) {
+    assert.equal(classifyCommand(command).ok, false, command);
+  }
+  // The not-strict side keeps main's decision.
+  assert.deepEqual(withListing("find dist -name '*.o' -delete", plain), ["files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("find . -name '*.o' -delete", plain), ["files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("rsync -a src/ dst/", plain), ["network.call"]);
+  assert.deepEqual(withListing("git rm -r --cached build/", plain), ["vcs.commit.branch"]);
+  assert.deepEqual(withListing("git rm -r --cached .", organ), ["vcs.commit.branch"]);
+  assert.deepEqual(withListing("git rm src/a.ts", organ), ["vcs.commit.branch"]);
+});
