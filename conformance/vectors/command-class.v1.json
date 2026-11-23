@@ -1198,12 +1198,18 @@
             "path": ".APPROVAL"
           },
           {
+            "class": "log.mutate",
+            "rule": "protected-path",
+            "path": ".APPROVAL"
+          },
+          {
             "class": "files.write.workspace",
             "rule": "rm-workspace"
           }
         ],
         "classes": [
           "policy.core",
+          "log.mutate",
           "files.write.workspace"
         ]
       }

@@ -890,20 +890,194 @@ function withMainRules<T>(run: () => T): T {
 }
 
 /**
+ * Does the organ-directory rule ({@link bareOrganDirectory}) and its contents
+ * rule ({@link folderContentClaims}) apply to the segment being classified?
+ * FAIL CLOSED (lead ruling L62013, S2; security review of e9956c84): every
+ * command naming the bare organ folder keeps the folder's class, a redirect
+ * onto it included, except the short release list in {@link releasedFromOrganRule}:
+ * commands that cannot remove, replace, move or change access to the entry.
+ * Set per segment by {@link classifySegment}.
+ */
+let organVerbs = true;
+
+/**
+ * Lead ruling L62013 (S2): `mkdir` and `touch` keep main's class, so creating
+ * a folder asks nothing new, and so does `tar` creating an archive from it.
+ * Released only when EVERY option is one listed here, spelled in full: an
+ * unknown option, or a long one abbreviated (getopt_long accepts any unique
+ * prefix, which this list does not resolve), keeps the folder's class.
+ * `mkdir -m`/`--mode` is not released: on a folder that is not there yet it
+ * creates the folder with that mode (`mkdir -m 000 .claude` locks it); on one
+ * that is, macOS and GNU leave the mode alone.
+ */
+function releasedFromOrganRule(basename: string, args: readonly string[]): boolean {
+  switch (basename) {
+    case "mkdir":
+      return onlyKnownOptions(args, { flags: "pv", valued: "", long: ["parents", "verbose"], longValued: [] });
+    case "touch":
+      return onlyKnownOptions(args, { flags: "acfhm", valued: "tdrA", long: ["no-create", "no-dereference"], longValued: ["date", "reference", "time"] });
+    case "tar":
+      return tarCreatesOnly(args);
+    default:
+      return false;
+  }
+}
+
+interface KnownOptions {
+  /** Short letters that take no value. */
+  flags: string;
+  /** Short letters that take a value (attached or the next word). */
+  valued: string;
+  /** Long options that take no value, in full. */
+  long: readonly string[];
+  /** Long options that take a value (`--name=v` or `--name v`), in full. */
+  longValued: readonly string[];
+}
+
+/** Is every option before `--` one of `known`, each long one spelled in full? */
+function onlyKnownOptions(args: readonly string[], known: KnownOptions): boolean {
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") return true;
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+      if (known.long.includes(name) && eq === -1) continue;
+      if (known.longValued.includes(name)) {
+        if (eq === -1) at += 1;
+        continue;
+      }
+      return false;
+    }
+    if (!arg.startsWith("-") || arg === "-") continue;
+    for (let index = 1; index < arg.length; index += 1) {
+      const letter = arg[index] as string;
+      if (known.flags.includes(letter)) continue;
+      if (known.valued.includes(letter)) {
+        if (index === arg.length - 1) at += 1;
+        break;
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Does this `tar` only create an archive (`-c`, `--create`), with every option
+ * known and none that removes what it reads (`--remove-files`) or extracts?
+ * The first word may be a bundle without its dash (`tar czf out.tgz .`).
+ */
+function tarCreatesOnly(args: readonly string[]): boolean {
+  const [first, ...rest] = args;
+  if (first === undefined) return false;
+  const bundled = !first.startsWith("-") && /^[A-Za-z]+$/u.test(first);
+  const words = bundled ? [`-${first}`, ...rest] : [...args];
+  // With a dashless bundle, its value letters take the next words in order.
+  const known: KnownOptions = { flags: "czjJvh", valued: "fC", long: ["create", "gzip", "bzip2", "xz", "verbose", "dereference"], longValued: ["file", "directory", "exclude"] };
+  if (bundled) {
+    const takers = [...first].filter((letter) => known.valued.includes(letter)).length;
+    if (![...first].every((letter) => known.flags.includes(letter) || known.valued.includes(letter))) return false;
+    if (!onlyKnownOptions(rest.slice(takers), known)) return false;
+  } else if (!onlyKnownOptions(words, known)) {
+    return false;
+  }
+  const creates = words.some((word) => word === "--create" || (/^-[A-Za-z]+$/u.test(word) && word.includes("c")));
+  return creates;
+}
+
+/**
  * Is `segments[index]` the organ directory ITSELF: the last segment, or one
  * whose tail comes back to it (`.claude/x/..`)? A tail that leaves it first
  * (`.claude/..`) names its parent, which this rule does not judge.
  */
 function bareOrganDirectory(segments: readonly string[], index: number): boolean {
-  if (mainRulesOnly) return false;
+  if (mainRulesOnly || !organVerbs) return false;
+  const bare = tailReturnsTo(segments, index);
+  if (bare) markGlobWriteFired();
+  return bare;
+}
+
+/** Does the tail after `segments[index]` come back to it (`x/..`, `.`), never leaving it first? */
+function tailReturnsTo(segments: readonly string[], index: number): boolean {
   let depth = 0;
   for (const segment of segments.slice(index + 1)) {
     if (segment === "..") depth -= 1;
     else if (segment !== "." && segment.length > 0) depth += 1;
     if (depth < 0) return false;
   }
-  if (depth === 0) markGlobWriteFired();
   return depth === 0;
+}
+
+/**
+ * Paths under each organ folder whose built-in class may differ from the
+ * folder's own (lead ruling L62013, S1): the folder's contents go with it.
+ */
+const FOLDER_CONTENTS: Readonly<Record<string, readonly string[]>> = {
+  ".approval": ["log/x", "env"],
+  ".claude": ["settings.json", "hooks/x"],
+  ".cursor": ["hooks.json", "hooks/x", "agents/x"],
+  ".grok": ["hooks.json", "hooks/x"],
+  ".muse": ["hooks.json", "settings.json"],
+  ".codex": ["config.toml", "hooks.json", "hooks/x"],
+  ".github": ["workflows/x.yml"],
+  ".hermes": [
+    "config.yaml", "agent-hooks/x", "shell-hooks-allowlist.json", ".env", "auth.json", "approval/x", "scripts/x", "plugins/x",
+    "hermes-agent/x", ".op.env",
+  ],
+};
+
+/**
+ * Lead ruling L62013 (S1): a command that removes, moves or changes access to
+ * an organ folder ITSELF takes the class of every guarded path inside it, the
+ * policy's routed entries included (`rm -rf .github` is `policy.edit.ci`
+ * where `.github/workflows/` is routed there). The pure classifier has the
+ * policy's entries but not their autonomy, so it cannot rank them: each class
+ * is a claim of equal standing ({@link takeAmongEqual}), and the gate judges
+ * every one, so the strictest decides under the policy in force. Each path
+ * inside is classified as a file under the folder would be: a built-in
+ * representative per organ ({@link FOLDER_CONTENTS}) and one per policy entry
+ * that names a path under the folder.
+ */
+function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): string | null {
+  const own = protectedPathClassOfWordAlone(candidate, extra);
+  if (own === null || !organVerbs || mainRulesOnly) return own;
+  const claims = folderContentClaims(candidate, own, extra);
+  if (claims.length <= 1) return own;
+  markGlobWriteFired();
+  return takeAmongEqual(claims);
+}
+
+/** `own`, then each distinct class of a path inside the organ folder `candidate` names bare (S1). */
+function folderContentClaims(candidate: string, own: string, extra: readonly ProtectedPathEntry[]): string[] {
+  const segments = pathSegments(collapseBracedVariables(candidate)).map(foldNameExact);
+  let at = -1;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    if (Object.hasOwn(FOLDER_CONTENTS, segments[index] as string) && tailReturnsTo(segments, index)) {
+      at = index;
+      break;
+    }
+  }
+  if (at === -1) return [own];
+  const name = segments[at] as string;
+  const prefix = (candidate.startsWith("/") ? "/" : "") + segments.slice(0, at + 1).join("/");
+  const inside = (FOLDER_CONTENTS[name] ?? []).map((tail) => `${prefix}/${tail}`);
+  for (const raw of extra) {
+    const entry = parseProtectedEntry(raw);
+    if (entry === null) continue;
+    const wanted = entry.segments.map(foldNameExact);
+    for (let position = 0; position < wanted.length - 1; position += 1) {
+      if (wanted[position] !== name || position > at) continue;
+      if (!wanted.slice(0, position).every((segment, offset) => segment === segments[at - position + offset])) continue;
+      inside.push(`${prefix}/${wanted.slice(position + 1).join("/")}${entry.directory ? "/x" : ""}`);
+    }
+  }
+  const claims = [own];
+  for (const path of inside) {
+    const cls = protectedPathClassOfWordAlone(path, extra);
+    if (cls !== null && !claims.includes(cls)) claims.push(cls);
+  }
+  return claims;
 }
 
 /**
@@ -939,7 +1113,7 @@ function distinctClasses(readings: readonly (string | null)[]): string[] {
 }
 
 /** {@link protectedPathClass} for one word that brace expansion has already made. */
-function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): string | null {
+function protectedPathClassOfWordAlone(candidate: string, extra: readonly ProtectedPathEntry[]): string | null {
   // Every guarded name below is compared with the candidate's FOLDED segments
   // ({@link foldFileName}), on every platform: APFS opens `Approval.MD`,
   // `.Claude/Settings.json` and `.APPROVAL/env` as the guarded files, and a
@@ -11018,6 +11192,21 @@ function classifySegment(
   protectedPaths: readonly ProtectedPathEntry[],
   context: ClassifierContext,
 ): SegmentOutcome {
+  // This segment's own release, not one around it (a substitution is a segment too).
+  const outerVerbs = organVerbs;
+  organVerbs = true;
+  try {
+    return classifySegmentWithVerb(segment, protectedPaths, context);
+  } finally {
+    organVerbs = outerVerbs;
+  }
+}
+
+function classifySegmentWithVerb(
+  segment: LexSegment,
+  protectedPaths: readonly ProtectedPathEntry[],
+  context: ClassifierContext,
+): SegmentOutcome {
   if (segment.opaque !== null) {
     return { ok: false, code: "opaque", detail: segment.opaque };
   }
@@ -11346,6 +11535,9 @@ function classifySegment(
   }
 
   const positionals = args.filter((arg) => !isFlag(arg));
+  // Lead ruling L62013 (S2), fail closed: the organ-directory rule holds for
+  // every command but the release list (redirects above were judged with it).
+  organVerbs = !releasedFromOrganRule(basename, args);
 
   // APRV-520: a git global option that takes a value, or one this table does
   // not know, leaves the segment unclassified ({@link gitGlobalRefusal}). It is
