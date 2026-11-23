@@ -1451,6 +1451,9 @@ test("lead ruling L62013 (S2), fail closed: every command naming the bare organ 
     "mkdir -p {.claude,x}",
     "touch ~/.claude/../.claude",
     "touch .claude -r",
+    "touch .claude --date",
+    // The shell keeps this backslash: the name is `.cl\\aude`, not the text read.
+    'touch ".cl\\aude"',
   ]) {
     assert.ok(held(command), `${command} -> ${JSON.stringify(classifyCommand(command))}`);
   }
@@ -1465,6 +1468,9 @@ test("lead ruling L62013 (S2), fail closed: every command naming the bare organ 
     ["touch -t 202601010000 .claude", "files.write.workspace"],
     ["touch --no-create .claude", "files.write.workspace"],
     ["touch -r ref .claude", "files.write.workspace"],
+    // A valued option takes the next word as its value, whatever it looks like.
+    ["touch -r -x .claude", "files.write.workspace"],
+    ["touch --reference -x .claude", "files.write.workspace"],
     ["touch -d 2026-01-01 -a .claude", "files.write.workspace"],
     ["\\mkdir .claude", "files.write.workspace"],
   ] as const) {
