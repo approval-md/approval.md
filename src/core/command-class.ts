@@ -889,49 +889,100 @@ function withMainRules<T>(run: () => T): T {
 }
 
 /**
- * Does the segment being classified remove, move or change access to what it
- * names (lead ruling L62013, S2)? Only then does the organ-directory rule
- * ({@link bareOrganDirectory}) and its contents rule ({@link folderContentClaims})
- * apply; `mkdir .claude`, `touch .claude` and every other command naming the
- * bare folder keep main's class. Set per segment by {@link classifySegment}.
+ * Does the organ-directory rule ({@link bareOrganDirectory}) and its contents
+ * rule ({@link folderContentClaims}) apply to the segment being classified?
+ * FAIL CLOSED (lead ruling L62013, S2; security review of e9956c84): every
+ * command naming the bare organ folder keeps the folder's class, a redirect
+ * onto it included, except the short release list in {@link releasedFromOrganRule}:
+ * commands that cannot remove, replace, move or change access to the entry.
+ * Set per segment by {@link classifySegment}.
  */
-let organVerbs = false;
-
-/** A short option cluster (`-rf`) holding any of `letters`, or a long option `--name` (a unique prefix of three or more letters too). */
-function hasOption(args: readonly string[], letters: string, longNames: readonly string[]): boolean {
-  for (const arg of args) {
-    if (arg === "--") return false;
-    if (/^-[A-Za-z]+$/u.test(arg) && [...arg.slice(1)].some((letter) => letters.includes(letter))) return true;
-    const long = /^--([a-z-]+)(?:=.*)?$/u.exec(arg)?.[1];
-    if (long !== undefined && long.length >= 1 && longNames.some((name) => name === long || (long.length >= 3 && name.startsWith(long)))) return true;
-  }
-  return false;
-}
+let organVerbs = true;
 
 /**
- * The verbs of lead ruling L62013 (S2): `rm` recursive or `-d`, `rmdir`, `mv`,
- * `chmod`, `chown` and `chgrp` (refused today: the rule covers them if they are
- * ever classified), `ln` with `-f`, `find … -delete`, `git rm -r` and `git mv`.
+ * Lead ruling L62013 (S2): `mkdir` and `touch` keep main's class, so creating
+ * a folder asks nothing new, and so does `tar` creating an archive from it.
+ * Released only when EVERY option is one listed here, spelled in full: an
+ * unknown option, or a long one abbreviated (getopt_long accepts any unique
+ * prefix, which this list does not resolve), keeps the folder's class.
+ * `mkdir -m`/`--mode` is not released: on a folder that is not there yet it
+ * creates the folder with that mode (`mkdir -m 000 .claude` locks it); on one
+ * that is, macOS and GNU leave the mode alone.
  */
-function organVerbFor(basename: string, sub: string | null, args: readonly string[]): boolean {
+function releasedFromOrganRule(basename: string, args: readonly string[]): boolean {
   switch (basename) {
-    case "rm":
-      return hasOption(args, "rRd", ["recursive", "dir"]);
-    case "rmdir":
-    case "mv":
-    case "chmod":
-    case "chown":
-    case "chgrp":
-      return true;
-    case "ln":
-      return hasOption(args, "f", ["force"]);
-    case "find":
-      return args.includes("-delete");
-    case "git":
-      return sub === "mv" || (sub === "rm" && hasOption(args, "r", []));
+    case "mkdir":
+      return onlyKnownOptions(args, { flags: "pv", valued: "", long: ["parents", "verbose"], longValued: [] });
+    case "touch":
+      return onlyKnownOptions(args, { flags: "acfhm", valued: "tdrA", long: ["no-create", "no-dereference"], longValued: ["date", "reference", "time"] });
+    case "tar":
+      return tarCreatesOnly(args);
     default:
       return false;
   }
+}
+
+interface KnownOptions {
+  /** Short letters that take no value. */
+  flags: string;
+  /** Short letters that take a value (attached or the next word). */
+  valued: string;
+  /** Long options that take no value, in full. */
+  long: readonly string[];
+  /** Long options that take a value (`--name=v` or `--name v`), in full. */
+  longValued: readonly string[];
+}
+
+/** Is every option before `--` one of `known`, each long one spelled in full? */
+function onlyKnownOptions(args: readonly string[], known: KnownOptions): boolean {
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") return true;
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+      if (known.long.includes(name) && eq === -1) continue;
+      if (known.longValued.includes(name)) {
+        if (eq === -1) at += 1;
+        continue;
+      }
+      return false;
+    }
+    if (!arg.startsWith("-") || arg === "-") continue;
+    for (let index = 1; index < arg.length; index += 1) {
+      const letter = arg[index] as string;
+      if (known.flags.includes(letter)) continue;
+      if (known.valued.includes(letter)) {
+        if (index === arg.length - 1) at += 1;
+        break;
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Does this `tar` only create an archive (`-c`, `--create`), with every option
+ * known and none that removes what it reads (`--remove-files`) or extracts?
+ * The first word may be a bundle without its dash (`tar czf out.tgz .`).
+ */
+function tarCreatesOnly(args: readonly string[]): boolean {
+  const [first, ...rest] = args;
+  if (first === undefined) return false;
+  const bundled = !first.startsWith("-") && /^[A-Za-z]+$/u.test(first);
+  const words = bundled ? [`-${first}`, ...rest] : [...args];
+  // With a dashless bundle, its value letters take the next words in order.
+  const known: KnownOptions = { flags: "czjJvh", valued: "fC", long: ["create", "gzip", "bzip2", "xz", "verbose", "dereference"], longValued: ["file", "directory", "exclude"] };
+  if (bundled) {
+    const takers = [...first].filter((letter) => known.valued.includes(letter)).length;
+    if (![...first].every((letter) => known.flags.includes(letter) || known.valued.includes(letter))) return false;
+    if (!onlyKnownOptions(rest.slice(takers), known)) return false;
+  } else if (!onlyKnownOptions(words, known)) {
+    return false;
+  }
+  const creates = words.some((word) => word === "--create" || (/^-[A-Za-z]+$/u.test(word) && word.includes("c")));
+  return creates;
 }
 
 /**
@@ -10832,9 +10883,9 @@ function classifySegment(
   protectedPaths: readonly ProtectedPathEntry[],
   context: ClassifierContext,
 ): SegmentOutcome {
-  // The verb of this segment, not of one around it (a substitution is a segment too).
+  // This segment's own release, not one around it (a substitution is a segment too).
   const outerVerbs = organVerbs;
-  organVerbs = false;
+  organVerbs = true;
   try {
     return classifySegmentWithVerb(segment, protectedPaths, context);
   } finally {
@@ -11175,9 +11226,9 @@ function classifySegmentWithVerb(
   }
 
   const positionals = args.filter((arg) => !isFlag(arg));
-  // Lead ruling L62013 (S2): the organ-directory rule is for the verbs that
-  // remove, move or change access; redirects above were judged without it.
-  organVerbs = organVerbFor(basename, positionals[0] ?? null, args);
+  // Lead ruling L62013 (S2), fail closed: the organ-directory rule holds for
+  // every command but the release list (redirects above were judged with it).
+  organVerbs = !releasedFromOrganRule(basename, args);
 
   // APRV-520: a git global option that takes a value, or one this table does
   // not know, leaves the segment unclassified ({@link gitGlobalRefusal}). It is

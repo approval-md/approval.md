@@ -258,7 +258,8 @@ test("review 1: every operand of a command that is not a read is a write target 
     "scp a .appr*/env",
     "gunzip .appr*/env.gz",
   ]) {
-    assert.equal(strictest(command), "policy.core", command);
+    // `-C .appr*` may be `.approval` itself, and its log goes with it (lead ruling L62013, S1).
+    assert.equal(strictest(command), command.startsWith("tar") ? "log.mutate" : "policy.core", command);
   }
   // The shell globs WHOLE words: a pattern inside an option word is handed to
   // the program as written, so it is not a path the shell resolves.
@@ -411,10 +412,10 @@ test("dot-names: the ruling's workflow lines, with and without dot matching on t
   // `*` can be APPROVAL.md (a guarded name at any depth, and matched with no
   // option: on APFS, case folded, `*.md` and `*` reach it as bash does), so a
   // write through `*` straight into a directory stays policy.core either way.
-  // Lead ruling L62013 (S1): a recursive delete or a chmod through `*` may
-  // reach `.approval` itself, and its log goes with it: `log.mutate` too.
+  // Lead ruling L62013 (S1): `*` may be `.approval` itself, and a command on
+  // that folder takes its log's class too: `log.mutate`.
   for (const command of ["rm -rf dist/*", "chmod +x scripts/*", "git add src/*", "npx prettier --write src/*", "git add *"]) {
-    assert.equal(strictest(command), command.startsWith("rm") || command.startsWith("chmod") ? "log.mutate" : "policy.core", command);
+    assert.equal(strictest(command), "log.mutate", command);
     assert.ok(lineClasses(`GLOBIGNORE=x; ${command}`).includes("policy.core"), command);
   }
   // A pattern for a DIRECTORY reaches only dot-directories, which dotglob or
@@ -553,9 +554,9 @@ test("listings: the four workflow lines by what the directory holds", () => {
     assert.deepEqual(withListing(command, { [dir]: ["APPROVAL.md"] }), raised, `${command} APPROVAL.md`);
     // Another spelling: guarded in the folded reading; main's class beside, as for any raise.
     assert.deepEqual(withListing(command, { [dir]: ["apprOVAL.MD"] }), raised, `${command} apprOVAL.MD`);
-    // Unlisted, `*` may be `.approval` itself: a delete or chmod of it takes
-    // the class of its log too (lead ruling L62013, S1).
-    const unlisted = /^(?:rm|chmod) /u.test(command) ? [...raised, "log.mutate"] : raised;
+    // Unlisted, `*` may be `.approval` itself: a command on it takes the
+    // class of its log too (lead ruling L62013, S1).
+    const unlisted = [...raised, "log.mutate"];
     assert.deepEqual(withListing(command, { [dir]: "unreadable" }), unlisted, `${command} unreadable`);
     assert.deepEqual(withListing(command, {}), unlisted, `${command} not listed`);
   }
@@ -572,7 +573,8 @@ test("listings: home organs, absolute and relative prefixes, the first globbed l
   assert.deepEqual(withListing("echo x > /abs/out/*", { "/abs/out": ["a.log"] }), andMain(["files.write.workspace"], "echo x > /abs/out/*", { "/abs/out": ["a.log"] }));
   assert.deepEqual(withListing("echo x > /abs/out/*", { "/abs/out": ["APPROVAL.md"] }), andMain(["policy.core"], "echo x > /abs/out/*", { "/abs/out": ["APPROVAL.md"] }));
   // A deeper globbed level keeps the over-approximated reading.
-  assert.deepEqual(withListing("echo x > src/*/*", { "/w/src": ["lib"] }), andMain(["policy.core"], "echo x > src/*/*", { "/w/src": ["lib"] }));
+  // (`src/lib/*` may be `src/lib/.approval` itself: its log's class too, L62013 S1.)
+  assert.deepEqual(withListing("echo x > src/*/*", { "/w/src": ["lib"] }), ["policy.core", "files.write.workspace", "log.mutate"]);
   assert.deepEqual(withListing("echo x > src/*/*.ts", { "/w/src": ["lib"] }), andMain(["files.write.workspace"], "echo x > src/*/*.ts", { "/w/src": ["lib"] }));
 });
 
@@ -1366,48 +1368,92 @@ test("lead ruling L62013 (S1): an organ folder itself takes the class of every g
   assert.deepEqual(classesOf("mkdir .approval"), ["policy.core"]);
 });
 
-test("lead ruling L62013 (S2): the organ-directory rule is for the verbs that remove, move or change access", () => {
-  // Held: the folder's own class beside main's.
+test("lead ruling L62013 (S2), fail closed: every command naming the bare organ folder keeps its class but a short release list", () => {
+  // Held (the folder's class, or refused as on main): anything that may
+  // remove, replace, move or change access to the entry, and any tool or
+  // option this classifier does not know. Security review of e9956c84: a list
+  // of destructive verbs failed open.
+  const held = (command: string): boolean => {
+    const result = classifyCommand(command);
+    return !result.ok || result.classes.includes("policy.core");
+  };
   for (const command of [
     "rm -rf .claude",
-    "rm -r .claude",
     "rm -d .claude",
-    "rm --recursive .claude",
     "rmdir .claude",
     "mv .claude x",
     "mv x .claude",
     "chmod -R 000 .claude",
     "chmod 000 .claude",
     "ln -sf x .claude",
-    "ln -f x .claude",
+    "ln -s x .claude",
     "find .claude -delete",
     "git rm -r .claude",
     "git mv .claude x",
+    // Finding 3: plain rm and unlink of the bare name (a symlink, or a glob).
+    "rm .claude",
+    "rm -f .claude",
+    "rm -f .cl*",
+    "unlink .claude",
+    // Finding 2: any unique prefix getopt_long accepts.
+    "rm --r .claude",
+    "rm --re .claude",
+    "rm --di .claude",
+    // Finding 1: tools that delete or move their SOURCE, and unknown ones.
+    "tar --remove-files -cf x.tar .claude",
+    "tar --remove-f -cf x.tar .claude",
+    "tar -czf out.tgz --remove-files -C .claude .",
+    "rsync -a --remove-source-files .claude/ x/",
+    "zip -m x.zip .claude",
+    "zip -rm x.zip .claude",
+    "gmv .claude x",
+    "trash .claude",
+    "shred -u .claude",
+    "srm .claude",
+    "git clean -fdx .claude",
+    "find .claude -exec rm -rf {} +",
+    "chown -R x .claude",
+    "chgrp x .claude",
+    "install -d .claude",
+    // Other writes naming the bare folder.
+    "tee .claude",
+    "echo x > .claude",
+    "truncate -s 0 .claude",
+    // Not on the release list: a mode at creation, an abbreviated or unknown option.
+    "mkdir -m 000 .claude",
+    "mkdir --mode=000 .claude",
+    "mkdir --par .claude",
+    "mkdir -Z .claude",
+    "touch --no-c .claude",
+    "tar -cf x.tar --unknown -C .claude .",
   ]) {
-    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+    assert.ok(held(command), `${command} -> ${JSON.stringify(classifyCommand(command))}`);
   }
-  // chown and chgrp have no rule: refused, on main and here (stricter than any class).
-  for (const command of ["chown -R x .claude", "chgrp x .claude", "install -d .claude"]) {
-    assert.equal(classifyCommand(command).ok, false, command);
-    assert.equal(classifyCommandWithMainRules(command).ok, false, command);
-  }
-  // Released to main's class: creating, touching or naming the bare folder.
+  // Released to main's class: creating the folder, touching it, archiving it.
   for (const [command, main] of [
     ["mkdir .claude", "files.write.workspace"],
-    ["mkdir -p .cursor/", "files.write.workspace"],
+    ["mkdir -p .claude", "files.write.workspace"],
+    ["mkdir -pv .cursor/", "files.write.workspace"],
+    ["mkdir --parents --verbose .github", "files.write.workspace"],
     ["touch .claude", "files.write.workspace"],
-    ["tee .claude", "files.write.workspace"],
-    ["echo x > .claude", "files.write.workspace"],
-    ["truncate -s 0 .claude", "files.write.workspace"],
-    ["rm .claude", "files.write.workspace"],
-    ["rm -f .grok", "files.write.workspace"],
+    ["touch -c .claude", "files.write.workspace"],
+    ["touch -t 202601010000 .claude", "files.write.workspace"],
+    ["touch --no-create .claude", "files.write.workspace"],
     ["tar -czf out.tgz -C .claude .", "files.write.workspace"],
+    ["tar czf out.tgz -C .claude .", "files.write.workspace"],
+    ["tar --create --gzip --file=out.tgz --directory=.claude .", "files.write.workspace"],
   ] as const) {
     assert.deepEqual(classesOf(command), [main], command);
+    const mainPass = classifyCommandWithMainRules(command);
+    assert.ok(mainPass.ok, command);
+    assert.deepEqual(mainPass.classes, [main], command);
   }
-  // Kept by #686's destination rule, not this one: a write INTO the folder, or
-  // a copy that lands one (`backup/.claude/settings.json` is policy.core on main).
-  for (const command of ["cp -r evil/ .claude", "rsync -a x/ .claude/", "ln -s x .claude", "cp -r .claude backup/", "cp -r evil/.claude .", "tar -xf a.tar -C .claude"]) {
+  // A read of the folder as a copy's source: main's class, except that what
+  // lands is judged by #686's destination rule (`backup/.claude/settings.json`
+  // is policy.core on main when spelled).
+  assert.ok(classesOf("cp -r .claude backup/").includes("policy.core"));
+  // Kept by the destination rule: a write INTO the folder.
+  for (const command of ["cp -r evil/ .claude", "rsync -a x/ .claude/", "cp -r evil/.claude .", "tar -xf a.tar -C .claude"]) {
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
 });

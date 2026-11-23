@@ -153,27 +153,32 @@ own registration (`.claude/settings.json`): an agent could switch the gate off
 in one command. The bare organ directories now take their strictest class
 exactly as bare `.approval`, `.codex` and `.hermes` already did:
 `.claude`, `.cursor`, `.grok` and `.muse` are `policy.core`, `.github` is
-`policy.edit`. The rule is for the verbs that remove, move or change access
-(lead ruling L62013, S2): `rm -r`/`-R`/`-rf`, `rm -d`, `rmdir`, `mv` (either
-side), `chmod` (recursive or not), `ln -f`, `find .claude -delete`,
-`git rm -r .claude` and `git mv`; `chown` and `chgrp` would be too, and stay
-refused (no rule) as on main. The spellings
+`policy.edit`. Fail closed (lead ruling L62013, S2; security review of
+e9956c84): every command naming the bare folder keeps its class, a redirect
+onto it, a plain `rm`/`unlink` (the name may be a symlink) and any tool or
+option the classifier does not know included, except a short release list
+of commands that cannot remove, replace, move or change access to it. The
+spellings
 `.claude/`, `./.claude`, `.claude/.` and `.claude/x/..`, and with the glob
 readings `rm -rf .cl*`, `rm -rf .c?aude`, `rm -rf .*` and, where the hook's
 listing shows one, `rm -rf *`. An ordinary directory (`rm -rf dist`,
 `rm -rf node_modules`, `rm -rf build/`, `rm -rf .cache`) and a directory
 inside an organ that guards no file (`rm -rf .claude/commands`) keep their
-class. Every other command naming the bare folder keeps main's class:
-`mkdir .claude`, `touch .claude`, `tee .claude`, `> .claude`,
-`truncate -s 0 .claude`, `rm .claude` without `-r` or `-d`, and
-`tar -czf out.tgz -C .claude .` (a read). A write INTO the folder stays
+class. Released to main's class, only when every option is one listed and
+spelled in full (an unknown or abbreviated option keeps the folder's class):
+`mkdir` with `-p`/`-v` (not `-m`, which creates the folder with that mode),
+`touch` (timestamps only), and `tar` creating an archive from the folder
+(`tar -czf out.tgz -C .claude .`, never with `--remove-files`). Held, for
+example: `rm -f .claude`, `unlink .claude`, `rm --r .claude`,
+`tar --remove-files -cf x.tar .claude`, `tee .claude`, `> .claude`,
+`truncate -s 0 .claude`. A write INTO the folder stays
 strict by the destination rule above (`cp -r evil/ .claude`,
 `rsync -a x/ .claude/`, `ln -s x .claude`, `tar -xf a.tar -C .claude`), as
 does a copy that lands one (`cp -r .claude backup/` writes
 `backup/.claude/settings.json`). Bare `.approval`, `.codex` and `.hermes`
 keep main's class for every verb.
-**The folder's contents go with it (lead ruling L62013, S1).** A command of
-those verbs on an organ folder ITSELF also takes the class of every guarded
+**The folder's contents go with it (lead ruling L62013, S1).** A command the
+rule holds on an organ folder ITSELF also takes the class of every guarded
 path inside it, the policy's routed entries included: `rm -rf .github` is
 `policy.edit` AND `policy.edit.ci` where `.github/workflows/` is routed
 there, `rm -rf .approval` is `policy.core` AND `log.mutate`, and

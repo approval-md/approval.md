@@ -84,13 +84,12 @@ test("lead ruling L61492/L61497 through the hook: `rm -f *` and `chmod 644 *` wh
   for (const command of ["rm -f *", "chmod 644 *", "rm -rf ./*"]) {
     assert.ok((await hookClasses(command, checkout)).includes("vcs.history.rewrite"), command);
   }
-  // `rm -rf *` and `chmod 644 *` where `.claude` is take what `rm -rf .claude`
-  // takes: the organ directory's class since lead ruling L61587. `rm -f *`
-  // cannot remove a directory: main's class (lead ruling L62013, S2).
+  // `rm -f *` and `chmod 644 *` where `.claude` is take what `rm -f .claude`
+  // takes: the organ directory's class since lead ruling L61587 (`.claude`
+  // may be a symlink, which a plain rm removes: lead ruling L62013, fail closed).
   const claude = project({ ".claude": ["settings.json"], src: ["a.ts"] });
   const plain = project({ ".cache": ["x"], src: ["a.ts"] });
-  assert.deepEqual(await hookClasses("rm -f *", claude), ["files.delete.out_of_scope"]);
-  for (const command of ["rm -rf *", "chmod 644 *"]) {
+  for (const command of ["rm -f *", "rm -rf *", "chmod 644 *"]) {
     assert.ok((await hookClasses(command, claude)).includes("policy.core"), command);
     assert.ok(!(await hookClasses(command, plain)).some((cls) => ["policy.core", "log.mutate", "vcs.history.rewrite"].includes(cls)), command);
   }
