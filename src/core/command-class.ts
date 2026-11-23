@@ -4742,6 +4742,7 @@ function gitWriteRefinement(
   dir: ShellDir | null | undefined,
   namedWrites = true,
   lineNamesGit = false,
+  dotGit?: (word: string) => boolean,
 ): { class: string; rule: string; path: string } | null {
   const spelled = named.filter((word) => !/\s/u.test(word));
   const words = [...writeTargets, ...spelled];
@@ -4755,7 +4756,8 @@ function gitWriteRefinement(
   const gitDir =
     words.find((word) => namesGitDirectory(word)) ??
     resolvable.find((word) => relativeLandsInGitDir(word, dir)) ??
-    throughLine;
+    throughLine ??
+    (dotGit === undefined ? undefined : words.find(dotGit));
   if (gitDir !== undefined) return { class: "vcs.history.rewrite", rule: GIT_DIR_WRITE_RULE, path: gitDir };
   const gitConfig = words.find(namesGitConfigFile);
   if (gitConfig !== undefined) return { class: "vcs.history.rewrite", rule: GIT_CONFIG_FILE_WRITE_RULE, path: gitConfig };
@@ -8490,9 +8492,11 @@ const DOTGLOB_LAUNCHERS: readonly string[] = [
  *   ({@link DOTGLOB_LAUNCHERS}); find's `-exec`, `-execdir`, `-ok`; a
  *   single-dash cluster holding `l` or `i` (a login or interactive shell).
  *
- * A user's own start-up file that sets the option for the agent's shell is
- * state from before the command, the "earlier call" known limit (lead ruling
- * L60846).
+ * A user's own start-up file may set dotglob or globdots unseen, so every
+ * write-target pattern is read with dot-names matched as well, whatever this
+ * says (lead ruling, CLAIMS L61492 and L61497; {@link globGuardClass}). What
+ * this still decides: whether `*` and `?` may also be read as `.` and `..`,
+ * and whether zsh's extendedglob and braceccl forms are patterns.
  */
 function lineMaySetDotglob(command: string): boolean {
   if (/[$`{}()]/u.test(command)) return true;
@@ -8743,6 +8747,51 @@ export function containedInAny(words: readonly string[]): (text: string) => bool
   };
 }
 
+/**
+ * Could the shell expand this write target to a path through `.git` with
+ * dotglob or globdots set where the line cannot show it (lead ruling, CLAIMS
+ * L61492 and L61497)? {@link mayNameGitDirectory} keeps the rule that a
+ * leading `*` or `?` never matches a leading dot, so only such segments are
+ * read here, each against `.git`. With the caller's listing of the directory
+ * before the segment, only a `.git` that is there counts (`rm -f *` in a
+ * checkout's root, not in `dist/`); with none, the pattern decides. The plain
+ * (text-only) pass reads no pattern; a hit is a raise (review-b S1).
+ */
+function dotGlobNamesGit(word: string, inexact: (word: string) => boolean, glob: GlobReading): boolean {
+  if (glob.off || !inexact(word) || !globLive(glob, word)) return false;
+  const hit = ((): boolean => {
+    const alternatives = word.includes("{") ? expandBraces(word) : [word];
+    if (alternatives === null) return true;
+    for (const each of alternatives) {
+      const segments = each.split("/");
+      for (let index = 0; index < segments.length; index += 1) {
+        const segment = segments[index] as string;
+        if (!/^[*?]/u.test(segment)) continue;
+        const match = globTokensMatch(globSegmentTokens(segment, glob.options), ".git", false, glob.budget);
+        if (match === false) continue;
+        if (match === null) return true;
+        const prefix = segments.slice(0, index);
+        const disk = glob.disk;
+        if (disk !== undefined && disk.listingsOk !== false && !prefix.some((part) => hasGlobConstruct(part))) {
+          const dir = globListingDir(prefix, disk);
+          if (dir !== null) {
+            disk.collect?.add(dir);
+            const listing = diskListing(disk, dir, true);
+            if (listing !== undefined) {
+              if (listing.some((name) => name.toLowerCase() === ".git")) return true;
+              continue;
+            }
+          }
+        }
+        return true;
+      }
+    }
+    return false;
+  })();
+  if (hit && glob.tracker !== undefined) glob.tracker.raised = true;
+  return hit;
+}
+
 /** Unknown liveness is live: fail closed. */
 function globLive(glob: GlobReading, word: string): boolean {
   return glob.live === undefined || glob.live(word);
@@ -8811,7 +8860,8 @@ const ORGAN_DIRECTORIES: Readonly<Record<string, string>> = {
  * lexically first (`.claude/x/..`, `./.claude/.` and `.claude//` are
  * `.claude`); each component, case folded, that is an
  * {@link ORGAN_DIRECTORIES} name (or, in a word the shell may still
- * glob, could match one; dot-names by the line's rule) takes that class.
+ * glob, could match one, dot-names always: dotglob and globdots may be set
+ * where the line cannot show it) takes that class.
  */
 function organDestination(dest: string, inexact: (word: string) => boolean, glob: GlobReading): { surface: string; path: string } | null {
   const { parts } = lexicalParts(dest);
@@ -8819,20 +8869,33 @@ function organDestination(dest: string, inexact: (word: string) => boolean, glob
   // `.git` component is spelled in its source word, which that rule reads.
   const guarded = Object.entries(ORGAN_DIRECTORIES);
   let best: string | null = null;
+  // The answer by names alone, for the record of whether a pattern raised it.
+  let named: string | null = null;
   // Asked once for the whole word, not per component (review A686-FOLD2, M1:
   // per component it was quadratic in the destination's length).
   const liveDest = inexact(dest) && globLive(glob, dest);
   for (const part of parts) {
     if (part === "..") continue;
     const pattern =
-      liveDest && hasGlobConstruct(part) && (glob.options || part.startsWith(".") || /^[(]/u.test(part))
+      // Every organ directory is a dot-name, which a pattern may reach under
+      // dotglob or globdots set where the line cannot show it (lead ruling,
+      // CLAIMS L61492 and L61497): any globbed component is read against them.
+      // The plain pass keeps the reading from before that ruling (an explicit
+      // leading `.` or group, or a line that may set options), so what it
+      // carries beside a raised class is what it carried before.
+      liveDest && hasGlobConstruct(part) && (!glob.off || glob.options || part.startsWith(".") || /^[(]/u.test(part))
         ? globSegmentTokens(part, glob.options)
         : null;
     for (const [name, cls] of guarded) {
-      const hit = foldGuardedName(part) === foldGuardedName(name) || (pattern !== null && globTokensMatch(pattern, name, false, glob.budget) !== false);
+      const spelled = foldGuardedName(part) === foldGuardedName(name);
+      if (spelled && (named === null || protectedRank(cls) < protectedRank(named))) named = cls;
+      const hit = spelled || (pattern !== null && globTokensMatch(pattern, name, false, glob.budget) !== false);
       if (hit && (best === null || protectedRank(cls) < protectedRank(best))) best = cls;
     }
   }
+  // A pattern reading never takes a class away (review-b S1): where one
+  // raised the answer, the plain pass is classified too and rides beside it.
+  if (best !== named && glob.tracker !== undefined) glob.tracker.raised = true;
   return best === null ? null : { surface: best, path: dest };
 }
 
@@ -9309,10 +9372,10 @@ function listedMatches(source: string, base: string, glob: GlobReading): string[
   const listing = diskListing(disk, dir, true);
   if (listing === undefined) return null;
   const pattern = globSegmentTokens(base, glob.options);
-  const dotted = glob.options || base.startsWith(".");
   const out: string[] = [];
+  // Dot-names too: dotglob or globdots may be set where the line cannot show
+  // it (lead ruling, CLAIMS L61492 and L61497). A listing holds no `.` or `..`.
   for (const name of listing) {
-    if (!dotted && name.startsWith(".")) continue;
     const hit = globTokensMatch(pattern, name, false, glob.budget);
     if (hit === null) return null;
     if (hit) out.push(name);
@@ -9749,13 +9812,12 @@ function globGuardClass(
   word: string,
   protectedPaths: readonly ProtectedPathEntry[],
   budget: { left: number } = { left: GLOB_GUARD_STEP_CAP },
-  dots = false,
+  options = false,
   disk?: GlobDisk,
 ): string | null {
   // zsh's extendedglob forms (`#`, `^`, the `~` exclusion) and braceccl need an
   // option; with none possibly set on the line they are literal text (lead
   // ruling L60846; review-b S2: `rm -f *~` is the files ending in `~`).
-  const options = dots;
   if (word.includes(PARAMETER_MARK)) return "log.mutate";
   const extraNames = protectedPaths.flatMap((entry) => parseProtectedEntry(entry)?.segments ?? []);
   const names = [...new Set([...GLOB_GUARD_NAMES, ...extraNames])];
@@ -9791,11 +9853,18 @@ function globGuardClass(
         disk.collect?.add(dir);
         return diskListing(disk, dir, true);
       };
-      // A dot-name (`.approval`, `.hermes`, `..`) is reached only by an
-      // explicit leading `.`, unless the line turns dot matching on (`dots`).
-      const nonDot = names.filter((name) => !name.startsWith("."));
+      // Dot matching (lead ruling, CLAIMS L61492 and L61497): bash's dotglob
+      // and zsh's globdots may be set in the user's own profile, where no
+      // setter on the line shows, so a pattern is read with dot-names matched
+      // as well as hidden, and the stricter reading answers. Matched, a `*`,
+      // `?` or class at a segment's start reaches every dot-name but `.` and
+      // `..`, which no option lets them match; an explicit leading `.` (or a
+      // leading group or `.` class) reaches those too, as does any segment on
+      // a line that may set options (as before). The dot-matched reading
+      // holds every candidate the hidden one does, so it alone is judged.
+      const notDots = names.filter((name) => name !== "." && name !== "..");
       const spanning = (segment: string, dotted: boolean): string[][] => {
-        const pool = dotted ? names : nonDot;
+        const pool = dotted ? names : notDots;
         const out: string[][] = [[], [segment]];
         for (const first of pool) {
           out.push([first]);
@@ -9814,7 +9883,7 @@ function globGuardClass(
         // globstar and zsh's `**/` descend into dot-directories only with dot
         // matching on; a variable's value and a braceccl range are literal text,
         // which may hold a dot-name.
-        if (segment === "**" || segment === "***") return spanning(segment, dots);
+        if (segment === "**" || segment === "***") return spanning(segment, options);
         const glob = hasGlobConstruct(segment.split(PARAMETER_MARK).join(""));
         if (segment.includes("$")) return glob ? spanning(segment, true) : [[segment]];
         const pattern = globSegmentTokens(segment, options);
@@ -9824,7 +9893,7 @@ function globGuardClass(
         // class holding `.` may reach a dot-name with no option set.
         const first = pattern.tokens[0];
         const dotted =
-          dots ||
+          options ||
           /^[.(]|^[!@?*+]\(/u.test(segment) ||
           (first?.kind === "set" && first.chars.includes("."));
         const test = (name: string, prefix: boolean): boolean => {
@@ -9838,7 +9907,8 @@ function globGuardClass(
           // (`apprOVAL.MD` is the policy file on a case-insensitive volume).
           // No match: the pattern names no file there, so no candidate.
           const listed: string[][] = [];
-          const present = dotted ? [...listing, ".", ".."] : listing.filter((name) => !name.startsWith("."));
+          // A listing never holds `.` or `..`; every name in it is read, dot-names too.
+          const present = dotted ? [...listing, ".", ".."] : listing;
           for (const name of present) {
             if (!test(name, false)) continue;
             listed.push([name]);
@@ -9847,8 +9917,8 @@ function globGuardClass(
           return listed;
         }
         const out: string[][] = [[segment]];
-        for (const name of dotted ? names : nonDot) if (name !== segment && test(name, false)) out.push([name]);
-        for (const name of GLOB_GUARD_PREFIXES) if ((dotted || !name.startsWith(".")) && test(name, true)) out.push([name]);
+        for (const name of dotted ? names : notDots) if (name !== segment && test(name, false)) out.push([name]);
+        for (const name of GLOB_GUARD_PREFIXES) if (test(name, true)) out.push([name]);
         return out;
       });
       if (exhausted) return "log.mutate";
@@ -10558,7 +10628,9 @@ function classifySegment(
     // write; an assignment on its own touches nothing. A bare redirection into
     // `.git` or a git configuration file is that write (APRV-518, S1).
     if (writeTargets.length > 0) {
-      const gitWrite = gitWriteRefinement(writeTargets, [], context.shellDir, true, context.lineNamesGit === true);
+      const gitWrite = gitWriteRefinement(writeTargets, [], context.shellDir, true, context.lineNamesGit === true, (word) =>
+        dotGlobNamesGit(word, inexact, glob),
+      );
       if (gitWrite !== null) return { ok: true, ...gitWrite };
       return { ok: true, class: "files.write.workspace", rule: "redirect-write" };
     }
@@ -10992,7 +11064,14 @@ function classifySegment(
       ...(plan?.anyName ?? []).map((dest) => organDestination(dest, inexact, glob)),
       ...(landed?.plain ?? []).map((path) => organDestination(path, () => false, glob)),
       // A landing the shell may still glob (`ln -s ../evil/.git?ub`), as a pattern.
-      ...(landed?.patterns ?? []).map((path) => organDestination(path, () => true, { options: glob.options, budget: glob.budget, off: glob.off })),
+      ...(landed?.patterns ?? []).map((path) =>
+        organDestination(path, () => true, {
+          options: glob.options,
+          budget: glob.budget,
+          off: glob.off,
+          ...(glob.tracker === undefined ? {} : { tracker: glob.tracker }),
+        }),
+      ),
       ...(plan?.files.length ? [strictestProtectedWrite(plan.files, protectedPaths, inexact, false, glob)] : []),
     ].reduce<{ surface: string; path: string } | null>(
         (best, hit) => (hit !== null && (best === null || protectedRank(hit.surface) < protectedRank(best.surface)) ? hit : best),
@@ -11105,7 +11184,9 @@ function classifySegment(
             : readOutputs
           : [...positionals, ...flagValues, ...attached, ...operandValues];
     const gitWrite =
-      gitWriteRefinement(writeTargets, named, context.shellDir, true, context.lineNamesGit === true) ??
+      gitWriteRefinement(writeTargets, named, context.shellDir, true, context.lineNamesGit === true, (word) =>
+        dotGlobNamesGit(word, inexact, glob),
+      ) ??
       (sedLiteral
         ? (sedLiteralGitWrite(readOutputs, context.shellDir, context.lineNamesGit === true) ??
           gitWriteRefinement([], readOutputs, context.shellDir, true, context.lineNamesGit === true))
@@ -11420,8 +11501,9 @@ export function classifyCommand(
   const lineNamesGit =
     context.lineNamesGit === true || (context.bodyAlreadyRead !== true && lineSpellsGitIndirectly(lexed.segments));
   const spelledSegments = new WeakSet<LexSegment>(lexed.segments);
-  // GLOB-WRITE (lead ruling L60846): an option an EARLIER call set is a known
-  // limit; one this line (or a script inside it) may set is read.
+  // GLOB-WRITE (lead ruling L60846): an option this line (or a script inside
+  // it) may set is read. Dot matching set earlier or in a profile is read on
+  // every line (L61492, L61497).
   const lineSetsDotglob = context.lineSetsDotglob === true || lineMaySetDotglob(command);
   // GLOB-WRITE (L61167): a relative pattern is placed by the caller's cwd only
   // on a line that cannot move the shell first.

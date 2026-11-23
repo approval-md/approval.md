@@ -163,8 +163,9 @@ test("the zsh constructs a lexed word can carry are read as patterns too", () =>
   assert.ok(lineClasses("setopt extendedglob; echo x > ~/.hermes/a^Z").includes("policy.core"));
   assert.ok(lineClasses("setopt extendedglob; echo x > APPROVAL.m*~x/y").includes("policy.core"));
   assert.deepEqual(classesOf("echo x > out/a^Z"), ["files.write.workspace"]);
-  // A whole `**` descends into dot-directories only with dot matching on.
-  assert.deepEqual(classesOf("echo x > ~/**/auth.json"), ["files.write.workspace"]);
+  // A whole `**` descends into dot-directories with dot matching on, which
+  // the user's profile may set unseen (lead ruling, CLAIMS L61492 and L61497).
+  assert.equal(strictest("echo x > ~/**/auth.json"), "log.mutate");
   assert.equal(strictest("GLOBIGNORE=x; echo x > ~/**/auth.json"), "log.mutate");
   // Quoted, the word is a literal file name and never a pattern.
   assert.deepEqual(classesOf("echo x > '~/.hermes/?uth.json'"), ["files.write.workspace"]);
@@ -367,16 +368,19 @@ test("dot-names: an explicit leading dot reaches them with no option set", () =>
   }
 });
 
-test("dot-names: *, ? and [...] do not reach them unless the same line turns dot matching on", () => {
-  for (const [command, alone] of [
-    ["echo x > dist/*/x.txt", "files.write.workspace"],
-    ["echo x > ~/*/auth.json", "files.write.workspace"],
-    ["echo x > */env", "files.write.workspace"],
-    ["echo x > ?approval/env", "files.write.workspace"],
-    ["echo x > [.]approval/env", "files.write.workspace"],
-    ["cp a ~/*/auth.json", "files.write.workspace"],
-  ] as const) {
-    assert.deepEqual(classesOf(command), [alone], command);
+test("dot-names: *, ? and [...] reach them, setter or not (lead ruling, CLAIMS L61492 and L61497)", () => {
+  // dotglob (bash) and globdots (zsh) may be set in the user's own profile,
+  // where no setter on the line shows: a write whose `*` or `?` would match a
+  // guarded dot-name under them is that name's class.
+  for (const command of [
+    "echo x > dist/*/x.txt",
+    "echo x > ~/*/auth.json",
+    "echo x > */env",
+    "echo x > ?approval/env",
+    "echo x > [.]approval/env",
+    "cp a ~/*/auth.json",
+  ]) {
+    assert.ok(classesOf(command).some((cls) => HUMAN_ONLY.has(cls)), `${command} -> ${classesOf(command).join(",")}`);
     for (const setter of SAME_LINE_SETTERS) {
       const cls = lastClass(`${setter}${command}`);
       assert.ok(HUMAN_ONLY.has(cls) || cls.startsWith("refused:"), `${setter}${command} -> ${cls}`);
@@ -394,9 +398,9 @@ test("dot-names: the ruling's workflow lines, with and without dot matching on t
     assert.equal(strictest(command), "policy.core", command);
     assert.ok(lineClasses(`GLOBIGNORE=x; ${command}`).includes("policy.core"), command);
   }
-  // A pattern for a DIRECTORY reaches only dot-directories: main's class by
-  // default, strict when the line turns dot matching on.
-  assert.deepEqual(classesOf("echo x > dist/*/x.txt"), ["files.write.workspace"]);
+  // A pattern for a DIRECTORY reaches only dot-directories, which dotglob or
+  // globdots set in a profile lets it match (L61492): strict with no listing.
+  assert.equal(strictest("echo x > dist/*/x.txt"), "policy.core");
   assert.equal(lastClass("shopt -s dotglob; echo x > dist/*/x.txt"), "policy.core");
   assert.equal(lastClass("setopt globdots; echo x > dist/*/x.txt"), "policy.core");
   // Patterns that reach no guarded name keep their class either way.
@@ -443,9 +447,9 @@ test("dot-names: ANY option-setting construct on the line turns the relaxed read
     const cls = lastClass(`${setter}${target}`);
     assert.ok(HUMAN_ONLY.has(cls) || cls.startsWith("refused:"), `${setter}${target} -> ${cls}`);
   }
-  // A line with none of them keeps the default reading.
+  // A line with none of them is read with dot-names matched too (L61492).
   for (const line of [target, `cd out && ${target}`, `ls; ${target}`, `true && ${target}`]) {
-    assert.equal(lastClass(line), "files.write.workspace", line);
+    assert.equal(lastClass(line), "policy.core", line);
   }
 });
 
@@ -487,9 +491,9 @@ test("dot-names: the relaxed reading is an allowlist of plain lines (lead ruling
     const cls = lastClass(`${setter}${target}`);
     assert.ok(HUMAN_ONLY.has(cls) || cls.startsWith("refused:"), `${setter}${target} -> ${cls}`);
   }
-  // Builtin names count as a WHOLE word only: assets/ and dataset/ are plain.
-  assert.deepEqual(classesOf("echo x > assets/*/x.txt"), ["files.write.workspace"]);
-  assert.deepEqual(classesOf("echo x > dataset/*/x.txt"), ["files.write.workspace"]);
+  // A pattern for a directory reaches dot-directories on any line now
+  // (L61492); one that reaches no guarded name keeps its class.
+  assert.equal(strictest("echo x > assets/*/x.txt"), "policy.core");
   assert.deepEqual(classesOf("rm -rf assets/*.png"), ["files.delete.out_of_scope"]);
   // `rm -rf assets/*` is NOT main's class, and not because of dots: `*` can be
   // `APPROVAL.md`, which protectedPathClass guards at any depth (`rm
@@ -520,7 +524,9 @@ test("listings: the four workflow lines by what the directory holds", () => {
   for (const [command, dir, main] of lines) {
     assert.deepEqual(withListing(command, { [dir]: [] }), [main], `${command} empty`);
     assert.deepEqual(withListing(command, { [dir]: ["a.ts", "README.md", "x.png"] }), [main], `${command} unrelated`);
-    assert.deepEqual(withListing(command, { [dir]: [".approval"] }), [main], `${command} dot-name, plain line`);
+    // A dot-name: guarded, it counts on any line (L61492); unguarded, it does not.
+    assert.ok(withListing(command, { [dir]: [".approval"] }).some((cls) => HUMAN_ONLY.has(cls)), `${command} .approval`);
+    assert.deepEqual(withListing(command, { [dir]: [".cache", ".DS_Store", "a.ts"] }), [main], `${command} unguarded dot-names`);
     // The raised class, with a plain class that is not an ordinary write beside it (review-b S1).
     const raised = main.startsWith("files.") ? ["policy.core"] : ["policy.core", main];
     assert.deepEqual(withListing(command, { [dir]: ["APPROVAL.md"] }), raised, `${command} APPROVAL.md`);
@@ -1124,4 +1130,58 @@ test("review A686-FOLD2 (M2): containedInAny answers as the scan of the words do
       assert.equal(ask(text), scan(words, text), `${JSON.stringify(words)} ${JSON.stringify(text)}`);
     }
   }
+});
+
+test("lead ruling (CLAIMS L61492, L61497): a write's * or ? that would match a guarded dot-name under dotglob or globdots is that name's class, setter or not", () => {
+  // The sweep's dotglob rows (known-dotglob-9d9ec0b6, 88 allowed on 439e22ca), one per family.
+  for (const command of [
+    "echo x > ~/*/auth.json",
+    "echo x > ~/*/hermes-agent/.env",
+    "echo x > */env",
+    "echo x > */keys/k1",
+    "cp README.md ~/*/profiles/p1/auth.json",
+    "echo x > ~/?hermes/auth.json",
+    "echo x > ~/.hermes/?env",
+    "echo x > ?approval/vault.enc",
+    "cp README.md ~/?hermes/hermes-agent/.env",
+    "echo x > ~/[.]hermes/auth.json",
+    "echo x > ~/.hermes/[.]op.env",
+    "echo x > [.]approval/env",
+    "echo x > ~/**/auth.json",
+    "echo x > **/vault.enc",
+    "cp README.md ~/**/profiles/p1/.env",
+  ]) {
+    assert.ok(classesOf(command).some((cls) => HUMAN_ONLY.has(cls)), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // With a listing, by what is there: a guarded dot-name counts, an unguarded one does not.
+  assert.deepEqual(withListing("echo x > ~/*/auth.json", { "/h": [".hermes", "notes"] }), ["policy.core"]);
+  assert.deepEqual(withListing("echo x > ~/*/auth.json", { "/h": [".cache", "notes"] }), ["files.write.workspace"]);
+  assert.deepEqual(withListing("echo x > */env", { "/w": [".approval"] }).filter((cls) => HUMAN_ONLY.has(cls)).length > 0, true);
+  assert.deepEqual(withListing("echo x > */env", { "/w": ["src", ".github"] }), ["files.write.workspace"]);
+  // `.git`: `rm -f *` and `chmod 644 *` in a directory holding it take the
+  // git-dir class (the cost the lead accepted); in one that does not, main's.
+  for (const [command, main] of [
+    ["rm -f *", "files.delete.out_of_scope"],
+    ["chmod 644 *", "files.write.workspace"],
+    ["rm -rf ./*", "files.delete.out_of_scope"],
+  ] as const) {
+    assert.ok(withListing(command, { "/w": [".git", "a.js"] }).includes("vcs.history.rewrite"), `${command} with .git`);
+    assert.deepEqual(withListing(command, { "/w": ["a.js", ".cache"] }), [main], `${command} without .git`);
+  }
+  assert.deepEqual(withListing("rm -rf dist/*", { "/w/dist": ["a.js", ".cache"] }), ["files.delete.out_of_scope"]);
+  assert.ok(withListing("chmod 644 dist/*", { "/w/dist": [".GIT"] }).includes("vcs.history.rewrite"));
+  // A segment that cannot match `.git` (`*.ts`), or a pattern in no leading
+  // place, is not read for it.
+  assert.deepEqual(withListing("chmod 644 *.ts", { "/w": [".git", "a.ts"] }), ["files.write.workspace"]);
+  // A copy into a destination a pattern may spell as an organ directory: `*` can be `.claude`.
+  assert.ok(classesOf("rsync -a pkg/ */").includes("policy.core"));
+  assert.deepEqual(classesOf("rsync -a pkg/ o*/"), ["network.call"]);
+  // `.grok` and `.muse` are organ directories only (no guarded file under them is named).
+  assert.deepEqual(classesOf("rsync -a pkg/ ?grok/"), ["policy.core", "network.call"]);
+  assert.deepEqual(classesOf("tar -xf a.tar -C *use"), ["policy.core"]);
+  // A pattern reading never takes a class away (review-b S1): the plain
+  // class rides beside the one a destination pattern raised; the plain pass
+  // reads destinations as before the ruling, so `.cl*/` carries nothing new.
+  assert.deepEqual(classesOf("mv a .git/*"), ["policy.core", "vcs.history.rewrite"]);
+  assert.deepEqual(classesOf("rsync -a evil/ .cl*/"), ["policy.core"]);
 });

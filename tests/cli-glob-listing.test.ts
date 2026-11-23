@@ -63,14 +63,40 @@ test("they are policy.core where the directory holds the policy file, in any let
   }
 });
 
-test("an empty directory, and a dot-name without dot matching on the line, keep main's class", async () => {
+test("an empty directory keeps main's class; a guarded dot-name counts, setter or not (L61492)", async () => {
   const empty = project({ dist: [] });
   assert.deepEqual(await hookClasses("rm -rf dist/*", empty), ["files.delete.out_of_scope"]);
   const dotted = project({ "dist/.approval": [] });
-  assert.deepEqual(await hookClasses("echo x > dist/*/env", dotted), ["files.write.workspace"]);
-  // With dot matching possibly on (a non-plain line), the dot-name counts.
+  // dotglob or globdots may be set in the user's profile (lead ruling, CLAIMS L61492 and L61497).
+  assert.deepEqual(await hookClasses("echo x > dist/*/env", dotted), ["policy.core"]);
   const classes = await hookClasses("GLOBIGNORE=x; echo x > dist/*/env", dotted);
   assert.equal(classes[classes.length - 1], "policy.core");
+  // An unguarded dot-name does not.
+  const cache = project({ "dist/.cache": [] });
+  assert.deepEqual(await hookClasses("echo x > dist/*/env", cache), ["files.write.workspace"]);
+});
+
+test("lead ruling L61492/L61497 through the hook: `rm -f *` and `chmod 644 *` where `.git` is take its class; elsewhere main's", async () => {
+  const checkout = project({ ".git": ["config"], src: ["a.ts"] });
+  writeFileSync(join(checkout, "a.js"), "made-up\n");
+  for (const command of ["rm -f *", "chmod 644 *", "rm -rf ./*"]) {
+    assert.ok((await hookClasses(command, checkout)).includes("vcs.history.rewrite"), command);
+  }
+  // `.claude` is a guarded directory by name for a copy INTO it; `rm -f *`
+  // there takes what `rm -f .claude` takes, which is main's class.
+  const claude = project({ ".claude": ["settings.json"], src: ["a.ts"] });
+  const plain = project({ ".cache": ["x"], src: ["a.ts"] });
+  for (const command of ["rm -f *", "chmod 644 *"]) {
+    assert.deepEqual(await hookClasses(command, claude), await hookClasses(command, plain), command);
+    assert.ok(!(await hookClasses(command, plain)).some((cls) => ["policy.core", "log.mutate", "vcs.history.rewrite"].includes(cls)), command);
+  }
+  // A directory holding no guarded dot-name stays as it is today.
+  const dist = project({ dist: ["a.js", "b.css"], "dist/.cache": ["x"] });
+  assert.deepEqual(await hookClasses("rm -rf dist/*", dist), ["files.delete.out_of_scope"]);
+  // A guarded dot-name reached by `*` in a home-organ shape, by what is there.
+  const hermes = project({ ".hermes": ["auth.json"] });
+  assert.deepEqual(await hookClasses("echo x > */auth.json", hermes), ["policy.core"]);
+  assert.deepEqual(await hookClasses("echo x > */auth.json", plain), ["files.write.workspace"]);
 });
 
 test("a guarded name under a home organ is reached by what is there", async () => {

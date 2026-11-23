@@ -114,9 +114,11 @@ test("S1: ordinary glob and brace lines do not move", () => {
   assert.deepEqual(pure("cp src/*.ts out/"), ["files.write.workspace workspace-write"]);
   assert.deepEqual(pure("echo x > out/{a,b}.txt"), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure("ls .g*"), [READ_SHELL]);
-  // `*` and `?` never match a leading dot, as the shell's expansion requires.
+  // `*` and `?` never match a leading dot by default, as the shell's expansion requires.
   assert.deepEqual(pure("cd * && echo x > f"), [READ_SHELL, "files.write.workspace redirect-write"]);
-  assert.deepEqual(pure("echo x > ?git/config"), ["files.write.workspace redirect-write"]);
+  // A WRITE target's leading `?` may, under dotglob or globdots set in a
+  // profile (lead ruling, CLAIMS L61492 and L61497): `.git/config`.
+  assert.deepEqual(pure("echo x > ?git/config"), [DIR_WRITE]);
   assert.deepEqual(pure("rm -f .*.swp"), ["files.delete.out_of_scope rm-unreadable-path"]);
   // A `?` beside a `-` (a URL's query) is an ordinary pattern, never an error read as a match.
   assert.deepEqual(pure("echo x > out?a-b.txt"), ["files.write.workspace redirect-write"]);

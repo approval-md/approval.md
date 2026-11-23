@@ -43,21 +43,22 @@ option, case folded), and takes the strictest class among them.
   eight such spans in one word, or a default nested three deep, is
   `log.mutate`. zsh's `braceccl` class (`{a-z}`) is read as a class of its
   characters, and a variable beside a glob construct may name anything.
-- **Dot-names (lead ruling L60846):** `*`, `?`, `[...]` and a whole `**`
-  reach `.approval`, `.hermes` and the other dot-names only through an
-  explicit leading `.` (`.appr*`, `.[!Z]ermes`), as every shell's default
-  does. Only a PLAIN line gets that reading (an allowlist, fail closed): no
-  `$`, backtick, brace or parenthesis; no option name anywhere (`options`,
-  `dotglob`, `globdots`, `globignore`, `bashopts`, `shellopts`, `bash_env`,
-  `zdotdir`, quotes, backslashes and underscores removed, case folded); no
-  word that is a builtin which may set one (`shopt`, `set`, `setopt`,
-  `typeset`, `declare`, `printf`, `read`, `eval`, `source`, ...); no `.`
-  command; no shell or launcher (`bash`, `zsh`, `env`, `xargs`, `sudo`,
-  `find -exec`, ...); no `-l`/`-i` cluster. Any other line may match
-  dot-names. Set by an earlier call, or by the user's own start-up file, it
-  is a known limit. Case folding stays:
-  `*` and `*.md` reach `APPROVAL.md` as bash does on a case-insensitive APFS
-  volume.
+- **Dot-names, setter or not (lead rulings L60846, L61492, L61497):** bash's
+  `dotglob` and zsh's `globdots` may be set in the user's own start-up file,
+  where no setter on the line shows, so a write whose `*`, `?` or `[...]`
+  (or a whole `**`) would match a guarded dot-name under them is that name's
+  class: `echo x > ~/*/auth.json`, `cp README.md ~/?hermes/hermes-agent/.env`,
+  `echo x > [.]approval/env` and `echo x > ~/**/auth.json` are human-only.
+  A pattern is read with dot-names hidden and matched, and the stricter
+  answer stands. `.` and `..` are matched only by an explicit leading `.`
+  (or on a line that may set an option, as before), never by `*` or `?`.
+  The same reading covers `.git` for the git-dir write rule (a leading `*` or
+  `?` in a write target), and a copy or sync destination's globbed component
+  against the organ directories (`rsync -a pkg/ ?grok/`). The cost the lead
+  accepted: `rm -f *` or `chmod 644 *` in a directory that holds `.git` is
+  `vcs.history.rewrite`; in one holding no guarded dot-name (`rm -rf dist/*`
+  beside `dist/.cache`) the class is what it was. Case folding stays: `*` and
+  `*.md` reach `APPROVAL.md` as bash does on a case-insensitive APFS volume.
 - **Decided by what is there (lead ruling L61167):** before it classifies, the
   hook lists the directory each write-target pattern's first globbed component
   sits in (`src/cli/glob-listing.ts`: `fs.promises.opendir`, 2,000 entries, a
@@ -82,7 +83,7 @@ option, case folded), and takes the strictest class among them.
   `rm -rf dist/*`, `chmod +x scripts/*`, `git add *`, `git add src/*`,
   `npx prettier --write src/*`, `echo x > dist/*.md`, `sed -i … *.md`. A
   pattern that cannot reach a guarded name (`out/*.log`, `src/*.ts`,
-  `dist/*/x.txt` without dot matching) keeps its class. More than 4,096
+  `rm -rf assets/*.png`) keeps its class. More than 4,096
   candidate paths, 32 segments or two million matcher steps is `log.mutate`;
   the worst words measured cost about 0.05 CPU s.
 - **One budget, never lower (review-b M1, S1):** the two million matcher
