@@ -318,10 +318,21 @@ test("the two walks that take components from a list still take them in order: a
   // The git-directory pass's walk (`physicalLanding` in git-dir-writes).
   assert.deepEqual(classes("echo x > g/pre-push"), ["files.write.workspace", "vcs.history.rewrite"]);
   assert.deepEqual(classes("echo x > p/pre-push"), ["files.write.workspace"]);
-  // A link whose target has several pieces: they are walked first piece first
-  // (`plain`, back out of it, then into the git directory).
-  symlinkSync("plain/../.git/hooks", join(root, "ws", "h"));
-  assert.deepEqual(classes("echo x > h/pre-push"), ["files.write.workspace", "vcs.history.rewrite"]);
+  // A link whose target has several pieces: they are walked first piece first.
+  // A checkout whose git directory is named by a `.git` FILE, so no `.git`
+  // appears in the link's text or in where it lands: only the order of the
+  // pieces (`plain`, back out twice, then `store/gd/hooks`) finds it.
+  mkdirSync(join(root, "store", "gd", "hooks"), { recursive: true });
+  mkdirSync(join(root, "ws2", "plain"), { recursive: true });
+  writeFileSync(join(root, "ws2", ".git"), "gitdir: ../store/gd\n");
+  symlinkSync("plain/../../store/gd/hooks", join(root, "ws2", "h"));
+  symlinkSync("plain", join(root, "ws2", "p"));
+  const classes2 = (command: string): string[] => {
+    const { result } = classifyForHook(command, [], join(root, "ws2"));
+    return result.ok ? result.classes : [`refused ${result.code}`];
+  };
+  assert.deepEqual(classes2("echo x > h/pre-push"), ["files.write.workspace", "vcs.history.rewrite"]);
+  assert.deepEqual(classes2("echo x > p/pre-push"), ["files.write.workspace"]);
 });
 
 // ---------------------------------------------------------------------------
