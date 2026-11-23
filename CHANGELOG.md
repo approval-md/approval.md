@@ -183,28 +183,31 @@ or absolute (`/tmp/build`), is compared with them by the canonical paths the
 hook resolves (symlinks followed, letter case as on disk): one that reaches
 either by another spelling (`/tmp/x` for /private/tmp/x, `/Users/Me/Proj` for
 /Users/me/proj) is `policy.core`, one that is provably elsewhere is read by
-its own listing, and one the hook could not resolve fails closed. A directory
-that holds none keeps its class, unchanged from main (`rm -rf .` in a tree of
-sources is `files.delete.out_of_scope`). A chmod mode that starts with `-`
-(`chmod -R -w .`) is the mode, not an option. Fail closed, `policy.core`: no
-listing (every caller but the hook), a directory over the listing's
-2,000-entry cap, unreadable, or missing where an earlier segment of the line
-may make it, a line that may change directory or names `HOME`, an operand with
-a word the text cannot read (`$X`, `"$X"`, `$OLDPWD`, `$(pwd)`, any other
-`$(...)`, `~user`) last in the path (`$X`, `./$X`, `sub/$X`, `/tmp/$X`),
-followed by a glob, or removed again by a later `..` (`$(echo sub)/..`,
-`$X/a/../..`), since such a word may itself hold `..`; and a chain of more
-than 8 directories to list. Not a parent, and unchanged: `rm -rf ./dist`, `rm
--rf "$TMPDIR"/x`, `rm -rf $TARGET/x`, `rm -rf $X/dist`. `mv .`, `mv ./` and
-`mv sub/..` move nothing (rename(2) refuses them) and keep their class; `rm
--rf $(builtin pwd)` and `$(command pwd)` stay refused, as on main. Not covered
-(follow-up): an absolute path for a caller with no listing (every caller but
-the hook: it has no working directory to compare), `rmdir .`, `find .
--delete`, `chown`/`chgrp` (refused), organ directories below the top of a
-sibling tree, and organ directories in a sibling tree under an ancestor (`rm
--rf ..` lists only the chain to the working directory and the home). On macOS
-(and GNU) `rm -rf .`, `./`, `..` and `sub/..` refuse to run; they are judged
-by the rule anyway, as the ruling says.
+its own listing, and one the hook could not resolve fails closed. A `..` after
+a name (`link/..`, `sub/../x`) is placed as the kernel reads it, after any
+symlink it follows: by the hook's resolution of the operand as written, and
+fails closed without it. A directory that holds none keeps its class,
+unchanged from main (`rm -rf .` in a tree of sources is
+`files.delete.out_of_scope`). A chmod mode that starts with `-` (`chmod -R -w
+.`) is the mode, not an option. Fail closed, `policy.core`: no listing (every
+caller but the hook), a directory over the listing's 2,000-entry cap,
+unreadable, or missing where an earlier segment of the line may make it, a
+line that may change directory or names `HOME`, an operand with a word the
+text cannot read (`$X`, `"$X"`, `$OLDPWD`, `$(pwd)`, any other `$(...)`,
+`~user`) last in the path (`$X`, `./$X`, `sub/$X`, `/tmp/$X`), followed by a
+glob, or removed again by a later `..` (`$(echo sub)/..`, `$X/a/../..`), since
+such a word may itself hold `..`; and a chain of more than 8 directories to
+list. Not a parent, and unchanged: `rm -rf ./dist`, `rm -rf "$TMPDIR"/x`, `rm
+-rf $TARGET/x`, `rm -rf $X/dist`. `mv .`, `mv ./` and `mv sub/..` move nothing
+(rename(2) refuses them) and keep their class; `rm -rf $(builtin pwd)` and
+`$(command pwd)` stay refused, as on main. Not covered (follow-up): an
+absolute path for a caller with no listing (every caller but the hook: it has
+no working directory to compare), `rmdir .`, `find . -delete`, `chown`/`chgrp`
+(refused), organ directories below the top of a sibling tree, and organ
+directories in a sibling tree under an ancestor (`rm -rf ..` lists only the
+chain to the working directory and the home). On macOS (and GNU) `rm -rf .`,
+`./`, `..` and `sub/..` refuse to run; they are judged by the rule anyway, as
+the ruling says.
 
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),

@@ -264,3 +264,34 @@ test("security review of the parents rule (L61587), 6, through the hook: an abso
     else process.env["HOME"] = savedHome;
   }
 });
+
+test("security review of the parents rule (L61587), 7, through the hook: `link/..` is the directory above the symlink's target", async () => {
+  const savedHome = process.env["HOME"];
+  const home = join(scratch, "home7");
+  mkdirSync(home, { recursive: true });
+  process.env["HOME"] = home;
+  try {
+    const root = join(scratch, "f7");
+    for (const [dir, file] of [
+      [join(root, "proj", "src"), "a.ts"],
+      [join(root, "other", ".claude"), "settings.json"],
+      [join(root, "other", "deep"), "x.txt"],
+      [join(root, "plain", "deep"), "x.txt"],
+    ] as const) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, file), "made-up\n");
+    }
+    const proj = join(root, "proj");
+    symlinkSync(join(root, "other", "deep"), join(proj, "link"));
+    symlinkSync(join(root, "plain", "deep"), join(proj, "link2"));
+    // The kernel's reading: link/.. is f7/other, which holds .claude.
+    assert.equal(realpathSync.native(join(proj, "link") + "/.."), realpathSync.native(join(root, "other")));
+    assert.ok((await hookClasses("chmod -R 000 link/..", proj)).includes("policy.core"));
+    assert.ok((await hookClasses("rm -rf link/../.claude", proj)).includes("policy.core"));
+    // link2/.. is f7/plain, which holds no guarded name: main's class.
+    assert.deepEqual(await hookClasses("chmod -R 000 link2/..", proj), ["files.write.workspace"]);
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});

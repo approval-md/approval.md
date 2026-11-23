@@ -1210,7 +1210,6 @@ test("lead ruling L61587 (review-b A686-FOLD3 M1): a delete, move or chmod of an
       `rm -R ${dir}/`,
       `rm -rf ./${dir}`,
       `rm -rf ${dir}/.`,
-      `rm -rf ${dir}/x/..`,
       `rm -d ${dir}`,
       `rmdir ${dir}`,
       `mv ${dir} gone`,
@@ -1224,6 +1223,9 @@ test("lead ruling L61587 (review-b A686-FOLD3 M1): a delete, move or chmod of an
     ]) {
       assert.ok(classesOf(command).includes(cls), `${command} -> ${classesOf(command).join(",")}`);
     }
+    // `..` after a name: `x` may be a symlink, so the text cannot place it
+    // (parents rule, security review 7): policy.core, at least as strict.
+    assert.ok(classesOf(`rm -rf ${dir}/x/..`).includes("policy.core"), `${dir}/x/..`);
   }
   // A dot-name `*` reaches by the hook's listing (L61492): where the directory holds one.
   assert.ok(withListing("rm -rf *", { "/w": [".claude", "a.js"] }).includes("policy.core"));
@@ -1441,4 +1443,36 @@ test("security review of the parents rule (L61587), 6: an absolute operand that 
   ]);
   // Without a disk (every caller but the hook) an absolute path is not judged here, as before.
   assert.deepEqual(classesOf("rm -rf /tmp/x"), ["files.delete.out_of_scope"]);
+});
+
+test("security review of the parents rule (L61587), 7: `..` after a name the kernel may resolve through a symlink", () => {
+  // `link/..` is the directory above link's TARGET, not the working
+  // directory: the kernel follows the symlink before it applies `..`. The
+  // hook resolves the operand as written; without that, fail closed.
+  const written = (path: string, physical: string): Record<string, string[]> => ({ [realpathKey(path)]: [physical] });
+  const sides = { ...written("/w", "/w"), ...written("/h", "/h") };
+  // Without the hook's resolution of the operand as written: strict.
+  for (const command of ["chmod -R 000 link/..", "rm -rf link/../x", "chmod -R 000 a/b/../..", "rm -rf /tmp/a/../b"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  assert.deepEqual(withDisk("chmod -R 000 link/..", "/w", { "/w": ["src", "link"], ...sides }), ["policy.core"]);
+  // Resolved: link/.. is /elsewhere, which holds an organ directory: its class.
+  assert.deepEqual(
+    withDisk("chmod -R 000 link/..", "/w", { "/w": ["src", "link"], "/w/link/..": [".claude", "deep"], ...written("/w/link/..", "/elsewhere"), ...sides }),
+    ["policy.core"],
+  );
+  // Resolved to a place that holds none: main's class.
+  assert.deepEqual(
+    withDisk("chmod -R 000 link/..", "/w", { "/w": ["src", "link"], "/w/link/..": ["deep", "notes"], ...written("/w/link/..", "/elsewhere"), ...sides }),
+    ["files.write.workspace"],
+  );
+  // Resolved to the working directory itself (`sub` a real directory): the chain, as before.
+  assert.deepEqual(withDisk("chmod -R 000 sub/..", "/w", { "/w": ["src", "sub"], ...written("/w/sub/..", "/w"), ...written("/w", "/w"), ...sides }), [
+    "files.write.workspace",
+  ]);
+  assert.deepEqual(withDisk("chmod -R 000 sub/..", "/w", { "/w": [".claude", "sub"], ...written("/w/sub/..", "/w"), ...sides }), ["policy.core"]);
+  // Resolved through a symlink to an ancestor of the working directory by another road: strict.
+  assert.deepEqual(withDisk("chmod -R 000 link/..", "/p/w", { "/p/w": ["src"], ...written("/p/w/link/..", "/p"), ...written("/p/w", "/p/w"), ...written("/h", "/h") }), [
+    "policy.core",
+  ]);
 });

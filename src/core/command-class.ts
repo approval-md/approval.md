@@ -9020,10 +9020,14 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
   // `~user` leads to a home, maybe this one: a word the text cannot read.
   if (base === "cwd" && /^~[^/]/u.test(parts[0] ?? "")) parts[0] = "$~user";
   const stack: string[] = [];
+  // A `..` that removes a name (`link/..`): the kernel applies it after it
+  // follows the name if that is a symlink, so the text alone cannot place it.
+  let poppedName = false;
   for (const segment of parts) {
     if (segment.length === 0 || segment === ".") continue;
     if (segment === ".." && stack.length > 0 && stack[stack.length - 1] !== "..") {
       if (unreadable(stack.pop() as string)) return "unplaced";
+      poppedName = true;
     } else if (segment === ".." && base === "root") continue;
     else stack.push(segment);
   }
@@ -9041,17 +9045,20 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
   let ups = 0;
   while (ups < stack.length && stack[ups] === "..") ups += 1;
   const names = stack.slice(ups);
-  if (base !== "root" && ups === 0 && names.length > 0) return null;
   // Without the caller's disk: the working directory, the home, their
   // ancestors and `/` are parents of an organ directory the text cannot rule
-  // out; any other absolute path is not judged here.
-  if (disk === undefined) return base === "root" && stack.length > 0 ? null : "unplaced";
+  // out, and so is a path with a `..` after a name (security review, 7); any
+  // other absolute path is not judged here.
+  if (!poppedName && base !== "root" && ups === 0 && names.length > 0) return null;
+  if (disk === undefined) return !poppedName && base === "root" && stack.length > 0 ? null : "unplaced";
   let target: string;
+  let from = "";
   if (base === "root") {
     target = `/${stack.join("/")}`;
   } else {
-    const from = base === "home" ? (disk.homeOk === false ? null : disk.home) : disk.relativeOk === false ? null : disk.cwd;
-    if (from === null || !from.startsWith("/")) return "unplaced";
+    const start = base === "home" ? (disk.homeOk === false ? null : disk.home) : disk.relativeOk === false ? null : disk.cwd;
+    if (start === null || !start.startsWith("/")) return "unplaced";
+    from = start;
     const parts = from.split("/").filter((part) => part.length > 0);
     target = `/${[...parts.slice(0, Math.max(0, parts.length - ups)), ...names].join("/")}`;
   }
@@ -9060,6 +9067,30 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
   const sides = [disk.relativeOk === false ? null : disk.cwd, disk.homeOk === false ? null : disk.home].filter(
     (dir): dir is string => dir !== null && dir.startsWith("/"),
   );
+  const canonical = (path: string): string | null => {
+    const resolved = disk.listings.get(realpathKey(path));
+    return Array.isArray(resolved) && typeof resolved[0] === "string" && resolved[0].startsWith("/") ? resolved[0] : null;
+  };
+  if (poppedName) {
+    // Placed by the hook's resolution of the operand AS WRITTEN (the kernel's
+    // reading, `..` after the symlink it follows), not by the text's. Not
+    // resolved: fail closed. Holding neither the working directory nor the
+    // home: judged by its own listing, read through the same spelling. Holding
+    // one: only when it is the directory the text names, else fail closed.
+    if (base === "root" && (disk.relativeOk === false || disk.homeOk === false)) return "unplaced";
+    const written = base === "root" ? rest : `${from}/${rest.replace(/^\/+/u, "")}`;
+    disk.collect?.add(written);
+    disk.collect?.add(target);
+    const physical = canonical(written);
+    const physicalSides = sides.map(canonical);
+    if (physical === null || physicalSides.some((dir) => dir === null)) return "unplaced";
+    if (!physicalSides.some((dir) => dir !== null && under(fold(dir), fold(physical)))) {
+      return disk.listingsOk === false ? "unplaced" : [written];
+    }
+    const lexical = canonical(target);
+    if (lexical === null || fold(lexical) !== fold(physical)) return "unplaced";
+    if (base !== "root" && ups === 0 && names.length > 0) return null;
+  }
   const places = sides.filter((dir) => under(dir, target));
   if (places.length === 0) {
     // A path that holds neither the working directory nor the home as
@@ -9073,10 +9104,6 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
     // `/tmp/build`). Without them nothing shows it: fail closed.
     if (base === "root" && (disk.relativeOk === false || disk.homeOk === false)) return "unplaced";
     disk.collect?.add(target);
-    const canonical = (path: string): string | null => {
-      const resolved = disk.listings.get(realpathKey(path));
-      return Array.isArray(resolved) && typeof resolved[0] === "string" && resolved[0].startsWith("/") ? resolved[0] : null;
-    };
     const canonicalTarget = canonical(target);
     const canonicalSides = sides.map(canonical);
     if (canonicalTarget === null || canonicalSides.some((dir) => dir === null)) return "unplaced";

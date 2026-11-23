@@ -445,11 +445,13 @@ const FIXTURES: readonly Fixture[] = [
     row: "rm",
     context: SCRATCH_ROOTS,
   },
-  // A `..` segment: the text says one place, the kernel goes to another.
+  // A `..` segment: the text says one place, the kernel goes to another
+  // (after a symlink it may follow: the parents rule fails closed, L61587
+  // security review 7).
   {
     command: "rm -rf /private/tmp/claude-501/sess/scratchpad/../../../etc",
-    class: "files.delete.out_of_scope",
-    rule: "rm-absolute",
+    class: "policy.core",
+    rule: "protected-path",
     row: "rm",
     context: SCRATCH_ROOTS,
   },
