@@ -457,6 +457,15 @@ because this is the harness with the smallest ceiling:
   reads the log once and answers `hook-timeout` at once, leaving the question
   open for the retry grace. The refusal above covers a question this run would
   open; the clamp covers one it only waits on.
+- **Reading the call has a deadline too: `hook-deadline`.** A hook Hermes kills
+  has decided nothing, so the hook stops its own reading of a call (classifying
+  it and landing its paths on the disk) at 15s, or at the cap less two seconds
+  when that is shorter: 15s under the 30s default and under `--harness-cap
+  300s`, 8s under `--harness-cap 10s`. A call it cannot read in that time is
+  blocked `hook-deadline`, with nothing registered or requested. An ordinary
+  call is read in milliseconds; a `cat` of twenty thousand paths takes several
+  seconds. The whole account is in
+  [claude-code-hook.md](claude-code-hook.md#the-hooks-own-deadline-hook-deadline).
 
 ## What is gated
 

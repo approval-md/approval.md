@@ -63,12 +63,15 @@ const LINK_LIMIT = 40;
  * an unreadable link) is `unplaceable`, with its code.
  */
 function physicalLanding(path: string): { landed: string; links: string[] } | { unplaceable: string } {
-  const pending = path.split("/").filter((part) => part.length > 0);
+  // The components still to walk, LAST FIRST: taking the next one is a pop.
+  // Taking it from the front of a long array moved every other component each
+  // time, so a word of n components cost n squared.
+  const pending = path.split("/").filter((part) => part.length > 0).reverse();
   let current = "/";
   const links: string[] = [];
   let followed = 0;
   while (pending.length > 0) {
-    const part = pending.shift() as string;
+    const part = pending.pop() as string;
     if (part === ".") continue;
     if (part === "..") {
       current = dirname(current);
@@ -104,7 +107,8 @@ function physicalLanding(path: string): { landed: string; links: string[] } | { 
     }
     links.push(target);
     if (target.startsWith("/")) current = "/";
-    pending.unshift(...target.split("/").filter((piece) => piece.length > 0));
+    const pieces = target.split("/").filter((piece) => piece.length > 0);
+    for (let index = pieces.length - 1; index >= 0; index -= 1) pending.push(pieces[index] as string);
   }
   return { landed: current, links };
 }
