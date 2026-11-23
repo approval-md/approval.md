@@ -28,10 +28,15 @@ import { fileURLToPath } from "node:url";
 import {
   canonicalPath,
   classifyForHook,
+  decideHarnessCall,
   DESCRIBE_DEADLINE_ENV,
   DESCRIBE_DEADLINE_MS,
   describeDeadlineMs,
+  HARNESS_ADAPTERS,
+  type HarnessVerdict,
   HOOK_DENY_CODES,
+  type HookInput,
+  hookScope,
   physicalLanding,
   waitDeadlineAt,
 } from "../src/cli/hook.js";
@@ -96,6 +101,19 @@ test("runUnderDeadline: a nested call runs under the outer deadline", () => {
   assert.deepEqual(
     runUnderDeadline(100, () => runUnderDeadline(60_000, spin)),
     { ok: false },
+  );
+  // And the inner limit is not a second deadline: work that outlasts it is
+  // finished under the outer one.
+  const busy = (milliseconds: number): string => {
+    const end = Date.now() + milliseconds;
+    while (Date.now() < end) {
+      // Fifty milliseconds of work, against an inner limit of one.
+    }
+    return "inner";
+  };
+  assert.deepEqual(
+    runUnderDeadline(60_000, () => runUnderDeadline(1, () => busy(50))),
+    { ok: true, value: { ok: true, value: "inner" } },
   );
 });
 
@@ -224,6 +242,18 @@ test("canonicalPath and physicalLanding answer as the walks they replace, on lin
       assert.equal(physicalLanding(root, path), physicalLandingBefore(root, path), `${base} + ${String(count)}`);
     }
   }
+  // A step back among the components: `x/..` resolves where `x` does not, so
+  // the longest prefix that resolves is not a boundary a halving finds. Such
+  // a path is climbed as it always was, and a link past the step back is
+  // still followed.
+  for (const pairs of [1, 2, 3, 5, 8]) {
+    for (const count of [33, 34, 36, 40, 47]) {
+      for (const leaf of ["link", "abs", "a/b/up"]) {
+        const path = `${root}/${"x/../".repeat(pairs)}${leaf}/${Array.from({ length: count }, () => "m").join("/")}`;
+        assert.equal(canonicalPath(path), canonicalPathBefore(path), path);
+      }
+    }
+  }
 });
 
 test("a megabyte of path costs what a megabyte costs: the walks are linear", { skip: sep !== "/" }, () => {
@@ -288,6 +318,10 @@ test("the two walks that take components from a list still take them in order: a
   // The git-directory pass's walk (`physicalLanding` in git-dir-writes).
   assert.deepEqual(classes("echo x > g/pre-push"), ["files.write.workspace", "vcs.history.rewrite"]);
   assert.deepEqual(classes("echo x > p/pre-push"), ["files.write.workspace"]);
+  // A link whose target has several pieces: they are walked first piece first
+  // (`plain`, back out of it, then into the git directory).
+  symlinkSync("plain/../.git/hooks", join(root, "ws", "h"));
+  assert.deepEqual(classes("echo x > h/pre-push"), ["files.write.workspace", "vcs.history.rewrite"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -400,4 +434,78 @@ test("through the real hook, a Write through a link and a step back is judged wh
   assert.match(organ.reason, /policy\.core/u);
   const plain = decideTool(dir, write("p/../note.txt"));
   assert.equal(plain.permission, "allow", plain.reason);
+});
+
+// ---------------------------------------------------------------------------
+// 4. In this process, as the Codex bridge calls it
+// ---------------------------------------------------------------------------
+
+/** One call through `decideHarnessCall`, the way a long-lived caller makes it. */
+function decideHere(dir: string, command: string, more: { timeoutMs?: number; startedAtMs?: number } = {}): HarnessVerdict {
+  labs += 1;
+  const { logPath, root, options } = hookScope({}, dir);
+  const input: HookInput = {
+    sessionId: "deadline",
+    sessionIdPresent: true,
+    cwd: dir,
+    toolName: "Bash",
+    toolInput: { command },
+    toolUseId: `deadline-${String(labs)}`,
+    hookEventName: "PreToolUse",
+    model: null,
+    toolResponse: null,
+    toolResponseRaw: undefined,
+    interrupted: false,
+    harnessVersion: null,
+  };
+  return decideHarnessCall({
+    streams: { out: () => undefined, err: () => undefined },
+    input,
+    adapter: HARNESS_ADAPTERS["claude-code"],
+    cwd: dir,
+    logPath,
+    root,
+    options,
+    actor: "agent:cc",
+    timeoutMs: more.timeoutMs ?? 1_000,
+    intervalMs: 100,
+    graceMs: 60_000,
+    windowRecords: null,
+    ...(more.startedAtMs === undefined ? {} : { startedAtMs: more.startedAtMs }),
+  });
+}
+
+test("the wait itself runs on the invocation's clock: a call that began a whole wait ago is answered without waiting again", { skip }, () => {
+  const dir = lab();
+  const began = Date.now();
+  // A class this policy waits for a human on, a 30 s wait, and an invocation
+  // that began a minute ago: its wait is over before it starts.
+  const verdict = decideHere(dir, "git push origin main", { timeoutMs: 30_000, startedAtMs: began - 60_000 });
+  assert.equal(verdict.permission, "deny", JSON.stringify(verdict));
+  assert.equal(verdict.permission === "deny" ? verdict.code : "", "hook-timeout", JSON.stringify(verdict));
+  // The one wall-clock bound in this file: half the wait it must not make.
+  assert.ok(Date.now() - began < 15_000, `${String(Date.now() - began)} ms`);
+});
+
+// LAST IN THIS FILE, and on purpose: after it this process describes no call.
+test("after one call has outlasted the deadline, this process reads no further call and says why", { skip }, () => {
+  const dir = lab();
+  const before = decideHere(dir, "cat notes/a.txt");
+  assert.equal(before.permission, "allow", JSON.stringify(before));
+  process.env[DESCRIBE_DEADLINE_ENV] = "1";
+  let stopped: HarnessVerdict;
+  try {
+    stopped = decideHere(dir, `cat ${"notes/a.txt ".repeat(21_000)}`);
+  } finally {
+    delete process.env[DESCRIBE_DEADLINE_ENV];
+  }
+  assert.equal(stopped.permission, "deny", JSON.stringify(stopped).slice(0, 300));
+  assert.equal(stopped.permission === "deny" ? stopped.code : "", "hook-deadline");
+  assert.match(stopped.permission === "deny" ? stopped.detail : "", /^this hook could not read the Bash call within its own 1ms limit/u);
+  // The same short call that was allowed a moment ago, with the deadline it ships with.
+  const later = decideHere(dir, "cat notes/a.txt");
+  assert.equal(later.permission, "deny", JSON.stringify(later));
+  assert.equal(later.permission === "deny" ? later.code : "", "hook-deadline");
+  assert.match(later.permission === "deny" ? later.detail : "", /^an earlier call in this process outlasted the hook's own limit/u);
+  assert.match(later.permission === "deny" ? later.detail : "", /Nothing was registered or requested\. Start the process again\.$/u);
 });

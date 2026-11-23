@@ -250,7 +250,10 @@ tool call holds:
   past the harness's timeout.
 
 The deadline interrupts the hook's own JavaScript. It does not interrupt a
-blocking system call.
+blocking system call. A read that is stopped is stopped part way, so a process
+that answers many calls (the Codex bridge) refuses every later call
+`hook-deadline` too, and says so, until it is started again. A hook the
+harness runs once per call starts fresh each time.
 
 ### The effective window: `--harness-cap`, and the 60s margin (APRV-423)
 

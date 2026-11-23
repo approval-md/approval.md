@@ -7379,7 +7379,16 @@ function describeToolCall(
   deadlineMs: number,
   ...described: Parameters<typeof describeToolCallNow>
 ): ToolDescription {
-  const ran = describeDeadlinePassed ? ({ ok: false } as const) : runUnderDeadline(deadlineMs, () => describeToolCallNow(...described));
+  if (describeDeadlinePassed) {
+    // A process that answers many calls (the Codex bridge): say what happened,
+    // not that THIS call was too long.
+    return {
+      kind: "deny",
+      code: "hook-deadline",
+      detail: `an earlier call in this process outlasted the hook's own limit and was stopped part way through being read, so this process reads no further call and the ${described[0].toolName} call is refused. Nothing was registered or requested. Start the process again.`,
+    };
+  }
+  const ran = runUnderDeadline(deadlineMs, () => describeToolCallNow(...described));
   if (ran.ok) return ran.value;
   describeDeadlinePassed = true;
   return {
