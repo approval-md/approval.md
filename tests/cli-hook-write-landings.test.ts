@@ -332,6 +332,49 @@ test("opted in, decision A: the write rows that are files.delete.out_of_scope to
   assert.deepEqual(see("rm ../x", scope).segments, see("rm ../x").segments);
 });
 
+test("decision A lightens only a write whose every candidate the old pass read was placed (review of 15de94c7)", () => {
+  writeFileSync(join(outside, "a"), "a", "utf8");
+  const scope = optedIn();
+  const keep: Array<[command: string, why: string]> = [
+    ["mv ../outside/a b", "mv removes a source outside every root"],
+    ["mv a ../outside/b", "mv is never decided by landing"],
+    ["rmdir ../outside", "a delete keeps its class"],
+    ["tar -c --remove-files -f x.tar ../outside/a", "tar --remove-files removes its sources"],
+    ["tar -x -f a.tgz -C", "the classifier's flag-present, value-missing answer records no path"],
+  ];
+  for (const [command, why] of keep) {
+    const before = see(command);
+    const after = see(command, scope);
+    assert.deepEqual(
+      withoutLandingEntries(after).filter(([cls]) => cls !== OUT),
+      withoutLandingEntries(before),
+      `${command}: ${why}`,
+    );
+    assert.ok(!after.segments.some(([, rule]) => rule === "write-out-of-scope-landed" || rule === "write-in-scope-resolved"), `${command}: ${why}`);
+  }
+  // Each of these has a candidate outside, a source or an option value, so
+  // even with the destination inside it is not a workspace write.
+  for (const command of [
+    "cp ../outside/a sub/",
+    "cp a ../outside/a sub/",
+    "ln -s a b ../outside/",
+    "cp --target-directory=../outside a",
+    "cp -t ../outside a",
+    "tar -C ../outside -x -f a.tgz",
+    "tar -x -f ../outside/a -C sub",
+  ]) {
+    const seen = see(command, scope);
+    assert.ok(!seen.segments.some(([cls, rule]) => cls === WORKSPACE && rule === "write-in-scope-resolved"), `${command}: ${JSON.stringify(seen.segments)}`);
+    assert.ok(seen.classes.includes(OUT) || seen.classes.includes(DELETE_OUT), `${command}: ${JSON.stringify(seen.segments)}`);
+    // Not opted in, the old answer stands exactly.
+    assert.deepEqual(withoutLandingEntries(see(command)), see(command).segments.filter(([cls]) => cls !== GUARDED), command);
+  }
+  // `mv ~/x ./y` and an rsync are not A rows at all: the head answers as main.
+  for (const command of ["mv ~/x ./y", "rsync --remove-source-files ../outside/a b"]) {
+    assert.deepEqual(withoutLandingEntries(see(command, scope)), withoutLandingEntries(see(command)), command);
+  }
+});
+
 test("opted in: write_scope.roots widens and never narrows", () => {
   const scope = optedIn([outside]);
   assert.ok(!see("echo x > link-out/y", scope).classes.includes(OUT));

@@ -4200,6 +4200,63 @@ function staticPrefix(text: string): string {
 }
 
 /**
+ * The binaries decision A may decide by landing: each WRITES its targets and
+ * removes nothing. Left out on purpose, so they keep `files.delete.out_of_scope`:
+ * `mv` (it removes its sources), `rmdir`, `rm`, `unlink`, `shred` (deletes,
+ * point 7), `gunzip` (it removes the `.gz` it reads), `rsync` (its
+ * `--remove-source-files`), and `tar` with `--remove-files`.
+ */
+const DECISION_A_BINS: ReadonlySet<string> = new Set([
+  "cp", "ln", "touch", "tee", "mkdir", "chmod", "truncate", "tar", "base64", "openssl", "npm",
+]);
+
+/**
+ * Decision A for one segment (coordinator's review of 15de94c7): the class it
+ * takes from where it lands, or `null` to keep the class it has.
+ *
+ * The old pass (APRV-402 {@link refineWriteScope}, and the classifier's
+ * `scopedWrite`) tightened the segment because SOME word was outside: it reads
+ * every argument that is not a flag, plus each `--opt=value` value
+ * ({@link writeCandidates}). So the same candidates are judged here, sources
+ * and option values included, each through the write pass's own resolver and
+ * landings; the segment is lighter only when EVERY one of them was read and
+ * placed. It keeps its class when the binary is not one that only writes
+ * ({@link DECISION_A_BINS}), when there is no candidate, and when the path the
+ * old pass recorded on the segment is not among the candidates or their
+ * landings (the classifier's "flag present, value missing" answer has none).
+ */
+function decisionALanding(
+  shape: CommandSegmentShape,
+  segment: ClassifiedSegment,
+  judge: (word: string, at: number) => WriteLanding,
+  at: number,
+  cwds: readonly string[],
+): WriteLanding | null {
+  const bin = shape.bin === null ? null : basename(shape.bin);
+  if (bin === null || !DECISION_A_BINS.has(bin)) return null;
+  if (bin === "tar" && shape.args.some((arg) => arg.startsWith("--remove-files"))) return null;
+  const candidates = writeCandidates(shape.args);
+  if (candidates.length === 0) return null;
+  const recorded = segment.path;
+  if (recorded === undefined) return null;
+  const known = new Set<string>(candidates);
+  for (const candidate of candidates) {
+    for (const from of cwds) {
+      const resolved = resolvedWriteTarget(candidate, from);
+      if (resolved !== null) known.add(resolved);
+    }
+  }
+  if (!known.has(recorded)) return null;
+  let verdict: WriteLanding = { kind: "in" };
+  for (const candidate of candidates) {
+    const judged = judge(candidate, at);
+    if (judged.kind === "guarded") return judged;
+    if (judged.kind === "out" && verdict.kind === "in") verdict = judged;
+  }
+  return verdict;
+}
+
+/**
  * Judge every write a command line makes, and attach what it finds.
  *
  * `cwds` are the directories the line may start in (the hook's own, and the
@@ -4232,8 +4289,11 @@ export function refineWriteLandings(
   let changedUnknown: string | null = null;
 
   const findings: WriteFinding[] = [];
-  /** Per shape index, the strictest verdict, for decision A. */
-  const verdicts = new Map<number, WriteLanding>();
+  /**
+   * Per shape index, decision A's verdict ({@link decisionALanding}): `null`
+   * when the segment must keep the class it has.
+   */
+  const aVerdicts = new Map<number, WriteLanding | null>();
 
   const stricter = (a: WriteLanding | undefined, b: WriteLanding): WriteLanding => {
     const rank = (v: WriteLanding | undefined): number => (v === undefined ? 3 : v.kind === "guarded" ? 0 : v.kind === "out" ? 1 : 2);
@@ -4450,15 +4510,17 @@ export function refineWriteLandings(
       }
     }
     if (verdict !== undefined && verdict.kind !== "in") {
-      verdicts.set(index, verdict);
       if (verdict.kind === "guarded") {
         const cls = verdict.rule === WRITE_UNREADABLE_RULE ? DECISION_B_UNREADABLE_CLASS : WRITE_GUARDED_CLASS;
         findings.push({ text: shape.text, cls, rule: verdict.rule, path: verdict.path, note: `${verdict.rule}: ${verdict.why}, so \`${shape.text}\` is also ${cls}` });
       } else if (scope.optedIn) {
         findings.push({ text: shape.text, cls: WRITE_OUT_OF_SCOPE_CLASS, rule: WRITE_OUT_OF_SCOPE_RULE, path: verdict.path, note: `${WRITE_OUT_OF_SCOPE_RULE}: \`${shape.text}\` lands at ${verdict.path}, outside every write root (${scope.roots.join(", ")}), so it is also ${WRITE_OUT_OF_SCOPE_CLASS}` });
       }
-    } else if (verdict !== undefined) {
-      verdicts.set(index, verdict);
+    }
+
+    // Decision A is judged here, from the directories this segment runs in.
+    if (scope.optedIn && segment !== undefined && segment.class === OUT_OF_SCOPE_WRITE_CLASS && DECISION_A_WRITE_RULES_BY_LANDING.includes(segment.rule)) {
+      aVerdicts.set(index, decisionALanding(shape, segment, judgeWord, index, cwds));
     }
 
     // What this segment changes is in place before the next one runs.
@@ -4494,9 +4556,10 @@ export function refineWriteLandings(
     segments = segments.map((segment, at) => {
       if (segment.class !== OUT_OF_SCOPE_WRITE_CLASS || !DECISION_A_WRITE_RULES_BY_LANDING.includes(segment.rule)) return segment;
       const index = shapes.length === result.segments.length ? at : shapes.findIndex((shape) => shape.text === segment.text);
-      const verdict = verdicts.get(index);
-      // No target this pass could read is no evidence: the segment keeps its class.
-      if (verdict === undefined || verdict.kind === "guarded") return segment;
+      const verdict = aVerdicts.get(index) ?? null;
+      // No verdict is no evidence: the segment keeps its class. A guarded
+      // verdict keeps it too, and the guarded entry is added beside it.
+      if (verdict === null || verdict.kind === "guarded") return segment;
       if (verdict.kind === "out") {
         notes.push(`decision A: \`${segment.text}\` (${segment.rule}) lands at ${verdict.path}, outside every write root, so it is ${WRITE_OUT_OF_SCOPE_CLASS} rather than ${OUT_OF_SCOPE_WRITE_CLASS}`);
         return { ...segment, class: WRITE_OUT_OF_SCOPE_CLASS, rule: WRITE_OUT_OF_SCOPE_LANDED_RULE, path: verdict.path };
