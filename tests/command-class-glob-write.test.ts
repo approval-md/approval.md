@@ -684,3 +684,38 @@ test("review-b S2: an option-dependent zsh form is literal text on a plain line"
   // With options possibly set on the line, they are patterns again.
   assert.equal(lastClass("setopt extendedglob; echo x > APPROVAL.m*~x"), "policy.core");
 });
+
+test("review of b402adec (H1): zsh's >&! >&| >>&! >>&| and &>! write the next word", () => {
+  for (const command of ["echo x >&! APPROVAL.md", "echo x >&| APPROVAL.md", "echo x >>&! .approval/env", "echo x >>&| .approval/env", "echo x &>! APPROVAL.md", "echo x &>| APPROVAL.md", "echo x &>>! .approval/env"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  assert.ok(classesOf("echo x >&! .git/config").includes("vcs.history.rewrite"));
+  assert.deepEqual(classesOf("echo x >&2"), ["read.shell"]);
+});
+
+test("review of b402adec (M2): a destination any name may land in is judged as the organ directory it is", () => {
+  for (const [command, cls] of [
+    ["cp -r src/ .claude/", "policy.core"],
+    ["cp -r src/. .claude/", "policy.core"],
+    ["cp -r src/.. .claude/", "policy.core"],
+    ["cp -R src .claude", "policy.core"],
+    ["cp -a src .cursor", "policy.core"],
+    ["cp -T src .claude", "policy.core"],
+    ["mv src .claude", "policy.core"],
+    ["ln -s src .claude", "policy.core"],
+    ["rsync -a src/ .claude/", "policy.core"],
+    ["tar -x -C .claude -f a.tar", "policy.core"],
+    ["tar -xf a.tar --directory=.cursor", "policy.core"],
+    ["tar -xzf a.tgz -C.grok", "policy.core"],
+    ["cp -r src/ .muse/", "policy.core"],
+    ["cp -r src/ .c*/", "policy.core"],
+    ["cp -r src/ .github/", "policy.edit"],
+  ] as const) {
+    assert.ok(classesOf(command).includes(cls), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // A plain file copy lands by its name; an ordinary destination stays ordinary.
+  for (const command of ["cp CONTRIBUTING.md .github/", "cp a.txt .claude/", "cp -r src/ out/", "rsync -a src/ out/", "tar -xf a.tar -C out"]) {
+    const classes = classesOf(command);
+    assert.ok(!classes.includes("policy.core") && !classes.includes("policy.edit"), `${command} -> ${classes.join(",")}`);
+  }
+});

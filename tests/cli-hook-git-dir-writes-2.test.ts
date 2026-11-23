@@ -105,7 +105,8 @@ test("S1: a glob or brace target that .git matches is git-dir-write, any letter 
   }
   // GLOB-WRITE (22 Nov 2026): `.g*` also matches `.grok`, whose `hooks/` is the
   // Grok hook organ, so the stricter `policy.core` answers this one.
-  assert.deepEqual(pure("tee -a sub/.g*/hooks/pre-push"), ["policy.core protected-path"]);
+  // The `.git` reader's class rides beside it (review-b S1: no class is taken away).
+  assert.deepEqual(pure("tee -a sub/.g*/hooks/pre-push"), ["policy.core protected-path", "vcs.history.rewrite git-dir-write"]);
 });
 
 test("S1: ordinary glob and brace lines do not move", () => {

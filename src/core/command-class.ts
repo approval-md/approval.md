@@ -1886,9 +1886,11 @@ function lex(command: string): LexResult {
 
     // Redirections, including the fd-prefixed and dup forms.
     // Lead ruling L61195 (a): zsh's clobbering forms `>!`, `>>!` (and `>|`,
-    // `>>|`) write the NEXT word, as `>` and `>>` do; `&>!` lexes as `&` and
-    // `>!`. Read as zsh reads them: Claude Code's Bash tool runs zsh on macOS.
-    const redirect = /^(\d*)(>>!|>>\||>>|>&|>\||>!|>|<<-|<<|<&|<)/u.exec(command.slice(index));
+    // `>>|`) write the NEXT word, as `>` and `>>` do, and so do `>&!`, `>&|`,
+    // `>>&!`, `>>&|` (stdout and stderr, clobbering; zsh -f writes each), read
+    // ahead of the `>&` dup; `&>!` lexes as `&` and `>!`. Read as zsh reads
+    // them: Claude Code's Bash tool runs zsh on macOS.
+    const redirect = /^(\d*)(>>&!|>>&\||>&!|>&\||>>!|>>\||>>|>&|>\||>!|>|<<-|<<|<&|<)/u.exec(command.slice(index));
     if (redirect !== null) {
       const op = redirect[2] as string;
       index += (redirect[0] as string).length;
@@ -8528,6 +8530,81 @@ function globWriteOperands(basename: string, positionals: readonly string[]): st
 }
 
 /**
+ * Harness directories whose files are organs only when named (`.claude/settings*`,
+ * `.cursor/hooks.json`, ...): a write that may land ANY name inside one is an
+ * organ write (review of b402adec, M2). `.github` for its workflows. The
+ * approval home, the Hermes home, `.codex` and `.git` are guarded bare already.
+ */
+const ORGAN_DIRECTORIES: Readonly<Record<string, string>> = {
+  ".claude": "policy.core",
+  ".cursor": "policy.core",
+  ".grok": "policy.core",
+  ".muse": "policy.core",
+  ".github": "policy.edit",
+};
+
+/**
+ * The organ class of a destination directory that a copy, move, link, sync or
+ * extraction may fill with any name (review of b402adec, M2): its last
+ * component, case folded, is an {@link ORGAN_DIRECTORIES} name, or, for a word
+ * the shell may still glob, could match one (dot-names by the line's rule).
+ */
+function organDestination(dest: string, inexact: (word: string) => boolean, glob: GlobReading): { surface: string; path: string } | null {
+  const parts = dest.split("/").filter((part) => part.length > 0 && part !== ".");
+  const last = parts[parts.length - 1];
+  if (last === undefined) return null;
+  let best: string | null = null;
+  for (const [name, cls] of Object.entries(ORGAN_DIRECTORIES)) {
+    let hit = last.toLowerCase() === name;
+    if (!hit && inexact(dest) && hasGlobConstruct(last) && (glob.options || last.startsWith(".") || /^[(]/u.test(last))) {
+      hit = globTokensMatch(globSegmentTokens(last, glob.options), name, false, glob.budget) !== false;
+    }
+    if (hit && (best === null || protectedRank(cls) < protectedRank(best))) best = cls;
+  }
+  return best === null ? null : { surface: best, path: dest };
+}
+
+/**
+ * The directories a command may fill with names its text does not show
+ * (review of b402adec, M2): a copy, move or link's destination (each `-t`
+ * directory, else the last operand), rsync's last operand, and tar's `-C` /
+ * `--directory`. Any source may be a directory whose contents land there
+ * (`cp -r src/ .claude/`, `cp -r src/. .claude/`, `cp -T`, `mv src .claude`,
+ * `rsync -a src/ .claude/`, `tar -x -C .claude`).
+ */
+function contentDestinations(basename: string, args: readonly string[], positionals: readonly string[], targetDirectories: readonly string[]): string[] {
+  if (["cp", "mv", "ln"].includes(basename)) {
+    const dests = targetDirectories.length > 0 ? [...targetDirectories] : positionals.length >= 2 ? [positionals[positionals.length - 1] as string] : [];
+    const sources = targetDirectories.length > 0 ? positionals : positionals.slice(0, -1);
+    // A plain `cp` of files lands each file by its basename ({@link copyLandings});
+    // a recursive copy, `-T`, a source ending in `/`, `.` or `..`, and every
+    // `mv` and `ln` (a directory source, or a destination that does not exist
+    // yet and becomes the source) may land the source's CONTENTS.
+    const contents =
+      basename !== "cp" ||
+      args.some((arg) => /^-[A-Za-z]*[rRaT]/u.test(arg) && !arg.startsWith("--")) ||
+      args.some((arg) => ["--recursive", "--archive", "--no-target-directory"].includes(arg)) ||
+      sources.some((source) => source.endsWith("/") || /(?:^|\/)\.\.?$/u.test(source));
+    return contents ? dests : [];
+  }
+  if (basename === "rsync") return positionals.length >= 2 ? [positionals[positionals.length - 1] as string] : [];
+  if (basename === "tar") {
+    const out: string[] = [];
+    for (let at = 0; at < args.length; at += 1) {
+      const arg = args[at] as string;
+      if (arg === "-C" || arg === "--directory") {
+        const next = args[at + 1];
+        if (next !== undefined) out.push(next);
+      } else if (arg.startsWith("--directory=")) out.push(arg.slice("--directory=".length));
+      else if (/^-[A-Za-z]*C./u.test(arg)) out.push(arg.slice(arg.indexOf("C") + 1));
+      else if (/^-[A-Za-z]*C$/u.test(arg) && args[at + 1] !== undefined) out.push(args[at + 1] as string);
+    }
+    return out;
+  }
+  return [];
+}
+
+/**
  * The files a `cp`, `mv`, `ln` or `install` would create inside a directory
  * destination (lead ruling L61195 (b)): `<dest>/<basename>` for each source,
  * the destination being every `-t` directory, or else the last operand. A
@@ -10183,11 +10260,20 @@ function classifySegment(
     // writes `<dir>/<basename of each source>`, so that file is judged too
     // (`cp evil/settings.json .claude/` is `.claude/settings.json`).
     const landed = copyFamily ? copyLandings(basename, args, positionals, targetDirectories, inexact, glob) : null;
+    // Review of b402adec (M2): a destination any name may land in, that is an organ directory.
+    const organDest = contentDestinations(basename, args, positionals, targetDirectories)
+      .map((dest) => organDestination(dest, inexact, glob))
+      .reduce<{ surface: string; path: string } | null>(
+        (best, hit) => (hit !== null && (best === null || protectedRank(hit.surface) < protectedRank(best.surface)) ? hit : best),
+        null,
+      );
     const landedNamed =
       landed === null
-        ? null
+        ? organDest
         : (() => {
-            const plainHit = strictestProtected(landed.plain, protectedPaths);
+            const plainText = strictestProtected(landed.plain, protectedPaths, true);
+            const plainHit =
+              organDest !== null && (plainText === null || protectedRank(organDest.surface) < protectedRank(plainText.surface)) ? organDest : plainText;
             const patternHit = strictestProtectedWrite(landed.patterns, protectedPaths, () => true, false, {
               options: glob.options,
               budget: glob.budget,

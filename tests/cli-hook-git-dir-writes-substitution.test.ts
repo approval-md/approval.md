@@ -156,7 +156,7 @@ test("rule 2: literal text and a substitution's output that join into .git name 
   // GLOB-WRITE (22 Nov 2026): an output beside a glob construct may hold a
   // `/` and so name any directory, the approval log's among them: the stricter
   // `log.mutate` answers before the `.git` reader.
-  assert.deepEqual(pure("echo x >> .g$(printf i)?/config"), ["log.mutate redirect-protected"]);
+  assert.deepEqual(pure("echo x >> .g$(printf i)?/config"), ["log.mutate redirect-protected", "vcs.history.rewrite git-dir-write"]);
   assert.deepEqual(pure("echo x >> .g{x,$(printf it)}/config"), [DIR_WRITE]);
   // git's own write option, and a script a shell wrapper runs.
   assert.deepEqual(pure("git log --output=.g$(printf it)/config"), [DIR_WRITE]);
