@@ -618,3 +618,49 @@ test("lead's ruling L61492: every word is read as zsh reads it under extendedglo
     assert.deepEqual(classes(command), classes(plain), `${command} vs ${plain}`);
   }
 });
+
+test("security review of aec23242: no segment skips the zsh reading for its spelling, and quoted parts are literals", () => {
+  // zsh -f with extendedglob (and globdots) opens the guarded file for each;
+  // at aec23242 each was allowed under both policies (main allows them too).
+  for (const command of [
+    "echo x > APPROV^1", // a git-revision-like suffix is still zsh's ^
+    "cat .approval/e^1",
+    "cat ~/^1/auth.json",
+    "cat ~/.hermes/a^1",
+    "cat ~/.hermes/'a'^x.json", // the quoted part is a literal, the ^ is not
+    'cat ~/.hermes/"a"^x.json',
+    "cat ~/.hermes/\\a^x.json",
+    "cat ~/.h'e'^Z/auth.json",
+  ]) {
+    for (const at of [lab, abstainLab]) {
+      const decision = claude(command, at);
+      assert.match(decision, /^deny: /u, `${command}: ${decision}`);
+    }
+  }
+  // A git revision still reads as git spells it where no file matches.
+  assert.deepEqual(classes("git diff HEAD~1"), classes("git diff HEAD"));
+  assert.deepEqual(classes("git show HEAD^2"), classes("git show HEAD"));
+});
+
+test("coordinator on aec23242: a zsh form with no slash names only what the directory it runs in holds", () => {
+  // Under extendedglob `^import` matches the entries of the working
+  // directory, a hidden one only under globdots: beside `.approval` and
+  // `.env` none of these reads a credential (at aec23242 each was refused
+  // as account.credential, which main allowed).
+  for (const [command, plain] of [
+    ["grep -r ^import src", "grep -r import src"],
+    ["grep ^foo README.md", "grep foo README.md"],
+    ["grep -n ^# README.md", "grep -n x README.md"],
+    ["rg ^use src", "rg use src"],
+    ["git log ^main", "git log main"],
+  ] as const) {
+    assert.ok(!classes(command).includes("account.credential"), `${command}: ${classes(command).join(", ")}`);
+    assert.ok(!classes(plain).includes("account.credential"), plain);
+  }
+  // A pattern that opens with `.` names hidden entries, and a non-hidden
+  // guarded file in the directory is named too.
+  assert.ok(classes("grep -r .^zz src").includes("account.credential"));
+  assert.ok(classes("echo x > APPROV^1").includes("policy.core"));
+  // Where the directory may move, the plain glob answers (strict).
+  assert.ok(classes("cd src; grep -r ^import x").includes("account.credential"));
+});

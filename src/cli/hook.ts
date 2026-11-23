@@ -4139,7 +4139,7 @@ export function classifyForHook(
       // The text as zsh reads it under `extendedglob` and `braceccl`, which
       // the user's zshrc may set (the lead's ruling L61492); a reading that
       // adds no class leaves the answer as it was.
-      const option = zshOptionCommandReading(base);
+      const option = zshOptionCommandReading(base, isAbsolute(cwd) ? [cwd, ...credentialCwds.filter((each) => isAbsolute(each))] : null);
       if (option !== null) {
         judged = togetherIfNew(judged, once(option), false);
         const grouped = optionGroupReading(option);
@@ -8559,84 +8559,173 @@ function optionGroupReading(command: string): string | null {
  * ({@link zshOptionReading}): `.h^Z` as `.h*`, `.Z#hermes` as `.*hermes`,
  * `.{hZ}ermes` as `.[hZ]ermes`, `^zz` as `*`. The user's own zshrc may set
  * either option, so every command is read this way too and the stricter
- * answer stands (the lead's ruling L61492). Only unquoted text: zsh reads
- * `'^import'` as itself. A segment holding a quote, a backslash, a `$`, a
- * backquote or a group is left as written (groups are
- * {@link optionGroupReading}'s), and so are a comment and a git revision
- * ({@link GIT_REVISION_SUFFIX}). `null` when nothing
- * changes. One pass over the text.
+ * answer stands (the lead's ruling L61492).
+ *
+ * Quoting is zsh's: a quoted or escaped character is itself (written `?` when
+ * it is a glob character, which matches it), so `'a'^x.json` is `a*`; a
+ * segment whose form also holds an unquoted `$` or backquote cannot be read
+ * and is any name (`*`). A comment is left as written (security review of
+ * aec23242: no segment is skipped for its spelling).
+ *
+ * A word with no `/` names entries of the directory the command runs in, and
+ * a hidden one only when the pattern opens with `.` (zsh without globdots).
+ * Where that directory is known (`cwds`, and no `cd`, `pushd` or `popd` in the
+ * command), the word is written as the entries it matches there, or left as
+ * written when it matches none (zsh refuses a pattern with no match), so
+ * `grep ^foo README.md` beside `.env` reads `.env` only if zsh would; past
+ * {@link OPTION_WORD_ENTRIES} entries, or where the directory is unknown, it
+ * is the plain glob. `null` when nothing changes. One pass over the text.
  */
-/**
- * A git revision suffix in a segment with no `.` (`HEAD~1`, `main^`,
- * `HEAD^{tree}`, `HEAD@{1}`, `HEAD~1:main`): read as git spells it, not as
- * zsh's exclusion, negation or brace class, which would turn `HEAD~1` into
- * `HEAD` (git-push-remote-config's agreement test).
- */
-const GIT_REVISION_SUFFIX = /^[^.]*(?:[~^](?:\d|$|:|\{)|@\{)/u;
-
-function zshOptionCommandReading(command: string): string | null {
+function zshOptionCommandReading(command: string, cwds: readonly string[] | null): string | null {
   if (!/[\^#{~]/u.test(command)) return null;
+  const known = cwds !== null && !/(?:^|[\s;&|(])(?:cd|pushd|popd)(?=[\s;&|)]|$)/u.test(command) ? cwds : null;
+  const listings = new Map<string, string[]>();
+  // Each entry is written once per command: a later word that matches only
+  // entries already written stands as its first match, so a line of many
+  // such words reads its directory once, not once a word.
+  const written = new Set<string>();
   const separator = /[\s;&|<>()]/u;
-  let out = "";
+  // The output as parts joined once at the end, and the last character
+  // written: indexing a string built by `+=` flattens it on every word.
+  const parts: string[] = [];
+  let last = "";
+  const write = (text: string): void => {
+    if (text.length === 0) return;
+    parts.push(text);
+    last = text[text.length - 1] as string;
+  };
   let changed = false;
   let at = 0;
   while (at < command.length) {
     const char = command[at] as string;
     if (separator.test(char)) {
-      out += char;
+      write(char);
       at += 1;
       continue;
     }
-    const before = out[out.length - 1];
-    if (char === "#" && (before === undefined || /[\s;&|]/u.test(before))) {
+    if (char === "#" && (last === "" || /[\s;&|]/u.test(last))) {
       const newline = command.indexOf("\n", at);
       const stop = newline === -1 ? command.length : newline;
-      out += command.slice(at, stop);
+      write(command.slice(at, stop));
       at = stop;
       continue;
     }
-    let word = "";
-    let quote: string | null = null;
+    // One word: its raw text, and each character it stands for with whether
+    // it was quoted; `$` and backquote outside single quotes mark the segment
+    // unknown.
+    const raw = at;
+    const units: Array<{ char: string; quoted: boolean; unknown: boolean; end: number; param?: true }> = [];
+    let quote: "'" | '"' | "$'" | null = null;
+    // Inside an unquoted `${…}` every character is the parameter's syntax
+    // (`${a:-x}`, `${#a}`, `${a^^}`), never a zsh glob form.
+    let paramDepth = 0;
     while (at < command.length) {
       const next = command[at] as string;
-      if (quote === "'") {
-        word += next;
+      if (quote === "'" || quote === "$'") {
+        if (next === "\\" && quote === "$'") {
+          units.push({ char: command[at + 1] ?? "", quoted: true, unknown: false, end: at + 2 });
+          at += 2;
+          continue;
+        }
         at += 1;
         if (next === "'") quote = null;
+        else units.push({ char: next, quoted: true, unknown: false, end: at });
         continue;
       }
       if (next === "\\") {
-        word += command.slice(at, at + 2);
+        units.push({ char: command[at + 1] ?? "", quoted: true, unknown: false, end: at + 2 });
         at += 2;
         continue;
       }
       if (quote === '"') {
-        word += next;
         at += 1;
         if (next === '"') quote = null;
+        else units.push({ char: next, quoted: true, unknown: next === "$" || next === "`", end: at });
         continue;
       }
       if (next === "'" || next === '"') {
-        quote = next;
-        word += next;
+        quote = next === "'" && command[at - 1] === "$" && units[units.length - 1]?.char === "$" ? "$'" : next;
+        if (quote === "$'") units.pop();
         at += 1;
         continue;
       }
       if (separator.test(next)) break;
-      word += next;
       at += 1;
+      if (next === "{" && units[units.length - 1]?.char === "$" && units[units.length - 1]?.quoted === false) paramDepth += 1;
+      const param = paramDepth > 0;
+      if (next === "}" && paramDepth > 0) paramDepth -= 1;
+      units.push({ char: next, quoted: false, unknown: next === "$" || next === "`", end: at, ...(param ? { param: true as const } : {}) });
     }
-    const rewritten = word
-      .split("/")
-      .map((segment) =>
-        /['"`$\\()]/u.test(segment) || GIT_REVISION_SUFFIX.test(segment) ? segment : (zshOptionReading(segment) ?? "*"),
-      )
-      .join("/");
+    const word = command.slice(raw, at);
+    // The segments, split at each unquoted `/`, each with its raw text.
+    const segments: Array<{ units: typeof units; from: number; to: number }> = [{ units: [], from: raw, to: at }];
+    for (const unit of units) {
+      const current = segments[segments.length - 1] as (typeof segments)[number];
+      if (!unit.quoted && unit.char === "/") {
+        current.to = unit.end - 1;
+        segments.push({ units: [], from: unit.end, to: at });
+      } else {
+        current.units.push(unit);
+      }
+    }
+    const hasForm = (segment: typeof units): boolean =>
+      segment.some(
+        (unit, index) =>
+          !unit.quoted &&
+          unit.param !== true &&
+          !(unit.char === "#" && segment[index - 1]?.char === "$") &&
+          (/[\^#{]/u.test(unit.char) || (unit.char === "~" && index > 0)),
+      );
+    if (!segments.some((segment) => hasForm(segment.units))) {
+      write(word);
+      continue;
+    }
+    const read = segments.map(({ units: segment, from, to }) => {
+      if (!hasForm(segment)) return command.slice(from, to);
+      if (segment.some((unit) => unit.unknown)) return "*";
+      const plain = segment
+        .map((unit) => (unit.quoted && /[*?[\]^#~{}!\\'"`$\s;&|<>()]/u.test(unit.char) ? "?" : unit.char))
+        .join("");
+      return zshOptionReading(plain) ?? "*";
+    });
+    let rewritten = read.join("/");
+    if (segments.length === 1 && known !== null) {
+      const pattern = read[0] as string;
+      const glob = globPattern(pattern);
+      const matches = new Set<string>();
+      let tooMany = false;
+      for (const directory of known) {
+        let names = listings.get(directory);
+        if (names === undefined) {
+          try {
+            names = readdirSync(directory);
+          } catch {
+            names = [];
+          }
+          listings.set(directory, names);
+        }
+        for (const name of names) {
+          if (name.startsWith(".") && !pattern.startsWith(".")) continue;
+          if (glob.test(name)) matches.add(name);
+        }
+        if (matches.size > OPTION_WORD_ENTRIES) tooMany = true;
+      }
+      if (!tooMany && matches.size === 0) rewritten = word;
+      else if (!tooMany) {
+        const fresh = [...matches].filter((name) => !written.has(name));
+        for (const name of fresh) written.add(name);
+        const chosen = fresh.length > 0 ? fresh : [[...matches][0] as string];
+        rewritten = chosen.map((name) => `'${name.replaceAll("'", "'\\''")}'`).join(" ");
+      }
+    }
     if (rewritten !== word) changed = true;
-    out += rewritten;
+    write(rewritten);
   }
-  return changed ? out : null;
+  return changed ? parts.join("") : null;
 }
+
+/** Past this many matching entries, a word with no `/` is read as its plain glob. */
+const OPTION_WORD_ENTRIES = 256;
 
 /** Names a credential file goes by, for a pattern to be tested against. */
 const CREDENTIAL_NAMES: readonly string[] = [".env", ".env.local", ".op.env", "auth.json", "env", "vault.enc", "keys"];

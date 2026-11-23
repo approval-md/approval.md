@@ -362,7 +362,7 @@ export function globPattern(component: string): GlobPattern {
  *
  * - `{hZ}`, `{a-z}` (braceccl): the class `[hZ]`, `[a-z]`.
  * - `X#` (zero or more X): `*` in X's place; `X##` (one or more): `X*`. A
- *   leading `X#` may match nothing, so the segment is any name.
+ *   `#` with no X before it is any name.
  * - `^rest` (negation): any name at the segment's start; after a literal
  *   prefix, the prefix and `*`.
  * - `a~b` (exclusion, not at the start): `a`.
@@ -415,7 +415,7 @@ export function zshOptionReading(segment: string): string | null {
         at += 1;
         continue;
       }
-      if (unit === 0 || out.length === 0) return null;
+      if (out.length === 0) return null;
       out = `${out.slice(0, unit)}*`;
       continue;
     }
