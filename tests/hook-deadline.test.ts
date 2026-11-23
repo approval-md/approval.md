@@ -430,6 +430,47 @@ test("through the real hook, a call it cannot read inside its deadline is refuse
   assert.equal(decide(dir, "cat notes/a.txt", { [DESCRIBE_DEADLINE_ENV]: "999999999" }).permission, "allow");
 });
 
+test("through the real hook, the worst pattern found so far is answered inside the deadline: stars with a letter between them, against one long name", { skip }, () => {
+  // Review-b's finding (441 bytes of stars) and the line it left: a pattern
+  // matcher that backtracks takes a power of the name's length. Ten stars
+  // and one file named sixty a's are minutes of matching, in 24 bytes.
+  const dir = lab();
+  writeFileSync(join(dir, "a".repeat(60)), "");
+  const command = `cat ${"*a".repeat(9)}*b`;
+  assert.equal(command.length, 24);
+  labs += 1;
+  const began = Date.now();
+  const ran = spawnSync(
+    process.execPath,
+    [CLI_ENTRY, "hook", "claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "100ms"],
+    {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, [DESCRIBE_DEADLINE_ENV]: "500" },
+      input: JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: "deadline",
+        tool_use_id: `deadline-${String(labs)}`,
+        cwd: dir,
+        transcript_path: "/dev/null",
+        tool_name: "Bash",
+        tool_input: { command },
+      }),
+      // Far past the 500 ms deadline, far short of the minutes the match
+      // takes: a hook with no deadline is stopped here and the test fails.
+      timeout: 30_000,
+    },
+  );
+  assert.equal(ran.error, undefined, `the hook was still running after ${String(Date.now() - began)} ms: ${String(ran.error)}`);
+  assert.equal(ran.status, 0, ran.stderr);
+  const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+  // What must hold is an answer in time. While the matcher backtracks that
+  // answer is the refusal; a matcher that does not (it reads the line in
+  // milliseconds) may allow the read, which is what the line is.
+  if (output.permissionDecision === "deny") assert.match(output.permissionDecisionReason, /^hook-deadline: /u);
+  else assert.equal(output.permissionDecision, "allow", output.permissionDecisionReason);
+});
+
 test("through the real hook, a Write through a link and a step back is judged where the kernel lands it", { skip }, () => {
   // The file tools' walk (`kernelLanding`): `k` links into a Hermes home, so
   // `k/../.op.env` is that home's `.op.env`, whatever the text says.
