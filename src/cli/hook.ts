@@ -4769,9 +4769,11 @@ export function refineWriteLandings(
    * {@link PATTERN_LINE_BYTES}, and by the listing's own bounds. A directory of
    * thousands of entries is read whole and moves nothing by its size (`rm
    * logs/*.log` over 5,000 files is what main says it is). Past a bound, or
-   * where the listing gives up, a delete adds nothing (main's delete rows
-   * already answer for a pattern they cannot read), and any other segment is
-   * unreadable: guarded.
+   * where the listing gives up, the segment is unreadable: guarded. A delete
+   * too: a bound that is passed is never "nothing found", or a directory
+   * padded with files would hide the policy file from `rm *.md`. (Main also
+   * gives a copy row a `files.delete.*` class, so the class says nothing
+   * about what the segment does.)
    */
   const patternWordClasses = (shape: CommandSegmentShape, at: number, segment: ClassifiedSegment | null): ResolvedClass[] => {
     const out: ResolvedClass[] = [];
@@ -4788,14 +4790,10 @@ export function refineWriteLandings(
     const argv = shape.bin !== null && shape.args.some(openPattern);
     if (!targets && !argv) return out;
     if (!targets && segment !== null && segment.class.startsWith("read.")) return out;
-    const quiet = segment !== null && segment.class.startsWith("files.delete") && !targets;
     const tooWide = (pattern: string, why: string): ResolvedClass[] =>
-      quiet ? [] : [{ cls: DECISION_B_UNREADABLE_CLASS, rule: WRITE_UNREADABLE_RULE, path: pattern, why: `${pattern} ${why}, so what \`${shape.text.slice(0, 80)}\` writes cannot be read from the disk` }];
+      [{ cls: DECISION_B_UNREADABLE_CLASS, rule: WRITE_UNREADABLE_RULE, path: pattern, why: `${pattern} ${why}, so what \`${shape.text.slice(0, 80)}\` writes cannot be read from the disk` }];
     const add = (found: readonly ResolvedClass[], pattern: string, count: number): void => {
       for (const each of found) {
-        // A synthetic line the classifier refuses is unreadable for a write
-        // and nothing for a delete, as above.
-        if (each.rule === WRITE_UNREADABLE_RULE && quiet) continue;
         if (out.some((known) => known.cls === each.cls)) continue;
         out.push({ ...each, path: pattern, why: `${pattern} matches ${String(count)} name${count === 1 ? "" : "s"} on the disk, and with them written out the line is ${each.cls}` });
       }
