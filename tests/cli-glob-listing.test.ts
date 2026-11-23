@@ -82,12 +82,12 @@ test("lead ruling L61492/L61497 through the hook: `rm -f *` and `chmod 644 *` wh
   for (const command of ["rm -f *", "chmod 644 *", "rm -rf ./*"]) {
     assert.ok((await hookClasses(command, checkout)).includes("vcs.history.rewrite"), command);
   }
-  // `.claude` is a guarded directory by name for a copy INTO it; `rm -f *`
-  // there takes what `rm -f .claude` takes, which is main's class.
+  // `rm -f *` where `.claude` is takes what `rm -f .claude` takes: the organ
+  // directory's class since lead ruling L61587.
   const claude = project({ ".claude": ["settings.json"], src: ["a.ts"] });
   const plain = project({ ".cache": ["x"], src: ["a.ts"] });
   for (const command of ["rm -f *", "chmod 644 *"]) {
-    assert.deepEqual(await hookClasses(command, claude), await hookClasses(command, plain), command);
+    assert.ok((await hookClasses(command, claude)).includes("policy.core"), command);
     assert.ok(!(await hookClasses(command, plain)).some((cls) => ["policy.core", "log.mutate", "vcs.history.rewrite"].includes(cls)), command);
   }
   // A directory holding no guarded dot-name stays as it is today.
@@ -197,4 +197,18 @@ test("review of e6b7bf97 (4) through the hook: a missing directory is empty only
   assert.equal(listings.get(join(cwd, "d")), "missing");
   assert.deepEqual(await hookClasses("rm -rf d/*", cwd), ["files.delete.out_of_scope"]);
   assert.ok((await hookClasses("true; rm -rf d/*", cwd)).includes("policy.core"));
+});
+
+test("lead ruling L61587 through the hook: `rm -rf *` where an organ directory is takes its class; an ordinary tree keeps main's", async () => {
+  const claude = project({ ".claude": ["settings.json"], src: ["a.ts"] });
+  for (const command of ["rm -rf *", "rm -rf ./*", "chmod -R 777 *", "rm -rf .claude", "mv .claude gone"]) {
+    assert.ok((await hookClasses(command, claude)).includes("policy.core"), command);
+  }
+  const nested = project({ "sub/.claude": ["settings.json"], sub: ["a.ts"] });
+  assert.ok((await hookClasses("rm -rf sub/*", nested)).includes("policy.core"));
+  const plain = project({ dist: ["a.js"], node_modules: ["x.js"], build: ["o.js"], ".cache": ["x"] });
+  assert.deepEqual(await hookClasses("rm -rf *", plain), ["files.delete.out_of_scope"]);
+  for (const command of ["rm -rf dist", "rm -rf node_modules", "rm -rf build/"]) {
+    assert.deepEqual(await hookClasses(command, plain), ["files.write.workspace"], command);
+  }
 });

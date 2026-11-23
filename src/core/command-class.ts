@@ -728,6 +728,21 @@ export function protectedPathClass(
   return strictest;
 }
 
+/**
+ * Is `segments[index]` the organ directory ITSELF: the last segment, or one
+ * whose tail comes back to it (`.claude/x/..`)? A tail that leaves it first
+ * (`.claude/..`) names its parent, which this rule does not judge.
+ */
+function bareOrganDirectory(segments: readonly string[], index: number): boolean {
+  let depth = 0;
+  for (const segment of segments.slice(index + 1)) {
+    if (segment === "..") depth -= 1;
+    else if (segment !== "." && segment.length > 0) depth += 1;
+    if (depth < 0) return false;
+  }
+  return depth === 0;
+}
+
 /** {@link protectedPathClass} for one word that brace expansion has already made. */
 function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): string | null {
   const segments = pathSegments(collapseBracedVariables(candidate));
@@ -746,9 +761,15 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
     // map, queue. The bare `.approval` directory itself lands here too.
     if (segment === ".approval") return "policy.core";
     // The harness's own settings, which is where a hook is installed or removed.
+    // The bare organ directory itself lands here too, as bare `.approval`,
+    // `.codex` and `.hermes` do (review-b A686-FOLD3 M1, lead ruling L61587):
+    // `rm -rf .claude`, `mv .claude x` and `chmod -R 000 .claude` remove or
+    // disable the hook's registration in one command. A tail with `..` in it
+    // may resolve to the directory, as `.codex`'s does.
     if (segment === ".claude") {
       const next = segments[index + 1];
       if (next !== undefined && next.startsWith("settings")) return "policy.core";
+      if (bareOrganDirectory(segments, index)) return "policy.core";
     }
     // Cursor's equivalent surface: the hook install file, hook scripts, and
     // custom-agent prompts. An agent that could write those could write itself
@@ -756,7 +777,7 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
     // the prose one.
     if (segment === ".cursor") {
       const next = segments[index + 1];
-      if (next === "hooks.json" || next === "hooks" || next === "agents") return "policy.core";
+      if (next === "hooks.json" || next === "hooks" || next === "agents" || bareOrganDirectory(segments, index)) return "policy.core";
     }
     // Grok Build's equivalent: `.grok/hooks/*.json` is where its PreToolUse
     // entries are installed, and the scripts beside them are what those
@@ -766,7 +787,7 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
     // `.cursor/hooks.json` for compatibility, and both are already here.
     if (segment === ".grok") {
       const next = segments[index + 1];
-      if (next === "hooks.json" || next === "hooks") return "policy.core";
+      if (next === "hooks.json" || next === "hooks" || bareOrganDirectory(segments, index)) return "policy.core";
     }
     // Muse Code's equivalent, OBSERVED rather than guessed (APRV-350): the live
     // probe on muse-bin-1.3.0-R3233.1 established that the installed build reads
@@ -783,7 +804,7 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
     // attention, which is the failure mode §11 asks to avoid.
     if (segment === ".muse") {
       const next = segments[index + 1];
-      if (next === "hooks.json" || next === "hooks" || next?.startsWith("settings")) {
+      if (next === "hooks.json" || next === "hooks" || next?.startsWith("settings") || bareOrganDirectory(segments, index)) {
         return "policy.core";
       }
     }
@@ -897,8 +918,9 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
   // 4. The prose and configuration about the gate.
   if (last !== undefined && PROTECTED_FILENAMES.includes(last)) return "policy.edit";
   for (let index = 0; index < segments.length; index += 1) {
-    // CI configuration.
-    if (segments[index] === ".github" && segments[index + 1] === "workflows") return "policy.edit";
+    // CI configuration, and the bare `.github` directory that holds it
+    // (review-b A686-FOLD3 M1, lead ruling L61587).
+    if (segments[index] === ".github" && (segments[index + 1] === "workflows" || bareOrganDirectory(segments, index))) return "policy.edit";
   }
 
   // 5. The policy's own bare-string entries, which mean `policy.edit` (APRV-107).

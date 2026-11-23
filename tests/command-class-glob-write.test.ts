@@ -855,8 +855,12 @@ test("finding 3: tar's extraction directory in every spelling; other archive too
   for (const command of ["tar -xPf a.tar -C .claude", "tar -xf a.tar --strip-components=1 -C .cursor/x", "tar -x -f a.tar -C .github"]) {
     assert.ok(!ORDINARY(classesOf(command)), command);
   }
-  // Creating an archive from a directory reads it.
-  assert.ok(ORDINARY(classesOf("tar -czf out.tgz -C .claude .")));
+  // Creating an archive from an organ directory names the directory itself,
+  // which is judged direction-blind as `tar -czf out.tgz -C .approval .` and
+  // `tar -czf out.tgz .claude/settings.json` are (lead ruling L61587); from an
+  // ordinary one it reads it.
+  assert.ok(classesOf("tar -czf out.tgz -C .claude .").includes("policy.core"));
+  assert.ok(ORDINARY(classesOf("tar -czf out.tgz -C src .")));
   // No rule on either build: refused, so fail closed already.
   for (const command of ["unzip a.zip -d .claude", "unzip a.zip", "ditto src .claude", "ditto -x -k a.zip .claude", "cpio -i -D .claude", "pax -r -f a.pax", "bsdtar -xf a.tar -C .claude", "gtar -xf a.tar", "7z x a.7z -o.claude"]) {
     const result = classifyCommand(command, []);
@@ -1184,4 +1188,55 @@ test("lead ruling (CLAIMS L61492, L61497): a write's * or ? that would match a g
   // reads destinations as before the ruling, so `.cl*/` carries nothing new.
   assert.deepEqual(classesOf("mv a .git/*"), ["policy.core", "vcs.history.rewrite"]);
   assert.deepEqual(classesOf("rsync -a evil/ .cl*/"), ["policy.core"]);
+});
+
+test("lead ruling L61587 (review-b A686-FOLD3 M1): a delete, move or chmod of an organ directory ITSELF takes its strictest class, as bare .approval, .codex and .hermes do", () => {
+  const ORGANS: readonly (readonly [string, string])[] = [
+    [".claude", "policy.core"],
+    [".cursor", "policy.core"],
+    [".grok", "policy.core"],
+    [".muse", "policy.core"],
+    [".github", "policy.edit"],
+  ];
+  for (const [dir, cls] of ORGANS) {
+    for (const command of [
+      `rm -rf ${dir}`,
+      `rm -r ${dir}`,
+      `rm -R ${dir}/`,
+      `rm -rf ./${dir}`,
+      `rm -rf ${dir}/.`,
+      `rm -rf ${dir}/x/..`,
+      `rm -d ${dir}`,
+      `rmdir ${dir}`,
+      `mv ${dir} gone`,
+      `mv ${dir}/ /tmp/`,
+      `chmod -R 000 ${dir}`,
+      `chmod 000 ${dir}`,
+      `find ${dir} -delete`,
+      `git rm -r ${dir}`,
+      `rm -rf ${dir.slice(0, 3)}*`,
+      `rm -rf ${dir.slice(0, 2)}?${dir.slice(3)}`,
+    ]) {
+      assert.ok(classesOf(command).includes(cls), `${command} -> ${classesOf(command).join(",")}`);
+    }
+  }
+  // A dot-name `*` reaches by the hook's listing (L61492): where the directory holds one.
+  assert.ok(withListing("rm -rf *", { "/w": [".claude", "a.js"] }).includes("policy.core"));
+  assert.ok(withListing("chmod -R 777 sub/*", { "/w/sub": [".cursor"] }).includes("policy.core"));
+  assert.deepEqual(withListing("rm -rf *", { "/w": [".cache", "dist", "a.js"] }), ["files.delete.out_of_scope"]);
+  // Not strict: an ordinary directory, a directory INSIDE an organ that guards no file, a near name.
+  for (const [command, main] of [
+    ["rm -rf dist", "files.write.workspace"],
+    ["rm -rf node_modules", "files.write.workspace"],
+    ["rm -rf build/", "files.write.workspace"],
+    ["rm -rf .cache", "files.write.workspace"],
+    ["rm -rf .claude/commands", "files.write.workspace"],
+    ["mkdir -p .claude/commands", "files.write.workspace"],
+    ["rm -rf .claude.bak", "files.write.workspace"],
+    ["rm -rf my.claude", "files.write.workspace"],
+  ] as const) {
+    assert.deepEqual(classesOf(command), [main], command);
+  }
+  // Not covered (the follow-up): a parent of an organ directory keeps main's class.
+  assert.deepEqual(classesOf("rm -rf ."), ["files.delete.out_of_scope"]);
 });

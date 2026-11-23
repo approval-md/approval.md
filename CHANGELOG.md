@@ -138,6 +138,31 @@ option, case folded), and takes the strictest class among them.
   `.github`, `policy.edit`); the suite's `vectors_version` is left for the
   release seat.
 
+**Deleting, moving or locking an organ directory is that directory's class
+(lead ruling L61587; review-b A686-FOLD3 M1).** `rm -rf .claude` was an
+ordinary `files.write.workspace` on 0.4.8 and main, and it removes the hook's
+own registration (`.claude/settings.json`): an agent could switch the gate off
+in one command. The bare organ directories now take their strictest class
+exactly as bare `.approval`, `.codex` and `.hermes` already did:
+`.claude`, `.cursor`, `.grok` and `.muse` are `policy.core`, `.github` is
+`policy.edit`. Covered, because the protected tier judges every operand of an
+effectful command: `rm -r`/`-R`/`-rf`, `rm -d`, `rmdir`, `mv` of the directory
+as a source (`mv .claude x`, `mv .claude/ /tmp/`), `chmod`
+(recursive or not), `find .claude -delete`, `git rm -r .claude`, the spellings
+`.claude/`, `./.claude`, `.claude/.` and `.claude/x/..`, and with the glob
+readings `rm -rf .cl*`, `rm -rf .c?aude`, `rm -rf .*` and, where the hook's
+listing shows one, `rm -rf *`. An ordinary directory (`rm -rf dist`,
+`rm -rf node_modules`, `rm -rf build/`, `rm -rf .cache`) and a directory
+inside an organ that guards no file (`rm -rf .claude/commands`) keep their
+class. The cost: any effectful command naming the bare directory is judged
+by it, so `mkdir .claude`, `cp -r .claude backup/` and
+`tar -czf out.tgz -C .claude .` are `policy.core` too (direction-blind, as for
+`.approval`). Not covered, a follow-up: a parent of an organ directory
+(`rm -rf .`, `rm -rf $PWD`, `rm -rf ..`, `rm -rf ~`) keeps its class;
+`chown`, `chgrp`, `unlink`, `rename` and `git clean` stay refused (no rule);
+`find . -name .claude -exec rm …` stays refused (opaque); case variants
+(`rm -rf .Claude`) as for every guarded path.
+
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),
 and the `git push m` after it read as an implicit `vcs.push.main` while it was
