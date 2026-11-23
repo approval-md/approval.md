@@ -113,6 +113,7 @@ import {
   NO_RULE_CLASS,
   NODE_SKILL_SCRIPT_RULE,
   protectedPathClass,
+  protectedPathClassReadings,
   protectedPathClasses,
   SKILL_SCRIPT_RULE,
   SUBSTITUTION_SENTINEL,
@@ -4815,9 +4816,16 @@ function describeCodexFileChanges(
       };
     }
     paths.push(declared);
-    // Every class either name reading gives it (`name-fold.ts`), each judged.
-    const found = protectedPathClasses(resolved, protectedPaths);
-    const each = found.length === 0 ? [WORKSPACE_WRITE_CLASS] : found;
+    // The class EACH name reading gives it (`name-fold.ts`), each judged. A
+    // reading that protects nothing answers the workspace class, and that
+    // answer is kept beside the other reading's: `Design/x` under a protected
+    // `design/` is `policy.edit` folded and a workspace write as spelled, and
+    // a policy may hold the workspace class the stricter of the two.
+    const each: string[] = [];
+    for (const reading of protectedPathClassReadings(resolved, protectedPaths)) {
+      const cls = reading ?? WORKSPACE_WRITE_CLASS;
+      if (!each.includes(cls)) each.push(cls);
+    }
     for (const cls of each) if (!classes.includes(cls)) classes.push(cls);
     notes.push(`change ${declared} (${each.join(", ")})`);
   }
