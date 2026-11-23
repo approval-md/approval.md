@@ -2237,6 +2237,69 @@ const commandClassVectors = [
       "a parameter expansion whose word is no .git leaves the write a workspace write (APRV-518, review of the substitution fold, S2 control)",
     input: { command: 'echo x > "${OUT:-build}/log.txt"' },
   },
+  // --- guarded names fold case on every platform -----------------------------
+  // APFS opens a name under full Unicode case folding, so each of these is the
+  // guarded file there; every spelling takes its canonical spelling's class.
+  {
+    id: "guarded-name-fold-policy-file-case",
+    description:
+      "a write to the policy file spelled in another case is policy.core: guarded names fold case on every platform",
+    input: { command: "echo x > Approval.MD" },
+  },
+  {
+    id: "guarded-name-fold-approval-home-case",
+    description:
+      "removing the approval home spelled in upper case is policy.core: guarded names fold case on every platform",
+    input: { command: "rm -rf .APPROVAL" },
+  },
+  {
+    id: "guarded-name-fold-log-case",
+    description:
+      "a write into the log directory spelled in upper case is log.mutate: guarded names fold case on every platform",
+    input: { command: "echo x > .APPROVAL/log/events.jsonl" },
+  },
+  {
+    id: "guarded-name-fold-claude-settings-case",
+    description:
+      "a write to the harness settings with the directory spelled in another case is policy.core: guarded names fold case on every platform",
+    input: { command: "echo x > .Claude/settings.json" },
+  },
+  {
+    id: "guarded-name-fold-kelvin-sign",
+    description:
+      "a write to .cursor/hooks.json spelled with the Kelvin sign (U+212A), which APFS opens as k, is policy.core",
+    input: { command: "echo x > .cursor/hooKs.json" },
+  },
+  {
+    id: "guarded-name-fold-long-s",
+    description:
+      "a write to .claude/settings.json spelled with the long s (U+017F), which APFS opens as s, is policy.core",
+    input: { command: "echo x > .claude/ſettings.json" },
+  },
+  {
+    id: "guarded-name-fold-fi-ligature",
+    description:
+      "a write to .codex/config.toml spelled with the fi ligature (U+FB01), which APFS opens as fi, is policy.core",
+    input: { command: "echo x > ~/.codex/conﬁg.toml" },
+  },
+  {
+    id: "guarded-name-fold-instructions-case",
+    description:
+      "a write to the agent instructions spelled in lower case is policy.edit: guarded names fold case on every platform",
+    input: { command: "echo x > claude.md" },
+  },
+  {
+    id: "guarded-name-fold-credential-long-s",
+    description:
+      "a read of the Hermes environment file with the home spelled with the long s (U+017F) is account.credential",
+    input: { command: "cat ~/.hermeſ/.env" },
+  },
+  {
+    id: "guarded-name-fold-control-unmoved",
+    description:
+      "a file whose name only contains a guarded name stays a workspace write (guarded names fold case control)",
+    input: { command: "echo x > approval-notes.md" },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",
@@ -5598,6 +5661,14 @@ const SUITES = [
     // fold adds three more in the same unreleased 1.12.0: a write through
     // `$'\x2egit'` and one through `${VAR:-.git}`, and a control,
     // `"${OUT:-build}/log.txt"`, which stays a workspace write.
+    // Guarded names fold case on every platform: ten more vectors in the same
+    // unreleased 1.12.0, and no expectation moved: a policy file, approval
+    // home, log, harness settings and instructions write spelled in another
+    // case, one spelling each with the Kelvin sign, the long s and the fi
+    // ligature that APFS opens as the ASCII name, a credential read through a
+    // long-s home, and a control, `approval-notes.md`, which stays a workspace
+    // write. Regenerating over main's 382 leaves them byte-identical. The
+    // number is bumped once, at the release cut, for every change it carries.
     vectors_version: "1.12.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
