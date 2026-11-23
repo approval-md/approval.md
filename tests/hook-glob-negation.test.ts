@@ -696,7 +696,9 @@ test("security review of c53565eb: a word is read as the entries it matches only
   const two = join(scratch, "two-entries");
   mkdirSync(two, { recursive: true });
   for (const name of ["0.txt", "APPROVAL.md"]) writeFileSync(join(two, name), "x\n", "utf8");
-  assert.equal(zshOptionCommandReading("cp ^zz ^zz", [two]), "cp '0.txt' 'APPROVAL.md' '0.txt' 'APPROVAL.md'");
+  assert.equal(zshOptionCommandReading("cat ^zz ^zz", [two]), "cat '0.txt' 'APPROVAL.md' '0.txt' 'APPROVAL.md'");
+  // A command that may write is not one a listing answers: the plain glob.
+  assert.equal(zshOptionCommandReading("cp ^zz ^zz", [two]), "cp * *");
   assert.ok(classesIn(two, "cp ^zz ^zz").includes("policy.core"));
   // 4: a word after a command that can make files is the plain glob, never
   // the word as written: `zq#` is `z*`, as `zq*` is read. At c53565eb it was
@@ -714,4 +716,45 @@ test("security review of c53565eb: a word is read as the entries it matches only
   // In the first command, with nothing before the word that can move or
   // make anything, the listing answers: `two` holds no credential.
   assert.ok(!classesIn(two, "grep -r ^foo README.md").includes("account.credential"));
+});
+
+test("security review of 901a37c6: only one plain read command is answered by a listing, never a reserved word or a group", () => {
+  // zsh runs the `cd` in each of these before `^zz` expands, with no `;`,
+  // `&`, `|` or `(` before the word (checked with zsh -f -o extendedglob):
+  // at 901a37c6 the word was the start directory's entries.
+  const two = join(scratch, "two-entries");
+  mkdirSync(two, { recursive: true });
+  for (const name of ["0.txt", "APPROVAL.md"]) writeFileSync(join(two, name), "x\n", "utf8");
+  for (const [command, plain] of [
+    ["{ cd ~/.hermes } always { cat ^zz }", "{ cd ~/.hermes } always { cat * }"],
+    ["while { cd ~/.hermes } { cat ^zz; break }", "while { cd ~/.hermes } { cat *; break }"],
+    ["if cd ~/.hermes; then cat ^zz; fi", "if cd ~/.hermes; then cat *; fi"],
+    ["repeat 1 { cd ~/.hermes } ; cat ^zz", "repeat 1 { cd ~/.hermes } ; cat *"],
+  ] as const) {
+    assert.equal(zshOptionCommandReading(command, [two]), plain, command);
+  }
+  // The shapes a listing answers, and some it does not.
+  for (const [command, listed] of [
+    ["grep -r ^foo src", true],
+    ["rg ^use src", true],
+    ["git log ^main", true],
+    ["git show ^main", true],
+    ["sed -n ^p README.md", true],
+    ["sed -i ^p README.md", false],
+    ["sed -ni ^p README.md", false],
+    ["awk -f ^p README.md", false],
+    ["sed ^w README.md", false],
+    ["git -C x log ^main", false],
+    ["git push ^main", false],
+    ["'c'at ^zz", false],
+    ["X=1 cat ^zz", false],
+    ["cat ^zz > out", false],
+    ["cat ^zz | wc", false],
+    ["cat ^zz $(true)", false],
+    ["cat ^zz { }", false],
+    ["time cat ^zz", false],
+  ] as const) {
+    const read = zshOptionCommandReading(command, [two]) ?? command;
+    assert.equal(read.includes("'0.txt'"), listed, `${command}: ${read}`);
+  }
 });

@@ -8658,24 +8658,21 @@ function optionGroupReading(command: string): string | null {
  * A word with no `/` names entries of the directory the command runs in,
  * hidden ones too (`globdots` may be set as well; the lead's ruling L61497).
  * The word is written as EVERY entry it matches there, or left as written
- * when it matches none, only where that directory and what it holds are
- * proven when the word expands (the security review of c53565eb): the
- * directory is known (`cwds`), and the word is in the command's first simple
- * command with nothing before it that can change directory or make a file.
- * That is, no unquoted `;`, `&`, `|`, newline, `(` or `)` before it (a `cd` in
- * any spelling, `eval`, a variable command, `AUTO_CD`, a glob qualifier's
- * code, a subshell, a later command of a list or pipeline), no backquote or
- * `$(` before it or in it, and no glob qualifier after it. Anywhere else the
- * word is the plain glob, as it is past {@link OPTION_WORD_ENTRIES} matches for
- * one word or {@link OPTION_COMMAND_ENTRIES} for the command. The listing is
- * read when the hook runs, as the credential pass reads it for a plain glob.
- * `null` when nothing changes. One pass over the text.
+ * when it matches none, only where the directory is known (`cwds`) and the
+ * command has the one shape in which nothing can change directory or make a
+ * file before the word expands ({@link listingCommand}; the coordinator's
+ * ruling after the security reviews of c53565eb and 901a37c6). Every other
+ * command reads the word as the plain glob, as it is past
+ * {@link OPTION_WORD_ENTRIES} matches for one word or
+ * {@link OPTION_COMMAND_ENTRIES} for the command. The listing is read when the
+ * hook runs, as the credential pass reads it for a plain glob. `null` when
+ * nothing changes. One pass over the text.
  */
 export function zshOptionCommandReading(command: string, cwds: readonly string[] | null): string | null {
   if (!/[\^#{~]/u.test(command)) return null;
-  // The directories the words of the first simple command expand in, while
-  // nothing before them can have changed directory or made a file.
-  let proven = cwds;
+  // The directories the words expand in, where the command's shape proves
+  // what they hold when the words expand.
+  const proven = cwds !== null && listingCommand(command) ? cwds : null;
   const listings = new Map<string, string[]>();
   // Entries written for the whole command, every word's every match.
   let written = 0;
@@ -8694,7 +8691,6 @@ export function zshOptionCommandReading(command: string, cwds: readonly string[]
   while (at < command.length) {
     const char = command[at] as string;
     if (separator.test(char)) {
-      if (!/[\s<>]/u.test(char) || char === "\n") proven = null;
       write(char);
       at += 1;
       continue;
@@ -8753,10 +8749,6 @@ export function zshOptionCommandReading(command: string, cwds: readonly string[]
       units.push({ char: next, quoted: false, unknown: next === "$" || next === "`", end: at, ...(param ? { param: true as const } : {}) });
     }
     const word = command.slice(raw, at);
-    // A command substitution in this word may change directory or make a
-    // file before the word's glob expands, and a glob qualifier after it
-    // (`^x(e:…:)`) runs code: this word and every later one are unproven.
-    if (word.includes("`") || word.includes("$(") || command[at] === "(") proven = null;
     // The segments, split at each unquoted `/`, each with its raw text.
     const segments: Array<{ units: typeof units; from: number; to: number }> = [{ units: [], from: raw, to: at }];
     for (const unit of units) {
@@ -8818,6 +8810,37 @@ export function zshOptionCommandReading(command: string, cwds: readonly string[]
     write(rewritten);
   }
   return changed ? parts.join("") : null;
+}
+
+/** The commands whose words {@link listingCommand} lets a listing answer: none changes directory or makes a file. */
+const LISTING_COMMANDS: ReadonlySet<string> = new Set(["grep", "rg", "egrep", "fgrep", "ls", "cat", "head", "tail", "wc", "file", "stat", "sed", "awk"]);
+
+/**
+ * Is the whole command ONE simple command in which nothing can change
+ * directory or make a file before its words expand, so that a listing of the
+ * directory it starts in is what its globs match? Its command word is a plain
+ * name from {@link LISTING_COMMANDS} or `git` with `log`, `diff` or `show`
+ * next; `sed` and `awk` only with no in-place flag (`-i`, `--in-place`), no
+ * script file (`-f`) and no `w` in any word. Nowhere in the text, quoted or
+ * not, is there a `;`, `&`, `|`, newline, `(`, `)`, `>` (a writing
+ * redirection), backquote or `$(`, and no word is `{` or `}` (a brace group,
+ * and with it `always`, `while { … }` and the other reserved-word forms that
+ * need one). Strict by construction: a command it refuses reads its words as
+ * the plain glob.
+ */
+function listingCommand(command: string): boolean {
+  if (/[;&|\n\r()>`]|\$\(/u.test(command)) return false;
+  const words = command.trim().split(/[ \t]+/u);
+  if (words.some((word) => word === "{" || word === "}")) return false;
+  const [name, next] = words;
+  if (name === "git") return next === "log" || next === "diff" || next === "show";
+  if (name === undefined || !LISTING_COMMANDS.has(name)) return false;
+  if (name === "sed" || name === "awk") {
+    return !words
+      .slice(1)
+      .some((word) => /^-[^-]*[if]/u.test(word) || /^--(?:in-?place|file)/u.test(word) || word.includes("w"));
+  }
+  return true;
 }
 
 /** Past this many matching entries, a word with no `/` is read as its plain glob. */
