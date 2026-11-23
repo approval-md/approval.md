@@ -31,6 +31,7 @@ import type { Dir } from "node:fs";
 import { homedir } from "node:os";
 
 import { globWriteListingDirs, type GlobDisk } from "../core/command-class.js";
+import { runUnderDeadline } from "../core/deadline.js";
 
 /** Most entries one directory is read for before it is judged unreadable. */
 export const GLOB_LISTING_ENTRY_CAP = 2_000;
@@ -49,6 +50,27 @@ export interface GlobListingOptions {
   entryCap?: number;
   timeoutMs?: number;
   dirCap?: number;
+  /**
+   * The wall-clock time (`Date.now()`) by which the classification that finds
+   * the directories must be done: the hook's own describe deadline (#693),
+   * which this pass spends first. Past it the pass is stopped and
+   * {@link GlobListingDeadline} is thrown; the classifier's state may be half
+   * written (`core/deadline.ts`), so the caller classifies nothing more.
+   */
+  deadlineAt?: number;
+}
+
+/**
+ * The classification that finds the directories to list outlasted
+ * {@link GlobListingOptions.deadlineAt}. The hook refuses the call
+ * (`hook-deadline`): a hook the harness kills at its timeout is a call that
+ * proceeds.
+ */
+export class GlobListingDeadline extends Error {
+  constructor() {
+    super("the classification that finds the directories to list outlasted the hook's deadline");
+    this.name = "GlobListingDeadline";
+  }
 }
 
 /** One directory's names, `"missing"` when it is not there, or `"unreadable"` on any other error, the cap or the timeout. */
@@ -113,11 +135,15 @@ export async function listGlobWriteDirs(
 ): Promise<Map<string, GlobListing>> {
   const listings = new Map<string, GlobListing>();
   let dirs: string[];
+  let ran: { ok: true; value: string[] } | { ok: false };
   try {
-    dirs = globWriteListingDirs(command, cwd, home);
+    const find = (): string[] => globWriteListingDirs(command, cwd, home);
+    ran = options.deadlineAt === undefined ? { ok: true, value: find() } : runUnderDeadline(Math.max(1, options.deadlineAt - Date.now()), find);
   } catch {
     return listings;
   }
+  if (!ran.ok) throw new GlobListingDeadline();
+  dirs = ran.value;
   const chosen = dirs.slice(0, options.dirCap ?? GLOB_LISTING_DIR_CAP);
   const results = await Promise.all(chosen.map((dir) => listGlobDirectory(dir, options)));
   chosen.forEach((dir, index) => listings.set(dir, results[index] as GlobListing));

@@ -17,8 +17,8 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { listGlobDirectory, listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
-import { classifyForHook } from "../src/cli/hook.js";
+import { GlobListingDeadline, listGlobDirectory, listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
+import { classifyForHook, DESCRIBE_DEADLINE_ENV } from "../src/cli/hook.js";
 import { CANONICAL_POLICY } from "../src/cli/scaffold.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -433,4 +433,45 @@ test("lead ruling L62013, through the real hook: a folder takes its routed conte
     assert.equal(held.permission, "deny", `${command}: ${held.reason}`);
     assert.match(held.reason, /^hook-timeout: .*policy\.core/u, command);
   }
+});
+
+test("main #693, the hook's own deadline: the listing pass runs under it, and past it the classification is stopped and refused", async () => {
+  // The classification that finds the directories to list is held to the
+  // deadline it is given; past it the lister throws and classifies nothing.
+  const dir = project({ out: ["a.log"] });
+  await assert.rejects(listGlobWriteDirsFor("rm -f out/*", [dir], { deadlineAt: Date.now() - 1 }), GlobListingDeadline);
+  assert.ok((await listGlobWriteDirsFor("rm -f out/*", [dir], { deadlineAt: Date.now() + 60_000 })).size > 0);
+});
+
+test("main #693 through the real hook: a call whose listing pass outlasts the hook's deadline is refused hook-deadline, never left to the harness's timeout", () => {
+  const dir = join(scratch, "deadline-lab");
+  mkdirSync(join(dir, "out"), { recursive: true });
+  writeFileSync(join(dir, "out", "a.log"), "made-up\n");
+  writeFileSync(join(dir, "notes.txt"), "made-up\n");
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    ["# Policy", "", "```yaml approval-policy", 'version: "0.1"', "defaults:", "  autonomy: manual", '  approval_ttl: "1h"', "  on_expiry: reject", "classes:", "  read.*:", "    autonomy: autonomous", "  files.write.workspace:", "    autonomy: autonomous", "```", ""].join("\n"),
+  );
+  assert.equal(runCliIn(["policy", "attest", "--as", "human:alice"], dir).code, 0);
+  // A write through a pattern, after 64 KB of words: the listing pass
+  // classifies all of it, which takes far longer than one millisecond.
+  const command = `cat ${"notes.txt ".repeat(6_500)}> out/*.log`;
+  const decide = (extra: Readonly<Record<string, string>>): { permission: string; reason: string } => {
+    decided += 1;
+    const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+    delete env["APPROVAL_HUMAN"];
+    const input = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "deadline", tool_use_id: `deadline-${String(decided)}`, cwd: dir, transcript_path: "/dev/null", tool_name: "Bash", tool_input: { command } });
+    const ran = spawnSync(process.execPath, [CLI_ENTRY, "hook", "claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "100ms"], { cwd: dir, encoding: "utf8", env, input });
+    assert.equal(ran.status, 0, ran.stderr);
+    const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+    return { permission: output.permissionDecision, reason: output.permissionDecisionReason };
+  };
+  // The deadline is spent in the listing pass: refused there, by its own reason.
+  const refused = decide({ [DESCRIBE_DEADLINE_ENV]: "1" });
+  assert.equal(refused.permission, "deny", refused.reason);
+  assert.match(refused.reason, /^hook-deadline: this hook could not read the Bash call within its own 1ms limit \(finding the directories its write patterns glob in ran past it\)/u);
+  assert.match(refused.reason, /Nothing was registered or requested/u);
+  // With the deadline it ships with, the same call is listed, read and allowed.
+  const read = decide({});
+  assert.equal(read.permission, "allow", read.reason);
 });

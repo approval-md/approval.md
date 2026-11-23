@@ -93,6 +93,13 @@ option, case folded), and takes the strictest class among them.
   7 KB the repeated walks took about 50 CPU s (now about 2). Each repeat
   still draws the steps the first walk drew, so the budget runs out where
   it did.
+- **The listing pass is held to the hook's own deadline (#693):** the hook
+  classifies a command once to find the directories its write patterns glob
+  in, before it describes the call. That pass now runs under the same
+  deadline, for the harness ceiling the call runs under, and its time comes
+  out of the deadline and counts as reading time. Stopped at the deadline,
+  the call is refused `hook-deadline` (it ran unbounded before: a 40 KB
+  `rsync -aR` answered a 500 ms deadline after 5.5 s).
 - **Main's class is carried beside every raise (lead ruling L61926):** a line
   any GLOB-WRITE rule fires on is classified a second time with every
   GLOB-WRITE rule off (main's answer), and the two join: every class of each
