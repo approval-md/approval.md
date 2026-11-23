@@ -86,9 +86,13 @@ function notAlreadyOver(label: string): void {
  * CPU seconds main's code takes on that runner, measured in this PR's own
  * run (it changes tests only). A head 50% slower than main still fails.
  *
- * PROVISIONAL at 12 until that run has logged the figure (`# cost-line:`).
+ * The figure: 7.35 CPU s, run 45231949630, the full gate's node 22 job, shard
+ * 1 (`# cost-line:` in its log; the calibration took 0.419 CPU s in the same
+ * process). One run, one measurement, taken cold as the test takes it. A
+ * laptop reads the line in 1.4 to 1.9, so this bound is loose there: it is
+ * CI that holds the line to it. The line logs its figure in every run.
  */
-const MANY_COMMAND_WORDS_BOUND = 12;
+const MANY_COMMAND_WORDS_BOUND = 1.5 * 7.35;
 
 /**
  * Fail if `seconds` is over the bound, and remember it. The bound is
