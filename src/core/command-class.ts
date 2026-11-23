@@ -923,13 +923,19 @@ let organVerbs = true;
  * A line that defines a function or alias, or sets `PATH`, is refused by main
  * already, and a refusal in main's pass refuses the line.
  */
-function releasedFromOrganRule(segment: LexSegment, cursor: number): boolean {
-  if (cursor !== 0) return false;
+function releasedFromOrganRule(segment: LexSegment): boolean {
+  // The segment's FIRST word, compared whole: an assignment, a wrapper or a
+  // path before or in it (`PATH=/tmp mkdir`, `nice touch`, `./mkdir`) is not
+  // the bare name.
   const words = segment.words;
   const bin = words[0];
-  if (bin === undefined || bin.text.includes("/")) return false;
+  if (bin === undefined) return false;
+  // Every word exactly its text: no parameter (`splits`), substitution, glob or
+  // brace (`expands`), leading tilde (`exact`), or zsh `#`, `^`, `~` where the
+  // line may set options (`setopt extendedglob; touch .claude~x`). Each flag
+  // is read; none is assumed to imply another.
   for (const word of words) {
-    if (!word.exact || word.splits || word.expands || word.zshGlob !== false || word.substitutions.length > 0 || word.assignment) return false;
+    if (!word.exact || word.splits || word.expands || word.zshGlob !== false || word.substitutions.length > 0) return false;
   }
   const args = words.slice(1).map((word) => word.text);
   switch (bin.text) {
@@ -11733,7 +11739,7 @@ function classifySegmentWithVerb(
   const positionals = args.filter((arg) => !isFlag(arg));
   // Lead ruling L62013 (S2), fail closed: the organ-directory rule holds for
   // every command but the release list (redirects above were judged with it).
-  organVerbs = !releasedFromOrganRule(segment, cursor);
+  organVerbs = !releasedFromOrganRule(segment);
 
   // APRV-520: a git global option that takes a value, or one this table does
   // not know, leaves the segment unclassified ({@link gitGlobalRefusal}). It is
