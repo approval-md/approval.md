@@ -35,7 +35,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { classifyForHook, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, type WriteScopeContext } from "../src/cli/hook.js";
+import { classifyForHook, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, type WriteScopeContext } from "../src/cli/hook.js";
 import { commandGate } from "../src/cli/gate-window.js";
 import type { Streams } from "../src/cli/main.js";
 import type { Prompter, SecretRead } from "../src/cli/prompt.js";
@@ -641,6 +641,8 @@ test("a tree written at a checkout, at home, or above a listed place is guarded;
     "mkdir -p nd/.git && tar -xf a.tar -C nd",
     "touch nd2/.git && cp -r dotfiles/. nd2",
     "ln -s repo nd3 && tar -xf a.tar -C nd3",
+    // A link laid UNDER the landing first: the copy's contents go through it.
+    "ln -s ~/.ssh nd4/sub && cp -r dotfiles/. nd4",
   ]) {
     for (const scope of [WRITE_SCOPE_OFF, optedIn()]) {
       const seen = see(command, scope);
@@ -689,6 +691,27 @@ test("one tar reader, no other option parser (review of 90b809fe)", () => {
   for (const command of ["tar --extract --file=x.tar", "tar xf x.tar", "tar xzf x.tgz -C sub", "tar -czf out.tgz --exclude=node_modules src", "tar -tf x.tar", "tar --create --file out.tar -C sub ."]) {
     const seen = see(command);
     assert.ok(seen.ok && !seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+  // The reader itself, called directly (main's classifier refuses a tar with
+  // no mode before the hook sees it).
+  assert.deepEqual(readTar(["-xzf", "a.tgz", "-C", "d"], [], {}), { mode: "extract", directory: "d" });
+  assert.deepEqual(readTar(["xzfC", "a.tgz", "d"], [], {}), { mode: "extract", directory: "d" });
+  assert.deepEqual(readTar(["--extract", "--file=a.tar", "--directory", "d"], [], {}), { mode: "extract", directory: "d" });
+  assert.deepEqual(readTar(["-czf", "o.tgz", "--exclude=x", "src"], [], {}), { mode: "create", directory: null });
+  assert.deepEqual(readTar(["-tvf", "a.tar"], [], {}), { mode: "list", directory: null });
+  for (const [args, assignments, env] of [
+    [["-f", "a.tar"], [], {}],
+    [["-xcf", "a.tar"], [], {}],
+    [["-xf", "a.tar", "-C", "a", "-C", "b"], [], {}],
+    [["-xPf", "a.tar"], [], {}],
+    [["-x", "--abs", "-f", "a.tar"], [], {}],
+    [["-x", "--extrac", "-f", "a.tar"], [], {}],
+    [["-xf", "a.tar"], ["TAR_OPTIONS=-P"], {}],
+    [["-xf", "a.tar"], [], { TAR_OPTIONS: "-P" }],
+    [["xPf", "a.tar"], [], {}],
+    [["-xf"], [], {}],
+  ] as const) {
+    assert.ok("unreadable" in readTar(args, assignments, env), JSON.stringify(args));
   }
   // A: scp is not parsed; every word and every tail of a cluster is judged
   // against the list as a tree root.
