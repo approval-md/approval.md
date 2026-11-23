@@ -8496,6 +8496,8 @@ const DOTGLOB_LAUNCHERS: readonly string[] = [
  */
 function lineMaySetDotglob(command: string): boolean {
   if (/[$`{}()]/u.test(command)) return true;
+  // Shell option names, not file names: zsh folds ASCII case and drops
+  // underscores, so this stays an ASCII lower case, not foldGuardedName.
   const folded = command.replace(/['"\\_]/gu, "").toLowerCase();
   if (DOTGLOB_OPTION_NAMES.test(folded)) return true;
   for (const piece of folded.split(/[;&|\n]+/u)) {
@@ -8741,6 +8743,20 @@ function globWriteOperands(basename: string, positionals: readonly string[]): st
 }
 
 /**
+ * The ONE case fold the GLOB-WRITE code applies to a guarded name, or to a
+ * name or pattern character compared with one (listing names, organ-directory
+ * names, pattern tokens). To be REPLACED by the shared guarded-name fold
+ * helper (build-6; lead ruling 04:11Z), which folds what APFS folds (long s,
+ * sharp s as ss, the Kelvin sign, ligatures, NFC/NFD): swap this body for a
+ * call to it. Note for that swap: the glob matcher compares one character at
+ * a time, so a fold that changes a string's length must be applied to whole
+ * names before matching, not per token.
+ */
+function foldGuardedName(name: string): string {
+  return name.toLowerCase();
+}
+
+/**
  * Harness directories whose files are organs only when named (`.claude/settings*`,
  * `.cursor/hooks.json`, ...): a write that may land ANY name inside one is an
  * organ write (review of b402adec, M2). `.github` for its workflows. The
@@ -8777,7 +8793,7 @@ function organDestination(dest: string, inexact: (word: string) => boolean, glob
         ? globSegmentTokens(part, glob.options)
         : null;
     for (const [name, cls] of guarded) {
-      const hit = part.toLowerCase() === name || (pattern !== null && globTokensMatch(pattern, name, false, glob.budget) !== false);
+      const hit = foldGuardedName(part) === foldGuardedName(name) || (pattern !== null && globTokensMatch(pattern, name, false, glob.budget) !== false);
       if (hit && (best === null || protectedRank(cls) < protectedRank(best))) best = cls;
     }
   }
@@ -9565,7 +9581,7 @@ function globSegmentTokens(segment: string, options = true): { tokens: GlobToken
       at = end - 1;
     } else if (ch === "{" && options && lastClose > at) {
       const inside = segment.slice(at + 1, lastClose).replace(/[{},]/gu, "");
-      const chars = new Set(inside.toLowerCase());
+      const chars = new Set(foldGuardedName(inside));
       let wide = false;
       for (let k = 1; k + 1 < inside.length && !wide; k += 1) {
         if (inside[k] !== "-") continue;
@@ -9574,7 +9590,7 @@ function globSegmentTokens(segment: string, options = true): { tokens: GlobToken
         if (low <= 0x2f && high >= 0x2f) spans = true;
         // A range wider than ASCII may be any character.
         if (high - low > 0x80) wide = true;
-        else for (let code = low; code <= high; code += 1) chars.add(String.fromCharCode(code).toLowerCase());
+        else for (let code = low; code <= high; code += 1) chars.add(foldGuardedName(String.fromCharCode(code)));
       }
       if (wide) pushRun();
       else tokens.push({ kind: "set", chars: [...chars].join("") });
@@ -9583,7 +9599,7 @@ function globSegmentTokens(segment: string, options = true): { tokens: GlobToken
       tokens.push({ kind: "bracket" });
     } else {
       if (ch === "]") closes.push(tokens.length);
-      tokens.push({ kind: "lit", ch: ch.toLowerCase() });
+      tokens.push({ kind: "lit", ch: foldGuardedName(ch) });
     }
   }
   return { tokens, closes, spans };
@@ -9604,7 +9620,7 @@ function globTokensMatch(
   budget: { left: number },
 ): boolean | null {
   const { tokens, closes } = pattern;
-  const text = name.toLowerCase();
+  const text = foldGuardedName(name);
   const memo = new Map<number, boolean>();
   let exhausted = false;
   const match = (ti: number, si: number): boolean => {
@@ -9790,7 +9806,7 @@ function globGuardClass(
           for (const name of present) {
             if (!test(name, false)) continue;
             listed.push([name]);
-            for (const guard of names) if (guard !== name && guard.toLowerCase() === name.toLowerCase()) listed.push([guard]);
+            for (const guard of names) if (guard !== name && foldGuardedName(guard) === foldGuardedName(name)) listed.push([guard]);
           }
           return listed;
         }
