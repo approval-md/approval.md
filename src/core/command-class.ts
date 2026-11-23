@@ -734,9 +734,8 @@ export function protectedPathClass(
 
 /**
  * The names the protected rows below compare a segment with: the gate's
- * directories and the organs under them. The top-level file names
- * (`APPROVAL.md`, `CLAUDE.md`) are left out, so `*.md` stays the workspace
- * write it was.
+ * directories and the organs under them. The top-level file names are
+ * compared with a LAST segment only ({@link protectedGlobReadings}).
  */
 const PROTECTED_SEGMENT_NAMES: readonly string[] = [
   ".approval", "log", ".claude", "settings.json", "settings.local.json", ".cursor", "hooks.json", "hooks",
@@ -745,31 +744,72 @@ const PROTECTED_SEGMENT_NAMES: readonly string[] = [
   "hermes-agent", "plugins", ".op.env", "scripts", ".codex", "config.toml", ".github", "workflows",
 ];
 
+/**
+ * A last segment that is `*` alone or `*` and an extension (`*.md`,
+ * `*.tar.gz`) is not compared with the top-level file names: it stays what
+ * it was on main, where no glob was read here (the security review of
+ * 54624872 kept exactly that carve-out). `APPROVA?.md` and `*L.md` are read.
+ */
+const BARE_STAR_LAST = /^\*(?:\.[^*?[\]]+)?$/u;
+
 /** Past this many readings of one word, it is judged `policy.core`. */
 const PROTECTED_GLOB_READINGS = 256;
+
+/** Past this many pattern segments in one word, it is judged `policy.core`. */
+const PROTECTED_GLOB_SEGMENTS = 64;
 
 /**
  * The word as written, and with each segment that holds a glob replaced by
  * each protected name it matches as the shell would expand it (build-2's
  * sweep v3 on 83f30bdc: `echo x > ~/.[!Z]ermes/auth.json` wrote the Hermes
  * credential file as a workspace write under a harness with no per-call
- * directory, where the hook's disk pass does not run). `null` past
- * {@link PROTECTED_GLOB_READINGS}.
+ * directory, where the hook's disk pass does not run). A last segment is
+ * also compared with the top-level file names (`APPROVA?.md`, `CL?UDE.md`;
+ * the security review of 54624872), except {@link BARE_STAR_LAST}.
+ *
+ * Each segment's choices are found first and the readings joined once at the
+ * end, so a long word costs its length (the same review: copying each prefix
+ * per segment was quadratic). `null` past {@link PROTECTED_GLOB_SEGMENTS}
+ * pattern segments or {@link PROTECTED_GLOB_READINGS} readings.
  */
 function protectedGlobReadings(word: string, extra: readonly ProtectedPathEntry[]): string[] | null {
   const segments = pathSegments(word);
-  if (!segments.some(isPatternSegment)) return [word];
+  let patterns = 0;
+  for (const segment of segments) if (isPatternSegment(segment)) patterns += 1;
+  if (patterns === 0) return [word];
+  if (patterns > PROTECTED_GLOB_SEGMENTS) return null;
   const names = new Set(PROTECTED_SEGMENT_NAMES);
   for (const raw of extra) for (const segment of parseProtectedEntry(raw)?.segments ?? []) names.add(segment);
-  let readings: string[][] = [[]];
-  for (const segment of segments) {
-    const options = isPatternSegment(segment)
-      ? [segment, ...[...names].filter((name) => globSegmentMatches(segment, name))]
-      : [segment];
-    if (readings.length * options.length > PROTECTED_GLOB_READINGS) return null;
-    readings = readings.flatMap((reading) => options.map((option) => [...reading, option]));
+  const choices: Array<{ at: number; options: string[] }> = [];
+  let count = 1;
+  for (const [at, segment] of segments.entries()) {
+    if (!isPatternSegment(segment)) continue;
+    const candidates =
+      at === segments.length - 1 && !BARE_STAR_LAST.test(segment)
+        ? [...names, ...CORE_FILENAMES, ...PROTECTED_FILENAMES]
+        : [...names];
+    const matched = candidates.filter((name) => globSegmentMatches(segment, name));
+    if (matched.length === 0) continue;
+    count *= matched.length + 1;
+    if (count > PROTECTED_GLOB_READINGS) return null;
+    choices.push({ at, options: [segment, ...matched] });
   }
-  return readings.map((reading) => reading.join("/"));
+  if (choices.length === 0) return [word];
+  const readings: string[] = [];
+  const parts = [...segments];
+  const walk = (index: number): void => {
+    const choice = choices[index];
+    if (choice === undefined) {
+      readings.push(parts.join("/"));
+      return;
+    }
+    for (const option of choice.options) {
+      parts[choice.at] = option;
+      walk(index + 1);
+    }
+  };
+  walk(0);
+  return readings;
 }
 
 /** {@link protectedPathClass} for one word that brace expansion has already made. */

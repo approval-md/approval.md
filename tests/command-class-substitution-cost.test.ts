@@ -369,3 +369,13 @@ test("cost: the gate follow-up's readers (zsh forms, printf modifiers and words)
   }
   assert.deepEqual(pure(`echo x > "$(printf %.4${"l".repeat(1000)}s .gitfoo)/config"`), [DIR_WRITE]);
 });
+
+test("cost: a word of many glob segments is read in one pass (security review of 54624872)", () => {
+  // Each segment's protected names are found once and the readings joined at
+  // the end; copying each prefix per segment took 11 CPU s for the second.
+  assert.deepEqual(bounded(`echo x > ${"a*/".repeat(100000)}f`, "100,000 a*/"), ["policy.core redirect-protected"]);
+  assert.deepEqual(bounded(`echo x > ${"x/".repeat(100000)}.g*/hooks/pre-push`, "100,000 x/ then .g*"), ["policy.core redirect-protected"]);
+  // Past 64 pattern segments a word is judged policy.core; at 64 it is read.
+  assert.deepEqual(pure(`echo x > ${"b*/".repeat(64)}f`), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(pure(`echo x > ${"b*/".repeat(65)}f`), ["policy.core redirect-protected"]);
+});

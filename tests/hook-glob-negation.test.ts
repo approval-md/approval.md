@@ -413,3 +413,42 @@ test("build-2's sweep v3 on 83f30bdc: a write through a glob that names the Herm
     assert.deepEqual(classes(command), ["files.write.workspace"], command);
   }
 });
+
+test("security review of 54624872: a glob last segment that names a top-level gate file is that file's write", () => {
+  // bash 3.2 and zsh -f write APPROVAL.md (or CLAUDE.md, AGENTS.md, .npmrc)
+  // for each where it is the one match. At 54624872, and on main 21fc5fdc,
+  // each was allowed as files.write.workspace under both policies.
+  for (const at of [lab, abstainLab]) {
+    for (const command of ["echo x > APPROVA?.md", "echo x > APPROV[A]L.md", "echo x > APPROVAL.m?", "cp README.md APPROVA*.md", "echo x > *L.md"]) {
+      const decision = claude(command, at);
+      assert.match(decision, /^deny: .*policy\.core/u, `${command}: ${decision}`);
+    }
+  }
+  for (const command of ["echo x > CL?UDE.md", "echo x > CLAUDE.m[d]", "echo x > [A]GENTS.md", "echo x > .npmr?"]) {
+    assert.deepEqual(classes(command), ["policy.edit"], command);
+  }
+  // `*` alone and `*` with an extension keep main's answer exactly.
+  for (const command of ["echo x > *.md", "echo x > *", "cp src/* out/", "echo x > docs/*.md"]) {
+    assert.deepEqual(classes(command), ["files.write.workspace"], command);
+  }
+});
+
+test("security review of 54624872: an ANSI-C or locale quoted setter, or one from a parameter, is refused under both policies", () => {
+  // Not looser at 54624872 or on main 21fc5fdc: the classifier refuses each
+  // such word outright, so this pins the refusal.
+  for (const at of [lab, abstainLab]) {
+    for (const command of [
+      "$'\\x73etopt' extendedglob; cat ~/.hermes/au#th.json",
+      "$'set' -o extendedglob; cat ~/.hermes/au#th.json",
+      'set $"-o" extendedglob; cat ~/.hermes/au#th.json',
+      "set -$'o' braceccl; cat ~/.hermes/{a-b}uth.json",
+      "builtin $'setopt' extendedglob; cat ~/.hermes/au#th.json",
+      "shopt $'-s' nocaseglob; cat ~/.hermes/AUTH.json",
+      "$S extendedglob; cat ~/.hermes/au#th.json",
+      "builtin ${S} -o extendedglob; cat ~/.hermes/au#th.json",
+    ]) {
+      const decision = claude(command, at);
+      assert.match(decision, /^deny: /u, `${command}: ${decision}`);
+    }
+  }
+});
