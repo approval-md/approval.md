@@ -5245,6 +5245,12 @@ export interface HookWaitSeam {
    */
   pollRead?: (logPath: string) => ReadRecordsResult;
   /**
+   * The clock the read of the call is timed by ({@link waitAfterRead}).
+   * Omitted by every real caller, which gets `Date.now`; it exists so a test
+   * can make a read slow without an input that takes seconds to read.
+   */
+  readClock?: () => number;
+  /**
    * Whether the party this invocation answers has gone away (APRV-427 review).
    *
    * `approval serve` sets it when the HTTP client that asked disconnects. Read
@@ -7346,13 +7352,34 @@ export const DESCRIBE_DEADLINE_MS = 15_000;
 export const DESCRIBE_DEADLINE_ENV = "APPROVAL_HOOK_DESCRIBE_DEADLINE_MS";
 
 /**
- * The deadline for describing one call: {@link DESCRIBE_DEADLINE_MS}, a
- * quarter of the harness ceiling where one is known and that is shorter, and
- * {@link DESCRIBE_DEADLINE_ENV} where it is shorter still.
+ * What a known harness ceiling must still leave after the read: the time this
+ * process spends outside it (starting, reading the policy and the log, writing
+ * the answer), measured at about 0.4 s on a busy machine.
+ */
+export const DESCRIBE_CAP_MARGIN_MS = 2_000;
+
+/**
+ * The deadline for describing one call: {@link DESCRIBE_DEADLINE_MS}; under a
+ * known harness ceiling, the ceiling less {@link DESCRIBE_CAP_MARGIN_MS} where
+ * that is shorter (a quarter of the ceiling when even the margin does not
+ * fit); and {@link DESCRIBE_DEADLINE_ENV} where it is shorter still.
+ *
+ * The ceiling is the harness's own hook timeout, not a number chosen here. For
+ * Hermes it is `plugins.hook_callback_timeout`, 30 s unless the operator states
+ * another with `--harness-cap` (`docs/hermes-hook.md`, "Two timeouts bound the
+ * wait"; the Hermes adapter's `capDefaultMs` and `capCeilingMs`). So a Hermes
+ * read has 15 s by default, as on every other harness, and 8 s under a stated
+ * 10 s. It was a quarter of the ceiling, 7.5 s on Hermes, which refused a read
+ * of ordinary size (review of 259711a6).
+ *
+ * The wait needs no share of the ceiling kept back here: a read slower than
+ * {@link READ_FREE_MS} is taken out of the wait ({@link waitAfterRead}).
  */
 export function describeDeadlineMs(harnessCapMs: number | null = null, env: NodeJS.ProcessEnv = process.env): number {
   let deadline = DESCRIBE_DEADLINE_MS;
-  if (harnessCapMs !== null) deadline = Math.min(deadline, Math.floor(harnessCapMs / 4));
+  if (harnessCapMs !== null) {
+    deadline = Math.min(deadline, Math.max(Math.floor(harnessCapMs / 4), harnessCapMs - DESCRIBE_CAP_MARGIN_MS));
+  }
   const stated = env[DESCRIBE_DEADLINE_ENV];
   if (stated !== undefined && /^\d{1,9}$/u.test(stated)) deadline = Math.min(deadline, Number(stated));
   return Math.max(1, deadline);
@@ -10291,7 +10318,8 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
   // both paths since APRV-214 (see `describeToolCall`): the open window
   // classifies exactly as the closed one does, and a second copy of this would
   // be a second answer to "what is this command".
-  const readBeganMs = Date.now();
+  const readClock = decide.waitSeam?.readClock ?? Date.now;
+  const readBeganMs = readClock();
   const described = describeToolCall(
     describeDeadlineMs(harnessCapMs),
     input,
@@ -10303,7 +10331,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     true,
     execGateOf(adapter, load.policy),
   );
-  const readMs = Date.now() - readBeganMs;
+  const readMs = readClock() - readBeganMs;
   if (described.kind === "deny") {
     return { permission: "deny", code: described.code, detail: described.detail };
   }

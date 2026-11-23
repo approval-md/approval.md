@@ -281,8 +281,9 @@ else was on it.
   the rest every time; they pop from the end. Answers are unchanged, held
   against the old walks on a fixture of links, loops and missing components.
   That 100 KB word now takes 0.2 seconds, and a megabyte under two.
-- **Reading a call has its own deadline: 15 seconds**, or a quarter of the
-  harness ceiling where one is stated or assumed and that is shorter. A call
+- **Reading a call has its own deadline: 15 seconds**, or the harness ceiling
+  less two seconds where one is stated or assumed and that is shorter (Hermes's
+  30 second default leaves the whole 15). A call
   the hook cannot read in that time is refused `hook-deadline`, with nothing
   registered or requested, while the hook can still say so. The deadline stops
   the hook's own work from outside it, so no input can outrun it; it does not

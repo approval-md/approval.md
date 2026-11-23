@@ -30,6 +30,7 @@ import {
   classifyForHook,
   commandHook,
   decideHarnessCall,
+  DESCRIBE_CAP_MARGIN_MS,
   DESCRIBE_DEADLINE_ENV,
   DESCRIBE_DEADLINE_MS,
   describeDeadlineMs,
@@ -120,18 +121,34 @@ test("runUnderDeadline: a nested call runs under the outer deadline", () => {
   );
 });
 
-test("the describe deadline: 15 s, a quarter of a known harness ceiling when that is shorter, and the environment can only shorten it", () => {
+test("the describe deadline: 15 s, a known harness ceiling less two seconds when that is shorter, and the environment can only shorten it", () => {
   assert.equal(DESCRIBE_DEADLINE_MS, 15_000);
+  assert.equal(DESCRIBE_CAP_MARGIN_MS, 2_000);
   assert.equal(describeDeadlineMs(null, {}), 15_000);
   assert.equal(describeDeadlineMs(600_000, {}), 15_000);
-  assert.equal(describeDeadlineMs(30_000, {}), 7_500);
+  // Hermes's default ceiling (its `plugins.hook_callback_timeout`, 30 s) leaves
+  // the whole 15 s: a read of ordinary size was refused at a quarter of it.
+  assert.equal(describeDeadlineMs(30_000, {}), 15_000);
+  assert.equal(describeDeadlineMs(17_000, {}), 15_000);
+  assert.equal(describeDeadlineMs(16_999, {}), 14_999, "the ceiling less the margin, from here down");
+  assert.equal(describeDeadlineMs(10_000, {}), 8_000);
+  // Where the margin does not fit, a quarter of the ceiling.
+  assert.equal(describeDeadlineMs(2_400, {}), 600);
+  assert.equal(describeDeadlineMs(2_000, {}), 500);
   assert.equal(describeDeadlineMs(2, {}), 1, "never below one millisecond");
+  // Never past the ceiling, whatever it is.
+  for (const cap of [1, 3, 999, 2_001, 2_667, 5_000, 16_000, 17_001, 60_000, 300_000]) {
+    const deadline = describeDeadlineMs(cap, {});
+    assert.ok(deadline >= 1 && deadline <= Math.max(1, cap) && deadline <= DESCRIBE_DEADLINE_MS, `${String(cap)}: ${String(deadline)}`);
+    if (cap >= 4 * DESCRIBE_CAP_MARGIN_MS) assert.ok(cap - deadline >= DESCRIBE_CAP_MARGIN_MS, `${String(cap)} leaves the margin`);
+  }
   assert.equal(describeDeadlineMs(null, { [DESCRIBE_DEADLINE_ENV]: "250" }), 250);
   assert.equal(describeDeadlineMs(null, { [DESCRIBE_DEADLINE_ENV]: "0" }), 1);
+  assert.equal(describeDeadlineMs(10_000, { [DESCRIBE_DEADLINE_ENV]: "9000" }), 8_000, "the environment cannot lengthen what the ceiling leaves");
   // Longer, or not a whole number of milliseconds: ignored.
   for (const stated of ["999999999", "60000", "-5", "1e3", "12.5", " 5", "five", ""]) {
     assert.equal(describeDeadlineMs(null, { [DESCRIBE_DEADLINE_ENV]: stated }), 15_000, JSON.stringify(stated));
-    assert.equal(describeDeadlineMs(30_000, { [DESCRIBE_DEADLINE_ENV]: stated }), 7_500, JSON.stringify(stated));
+    assert.equal(describeDeadlineMs(10_000, { [DESCRIBE_DEADLINE_ENV]: stated }), 8_000, JSON.stringify(stated));
   }
   assert.ok((HOOK_DENY_CODES as readonly string[]).includes("hook-deadline"));
 });
@@ -549,16 +566,19 @@ test("a read slower than a second shortens the wait by the rest; an ordinary rea
 });
 
 test("the wait that follows a slow read is the shortened one: the hook stops polling when it says it will", { skip }, () => {
-  // A call that waits for a human (the POST) and takes seconds to read (250 KB
-  // of path words). The hook reports how long the read took and what is left
-  // of a 2 s wait. Polls are counted, not timed: at one every 50 ms, the wait
-  // that is left allows a known number of them, and the whole 2 s would
-  // allow forty.
+  // A call that waits for a human (the POST). The read is timed by a clock
+  // this test owns, which adds 1.8 s to what the read really took: a slow read
+  // without an input that takes seconds, so the test does not depend on how
+  // busy the machine is (review of 259711a6: with a 250 KB input it reached
+  // the deadline itself under load). Polls are counted, not timed: at one
+  // every 50 ms, the wait that is left allows a known number of them, and the
+  // whole 2 s would allow forty.
   const dir = lab();
   labs += 1;
   let polls = 0;
   let out = "";
   let err = "";
+  let reads = 0;
   commandHook(
     ["claude-code", "--as", "agent:cc", "--timeout", "2s", "--interval", "50ms"],
     {
@@ -578,7 +598,7 @@ test("the wait that follows a slow read is the shortened one: the hook stops pol
         cwd: dir,
         transcript_path: "/dev/null",
         tool_name: "Bash",
-        tool_input: { command: `curl -X POST https://example.com/api -d call=1; cat ${"notes/a.txt ".repeat(21_000)}` },
+        tool_input: { command: "curl -X POST https://example.com/api -d call=1; cat notes/a.txt" },
       }),
     {
       enterWait: () => undefined,
@@ -587,8 +607,11 @@ test("the wait that follows a slow read is the shortened one: the hook stops pol
         polls += 1;
         return readVerifiedRecords(logPath);
       },
+      // Asked twice, before the read and after it.
+      readClock: () => Date.now() + (reads++ === 0 ? 0 : 1_800),
     },
   );
+  assert.equal(reads, 2, "the read is timed by the seam's clock, once on each side");
   const verdict = (JSON.parse(out) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
   assert.equal(verdict.permissionDecision, "deny", verdict.permissionDecisionReason);
   assert.match(verdict.permissionDecisionReason, /^hook-timeout: /u);
@@ -596,8 +619,9 @@ test("the wait that follows a slow read is the shortened one: the hook stops pol
   assert.ok(said !== null, `no line about the read on stderr: ${err.slice(0, 400)}`);
   const readMs = Number(said[1]);
   const left = Number(said[2]);
+  assert.ok(readMs >= 1_800, `the read took what the clock said: ${String(readMs)}`);
   assert.equal(left, waitAfterRead(2_000, readMs));
-  assert.ok(left < 2_000);
+  assert.ok(left <= 1_200, `at most 1.2 s is left of the 2 s: ${String(left)}`);
   // One poll per 50 ms of the wait that is left, and a few for its two ends.
   assert.ok(polls <= Math.ceil(left / 50) + 4, `${String(polls)} polls in a wait of ${String(left)} ms`);
 });

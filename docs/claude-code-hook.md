@@ -237,13 +237,21 @@ A killed hook is a call that proceeds, so the hook must never be the thing the
 harness kills. Two rules keep it inside the harness's timeout whatever the
 tool call holds:
 
-- **Reading the call has a deadline of its own: 15s**, or a quarter of the
-  harness ceiling where one is stated or assumed and that is shorter. A call
-  the hook cannot classify and land on the disk in that time is refused
-  `hook-deadline`, with nothing registered or requested. Reading an ordinary
-  call takes milliseconds; a megabyte of command takes a second or two. The
-  environment variable `APPROVAL_HOOK_DESCRIBE_DEADLINE_MS` can shorten the
-  deadline and can never lengthen it.
+- **Reading the call has a deadline of its own: 15s**, or the harness ceiling
+  less two seconds where one is stated or assumed and that is shorter (8s
+  under `--harness-cap 10s`). A call the hook cannot classify and land on the
+  disk in that time is refused `hook-deadline`, with nothing registered or
+  requested. Reading an ordinary call takes milliseconds; a megabyte of
+  command takes a second or two. The environment variable
+  `APPROVAL_HOOK_DESCRIBE_DEADLINE_MS` can shorten the deadline and can never
+  lengthen it.
+- **An entry whose `timeout` is under about 17s must say so.** The hook does
+  not see the `timeout` you wrote. Without `--harness-cap` the deadline is the
+  full 15s, and a harness that stops listening sooner has let the call through
+  before the hook refuses it. `--harness-cap <that timeout>` puts the deadline
+  inside it. (A stated cap at or under 60s still leaves no window for a human,
+  so a call that needs one is refused `hook-harness-cap-too-short`; a call that
+  needs none is answered as usual.)
 - **A slow read shortens the wait.** `--timeout` sits a little under the
   harness's own timeout, and the harness's timer started before the read did.
   A read that takes more than one second shortens the wait for a decision by
