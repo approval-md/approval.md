@@ -365,6 +365,35 @@ test("a pattern too wide to read: a write is unreadable, a read is left alone", 
   assert.ok(!see(`touch ${Array.from({ length: 60 }, (_, n) => `f${String(n).padStart(4, "0")}.m?`).join(" ")}`, WRITE_SCOPE_OFF, wide).classes.includes(GUARDED), "sixty patterns are read");
 });
 
+test("resolved words are re-read once a segment, and many brace words all at once: linear, and nothing is lost", () => {
+  // Past the first sixteen words with several spellings, the rest are re-read
+  // in one line, each alternative a word of its own: the class is still found.
+  // (`touch`, because main already answers `policy.core` for a `cp` with a variable.)
+  const fillers = Array.from({ length: 20 }, (_, n) => `d$y/{a,b}f${String(n)}`).join(" ");
+  const late = see(`y=; touch ${fillers} .appro{val,vax}$y/env`);
+  assert.ok(late.classes.includes("policy.core"), JSON.stringify(late.segments));
+  assert.ok(!late.classes.includes(GUARDED), `every word is read: ${late.notes.slice(0, 200)}`);
+  const early = see("y=; touch .appro{val,vax}$y/env");
+  assert.ok(early.classes.includes("policy.core"), JSON.stringify(early.segments));
+  const control = see(`y=; touch ${fillers} .appro{vex,vax}$y/env`);
+  assert.ok(!control.classes.includes("policy.core"), `the control: no alternative is the policy folder: ${JSON.stringify(control.segments)}`);
+  // One line for every word read to one other spelling: a read of n home
+  // paths costs n, not n squared (it was 3.6 CPU s at 6,400 words, 1.0 now).
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  const read = (n: number): string => `cat ${Array.from({ length: n }, (_, i) => `~/f${String(i)}`).join(" ")}`;
+  const least = (n: number): number => Math.min(cpu(() => see(read(n))), cpu(() => see(read(n))));
+  see(read(200));
+  const small = least(3_200);
+  const large = least(12_800);
+  // Four times the words: about four times the cost when linear, sixteen when square.
+  assert.ok(large < small * 8 + 0.2, `3,200 words ${small.toFixed(2)} CPU s, 12,800 words ${large.toFixed(2)} CPU s`);
+});
+
 test("a glob over a directory that cannot be read is guarded", { skip: process.getuid?.() === 0 ? "root reads every directory" : false }, () => {
   const locked = join(ws, "locked");
   mkdirSync(join(locked, "inner"), { recursive: true });

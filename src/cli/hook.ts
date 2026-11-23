@@ -3977,7 +3977,7 @@ export function judgeWriteLanding(
     // not exist yet holds none today (what the tree itself carries is not
     // read: see the hand-back).
     if (TREE_AT_A_CHECKOUT_IS_GUARDED && tree === true) {
-      for (const form of [...new Set([...landing.paths, ...forms])]) {
+      for (const form of new Set([...landing.paths, ...forms])) {
         try {
           lstatSync(join(form, ".git"));
         } catch {
@@ -4707,16 +4707,39 @@ export function refineWriteLandings(
     if (shape.bin !== null) {
       const bin = /^[A-Za-z0-9_./+-]+$/u.test(shape.bin) ? shape.bin : quote(shape.bin);
       const words = shape.args;
-      const settled = words.map((word) => {
-        const spellings = spellingsOf1(word);
+      const read = words.map((word) => spellingsOf1(word));
+      const settled = words.map((word, index) => {
+        const spellings = read[index] ?? null;
         return spellings !== null && spellings.length === 1 ? (spellings[0] as string) : word;
       });
-      for (const [index, word] of words.entries()) {
-        for (const spelling of spellingsOf1(word) ?? []) {
+      const lineOf = (argv: readonly string[]): string => [bin, ...argv.map(quote)].join(" ");
+      // Every word read to ONE other spelling is in `settled` already, so one
+      // line answers for all of them. (It was one line per such word, each
+      // the same text: a line of n words built n times, the square of a
+      // `cat` of thousands of `~` paths.)
+      const first = read.find((spellings) => spellings !== null && spellings.length === 1);
+      if (first !== undefined && first !== null) add(classesOfSynthetic(lineOf(settled), first[0] as string));
+      // A word with several spellings (a brace group beside a variable): each
+      // spelling in the word's own place, for the first few such words. Past
+      // that, all of them at once, each alternative a word of its own, which
+      // is the argv the shell builds.
+      let several = 0;
+      const rest = new Set<number>();
+      for (const [index, spellings] of read.entries()) {
+        if (spellings === null || spellings.length < 2) continue;
+        if ((several += 1) > RESOLVED_ARGV_LINES) {
+          rest.add(index);
+          continue;
+        }
+        for (const spelling of spellings) {
           const argv = [...settled];
           argv[index] = spelling;
-          add(classesOfSynthetic([bin, ...argv.map(quote)].join(" "), spelling));
+          add(classesOfSynthetic(lineOf(argv), spelling));
         }
+      }
+      if (rest.size > 0) {
+        const argv = settled.flatMap((word, index) => (rest.has(index) ? (read[index] as string[]) : [word]));
+        add(classesOfSynthetic(lineOf(argv), (read[[...rest][0] as number] as string[])[0] as string));
       }
     }
     return out;
@@ -5309,6 +5332,9 @@ const MAX_LANDING_BYTES = 4096;
 
 /** Milliseconds one glob expansion may take before the write is guarded (point 6). */
 const GLOB_TIME_LIMIT_MS = 250;
+
+/** The most words of one segment, each with several spellings, re-read one spelling at a time (a cost bound). */
+const RESOLVED_ARGV_LINES = 16;
 
 /** The most patterns of one segment listed on the disk (a cost bound: each is a directory read). */
 const PATTERN_LISTINGS = 64;
