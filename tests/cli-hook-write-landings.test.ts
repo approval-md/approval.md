@@ -347,22 +347,51 @@ test("a pattern takes the class its matches take written out: the directory is l
   }
 });
 
-test("a pattern too wide to read: a write is unreadable, a read is left alone", () => {
+test("a pattern too wide to read: a write is unreadable, a read and a delete are left alone; thousands of matches are read whole", () => {
+  // Thousands of matches are read whole and move nothing by their number.
+  const many = join(base, "many");
+  mkdirSync(many, { recursive: true });
+  for (let n = 0; n < 3000; n += 1) writeFileSync(join(many, `f${String(n).padStart(4, "0")}.md`), "", "utf8");
+  for (const line of ["touch *.md", "chmod +x *.md", "sed -i s/a/b/ *.md", "rm *.md", "ls *.md"]) {
+    const seen = see(line, WRITE_SCOPE_OFF, many);
+    assert.ok(!seen.classes.includes(GUARDED), `${line}: ${JSON.stringify(seen.segments)}`);
+    assert.ok(!seen.segments.some(([, rule]) => rule === "write-resolved-landing"), line);
+  }
+  // Among them, the policy file is still found.
+  writeFileSync(join(many, "APPROVAL.md"), "x", "utf8");
+  assert.ok(see("touch *.md", WRITE_SCOPE_OFF, many).classes.includes("policy.core"));
+  assert.ok(see("rm *.md", WRITE_SCOPE_OFF, many).classes.includes("policy.core"));
+
+  // More than a megabyte of names: 5,200 files with names of 210 bytes.
   const wide = join(base, "wide");
   mkdirSync(wide, { recursive: true });
-  for (let n = 0; n < 1100; n += 1) writeFileSync(join(wide, `f${String(n).padStart(4, "0")}.md`), "", "utf8");
+  for (let n = 0; n < 5200; n += 1) writeFileSync(join(wide, `${"w".repeat(202)}${String(n).padStart(4, "0")}.md`), "", "utf8");
   const written = see("touch *.md", WRITE_SCOPE_OFF, wide);
   assert.ok(written.classes.includes(GUARDED), JSON.stringify(written.segments));
   assert.match(written.notes, /write-unreadable: \*\.md matches more names than this hook reads/u);
-  const redirected = see("echo x > f00*.md", WRITE_SCOPE_OFF, wide);
-  assert.ok(!redirected.classes.includes(GUARDED), "100 names are read");
-  const read = see("ls *.md", WRITE_SCOPE_OFF, wide);
-  assert.deepEqual(read.segments, [["read.shell", "read-shell"]]);
+  const some = see("touch w*0001.md", WRITE_SCOPE_OFF, wide);
+  assert.ok(!some.classes.includes(GUARDED), "one name is read");
+  // A read and a delete are left as main has them.
+  assert.deepEqual(see("ls *.md", WRITE_SCOPE_OFF, wide).segments, [["read.shell", "read-shell"]]);
+  const removed = see("rm *.md", WRITE_SCOPE_OFF, wide);
+  assert.ok(!removed.classes.includes(GUARDED) && removed.segments.every(([cls]) => cls.startsWith("files.delete")), JSON.stringify(removed.segments));
+  // More names than the bound, short ones: 8,300 files.
+  const crowd = join(base, "crowd");
+  mkdirSync(crowd, { recursive: true });
+  for (let n = 0; n < 8300; n += 1) writeFileSync(join(crowd, `c${String(n).padStart(4, "0")}.md`), "", "utf8");
+  const crowded = see("chmod +x *.md", WRITE_SCOPE_OFF, crowd);
+  assert.ok(crowded.classes.includes(GUARDED), JSON.stringify(crowded.segments));
+  assert.match(crowded.notes, /matches more names than this hook reads/u);
+  assert.ok(!see("chmod +x c0*.md", WRITE_SCOPE_OFF, crowd).classes.includes(GUARDED), "a thousand names are read");
+  assert.ok(!see("rm *.md", WRITE_SCOPE_OFF, crowd).classes.includes(GUARDED), "a delete is left alone");
+  assert.deepEqual(see("ls *.md", WRITE_SCOPE_OFF, crowd).segments, [["read.shell", "read-shell"]]);
   // Many patterns in one segment: each is a listing, and they are bounded.
-  const many = see(`touch ${Array.from({ length: 80 }, (_, n) => `f${String(n).padStart(4, "0")}.m?`).join(" ")}`, WRITE_SCOPE_OFF, wide);
-  assert.ok(many.classes.includes(GUARDED), JSON.stringify(many.segments.slice(0, 4)));
-  assert.match(many.notes, /more patterns than this hook reads in one segment/u);
-  assert.ok(!see(`touch ${Array.from({ length: 60 }, (_, n) => `f${String(n).padStart(4, "0")}.m?`).join(" ")}`, WRITE_SCOPE_OFF, wide).classes.includes(GUARDED), "sixty patterns are read");
+  const patterns = (count: number): string => Array.from({ length: count }, (_, n) => `f${String(n).padStart(4, "0")}.m?`).join(" ");
+  const eighty = see(`touch ${patterns(80)}`, WRITE_SCOPE_OFF, many);
+  assert.ok(eighty.classes.includes(GUARDED), JSON.stringify(eighty.segments.slice(0, 4)));
+  assert.match(eighty.notes, /more patterns than this hook reads in one segment/u);
+  assert.ok(!see(`touch ${patterns(60)}`, WRITE_SCOPE_OFF, many).classes.includes(GUARDED), "sixty patterns are read");
+  assert.ok(!see(`rm ${patterns(80)}`, WRITE_SCOPE_OFF, many).classes.includes(GUARDED), "a delete is left alone");
 });
 
 test("resolved words are re-read once a segment, and many brace words all at once: linear, and nothing is lost", () => {

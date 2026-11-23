@@ -4762,10 +4762,16 @@ export function refineWriteLandings(
    * is read as one level and as none (`**` + `/*.md` finds `APPROVAL.md` beside
    * it); deeper levels are not walked (see the hand-back).
    *
-   * Bounded by {@link PATTERN_LISTINGS}, {@link PATTERN_MATCH_WORDS} and
-   * {@link PATTERN_LINE_BYTES}. Past
-   * any, or where the listing gives up, a segment main reads as a read adds
-   * nothing (it writes nothing), and any other is unreadable: guarded.
+   * A segment main reads as a read is not looked at: it writes nothing, and
+   * listing for it would cost every `ls *` a directory read.
+   *
+   * Bounded by {@link PATTERN_LISTINGS}, {@link PATTERN_MATCH_NAMES} and
+   * {@link PATTERN_LINE_BYTES}, and by the listing's own bounds. A directory of
+   * thousands of entries is read whole and moves nothing by its size (`rm
+   * logs/*.log` over 5,000 files is what main says it is). Past a bound, or
+   * where the listing gives up, a delete adds nothing (main's delete rows
+   * already answer for a pattern they cannot read), and any other segment is
+   * unreadable: guarded.
    */
   const patternWordClasses = (shape: CommandSegmentShape, at: number, segment: ClassifiedSegment | null): ResolvedClass[] => {
     const out: ResolvedClass[] = [];
@@ -4781,20 +4787,21 @@ export function refineWriteLandings(
     const targets = shape.writes.some(openTarget);
     const argv = shape.bin !== null && shape.args.some(openPattern);
     if (!targets && !argv) return out;
-    const reads = segment !== null && segment.class.startsWith("read.") && !targets;
+    if (!targets && segment !== null && segment.class.startsWith("read.")) return out;
+    const quiet = segment !== null && segment.class.startsWith("files.delete") && !targets;
     const tooWide = (pattern: string, why: string): ResolvedClass[] =>
-      reads ? [] : [{ cls: DECISION_B_UNREADABLE_CLASS, rule: WRITE_UNREADABLE_RULE, path: pattern, why: `${pattern} ${why}, so what \`${shape.text.slice(0, 80)}\` writes cannot be read from the disk` }];
+      quiet ? [] : [{ cls: DECISION_B_UNREADABLE_CLASS, rule: WRITE_UNREADABLE_RULE, path: pattern, why: `${pattern} ${why}, so what \`${shape.text.slice(0, 80)}\` writes cannot be read from the disk` }];
     const add = (found: readonly ResolvedClass[], pattern: string, count: number): void => {
       for (const each of found) {
         // A synthetic line the classifier refuses is unreadable for a write
-        // and nothing for a read, as above.
-        if (each.rule === WRITE_UNREADABLE_RULE && reads) continue;
+        // and nothing for a delete, as above.
+        if (each.rule === WRITE_UNREADABLE_RULE && quiet) continue;
         if (out.some((known) => known.cls === each.cls)) continue;
         out.push({ ...each, path: pattern, why: `${pattern} matches ${String(count)} name${count === 1 ? "" : "s"} on the disk, and with them written out the line is ${each.cls}` });
       }
     };
     for (const from of cwdUnknown ? [null] : here) {
-      let words = 0;
+      let matches = 0;
       let bytes = 0;
       let listings = 0;
       /** The words the shell hands over for one word: `null`, as written; a string, why it cannot be read. */
@@ -4814,6 +4821,7 @@ export function refineWriteLandings(
           const levels = spelling.split("/");
           const forms = levels.includes("**") ? [spelling, levels.filter((part) => part !== "**").join("/")] : [spelling];
           const names: string[] = [];
+          const seen = new Set<string>();
           for (const form of forms) {
             if (form.length === 0) continue;
             const spelled = absolute ? form : spelledAbsolute(from as string, form);
@@ -4834,11 +4842,11 @@ export function refineWriteLandings(
                 continue;
               }
               const name = absolute ? each.path : each.path.split("/").filter((part) => part.length > 0).slice(kept).join("/");
-              if (name.length === 0 || names.includes(name)) continue;
+              if (name.length === 0 || seen.has(name)) continue;
+              seen.add(name);
               names.push(name);
-              words += 1;
               bytes += name.length + 4;
-              if (words > PATTERN_MATCH_WORDS || bytes > PATTERN_LINE_BYTES) return "matches more names than this hook reads";
+              if ((matches += 1) > PATTERN_MATCH_NAMES || bytes > PATTERN_LINE_BYTES) return "matches more names than this hook reads";
             }
           }
           if (names.length === 0) {
@@ -5339,11 +5347,15 @@ const RESOLVED_ARGV_LINES = 16;
 /** The most patterns of one segment listed on the disk (a cost bound: each is a directory read). */
 const PATTERN_LISTINGS = 64;
 
-/** The most names a segment's patterns may match and still be read with them written out. */
-const PATTERN_MATCH_WORDS = 1024;
+/**
+ * The most names a segment's patterns may match and still be read with them
+ * written out (a cost bound on the line re-read: about 40 microseconds a
+ * name, so a third of a second at the bound).
+ */
+const PATTERN_MATCH_NAMES = 8192;
 
-/** The longest those names may be together, in bytes (a cost bound on the line re-read). */
-const PATTERN_LINE_BYTES = 65_536;
+/** The longest those names may be together, in bytes (the same bound, for long names). */
+const PATTERN_LINE_BYTES = 1_048_576;
 
 // ===========================================================================
 // Skill scripts, the disk half (APRV-502)
