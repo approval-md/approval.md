@@ -8766,7 +8766,8 @@ const ORGAN_DIRECTORIES: Readonly<Record<string, string>> = {
  */
 function organDestination(dest: string, inexact: (word: string) => boolean, glob: GlobReading): { surface: string; path: string } | null {
   const { parts } = lexicalParts(dest);
-  // `.git` is #683's git-dir rule's, which keeps its own rule id.
+  // `.git` is #683's git-dir rule's, which keeps its own rule id: a landing's
+  // `.git` component is spelled in its source word, which that rule reads.
   const guarded = Object.entries(ORGAN_DIRECTORIES);
   let best: string | null = null;
   for (const part of parts) {
@@ -9029,6 +9030,12 @@ interface CopyPlan {
   anyName: string[];
   /** The destination is implied (`ln -s target` links into `.`). */
   implicitDest?: boolean;
+  /**
+   * The copy keeps each source's path under the destination (`cp --parents`,
+   * rsync's `-R`/`--relative`, an rsync source with a `/./` component): the
+   * landing is `<dest>/<the source's relative path>` (review of 8e1e84ae, 3).
+   */
+  preserve?: boolean;
   files: string[];
   unknown: string | null;
   operands: string[];
@@ -9083,7 +9090,18 @@ function copyPlan(basename: string, args: readonly string[]): CopyPlan | null {
   // Lead ruling on the split (L61320): a copy, move, link or sync INTO a
   // guarded directory is judged by the directory's name alone, whatever it
   // copies.
-  const plan: CopyPlan = { ...empty(operands), dests, sources, anyName: [...dests], ...(implicit ? { implicitDest: true } : {}) };
+  const has = (...names: string[]): boolean => names.some((name) => parsed.seen.has(name));
+  const preserve =
+    (basename === "cp" && has("parents")) ||
+    (basename === "rsync" && (has("R", "relative") || sources.some((source) => source.includes("/./"))));
+  const plan: CopyPlan = {
+    ...empty(operands),
+    dests,
+    sources,
+    anyName: [...dests],
+    ...(implicit ? { implicitDest: true } : {}),
+    ...(preserve ? { preserve: true } : {}),
+  };
   if (basename === "rsync") {
     // Directories rsync writes any name into; relative ones are relative to the destination.
     for (const entry of parsed.values) {
@@ -9187,7 +9205,20 @@ function copyLandings(
   const patterns: string[] = [];
   for (const source of sources) {
     // rsync and scp: `host:path` lands by the path's basename.
-    const parts = source.replace(/^[^/]*:/u, "").split("/").filter((part) => part.length > 0);
+    const local = source.replace(/^[^/]*:/u, "");
+    if (plan.preserve === true) {
+      // `cp --parents a/b d` makes `d/a/b`; rsync `-R` keeps the path after a
+      // `/./` (else the whole path), a leading `/` dropped.
+      const cut = local.indexOf("/./");
+      const kept = (cut === -1 ? local : local.slice(cut + 3)).replace(/^\/+/u, "");
+      for (const dest of dests) {
+        const landing = `${dest.replace(/\/+$/u, "")}/${kept}`;
+        if (inexact(source) && globLive(glob, source) && hasGlobConstruct(kept)) patterns.push(landing);
+        else plain.push(landing);
+      }
+      continue;
+    }
+    const parts = local.split("/").filter((part) => part.length > 0);
     const base = parts[parts.length - 1];
     if (base === undefined || base === "." || base === "..") continue;
     const globbed = inexact(source) && globLive(glob, source) && hasGlobConstruct(base);
@@ -10898,11 +10929,11 @@ function classifySegment(
     // guarded directory or under one, and a source landing AS one
     // (`cp -r evil/.claude .`). The ancestor rule is the follow-up's (L61320).
     const organDest = [
-      // A destination with whitespace in it is prose (APRV-409), as in the scan above.
-      ...(plan?.anyName ?? []).filter((dest) => !/\s/u.test(dest)).map((dest) => organDestination(dest, inexact, glob)),
-      ...(landed?.plain ?? []).filter((path) => !/\s/u.test(path)).map((path) => organDestination(path, () => false, glob)),
+      // A destination is a path by construction, whitespace and all (review of 8e1e84ae, 4).
+      ...(plan?.anyName ?? []).map((dest) => organDestination(dest, inexact, glob)),
+      ...(landed?.plain ?? []).map((path) => organDestination(path, () => false, glob)),
       // A landing the shell may still glob (`ln -s ../evil/.git?ub`), as a pattern.
-      ...(landed?.patterns ?? []).filter((path) => !/\s/u.test(path)).map((path) => organDestination(path, () => true, { options: glob.options, budget: glob.budget, off: glob.off })),
+      ...(landed?.patterns ?? []).map((path) => organDestination(path, () => true, { options: glob.options, budget: glob.budget, off: glob.off })),
       ...(plan?.files.length ? [strictestProtectedWrite(plan.files, protectedPaths, inexact, false, glob)] : []),
     ].reduce<{ surface: string; path: string } | null>(
         (best, hit) => (hit !== null && (best === null || protectedRank(hit.surface) < protectedRank(best.surface)) ? hit : best),
@@ -10912,7 +10943,15 @@ function classifySegment(
       landed === null
         ? organDest
         : (() => {
-            const plainText = strictestProtected(landed.plain, protectedPaths, true);
+            // Landings are paths by construction, judged after lexical normalisation.
+            const plainText = strictestProtected(
+              landed.plain.map((path) => {
+                const { absolute, parts } = lexicalParts(path);
+                return (absolute ? "/" : "") + parts.join("/");
+              }),
+              protectedPaths,
+              false,
+            );
             const plainHit =
               organDest !== null && (plainText === null || protectedRank(organDest.surface) < protectedRank(plainText.surface)) ? organDest : plainText;
             const patternHit = strictestProtectedWrite(landed.patterns, protectedPaths, () => true, false, {

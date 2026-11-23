@@ -107,8 +107,13 @@ option, case folded), and takes the strictest class among them.
   lexical normalisation (`.claude/x/..`, `./.claude/.`, `.claude/sub/`), with
   no listing: `cp evil/settings.json .claude/`, `cp a.txt .claude/`, `cp -r
   x/. .claude/`, `tar -xf a.tar -C .claude`, `rsync -a src/ .claude/hooks/`.
-  `.git` keeps #683's git-dir rule. A copy into another directory is judged by
-  the file it lands (`cp evil/* out/` with `evil/APPROVAL.md`), and a source
+  `.git` keeps #683's git-dir rule. A destination is a path by construction,
+  whitespace and all (`cp x ".claude/my file"`). A copy into another
+  directory is judged by the file it lands (`cp evil/* out/` with
+  `evil/APPROVAL.md`); a path-preserving copy (`cp --parents`, rsync
+  `-R`/`--relative`, an rsync source with `/./`) lands
+  `<dest>/<the source's path>` (`cp --parents .claude/settings.json .`,
+  `rsync -R .approval/env backup/..`), normalised lexically; and a source
   landing AS a guarded directory is one (`cp -r evil/.claude .`, `ln -s
   ../evil/.claude`, which links into `.`). With no destination read, every
   operand is judged, as before. `cp`, `mv`, `ln`, `install`, `rsync` and `scp`
@@ -122,7 +127,13 @@ option, case folded), and takes the strictest class among them.
   is that write. A contents copy or extraction into an ordinary directory or
   an ancestor of a guarded one (`tar -xf a.tar`, `cp -r src/. .`) keeps its
   class here; that is a follow-up. A directory the hook finds not there is
-  empty only to a glob on a one-segment line.
+  empty only to a glob on a one-segment line. Two `command-class` conformance
+  vectors move to the stricter answer and are regenerated:
+  `cp-dot-slash-glob-is-unmoved` (`cp ./*.md docs/`, `policy.core`: the
+  landing `docs/*.md` may be `docs/APPROVAL.md`) and
+  `prose-opening-with-a-protected-path-under-cp` (a destination under
+  `.github`, `policy.edit`); the suite's `vectors_version` is left for the
+  release seat.
 
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),

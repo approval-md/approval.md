@@ -775,6 +775,12 @@ const MOVED_TO_FOLLOW_UP: readonly (readonly [string, string])[] = [
   ["tar -xf a.tar --transform s/a/b/ -C out", "files.write.workspace"],
   ["cp -r src/ ..", "files.write.workspace"],
   ["cp -r src/ ~", "files.write.workspace"],
+  ["tar --strip-components=1 -xf a.tar", "files.write.workspace"],
+  ["tar -x -f a.tar", "files.write.workspace"],
+  ["tar -xPf a.tar", "files.write.workspace"],
+  ["tar -xf a.tar --transform s,^,.claude/,", "files.write.workspace"],
+  ["rsync -a src/ ..", "network.call"],
+  ["rsync -a src/ ~", "network.call"],
 ];
 
 test("moved to a follow-up: contents copies and extractions into an ordinary place keep main's class", () => {
@@ -955,4 +961,37 @@ test("e6b7bf97 (4): a directory that was not there is empty only to a glob on a 
   }
   // Another writer on the line: no listing is used at all.
   assert.ok(withListing("mkdir -p d && cp x d/*", { "/w/d": "missing" }).includes("policy.core"));
+});
+
+test("review of 8e1e84ae (3): a path-preserving copy lands under the destination by the source's path", () => {
+  for (const [command, cls] of [
+    ["cp --parents .claude/settings.json .", "policy.core"],
+    ["cp --parents x/.cursor/hooks.json out", "policy.core"],
+    ["rsync -R src/./.cursor/hooks.json out", "policy.core"],
+    ["rsync -a --relative src/.claude/settings.json out/", "policy.core"],
+    ["rsync -R .approval/env backup/..", "account.credential"],
+    ["rsync -a --files-from=list . .claude/", "policy.core"],
+  ] as const) {
+    assert.ok(classesOf(command).includes(cls), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // .git keeps #683's rule id.
+  const git = classifyCommand("rsync -R x/./.git/hooks/pre-push .", []);
+  assert.ok(git.ok && git.segments.some((segment) => segment.class === "vcs.history.rewrite" && segment.rule === "git-dir-write"));
+  // Ordinary paths, and a file list into an ordinary place (the follow-up's), keep main's class.
+  for (const [command, main] of [
+    ["cp --parents a/b out/", "files.write.workspace"],
+    ["rsync -R a/b out", "network.call"],
+    ["rsync -a --files-from=list . out/", "network.call"],
+  ] as const) {
+    assert.deepEqual(classesOf(command), [main], command);
+  }
+});
+
+test("review of 8e1e84ae (4): a destination is a path by construction, whitespace and all", () => {
+  for (const command of ['cp x ".claude/my file"', 'mv x ".cursor/a b/"', 'rsync -a src/ ".claude/x y/"', 'tar -xf a.tar -C ".grok/a b"']) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  assert.ok(classesOf('cp x ".github/workflows/a b.yml"').includes("policy.edit"));
+  // An ordinary destination with whitespace stays ordinary.
+  assert.ok(ORDINARY(classesOf('cp x "notes/a b.txt"')));
 });

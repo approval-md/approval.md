@@ -400,10 +400,20 @@ test("the shortest form of the shape: a path, a space, and four words", () => {
 });
 
 test("the same shape under the other effectful rows", () => {
+  // GLOB-WRITE (#686, review of 8e1e84ae finding 4): a cp or mv DESTINATION is
+  // a path by construction, whitespace and all; one under `.github` is the
+  // guarded directory's write, decided by its name.
   for (const command of [
     `cp a.txt ".github/workflows/pages.yml deploys the site on push to main"`,
-    `tee ".github/workflows/pages.yml deploys the site on push to main"`,
     `mv a.txt ".github/workflows/pages.yml deploys the site on push to main"`,
+  ]) {
+    const segment = onePathSegment(command, ROUTED_PATHS);
+    assert.equal(segment.rule, "protected-path", command);
+    // The routed workflow class (`policy.edit.ci`) under this policy's paths.
+    assert.ok(segment.class.startsWith("policy.edit"), `${command} -> ${segment.class}`);
+  }
+  for (const command of [
+    `tee ".github/workflows/pages.yml deploys the site on push to main"`,
   ]) {
     const segment = onePathSegment(command, ROUTED_PATHS);
     assert.notEqual(segment.rule, "protected-path", command);

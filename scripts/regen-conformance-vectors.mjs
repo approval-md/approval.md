@@ -2629,7 +2629,7 @@ const commandClassVectors = [
   {
     id: "prose-opening-with-a-protected-path-under-cp",
     description:
-      "the same shape under a different effectful row: cp scans its positionals source and destination alike, and a sentence is neither",
+      "the same shape under a different effectful row: cp's DESTINATION is a path by construction, whitespace and all (GLOB-WRITE, #686), and this one is under .github, so the copy is the guarded directory's write; a sentence-shaped SOURCE would still be prose",
     input: { command: 'cp a.txt ".github/workflows/pages.yml deploys the site on push"' },
   },
   {
@@ -4125,7 +4125,7 @@ const commandClassVectors = [
   {
     id: "cp-dot-slash-glob-is-unmoved",
     description:
-      "./* can only expand to words beginning ./, never to an option",
+      "./* can only expand to words beginning ./, never to an option; but the copy lands docs/<each match>, and *.md may match APPROVAL.md, which is guarded at any depth (GLOB-WRITE, #686): with no listing of the source directory the landing pattern is the policy write",
     input: { command: "cp ./*.md docs/" },
   },
   {
