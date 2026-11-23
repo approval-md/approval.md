@@ -35,7 +35,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { classifyForHook, resolveWriteScope, WRITE_SCOPE_OFF, type WriteScopeContext } from "../src/cli/hook.js";
+import { classifyForHook, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, type WriteScopeContext } from "../src/cli/hook.js";
 import { commandGate } from "../src/cli/gate-window.js";
 import type { Streams } from "../src/cli/main.js";
 import type { Prompter, SecretRead } from "../src/cli/prompt.js";
@@ -330,96 +330,92 @@ test("opted in: an out-of-scope write is files.write.out_of_scope, beside its ow
   const redirect = see("echo x > ../sibling.txt", scope);
   assert.deepEqual(redirect.segments, [[WORKSPACE, "redirect-write"], [OUT, "write-out-of-scope"]]);
   assert.ok(see("echo x > link-out/y", scope).classes.includes(OUT));
-  assert.ok(see("tee ../x", scope).classes.includes(OUT));
+  // `tee ../x` is a row main already tightens: it stays as main has it.
+  assert.deepEqual(see("tee ../x", scope).segments, [[DELETE_OUT, "write-out-of-scope-resolved"]]);
+  assert.ok(see("echo x | tee -a ../x", scope).classes.includes(DELETE_OUT));
   assert.ok(!see("echo x > notes.txt", scope).classes.includes(OUT));
   // The list still wins, and is still added beside.
   const listed = see("echo x > ~/.zshrc", scope);
   assert.ok(listed.classes.includes(GUARDED));
 });
 
-test("opted in, decision A: the write rows that are files.delete.out_of_scope today are decided by landing", () => {
-  const scope = optedIn();
-  assert.deepEqual(see("cp a ../sibling.txt", scope).segments, [[OUT, "write-out-of-scope-landed"]]);
-  assert.deepEqual(see("cp a link-out/y", scope).segments, [[OUT, "write-out-of-scope-landed"]]);
-  // tar is not an exact shape (its archive names its own members): it keeps
-  // main's class, with the out-of-scope class beside it.
-  assert.deepEqual(see("tar -x -f a.tgz -C ../out", scope).segments, [[DELETE_OUT, "packaging-write-out-of-scope"], [OUT, "write-out-of-scope"]]);
-  // /etc is on the list and stays guarded beside the delete class.
-  const etc = see("cp a /etc/hosts", scope);
-  assert.ok(etc.classes.includes(GUARDED));
-  // A delete does not change.
-  assert.deepEqual(see("rm ../x", scope).segments, see("rm ../x").segments);
-});
+/**
+ * Decision A is not built (coordinator, 23 Nov): under EVERY policy, opted in
+ * or not, each segment main gave stays exactly as main gave it, and a row main
+ * already tightens to `files.delete.*` takes no out-of-scope entry beside it.
+ * These are the lines the old decision A lightened or was asked to keep: each
+ * now passes trivially, and fails if A comes back.
+ */
+const NOT_LIGHTER_LINES = [
+  "cp a ../sibling.txt",
+  "cp a link-out/y",
+  "tar -x -f a.tgz -C ../out",
+  "cp a /etc/hosts",
+  "rm ../x",
+  "mv ../outside/a b",
+  "mv a ../outside/b",
+  "rmdir ../outside",
+  "tar -c --remove-files -f x.tar ../outside/a",
+  "tar -x -f a.tgz -C",
+  "cp ../outside/a sub/",
+  "cp a ../outside/a sub/",
+  "ln -s a b ../outside/",
+  "cp --target-directory=../outside a",
+  "cp -t ../outside a",
+  "tar -C ../outside -x -f a.tgz",
+  "tar -x -f ../outside/a -C sub",
+  "mv ~/x ./y",
+  "rsync --remove-source-files ../outside/a b",
+  "tar -xf a.tar -C ../out",
+  "tar -xPf a.tar",
+  "tar --rem -cf out.tar x",
+  "TAR_OPTIONS=-P tar -xf a.tar",
+  "npm pack --pack-destination ../x",
+  "cp --unknown-flag a ../x",
+  "cp --targ=../x a",
+  "cp -s a ../x",
+  "chmod -x ../x",
+  "cp -- a ../x",
+  "cp a ../x",
+  "cp -Rp a ../x",
+  "cp -t ../x a",
+  "ln -sf a ../x",
+  "touch ../x",
+  "mkdir -p ../x",
+  "chmod +x ../x",
+  "truncate -s 0 ../x",
+  "tee -a ../x",
+];
 
-test("decision A lightens only a write whose every candidate the old pass read was placed (review of 15de94c7)", () => {
+test("no line gets lighter under any policy: every segment main gave stays, first and unchanged (decision A is not built)", () => {
   writeFileSync(join(outside, "a"), "a", "utf8");
-  const scope = optedIn();
-  const keep: Array<[command: string, why: string]> = [
-    ["mv ../outside/a b", "mv removes a source outside every root"],
-    ["mv a ../outside/b", "mv is never decided by landing"],
-    ["rmdir ../outside", "a delete keeps its class"],
-    ["tar -c --remove-files -f x.tar ../outside/a", "tar --remove-files removes its sources"],
-    ["tar -x -f a.tgz -C", "the classifier's flag-present, value-missing answer records no path"],
-  ];
-  for (const [command, why] of keep) {
-    const before = see(command);
-    const after = see(command, scope);
-    assert.deepEqual(
-      withoutLandingEntries(after).filter(([cls]) => cls !== OUT),
-      withoutLandingEntries(before),
-      `${command}: ${why}`,
-    );
-    assert.ok(!after.segments.some(([, rule]) => rule === "write-out-of-scope-landed" || rule === "write-in-scope-resolved"), `${command}: ${why}`);
-  }
-  // Each of these has a candidate outside, a source or an option value, so
-  // even with the destination inside it is not a workspace write.
-  for (const command of [
-    "cp ../outside/a sub/",
-    "cp a ../outside/a sub/",
-    "ln -s a b ../outside/",
-    "cp --target-directory=../outside a",
-    "cp -t ../outside a",
-    "tar -C ../outside -x -f a.tgz",
-    "tar -x -f ../outside/a -C sub",
-  ]) {
-    const seen = see(command, scope);
-    assert.ok(!seen.segments.some(([cls, rule]) => cls === WORKSPACE && rule === "write-in-scope-resolved"), `${command}: ${JSON.stringify(seen.segments)}`);
-    assert.ok(seen.classes.includes(OUT) || seen.classes.includes(DELETE_OUT), `${command}: ${JSON.stringify(seen.segments)}`);
-    // Not opted in, the old answer stands exactly.
-    assert.deepEqual(withoutLandingEntries(see(command)), see(command).segments.filter(([cls]) => cls !== GUARDED), command);
-  }
-  // `mv ~/x ./y` and an rsync are not A rows at all: the head answers as main.
-  for (const command of ["mv ~/x ./y", "rsync --remove-source-files ../outside/a b"]) {
-    assert.deepEqual(withoutLandingEntries(see(command, scope)), withoutLandingEntries(see(command)), command);
+  for (const scope of [WRITE_SCOPE_OFF, optedIn()]) {
+    for (const command of NOT_LIGHTER_LINES) {
+      const main = classifyForHook(command, [], ws, [], false, [], false, WRITE_SCOPE_OFF);
+      const head = see(command, scope);
+      if (!main.result.ok) {
+        assert.equal(head.ok, false, command);
+        continue;
+      }
+      const before = main.result.segments.filter((segment) => !["write-guarded", "write-unreadable", "write-out-of-scope", "write-resolved-landing"].includes(segment.rule));
+      assert.deepEqual(head.segments.slice(0, before.length), before.map((segment) => [segment.class, segment.rule]), command);
+      assert.ok(!head.segments.some(([, rule]) => rule === "write-out-of-scope-landed" || rule === "write-in-scope-resolved"), command);
+      for (const cls of main.result.classes) assert.ok(head.classes.includes(cls), `${command}: lost ${cls}`);
+    }
   }
 });
 
-test("decision A is an allowlist of exact shapes: tar, npm, an unknown flag or an env prefix keep main's class (second review of 0d6df3c4)", () => {
+test("opted in: a row main tightens to files.delete.out_of_scope stays exactly as main has it", () => {
   const scope = optedIn();
-  for (const command of [
-    "tar -xf a.tar -C ../out",
-    "tar -xPf a.tar",
-    "tar --rem -cf out.tar x",
-    "TAR_OPTIONS=-P tar -xf a.tar",
-    "npm pack --pack-destination ../x",
-    "cp --unknown-flag a ../x",
-    "cp --targ=../x a",
-    "cp -s a ../x",
-    "chmod -x ../x",
-    "cp -- a ../x",
-  ]) {
-    const before = see(command);
-    const after = see(command, scope);
-    // Opted in or not, every segment main gave is still there, unchanged.
-    assert.deepEqual(withoutLandingEntries(after), withoutLandingEntries(before), command);
-    assert.ok(!after.segments.some(([, rule]) => rule === "write-out-of-scope-landed" || rule === "write-in-scope-resolved"), command);
-  }
-  // An exact shape is decided by landing.
-  for (const command of ["cp a ../x", "cp -Rp a ../x", "cp -t ../x a", "cp --target-directory=../x a", "ln -sf a ../x", "touch ../x", "mkdir -p ../x", "chmod +x ../x", "truncate -s 0 ../x", "tee -a ../x"]) {
-    const seen = see(command, scope);
-    if (!seen.segments.some(([cls]) => cls === DELETE_OUT) && !seen.segments.some(([, rule]) => rule === "write-out-of-scope-landed")) continue; // not an A row on main
-    assert.ok(seen.segments.some(([, rule]) => rule === "write-out-of-scope-landed"), `${command}: ${JSON.stringify(seen.segments)}`);
-  }
+  assert.deepEqual(see("cp a ../sibling.txt", scope).segments, [[DELETE_OUT, "write-out-of-scope-resolved"]]);
+  assert.deepEqual(see("cp a link-out/y", scope).segments, [[DELETE_OUT, "write-out-of-scope-resolved"]]);
+  assert.deepEqual(see("tar -x -f a.tgz -C ../out", scope).segments, [[DELETE_OUT, "packaging-write-out-of-scope"]]);
+  // The guarded minimum is still added beside a delete row (point 5).
+  assert.ok(see("cp a /etc/hosts", scope).classes.includes(GUARDED));
+  assert.ok(see("cp a ~/.zshrc", scope).classes.includes(GUARDED));
+  // `cp a ../x` and `echo x > ../x` therefore still differ: a decision for the lead.
+  assert.ok(!see("cp a ../x", scope).classes.includes(OUT));
+  assert.ok(see("echo x > ../x", scope).classes.includes(OUT));
 });
 
 test("a variable spliced inside a guarded name is read where the line sets it, and guarded where it cannot be (review-b, CLAIMS L61530)", () => {
@@ -475,16 +471,127 @@ test("a variable spliced inside a guarded name is read where the line sets it, a
   }
 });
 
-test("decision A never lightens a segment a resolved word gave a class of its own (review of bd1bddc6)", () => {
+test("a resolved word's class is added and nothing main gave is dropped (review of bd1bddc6)", () => {
   const repo = join(base, "splice-a");
   mkdirSync(repo, { recursive: true });
   writeFileSync(join(repo, "a"), "a", "utf8");
   for (const command of ["x=; cp .appro${x}val/env ../x/", "x=; y=; cp .appro${x}val/env A${y}PPROVAL.md ../x/"]) {
     const before = see(command, WRITE_SCOPE_OFF, repo);
     const after = see(command, optedIn(), repo);
-    assert.ok(!after.segments.some(([, rule]) => rule === "write-out-of-scope-landed" || rule === "write-in-scope-resolved"), `${command}: ${JSON.stringify(after.segments)}`);
-    assert.deepEqual(withoutLandingEntries(after), withoutLandingEntries(before), command);
+    assert.deepEqual(withoutLandingEntries(after).slice(0, 1), withoutLandingEntries(before).slice(0, 1), command);
     assert.ok(after.classes.some((cls) => cls === "account.credential" || cls === "policy.core"), JSON.stringify(after.segments));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Which segment an entry belongs to (third review of 2b83468a, point 3)
+// ---------------------------------------------------------------------------
+
+test("an entry is tied to its segment by position, never by matching text", () => {
+  // The same text twice, one of them made guarded by its own substitution:
+  // one guarded entry, over the segment that holds the substitution.
+  for (const command of ["echo x > a; echo x > a $(sort -o ~/.zshrc b)", "echo x > a $(sort -o ~/.zshrc b); echo x > a"]) {
+    const seen = see(command);
+    assert.equal(seen.segments.filter(([cls]) => cls === GUARDED).length, 1, `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+  // The classifier refuses a substitution that writes; one it lets through
+  // (`sort -o`) is judged, and a target spelled BY a substitution is unreadable.
+  for (const [command, host] of [
+    ["echo x > a; echo x > $(echo a)", "echo x > $(echo a)"],
+    ["echo x > $(echo a); echo x > a", "echo x > $(echo a)"],
+  ] as const) {
+    const one = classifyForHook(command, [], ws, [], false, [], false, WRITE_SCOPE_OFF);
+    assert.ok(one.result.ok, command);
+    if (one.result.ok) assert.deepEqual(one.result.segments.filter((segment) => segment.class === GUARDED).map((segment) => segment.text), [host], command);
+  }
+  const refined = classifyForHook("echo x > a; echo x > a $(sort -o ~/.zshrc b)", [], ws, [], false, [], false, WRITE_SCOPE_OFF);
+  assert.ok(refined.result.ok);
+  if (refined.result.ok) {
+    const guarded = refined.result.segments.filter((segment) => segment.class === GUARDED);
+    assert.deepEqual(guarded.map((segment) => segment.text), ["echo x > a $(sort -o ~/.zshrc b)"]);
+  }
+  // Two identical segments, each its own: a guarded write repeated is one
+  // guarded entry per segment, never folded into one by text.
+  const twice = classifyForHook("echo x > ~/.zshrc; echo x > ~/.zshrc", [], ws, [], false, [], false, WRITE_SCOPE_OFF);
+  assert.ok(twice.result.ok);
+  if (twice.result.ok) assert.equal(twice.result.segments.filter((segment) => segment.class === GUARDED).length, 2);
+  // A script that repeats a segment's text: the inner write is judged on its
+  // own (guarded), the plain one outside stays as it was.
+  const scripted = see("echo x > a; bash -c 'echo x > a; echo y > ~/.zshrc'");
+  assert.equal(scripted.segments.filter(([cls]) => cls === GUARDED).length, 1, JSON.stringify(scripted.segments));
+  const plain = see("echo x > a; bash -c 'echo x > a'");
+  assert.ok(!plain.classes.includes(GUARDED), JSON.stringify(plain.segments));
+});
+
+// ---------------------------------------------------------------------------
+// A pattern's listing is a snapshot too (third review of 2b83468a, point 2)
+// ---------------------------------------------------------------------------
+
+test("a glob over a prefix an earlier segment changed is unreadable, not judged by its listing", () => {
+  mkdirSync(join(ws, "gl.d"), { recursive: true });
+  writeFileSync(join(ws, "gl.d", "one.txt"), "", "utf8");
+  for (const command of [
+    "ln -s ~/.ssh gl2.d; echo x > gl2.d/*.pub",
+    "mv gl.d gl3.d && echo x > gl3.d/*.txt",
+    "rm -rf gl.d && ln -s ~ gl.d && echo x > gl.d/.zsh*",
+    "ln -s ~/.ssh gl.d/inner; echo x > gl.d/*/authorized_keys",
+    "ln -s ~/.ssh gl.d/inner; cp a gl.d/*/",
+    "ln -s ~/.ssh gl.d/inner; cd gl.d/i* && echo x > authorized_keys",
+  ]) {
+    const seen = see(command);
+    assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+    assert.match(seen.notes, /write-unreadable/u, command);
+  }
+  // A changed path beside the pattern's prefix, not under it: read as usual.
+  assert.ok(!see("mv a.d b.d && echo x > gl.d/*.txt").classes.includes(GUARDED));
+  // The rule is the same named place: a cd it cannot follow is unknown too.
+  assert.ok(see('cd "$D" && echo x > gl.d/*.txt').classes.includes(GUARDED));
+});
+
+// ---------------------------------------------------------------------------
+// A tree written at a place that holds a guarded entry (re-read of the pass)
+// ---------------------------------------------------------------------------
+
+test("a tree written where a guarded entry can sit under it is guarded; one written beside is not", () => {
+  mkdirSync(join(ws, "dotfiles"), { recursive: true });
+  mkdirSync(join(ws, "Library"), { recursive: true });
+  for (const command of [
+    "cp -R dotfiles/ ~/",
+    "cp -a dotfiles/. ~",
+    "rsync -a dotfiles/ ~/",
+    "cp -R Library ~/",
+    "mv dotfiles ~/.config",
+    "ln -sfn dotfiles ~/.config",
+    "tar -xf a.tar -C ~",
+    "tar -xPf a.tar",
+    "tar --extract --absolute-names -f a.tar -C sub",
+    "git clone https://example.invalid/r.git ~/.config",
+    "cp -R dotfiles .git",
+    "find . -name x -fprint ~/.zshrc",
+    "npx prettier --write ~/.zshrc",
+    "make -C ~/.ssh",
+  ]) {
+    for (const scope of [WRITE_SCOPE_OFF, optedIn()]) {
+      const seen = see(command, scope);
+      assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+    }
+  }
+  // A program's argv is judged against the list only, never the roots.
+  assert.ok(!see("npx prettier --write ../x.md", optedIn()).classes.includes(OUT));
+  for (const command of ["npx prettier --write src", "make build", "cp -R dotfiles ~/", "cp -R dotfiles out/", "mv a.d b.d", "rsync -a dotfiles/ dist/", "tar -xf a.tar -C sub", "tar -xf a.tar", "cp dotfiles/x ~/", "ln -s a.d l"]) {
+    const seen = see(command);
+    assert.ok(!seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+});
+
+test("what the pass cannot read at all fails to guarded, never to nothing", () => {
+  // The classifier refuses these lines upstream; called on its own, the pass
+  // still adds the guarded class rather than nothing.
+  for (const command of ["bash -x -c 'echo x > ~/.zshrc'", 'echo "unterminated', "x $(a $(b $(c $(d $(e $(f > ~/.zshrc))))))"]) {
+    const forged = { ok: true as const, segments: [{ text: command, class: WORKSPACE, rule: "redirect-write" }], classes: [WORKSPACE] };
+    const refined = refineWriteLandings(forged, command, [ws], WRITE_SCOPE_OFF);
+    assert.ok(refined.result.ok && refined.result.classes.includes(GUARDED), `${command}: ${JSON.stringify(refined.result)}`);
+    if (refined.result.ok) assert.deepEqual(refined.result.segments[0], forged.segments[0], command);
   }
 });
 

@@ -20,7 +20,6 @@ import { explain } from "../src/core/policy-explain.js";
 import { loadPolicy, type PolicyLoadResult } from "../src/core/policy-load.js";
 import { CLASS_MINIMUMS, resolve } from "../src/core/policy-match.js";
 import {
-  DECISION_A_WRITE_RULES_BY_LANDING,
   DECISION_B_UNREADABLE_CLASS,
   DECISION_D_OVERWRITE_IS_GUARDED,
   DECISION_E_WINDOW,
@@ -153,8 +152,7 @@ test("only the class's own key or a write_scope block opts a policy in", () => {
   assert.equal(writeScopeOptedIn({ write_scope: { roots: ["/x"] } }), true);
 });
 
-test("the four decisions stand as the page recommends", () => {
-  assert.deepEqual([...DECISION_A_WRITE_RULES_BY_LANDING], ["write-out-of-scope-resolved", "packaging-write-out-of-scope"]);
+test("decisions B, D and E stand as the page recommends (A is not built)", () => {
   assert.equal(DECISION_B_UNREADABLE_CLASS, WRITE_GUARDED_CLASS);
   assert.equal(DECISION_D_OVERWRITE_IS_GUARDED, false);
   assert.equal(DECISION_E_WINDOW, "as-manual");

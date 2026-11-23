@@ -50,16 +50,10 @@ export const WRITE_OUT_OF_SCOPE_SHIPPED_AUTONOMY = "supervised-retro" as const;
 // ---------------------------------------------------------------------------
 
 /**
- * Decision A (review-b's N1), as recommended: in a policy that opts in, the
- * rules that answer `files.delete.out_of_scope` today for a WRITE are decided
- * by where the write lands instead, so `cp a ../sibling` is
- * {@link WRITE_OUT_OF_SCOPE_CLASS} like `echo x > ../sibling`. Deletes do not
- * change. The other ruling is an empty list: those rules keep today's class.
+ * Decision A (review-b's N1) is not built (coordinator, 23 Nov): a row main
+ * already tightens to `files.delete.out_of_scope` keeps exactly that class
+ * under every policy, so `cp a ../x` and `echo x > ../x` still differ.
  */
-export const DECISION_A_WRITE_RULES_BY_LANDING: readonly string[] = [
-  "write-out-of-scope-resolved",
-  "packaging-write-out-of-scope",
-];
 
 /**
  * Decision B: a target still unreadable after resolution takes this class.
@@ -259,6 +253,37 @@ export function guardedEntryOf(path: string, homes: readonly string[]): string |
   }
   for (const rootHome of ROOT_HOMES) {
     if (startsWithFolded(have, rootHome)) return "another user's home";
+  }
+  return null;
+}
+
+/**
+ * A guarded entry strictly UNDER an absolute, `..`-free path, or `null`: what a
+ * tree written AT that path (a recursive copy, a move, a link, an archive
+ * extracted there, a clone) may put onto the list without naming it. `/` holds
+ * every entry; a `.git` folder holds its `hooks`; `/Users` and `/var` hold
+ * other users' homes. Compared through {@link foldFileName}.
+ */
+export function guardedEntryBelow(path: string, homes: readonly string[]): string | null {
+  const have = segmentsOf(path);
+  if (have.includes("..")) return null;
+  const strictlyUnder = (entry: readonly string[]): boolean =>
+    entry.length > have.length && (have.length === 0 || startsWithFolded(entry, have));
+  const last = have[have.length - 1];
+  if (last !== undefined && foldFileName(last) === ".git") return "a git hooks folder";
+  for (const entry of GUARDED_ABSOLUTE_ENTRIES) {
+    if (strictlyUnder(entry.segments)) return entry.name;
+  }
+  for (const home of homes) {
+    const anchor = segmentsOf(home);
+    if (anchor.length === 0) continue;
+    for (const entry of GUARDED_HOME_ENTRIES) {
+      if (strictlyUnder([...anchor, ...entry.segments])) return entry.name;
+    }
+  }
+  // `/Users` itself holds homes (its children); `/var` holds `/var/root`.
+  for (const parent of [...HOME_PARENTS.map((each) => [...each, "a-home"]), ...ROOT_HOMES]) {
+    if (strictlyUnder(parent)) return "another user's home";
   }
   return null;
 }

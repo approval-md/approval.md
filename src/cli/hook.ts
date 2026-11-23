@@ -202,11 +202,11 @@ import {
   renderReadRoots,
 } from "../core/read-scope.js";
 import {
-  DECISION_A_WRITE_RULES_BY_LANDING,
   DECISION_B_UNREADABLE_CLASS,
   DECISION_D_OVERWRITE_IS_GUARDED,
   DECISION_E_WINDOW,
   effectiveWriteRoots,
+  guardedEntryBelow,
   guardedEntryOf,
   isInWriteScope,
   WRITE_GUARDED_CLASS,
@@ -3840,15 +3840,15 @@ export function refineWriteScope(
  *    ONLY for a policy that opts in (point 8). Every other policy keeps the
  *    answer it had before the class existed.
  *
- * ## Only ever stricter, except decision A
+ * ## Only ever stricter, under every policy
  *
  * The class is ADDED beside the segment's own, as an entry over the same
  * segment text (the shape `also` already has), never put in its place: the
  * gate resolves every class of a command and the strictest decides, so no
  * answer can get lighter through this pass, whatever the policy says of the
- * segment's own class. The one exception is decision A, for a policy that opts
- * in: the two rules that answer `files.delete.out_of_scope` for a WRITE today
- * are decided by where the write lands instead.
+ * segment's own class. Decision A is not built: a row main already tightens to
+ * `files.delete.*` keeps exactly that class, and takes no
+ * `files.write.out_of_scope` entry beside it (a guarded one still, point 5).
  *
  * Last in {@link classifyForHook}'s chain, after every pass that may raise a
  * segment, so nothing re-reads an entry it added.
@@ -3894,11 +3894,6 @@ export const WRITE_GUARDED_RULE = "write-guarded";
 export const WRITE_UNREADABLE_RULE = "write-unreadable";
 /** The rule an entry for a write outside every root reports (opt-in). */
 export const WRITE_OUT_OF_SCOPE_RULE = "write-out-of-scope";
-/** The rule a decision-A write takes when its landing is inside a root. */
-export const WRITE_IN_SCOPE_RULE = "write-in-scope-resolved";
-/** The rule a decision-A write takes when its landing is outside every root. */
-export const WRITE_OUT_OF_SCOPE_LANDED_RULE = "write-out-of-scope-landed";
-
 /** The rule an entry for a resolved spelling's own class reports (review-b, CLAIMS L61530). */
 export const WRITE_RESOLVED_RULE = "write-resolved-landing";
 
@@ -3938,6 +3933,7 @@ export function judgeWriteLanding(
   spelled: string,
   scope: WriteScopeContext,
   homes: readonly string[] = currentHomes(),
+  tree = false,
 ): WriteLanding {
   // Longer than any path the kernel opens (PATH_MAX is 1024 on macOS and 4096
   // on Linux): it cannot land anywhere this hook can name, and walking it one
@@ -3959,6 +3955,17 @@ export function judgeWriteLanding(
     const entry = guardedEntryOf(form, homes);
     if (entry !== null) {
       return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `${form} is on the guarded list (${entry})` };
+    }
+  }
+  // A TREE written at the landing (a recursive copy, a move, a link, an
+  // archive, a clone) holds names this hook never reads: an entry under it is
+  // within reach.
+  if (tree) {
+    for (const form of forms) {
+      const entry = guardedEntryBelow(form, homes);
+      if (entry !== null) {
+        return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can hold ${entry}, which is on the guarded list` };
+      }
     }
   }
   if (landing.unknown) {
@@ -3993,6 +4000,8 @@ const LANDING_PACKAGING_RULES: ReadonlySet<string> = new Set([
   "openssl-digest-out",
   "npm-pack",
 ]);
+/** The binaries of those rows, for a segment the classifier will not answer on its own text. */
+const LANDING_PACKAGING_BINS: ReadonlySet<string> = new Set(["tar", "gunzip", "base64", "openssl", "npm"]);
 
 /**
  * The snapshot rule (codex, CLAIMS L61466), in ONE place: which earlier
@@ -4145,7 +4154,11 @@ function resolveWriteWord(
       }
     }
     let failed = null as string | null;
-    text = text.replace(/\$\{([^}]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)|\$(.?)/gu, (match, braced?: string, bare?: string) => {
+    // `[^{}$]*` stops at the next `$` or brace, so an unclosed `${` costs the
+    // distance to the next one, not the rest of the word (linear, not
+    // quadratic, in a word of 250,000 `${`). A `${` it does not close is a
+    // form this hook does not read.
+    text = text.replace(/\$\{([^{}$]*)\}|\$\{|\$([A-Za-z_][A-Za-z0-9_]*)|\$(.?)/gu, (match, braced?: string, bare?: string) => {
       if (failed !== null) return match;
       const name = braced ?? bare;
       if (name === undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
@@ -4203,121 +4216,25 @@ function staticPrefix(text: string): string {
   return kept.join("/") || (text.startsWith("/") ? "/" : ".");
 }
 
-/** One binary's argv as decision A accepts it: every flag enumerated. */
-interface DecisionAShape {
-  /** Short flags that take no value; a cluster must hold only these. */
-  short: string;
-  /** Short flags that take the next word (alone, never in a cluster). */
-  shortWithValue: string;
-  /** Long flags that take no value, spelled in full. */
-  long: readonly string[];
-  /** Long flags that take a value (`--x=v` or `--x v`), spelled in full. */
-  longWithValue: readonly string[];
+/** A copy, move or link INTO a directory, as the write pass reads it. */
+interface IntoDir {
+  dir: string;
+  sources: string[];
+  /** Does the binary write a tree (a move, a link, an rsync, a recursive copy)? */
+  tree: boolean;
+  /** Do its contents land at `dir` itself (`src/`, `.`, `ln -n`)? */
+  contents: boolean;
 }
 
-/**
- * Decision A as an allowlist of exact shapes (second review of 0d6df3c4): the
- * binaries whose whole write set is the words on the line, with the flags
- * accepted for each. Anything else keeps the class it has: an unknown flag, an
- * abbreviated long option, a cluster holding a letter not listed, `--`, an
- * environment prefix, and every binary not here. Left out on purpose: `mv`
- * (it removes its sources), `rmdir`, `rm`, `unlink`, `shred` (deletes, point
- * 7), `rsync` (`--remove-source-files`), `gunzip` (removes the `.gz`), `tar`
- * (an archive names its own members, absolute and `..` ones and links among
- * them; `-P`, `-U`, `--recursive-unlink`, `--remove-files` and `TAR_OPTIONS`
- * move or delete), `npm` (it runs scripts), and `base64` and `openssl` (kept
- * out rather than parsed: their rows are packaging rows and stay as main has
- * them).
- *
- * Why each write set is the words judged: `cp` and `ln` write only the
- * destination (`-t DIR` included) and read the sources, which are judged too;
- * `touch`, `tee`, `mkdir`, `chmod` and `truncate` write exactly their operands
- * (`chmod`'s mode and the values of `-m`, `-r`, `-t`, `-d`, `-s` are judged as
- * paths too, which can only keep a class, never lighten one).
- */
-const DECISION_A_SHAPES: Readonly<Record<string, DecisionAShape>> = {
-  cp: { short: "afinprRvHLP", shortWithValue: "t", long: ["--force", "--interactive", "--no-clobber", "--recursive", "--verbose", "--archive"], longWithValue: ["--target-directory"] },
-  ln: { short: "sfnvhi", shortWithValue: "", long: ["--symbolic", "--force", "--no-dereference", "--verbose"], longWithValue: [] },
-  touch: { short: "acmh", shortWithValue: "rtd", long: ["--no-create"], longWithValue: [] },
-  tee: { short: "ai", shortWithValue: "", long: ["--append", "--ignore-interrupts"], longWithValue: [] },
-  mkdir: { short: "pv", shortWithValue: "m", long: ["--parents", "--verbose"], longWithValue: ["--mode"] },
-  chmod: { short: "Rvfh", shortWithValue: "", long: ["--recursive", "--verbose"], longWithValue: [] },
-  truncate: { short: "c", shortWithValue: "sr", long: ["--no-create"], longWithValue: ["--size", "--reference"] },
-};
-
-/** Does every flag of this argv fit the binary's enumerated shape? */
-function decisionAShapeKnown(shape: DecisionAShape, args: readonly string[]): boolean {
-  for (let at = 0; at < args.length; at += 1) {
-    const arg = args[at] as string;
-    if (arg === "--") return false;
-    if (arg.startsWith("--")) {
-      const equals = arg.indexOf("=");
-      const name = equals === -1 ? arg : arg.slice(0, equals);
-      if (shape.longWithValue.includes(name)) {
-        if (equals === -1) at += 1;
-        continue;
-      }
-      if (equals === -1 && shape.long.includes(name)) continue;
-      return false;
-    }
-    if (arg.startsWith("-") && arg.length > 1) {
-      const letters = arg.slice(1);
-      if (letters.length === 1 && shape.shortWithValue.includes(letters)) {
-        at += 1;
-        continue;
-      }
-      if ([...letters].every((letter) => shape.short.includes(letter))) continue;
-      return false;
-    }
-  }
-  return true;
-}
-
-/**
- * Decision A for one segment (coordinator's review of 15de94c7): the class it
- * takes from where it lands, or `null` to keep the class it has.
- *
- * The old pass (APRV-402 {@link refineWriteScope}, and the classifier's
- * `scopedWrite`) tightened the segment because SOME word was outside: it reads
- * every argument that is not a flag, plus each `--opt=value` value
- * ({@link writeCandidates}). So the same candidates are judged here, sources
- * and option values included, each through the write pass's own resolver and
- * landings; the segment is lighter only when EVERY one of them was read and
- * placed. It keeps its class when the argv is not an exact shape
- * ({@link DECISION_A_SHAPES}), when there is no candidate, and when the path the
- * old pass recorded on the segment is not among the candidates or their
- * landings (the classifier's "flag present, value missing" answer has none).
- */
-function decisionALanding(
-  shape: CommandSegmentShape,
-  segment: ClassifiedSegment,
-  judge: (word: string, at: number) => WriteLanding,
-  at: number,
-  cwds: readonly string[],
-): WriteLanding | null {
-  const bin = shape.bin === null ? null : basename(shape.bin);
-  const known = bin === null ? undefined : DECISION_A_SHAPES[bin];
-  if (known === undefined || shape.assignments.length > 0) return null;
-  if (!decisionAShapeKnown(known, shape.args)) return null;
-  const candidates = writeCandidates(shape.args);
-  if (candidates.length === 0) return null;
-  const recorded = segment.path;
-  if (recorded === undefined) return null;
-  const placed = new Set<string>(candidates);
-  for (const candidate of candidates) {
-    for (const from of cwds) {
-      const resolved = resolvedWriteTarget(candidate, from);
-      if (resolved !== null) placed.add(resolved);
-    }
-  }
-  if (!placed.has(recorded)) return null;
-  let verdict: WriteLanding = { kind: "in" };
-  for (const candidate of candidates) {
-    const judged = judge(candidate, at);
-    if (judged.kind === "guarded") return judged;
-    if (judged.kind === "out" && verdict.kind === "in") verdict = judged;
-  }
-  return verdict;
+/** Does this `tar` argv extract (`-x`, `--extract`, `--get`, or a bundled first word holding `x`)? */
+function tarExtracts(args: readonly string[]): boolean {
+  return args.some(
+    (arg, at) =>
+      arg === "--extract" ||
+      arg === "--get" ||
+      (/^-[A-Za-z]+$/u.test(arg) && arg.includes("x")) ||
+      (at === 0 && /^[A-Za-z]+$/u.test(arg) && arg.includes("x")),
+  );
 }
 
 /**
@@ -4338,20 +4255,72 @@ export function refineWriteLandings(
 ): RefinedClassification {
   if (!result.ok) return { result, notes: [] };
   const top = commandSegmentShapes(command);
-  if (top === null) return { result, notes: [] };
-  // A login-shell wrapper is classified by the segments of its script.
-  // Every `$(…)` runs before its segment and writes like any other: its
-  // segments are judged in place, ahead of the segment that expands them
-  // (their assignments never reach the line: `lineVariables` taints them).
-  const withSubstitutions = (shape: CommandSegmentShape, depth: number): CommandSegmentShape[] => {
-    if (depth > 4) return [shape];
-    const inner = shape.substitutions.flatMap((text) => (commandSegmentShapes(text) ?? []).flatMap((each) => withSubstitutions(each, depth + 1)));
-    return [...inner, shape];
+  if (top === null) {
+    // The classifier read the line and this reader cannot: two reads of the
+    // same bytes disagree. Nothing it writes can be judged: guarded.
+    const note = `${WRITE_UNREADABLE_RULE}: \`${command.slice(0, 80)}\` could not be re-read, so where it writes cannot be judged and it is also ${WRITE_GUARDED_CLASS}`;
+    const segments = [...result.segments, { text: command, class: WRITE_GUARDED_CLASS, rule: WRITE_UNREADABLE_RULE }];
+    const classes = result.classes.includes(WRITE_GUARDED_CLASS) ? result.classes : [...result.classes, WRITE_GUARDED_CLASS];
+    return { result: { ok: true, segments, classes }, notes: [note] };
+  }
+  // A login-shell wrapper is classified by the segments of its script. Every
+  // `$(…)` runs before its segment and writes like any other: its segments
+  // are judged in place, ahead of the segment that expands them (their
+  // assignments never reach the line: `lineVariables` taints them). Each unit
+  // carries the segment it is attached to by POSITION (its host among the
+  // line's own segments), never by matching text, so a line that repeats a
+  // segment's text cannot attach a verdict to the wrong one.
+  interface Unit {
+    shape: CommandSegmentShape;
+    /** The line-level segment this unit's entries are written beside. */
+    host: CommandSegmentShape;
+    /** That segment's position among the line's segments ({@link primary}), fixed before any substitution is added. */
+    hostIndex: number;
+    /** Why what this unit writes cannot be read at all (fails to guarded), or `null`. */
+    unreadable: string | null;
+  }
+  const withSubstitutions = (shape: CommandSegmentShape, host: CommandSegmentShape, hostIndex: number, depth: number, unreadable: string | null): Unit[] => {
+    if (depth > 4 && shape.substitutions.length > 0) {
+      return [{ shape, host, hostIndex, unreadable: `\`${shape.text.slice(0, 80)}\` nests command substitutions deeper than this hook reads` }];
+    }
+    const inner = shape.substitutions.flatMap((text) => {
+      const parsed = commandSegmentShapes(text);
+      if (parsed === null) return [{ shape, host, hostIndex, unreadable: `the substitution \`$(${text.slice(0, 80)})\` could not be read` }];
+      return parsed.flatMap((each) => withSubstitutions(each, host, hostIndex, depth + 1, null));
+    });
+    return [...inner, { shape, host, hostIndex, unreadable }];
   };
-  const shapes = top
-    .flatMap((shape) => (shape.script === null ? [shape] : (commandSegmentShapes(shape.script) ?? [shape])))
-    .flatMap((shape) => withSubstitutions(shape, 0));
+  type Primary = { shape: CommandSegmentShape; unreadable: string | null };
+  const primary: Primary[] = top.flatMap((shape): Primary[] => {
+    if (shape.opaqueShell) return [{ shape, unreadable: `\`${shape.text.slice(0, 80)}\` runs an inline script in a shape this hook does not unwrap` }];
+    if (shape.script === null) return [{ shape, unreadable: null }];
+    const inner = commandSegmentShapes(shape.script);
+    if (inner === null) return [{ shape, unreadable: `the script of \`${shape.text.slice(0, 80)}\` could not be read` }];
+    return inner.map((each) => ({ shape: each, unreadable: null }));
+  });
+  const units: Unit[] = primary.flatMap(({ shape, unreadable }, hostIndex) => withSubstitutions(shape, shape, hostIndex, 0, unreadable));
+  const shapes = units.map((unit) => unit.shape);
   const homes = currentHomes(env);
+  const hookCwd = cwds.find((each) => isAbsolute(each)) ?? "/";
+
+  /**
+   * What main answers for ONE segment, judged on its own text: the classifier
+   * and the APRV-402 pass, from the hook's own directory (as main's APRV-402
+   * pass reads every segment, `cd` or not). Read for the
+   * packaging rows (whose candidates over-include) and to leave a row main
+   * already tightens to `files.delete.*` exactly as main has it. Never read by
+   * matching text against the line's segments.
+   */
+  const ownAnswers = new Map<string, ClassifiedSegment | null>();
+  const ownAnswer = (shape: CommandSegmentShape): ClassifiedSegment | null => {
+    const known = ownAnswers.get(shape.text);
+    if (known !== undefined) return known;
+    const pure = classifyCommand(shape.text, protectedPaths, { scratchRoots: resolveScratchRoots(hookCwd) });
+    const raised = refineWriteScope(pure, resolveWriteRoots(hookCwd), hookCwd).result;
+    const answer = raised.ok ? (raised.segments[0] ?? null) : null;
+    ownAnswers.set(shape.text, answer);
+    return answer;
+  };
   const start = cwds.find((each) => isAbsolute(each)) ?? cwds[0] ?? "/";
   const line = { shapes, vars: lineVariables(shapes), cwd: start, env };
 
@@ -4368,12 +4337,7 @@ export function refineWriteLandings(
   };
   let changedUnknown: string | null = null;
 
-  const findings: WriteFinding[] = [];
-  /**
-   * Per shape index, decision A's verdict ({@link decisionALanding}): `null`
-   * when the segment must keep the class it has.
-   */
-  const aVerdicts = new Map<number, WriteLanding | null>();
+  const findings: Array<WriteFinding & { unit: number }> = [];
 
   const stricter = (a: WriteLanding | undefined, b: WriteLanding): WriteLanding => {
     const rank = (v: WriteLanding | undefined): number => (v === undefined ? 3 : v.kind === "guarded" ? 0 : v.kind === "out" ? 1 : 2);
@@ -4411,6 +4375,25 @@ export function refineWriteLandings(
         if (raw !== undefined) {
           return `${spelled} runs through ${raw}, which an earlier segment of this line changes, so its landing on the disk is not trusted`;
         }
+      }
+    }
+    return null;
+  };
+
+  /**
+   * The snapshot rule for a pattern (third review of 2b83468a, point 2): an
+   * expansion read from the disk is not trusted when an earlier segment
+   * changed its literal prefix, a component of it, or anything under it.
+   */
+  const volatilePattern = (spelled: string): string | null => {
+    if (changedUnknown !== null) return changedUnknown;
+    const prefix = staticPrefix(spelled);
+    const through = volatileOf(prefix);
+    if (through !== null) return through;
+    const key = `/${prefix.split("/").filter((part) => part.length > 0).map(foldFileName).join("/")}`;
+    for (const [changedKey, raw] of changedFolded) {
+      if (changedKey.startsWith(key === "/" ? "/" : `${key}/`)) {
+        return `${spelled} is a pattern over ${prefix}, under which an earlier segment of this line changes ${raw}, so its listing on the disk is not trusted`;
       }
     }
     return null;
@@ -4488,7 +4471,11 @@ export function refineWriteLandings(
       for (const each of found) if (!out.some((known) => known.cls === each.cls)) out.push(each);
     };
     const spellingsOf1 = (word: string): string[] | null => {
-      if (!/[$~{]/u.test(word)) return null;
+      // A variable or a tilde only: a brace group is the classifier's own
+      // reading already (it expands `.g{i,}t` itself), and the over-including
+      // brace reader would hand it spellings the shell never makes
+      // (`query=mutation{addComment{id}}` read as `query=mutationaddCommentid`).
+      if (!/[$~]/u.test(word)) return null;
       const resolved = resolveWriteWord(word, at, line);
       if ("unreadable" in resolved) return null;
       return resolved.spellings.every((spelling) => spelling === word) ? null : resolved.spellings;
@@ -4516,15 +4503,16 @@ export function refineWriteLandings(
   // One landing per spelling per line: the disk is read once for a target the
   // line names many times (a cost bound; the disk does not change within it).
   const landed = new Map<string, WriteLanding>();
-  const landOnce = (spelled: string): WriteLanding => {
-    const known = landed.get(spelled);
+  const landOnce = (spelled: string, tree: boolean): WriteLanding => {
+    const key = `${tree ? "T" : "F"}${spelled}`;
+    const known = landed.get(key);
     if (known !== undefined) return known;
-    const judged = judgeWriteLanding(spelled, scope, homes);
-    landed.set(spelled, judged);
+    const judged = judgeWriteLanding(spelled, scope, homes, tree);
+    landed.set(key, judged);
     return judged;
   };
 
-  const judgeWord = (word: string, at: number): WriteLanding => {
+  const judgeWord = (word: string, at: number, tree = false): WriteLanding => {
     if (word.length === 0) return { kind: "in" };
     const resolved = resolveWriteWord(word, at, line);
     if ("unreadable" in resolved) {
@@ -4536,40 +4524,70 @@ export function refineWriteLandings(
     }
     let verdict: WriteLanding = { kind: "in" };
     for (const each of spelled) {
-      if (each.length > MAX_LANDING_BYTES) return judgeWriteLanding(each, scope, homes);
+      if (each.length > MAX_LANDING_BYTES) return judgeWriteLanding(each, scope, homes, tree);
       const moved = volatileOf(each);
       if (moved !== null) return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: moved };
       if (/[*?[]/u.test(each)) {
         // Point 6: a glob is read from the disk, bounded by entries and time;
         // a match is judged as a landing, the pattern standing for the files
         // it did not keep, and the word as written for no match at all.
+        const unsure = volatilePattern(each);
+        if (unsure !== null) return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: unsure };
         const expanded = expandOnDisk("/", each, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS });
         if ("giveUp" in expanded) {
           return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: `${each} could not be read from the disk: ${expanded.giveUp}` };
         }
         for (const placed of expanded.paths) {
-          verdict = stricter(verdict, judgeWriteLanding(placed.path, scope, homes));
+          verdict = stricter(verdict, judgeWriteLanding(placed.path, scope, homes, tree));
           if (verdict.kind === "guarded") return verdict;
         }
         continue;
       }
-      verdict = stricter(verdict, landOnce(each));
+      verdict = stricter(verdict, landOnce(each, tree));
       if (verdict.kind === "guarded") return verdict;
     }
     return verdict;
   };
 
+  /** Is this word, resolved, an existing directory on every reading? Unreadable is `false`. */
+  const existingDirectory = (word: string, at: number): boolean => {
+    const resolved = resolveWriteWord(word, at, line);
+    if ("unreadable" in resolved) return false;
+    const spelled = spellingsOf(resolved);
+    if (spelled === null || spelled.length === 0) return false;
+    return spelled.every((each) => {
+      if (each.length > MAX_LANDING_BYTES || /[*?[]/u.test(each)) return false;
+      const landing = landingPaths(each);
+      if (landing.unknown || landing.paths.length === 0) return false;
+      return landing.paths.every((path) => {
+        try {
+          return statSync(path).isDirectory();
+        } catch {
+          return false;
+        }
+      });
+    });
+  };
+
   /** What this shape writes (judged) and what it changes (for the snapshot rule). */
-  const targetsOf = (shape: CommandSegmentShape, segment: ClassifiedSegment | undefined): {
+  const targetsOf = (shape: CommandSegmentShape, segment: ClassifiedSegment | null): {
     writes: string[];
-    intoDirs: { dir: string; sources: string[] }[];
+    intoDirs: IntoDir[];
+    trees: string[];
+    guardOnly: string[];
+    unreadable: string | null;
     changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[];
   } => {
     const writes: string[] = [...shape.writes];
-    const intoDirs: { dir: string; sources: string[] }[] = [];
+    const intoDirs: IntoDir[] = [];
+    /** Words a tree is written at (judged with {@link guardedEntryBelow} too). */
+    const trees: string[] = [];
+    /** Words a program MAY write (its argv, over-included): judged against the list only. */
+    const guardOnly: string[] = [];
+    let unreadable: string | null = null;
     const changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[] = shape.writes.map((word) => ({ word, kind: "write" as const }));
     const bin = shape.bin === null ? null : basename(shape.bin);
-    if (bin === null) return { writes, intoDirs, changes };
+    if (bin === null) return { writes, intoDirs, trees, guardOnly, unreadable, changes };
     const operands = shape.args.filter((arg) => !arg.startsWith("-") && arg.length > 0);
     if (LANDING_WRITE_EVERY.has(bin)) {
       writes.push(...operands);
@@ -4583,6 +4601,13 @@ export function refineWriteLandings(
       const sources = single ? operands : targetDir === null ? operands.slice(0, -1) : operands.filter((operand) => operand !== targetDir);
       const destination = single ? "." : (targetDir ?? operands[operands.length - 1]);
       const kind = bin === "mv" ? "move" : "link";
+      // A tree: a move, a link, an rsync, a recursive copy.
+      const recursive = shape.args.some((arg) => arg === "--recursive" || arg === "--archive" || /^-[A-Za-z]*[Rra]/u.test(arg));
+      const tree = bin === "mv" || bin === "ln" || bin === "rsync" || (bin === "cp" && recursive);
+      // `src/`, `src/.` and `.` put the CONTENTS at the destination itself;
+      // `ln -n`/`-h`/`-F` replace a link or directory at the destination.
+      const contents = sources.some((source) => source === "." || source === ".." || source.endsWith("/") || source.endsWith("/.")) ||
+        (bin === "ln" && shape.args.some((arg) => /^-[A-Za-z]*[nhF]/u.test(arg) || arg === "--no-dereference"));
       // A word the shell may still turn into an option (`ln -s "$T" l`) may
       // name the destination: what this segment changes is unknown.
       if (copyArgvUnknown(shape.args, shape.argFlags) !== null) {
@@ -4591,12 +4616,12 @@ export function refineWriteLandings(
       if (destination !== undefined) {
         writes.push(destination);
         changes.push({ word: destination, kind });
-        intoDirs.push({ dir: destination, sources });
+        intoDirs.push({ dir: destination, sources, tree, contents });
       }
       for (const extra of targetDirs.slice(1)) {
         writes.push(extra);
         changes.push({ word: extra, kind });
-        intoDirs.push({ dir: extra, sources });
+        intoDirs.push({ dir: extra, sources, tree, contents });
       }
       if (bin === "mv") for (const source of sources) changes.push({ word: source, kind: "move" });
     } else if (bin === "chmod" || bin === "chown" || bin === "chgrp") {
@@ -4620,18 +4645,45 @@ export function refineWriteLandings(
         changes.push({ word, kind: "write" });
       }
     } else if (
-      segment !== undefined &&
-      (LANDING_PACKAGING_RULES.has(segment.rule) ||
-        segment.rule === "packaging-write-out-of-scope" ||
-        segment.rule === "write-out-of-scope-resolved")
+      segment === null
+        ? LANDING_PACKAGING_BINS.has(bin)
+        : LANDING_PACKAGING_RULES.has(segment.rule) ||
+          segment.rule === "packaging-write-out-of-scope" ||
+          segment.rule === "write-out-of-scope-resolved"
     ) {
+      // A segment the classifier will not answer on its own text (a heredoc
+      // body elsewhere, say) is read as a packaging row by its binary: the
+      // candidates over-include, which only ever adds.
       const candidates = writeCandidates(shape.args);
       writes.push(...candidates);
       for (const word of candidates) changes.push({ word, kind: "link" });
-    } else if (segment !== undefined && (segment.class.startsWith("files.") || segment.rule === "write-out-of-scope-resolved")) {
+      // An archive extracted is a tree at its directory (the working one when
+      // no `-C` names another); with `-P` a member may land anywhere.
+      if (bin === "tar" && tarExtracts(shape.args)) {
+        trees.push(...candidates);
+        if (!shape.args.some((arg) => arg === "-C" || arg.startsWith("--directory") || /^-[A-Za-z]*C/u.test(arg))) trees.push(".");
+        if (shape.args.some((arg) => arg === "--absolute-names" || /^-[A-Za-z]*P/u.test(arg) || (/^[A-Za-z]+$/u.test(arg) && arg === shape.args[0] && arg.includes("P")))) {
+          unreadable = `\`${shape.text}\` extracts with absolute names, so a member may land anywhere`;
+        }
+      }
+    } else if (bin === "find") {
+      // `-fprint FILE`, `-fprint0 FILE`, `-fprintf FILE FORMAT`, `-fls FILE`.
+      for (const [at, arg] of shape.args.entries()) {
+        if (!["-fprint", "-fprint0", "-fprintf", "-fls"].includes(arg)) continue;
+        const file = shape.args[at + 1];
+        if (file === undefined) continue;
+        writes.push(file);
+        changes.push({ word: file, kind: "write" });
+      }
+    } else if (segment !== null && segment.class.startsWith("files.")) {
       // A write or delete this pass does not model by name: each operand is a
-      // path it may change.
+      // path it may change. A program that writes (`npx prettier --write`,
+      // `make`, a node script, `npm run`) names no target this hook can tell
+      // from what it reads: every word it is handed is judged against the
+      // guarded list, never against the roots.
       for (const word of operands) changes.push({ word, kind: segment.class.startsWith("files.delete") ? "remove" : "write" });
+      // (A redirect's own class is the redirect's: its target is judged above.)
+      if (segment.class.startsWith("files.write.") && segment.rule !== "redirect-write") guardOnly.push(...writeCandidates(shape.args));
     }
     // A reader that writes through one of its own words (`sort -o`, `uniq in
     // out`, sed's `w`) and git's own write words (`git clone URL DIR`).
@@ -4640,7 +4692,9 @@ export function refineWriteLandings(
       writes.push(word);
       changes.push({ word, kind: bin === "git" ? "link" : "write" });
     }
-    return { writes, intoDirs, changes };
+    // What git writes is a checkout: a tree.
+    if (bin === "git") trees.push(...gitWriteTargets(shape.args).filter((word) => word.length > 0));
+    return { writes, intoDirs, trees, guardOnly, unreadable, changes };
   };
 
   /**
@@ -4660,6 +4714,7 @@ export function refineWriteLandings(
       const spelled = spellingsOf({ spellings: [spelling] });
       if (spelled === null) return [null];
       for (const each of spelled) {
+        if (volatilePattern(each) !== null) return [null];
         const expanded = expandOnDisk("/", each, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS });
         if ("giveUp" in expanded) return [null];
         for (const placed of expanded.paths) names.push(basename(placed.path));
@@ -4667,11 +4722,6 @@ export function refineWriteLandings(
     }
     return names;
   };
-
-  const segmentFor = (shape: CommandSegmentShape, index: number): ClassifiedSegment | undefined =>
-    shapes.length === result.segments.length
-      ? result.segments[index]
-      : result.segments.find((segment) => segment.text === shape.text);
 
   for (const [index, shape] of shapes.entries()) {
     const bin = shape.bin === null ? null : basename(shape.bin);
@@ -4693,8 +4743,8 @@ export function refineWriteLandings(
             placed.push(each);
             continue;
           }
-          const expanded = expandOnDisk("/", each, { deadline: Date.now() + GLOB_TIME_LIMIT_MS });
-          if ("giveUp" in expanded) {
+          const expanded = volatilePattern(each) === null ? expandOnDisk("/", each, { deadline: Date.now() + GLOB_TIME_LIMIT_MS }) : null;
+          if (expanded === null || "giveUp" in expanded) {
             spelled = null;
             break;
           }
@@ -4722,16 +4772,44 @@ export function refineWriteLandings(
       continue;
     }
 
-    const segment = segmentFor(shape, index);
-    const { writes, intoDirs, changes } = targetsOf(shape, segment);
-    let verdict: WriteLanding | undefined;
-    for (const word of writes) {
+    const unit = units[index] as Unit;
+    const host = unit.host.text;
+    if (unit.unreadable !== null) {
+      // Nothing this unit writes can be read: guarded, and nothing after it
+      // can trust the disk either.
+      findings.push({ unit: index, text: host, cls: DECISION_B_UNREADABLE_CLASS, rule: WRITE_UNREADABLE_RULE, path: shape.text.slice(0, 80), note: `${WRITE_UNREADABLE_RULE}: ${unit.unreadable}, so \`${host}\` is also ${DECISION_B_UNREADABLE_CLASS}` });
+      changedUnknown ??= `${unit.unreadable}, so no later landing on the disk is trusted`;
+      continue;
+    }
+    const segment = ownAnswer(shape);
+    const { writes, intoDirs, trees, guardOnly, unreadable, changes } = targetsOf(shape, segment);
+    let verdict: WriteLanding | undefined =
+      unreadable === null ? undefined : { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: shape.text.slice(0, 80), why: unreadable };
+    for (const word of verdict === undefined ? writes : []) {
       verdict = stricter(verdict, judgeWord(word, index));
+      if (verdict.kind === "guarded") break;
+    }
+    for (const word of verdict?.kind === "guarded" ? [] : trees) {
+      verdict = stricter(verdict, judgeWord(word, index, true));
+      if (verdict.kind === "guarded") break;
+    }
+    // A program's word is not a known target: only a word ON the list counts
+    // (an unreadable one names no write this hook knows of).
+    for (const word of verdict?.kind === "guarded" ? [] : guardOnly) {
+      const judged = judgeWord(word, index);
+      if (judged.kind === "guarded" && judged.rule === WRITE_GUARDED_RULE) verdict = judged;
+      if (verdict?.kind === "guarded") break;
+    }
+    // A tree at the destination itself: contents copied there, or a
+    // destination that is not an existing directory (it becomes the tree).
+    for (const { dir, tree, contents } of verdict?.kind === "guarded" ? [] : intoDirs) {
+      if (!tree || !(contents || !existingDirectory(dir, index))) continue;
+      verdict = stricter(verdict, judgeWord(dir, index, true));
       if (verdict.kind === "guarded") break;
     }
     // A copy or move INTO a directory writes `<dir>/<source name>` too.
     if (verdict?.kind !== "guarded") {
-      for (const { dir, sources } of intoDirs) {
+      for (const { dir, sources, tree } of intoDirs) {
         for (const source of sources) {
           for (const name of intoNames(source, index)) {
             if (name === null) {
@@ -4739,7 +4817,7 @@ export function refineWriteLandings(
               break;
             }
             if (name.length === 0 || name === "." || name === "..") continue;
-            verdict = stricter(verdict, judgeWord(`${dir.replace(/\/+$/u, "")}/${name}`, index));
+            verdict = stricter(verdict, judgeWord(`${dir.replace(/\/+$/u, "")}/${name}`, index, tree));
             if (verdict.kind === "guarded") break;
           }
           if (verdict?.kind === "guarded") break;
@@ -4749,29 +4827,28 @@ export function refineWriteLandings(
     }
     if (verdict !== undefined && verdict.kind !== "in") {
       if (verdict.kind === "guarded") {
+        // Every write, whatever class main gave it: the guarded minimum is
+        // the one no policy setting may lift (point 5).
         const cls = verdict.rule === WRITE_UNREADABLE_RULE ? DECISION_B_UNREADABLE_CLASS : WRITE_GUARDED_CLASS;
-        findings.push({ text: shape.text, cls, rule: verdict.rule, path: verdict.path, note: `${verdict.rule}: ${verdict.why}, so \`${shape.text}\` is also ${cls}` });
-      } else if (scope.optedIn) {
-        findings.push({ text: shape.text, cls: WRITE_OUT_OF_SCOPE_CLASS, rule: WRITE_OUT_OF_SCOPE_RULE, path: verdict.path, note: `${WRITE_OUT_OF_SCOPE_RULE}: \`${shape.text}\` lands at ${verdict.path}, outside every write root (${scope.roots.join(", ")}), so it is also ${WRITE_OUT_OF_SCOPE_CLASS}` });
+        findings.push({ unit: index, text: host, cls, rule: verdict.rule, path: verdict.path, note: `${verdict.rule}: ${verdict.why}, so \`${host}\` is also ${cls}` });
+      } else if (scope.optedIn && !(segment?.class.startsWith("files.delete.") ?? false)) {
+        // A row main already tightens to `files.delete.*` stays exactly as
+        // main has it (decision A is not built).
+        findings.push({ unit: index, text: host, cls: WRITE_OUT_OF_SCOPE_CLASS, rule: WRITE_OUT_OF_SCOPE_RULE, path: verdict.path, note: `${WRITE_OUT_OF_SCOPE_RULE}: \`${host}\` lands at ${verdict.path}, outside every write root (${scope.roots.join(", ")}), so it is also ${WRITE_OUT_OF_SCOPE_CLASS}` });
       }
     }
 
-    const resolvedClasses = resolvedWordClasses(shape, index);
-    for (const found of resolvedClasses) {
-      // A class the segment already carries needs no second entry.
-      if (result.segments.some((each) => each.text === shape.text && each.class === found.cls)) continue;
+    for (const found of resolvedWordClasses(shape, index)) {
+      // A class the command already carries changes no answer: no second entry.
+      if (result.classes.includes(found.cls)) continue;
       findings.push({
-        text: shape.text,
+        unit: index,
+        text: host,
         cls: found.cls,
         rule: found.rule,
         path: found.path,
-        note: `${found.rule}: a word of \`${shape.text}\` resolves to ${found.path}, which is ${found.cls} as a plain spelling, so the segment is also ${found.cls}`,
+        note: `${found.rule}: a word of \`${host}\` resolves to ${found.path}, which is ${found.cls} as a plain spelling, so the segment is also ${found.cls}`,
       });
-    }
-    // Decision A is judged here, from the directories this segment runs in,
-    // and never for a segment a resolved word already gave a class of its own.
-    if (scope.optedIn && segment !== undefined && segment.class === OUT_OF_SCOPE_WRITE_CLASS && DECISION_A_WRITE_RULES_BY_LANDING.includes(segment.rule)) {
-      aVerdicts.set(index, resolvedClasses.length > 0 ? null : decisionALanding(shape, segment, judgeWord, index, cwds));
     }
 
     // What this segment changes is in place before the next one runs.
@@ -4798,46 +4875,20 @@ export function refineWriteLandings(
     }
   }
 
-  if (findings.length === 0 && !(scope.optedIn && DECISION_A_WRITE_RULES_BY_LANDING.length > 0)) {
-    return { result, notes: [] };
-  }
+  if (findings.length === 0) return { result, notes: [] };
 
   const notes: string[] = [];
-  let segments = result.segments;
-  // Decision A, for a policy that opts in: a write the classifier or the
-  // APRV-402 pass answered `files.delete.out_of_scope` is decided by where it
-  // lands. Each such segment takes the class its landing earns.
-  if (scope.optedIn) {
-    segments = segments.map((segment, at) => {
-      if (segment.class !== OUT_OF_SCOPE_WRITE_CLASS || !DECISION_A_WRITE_RULES_BY_LANDING.includes(segment.rule)) return segment;
-      const index = shapes.length === result.segments.length ? at : shapes.findIndex((shape) => shape.text === segment.text);
-      const verdict = aVerdicts.get(index) ?? null;
-      // No verdict is no evidence: the segment keeps its class. A guarded
-      // verdict keeps it too, and the guarded entry is added beside it.
-      if (verdict === null || verdict.kind === "guarded") return segment;
-      if (verdict.kind === "out") {
-        notes.push(`decision A: \`${segment.text}\` (${segment.rule}) lands at ${verdict.path}, outside every write root, so it is ${WRITE_OUT_OF_SCOPE_CLASS} rather than ${OUT_OF_SCOPE_WRITE_CLASS}`);
-        return { ...segment, class: WRITE_OUT_OF_SCOPE_CLASS, rule: WRITE_OUT_OF_SCOPE_LANDED_RULE, path: verdict.path };
-      }
-      notes.push(`decision A: \`${segment.text}\` (${segment.rule}) lands inside a write root, so it is files.write.workspace rather than ${OUT_OF_SCOPE_WRITE_CLASS}`);
-      return { ...segment, class: "files.write.workspace", rule: WRITE_IN_SCOPE_RULE };
-    });
-  }
   const appended: ClassifiedSegment[] = [];
+  const seen = new Set<string>();
   for (const finding of findings) {
-    // Under decision A the segment itself already carries the out-of-scope class.
-    if (
-      finding.cls === WRITE_OUT_OF_SCOPE_CLASS &&
-      segments.some((segment) => segment.text === finding.text && segment.class === WRITE_OUT_OF_SCOPE_CLASS)
-    ) {
-      continue;
-    }
-    if (appended.some((each) => each.text === finding.text && each.class === finding.cls)) continue;
+    // One entry per class per line-level segment, keyed by position.
+    const key = `${String((units[finding.unit] as Unit).hostIndex)}\0${finding.cls}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     appended.push({ text: finding.text, class: finding.cls, rule: finding.rule, path: finding.path });
     notes.push(finding.note);
   }
-  if (appended.length === 0 && segments === result.segments) return { result, notes: [] };
-  const all = [...segments, ...appended];
+  const all = [...result.segments, ...appended];
   const classes: string[] = [];
   for (const segment of all) if (!classes.includes(segment.class)) classes.push(segment.class);
   return { result: { ok: true, segments: all, classes }, notes };
@@ -5196,9 +5247,9 @@ export function classifyForHook(
   // APRV-522. Last, and it only ever adds: every path a segment reads, judged
   // where the disk lands it, against the same credential rule the text was.
   const credentialed = refineCredentialReads(scripted.result, command, [cwd, ...credentialCwds]);
-  // Design v4. Last of all, and it only ever adds an entry beside a segment
-  // (decision A aside, for a policy that opts in): every write judged where
-  // it lands, from the hook's directory and the envelope's.
+  // Design v4. Last of all, and it only ever adds an entry beside a segment:
+  // every write judged where it lands, from the hook's directory and the
+  // envelope's.
   const landed = refineWriteLandings(credentialed.result, command, [cwd, ...credentialCwds], writeScope, process.env, protectedPaths);
   return {
     result: landed.result,

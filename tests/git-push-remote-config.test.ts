@@ -655,7 +655,9 @@ test("review: a mirror appended to ~/.gitconfig on the same line is refused, and
     const result = classifyForHook(command, [], fixture.clone).result;
     assert.equal(result.ok, true);
     if (!result.ok) return;
-    assert.deepEqual(result.classes, ["vcs.history.rewrite"]);
+    // Design v4: ~/.gitconfig is on the guarded list, so the write is also
+    // files.write.guarded (whose minimum is manual).
+    assert.deepEqual(result.classes, ["vcs.history.rewrite", "files.write.guarded"]);
     assert.equal(result.segments[0]?.rule, "git-config-file-write");
     const before = refsOf(fixture.remote);
     assert.equal(sh(fixture.clone, command).status, 0);

@@ -66,6 +66,8 @@ function hook(command: string, cwd: string): string[] {
 }
 
 const DIR_WRITE = "vcs.history.rewrite git-dir-write";
+/** Design v4, decision B: a write target the hook cannot resolve is also files.write.guarded. */
+const UNREADABLE = "files.write.guarded write-unreadable";
 const READ_SHELL = "read.shell read-shell";
 
 let cases = 0;
@@ -204,7 +206,9 @@ test("B review: a sed name is judged both as literal text and as a shell word; e
   assert.deepEqual(hook("sed -n 'w .gi?/config' x", repo), [DIR_WRITE]);
   // As literal text: a directory literally named `l$x`, linked to .git.
   symlinkSync(".git", join(repo, "l$x"));
-  assert.deepEqual(hook("sed -n 'w l$x/config' x", repo), [DIR_WRITE]);
+  // Design v4: the sed name `l$x/config` is also read as a shell word whose
+  // `$x` the line never sets, so it is also unreadable (decision B).
+  assert.deepEqual(hook("sed -n 'w l$x/config' x", repo), [DIR_WRITE, UNREADABLE]);
   // The tag is the sed name's, not its text's: a redirection spelled the same
   // is a shell pattern, a hit when .git matches it ...
   assert.deepEqual(hook("sed -n 'w .g*t/x' f > .g*t/x", repo), [DIR_WRITE]);
