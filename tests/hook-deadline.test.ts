@@ -19,11 +19,11 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { after, test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   canonicalPath,
@@ -43,6 +43,8 @@ import {
   READ_FREE_MS,
   waitAfterRead,
 } from "../src/cli/hook.js";
+import { commandGate } from "../src/cli/gate-window.js";
+import type { Prompter, SecretRead } from "../src/cli/prompt.js";
 import { readVerifiedRecords } from "../src/core/state.js";
 import { runUnderDeadline } from "../src/core/deadline.js";
 
@@ -554,6 +556,138 @@ function decideHere(dir: string, command: string): HarnessVerdict {
     windowRecords: null,
   });
 }
+
+// ---------------------------------------------------------------------------
+// 4. The ceiling reaches the read on every path: a window open, a remainder
+// ---------------------------------------------------------------------------
+
+/** Open a window in `dir`, as a human at a terminal does (`approval gate open`). */
+function openWindow(dir: string): void {
+  const prompter: Prompter = {
+    readLine: () => "understood",
+    readSecret(): SecretRead {
+      throw new Error("gate open asks for no secret");
+    },
+    confirm(): boolean {
+      throw new Error("gate open asks for no confirmation");
+    },
+  };
+  let err = "";
+  const code = commandGate(
+    ["open", "--for", "5m", "--reason", "the deadline test", "--as", "human:alice"],
+    {
+      out: () => undefined,
+      err: (text) => {
+        err += text;
+      },
+    },
+    dir,
+    { prompter },
+  );
+  assert.equal(code, 0, err);
+}
+
+/** A Bash event for `command`, written to a file: a megabyte goes to a child from a file, not through a pipe. */
+function eventFile(dir: string, command: string): string {
+  labs += 1;
+  const file = join(scratch, `event-${String(labs)}.json`);
+  writeFileSync(
+    file,
+    JSON.stringify({
+      hook_event_name: "PreToolUse",
+      session_id: "deadline",
+      tool_use_id: `deadline-${String(labs)}`,
+      cwd: dir,
+      transcript_path: "/dev/null",
+      tool_name: "Bash",
+      tool_input: { command },
+    }),
+  );
+  return file;
+}
+
+/** Linear, and slow by its size alone: 720 KB of path words is seconds to read on any machine. */
+const SLOW_BY_SIZE = `cat ${"notes/a.txt ".repeat(60_000)}`;
+
+test("a stated ceiling sets the read's deadline with a window open as with it closed", { skip }, () => {
+  // Review of ab74cfbb (codex, CLAIMS L62004): the open-window path read the
+  // call under the default 15 s whatever `--harness-cap` said. Under a 2 s
+  // ceiling the read has 500 ms. The line takes seconds, so each path must
+  // refuse it at 500 ms; a path that has 15 s reads it and answers otherwise.
+  const dir = lab();
+  const ask = (command: string): { permission: string; reason: string } => {
+    const stdin = openSync(eventFile(dir, command), "r");
+    try {
+      const ran = spawnSync(
+        process.execPath,
+        [CLI_ENTRY, "hook", "claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "100ms", "--harness-cap", "2s"],
+        { cwd: dir, encoding: "utf8", env: { ...process.env }, stdio: [stdin, "pipe", "pipe"], timeout: 60_000 },
+      );
+      assert.equal(ran.error, undefined, String(ran.error));
+      assert.equal(ran.status, 0, ran.stderr);
+      const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+      return { permission: output.permissionDecision, reason: output.permissionDecisionReason };
+    } finally {
+      closeSync(stdin);
+    }
+  };
+  const closed = ask(SLOW_BY_SIZE);
+  assert.equal(closed.permission, "deny", closed.reason);
+  assert.match(closed.reason, /^hook-deadline: this hook could not read the Bash call within its own 500ms limit/u);
+  assert.equal(ask("cat notes/a.txt").permission, "allow");
+
+  openWindow(dir);
+  const open = ask(SLOW_BY_SIZE);
+  assert.equal(open.permission, "deny", open.reason);
+  assert.match(open.reason, /^hook-deadline: this hook could not read the Bash call within its own 500ms limit/u);
+  // The window is open and does its work for a call the hook can read.
+  assert.equal(ask("cat notes/a.txt").permission, "allow");
+});
+
+test("what an embedding caller has left of the ceiling sets the read's deadline, with a window open as with it closed", { skip }, () => {
+  // `approval serve` charges a call for the time it spent in line and hands
+  // the hook the remainder (`HookWaitSeam.remainingCapMs`). 2 s left of a
+  // stated 10 s is a 500 ms read, not the 8 s the stated ceiling alone gives.
+  // In a child process: a read stopped at its deadline latches the process.
+  const dir = lab();
+  const script = join(scratch, `remainder-${String(labs)}.mjs`);
+  writeFileSync(
+    script,
+    [
+      'import { readFileSync } from "node:fs";',
+      `import { commandHook } from ${JSON.stringify(pathToFileURL(join(dirname(CLI_ENTRY), "hook.js")).href)};`,
+      "const [dir, event] = process.argv.slice(2);",
+      'let out = "";',
+      'let err = "";',
+      "const code = commandHook(",
+      '  ["claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "100ms", "--harness-cap", "10s"],',
+      "  { out: (text) => { out += text; }, err: (text) => { err += text; } },",
+      "  dir,",
+      '  () => readFileSync(event, "utf8"),',
+      "  { enterWait: () => undefined, leaveWait: () => undefined, remainingCapMs: 2000 },",
+      ");",
+      "process.stdout.write(JSON.stringify({ code, out, err }));",
+      "",
+    ].join("\n"),
+  );
+  const ask = (command: string): { permission: string; reason: string } => {
+    const ran = spawnSync(process.execPath, [script, dir, eventFile(dir, command)], { cwd: dir, encoding: "utf8", env: { ...process.env }, timeout: 60_000 });
+    assert.equal(ran.error, undefined, String(ran.error));
+    assert.equal(ran.status, 0, ran.stderr);
+    const said = JSON.parse(ran.stdout) as { code: number; out: string; err: string };
+    assert.equal(said.code, 0, said.err);
+    const output = (JSON.parse(said.out) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+    return { permission: output.permissionDecision, reason: output.permissionDecisionReason };
+  };
+  const closed = ask(SLOW_BY_SIZE);
+  assert.equal(closed.permission, "deny", closed.reason);
+  assert.match(closed.reason, /^hook-deadline: .* within its own 500ms limit/u);
+  openWindow(dir);
+  const open = ask(SLOW_BY_SIZE);
+  assert.equal(open.permission, "deny", open.reason);
+  assert.match(open.reason, /^hook-deadline: .* within its own 500ms limit/u);
+  assert.equal(ask("cat notes/a.txt").permission, "allow");
+});
 
 test("a read slower than a second shortens the wait by the rest; an ordinary read leaves it whole", () => {
   assert.equal(READ_FREE_MS, 1_000);

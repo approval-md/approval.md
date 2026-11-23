@@ -7150,6 +7150,8 @@ function abstainedEarlier(
   const load = loadPolicyText(read.path, read.bytes.toString("utf8"));
   if (!load.ok || load.policy.defaults?.unclassified_command !== "abstain") return false;
   const described = describeToolCall(
+    // A report after the tool has run: no call waits on this read, so no
+    // harness ceiling shortens its deadline.
     describeDeadlineMs(),
     input,
     adapter,
@@ -9574,6 +9576,15 @@ function* runBypass(
    * shape.
    */
   decidedOn: { records: EventRecord[]; head: { seq: number; hash: string } | null } | null,
+  /**
+   * The harness ceiling this call runs under, as `commandHook` worked it out:
+   * the stated or assumed cap, less what an embedding caller already spent in
+   * line. The read's deadline follows it here as on the closed path. A window
+   * suspends the policy, not the clock: the hook must still answer before the
+   * harness stops listening (review of ab74cfbb: this path took the default
+   * 15 s whatever the ceiling was).
+   */
+  harnessCapMs: number | null,
 ): GateSteps<number> {
   const codexCommand =
     adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
@@ -9589,7 +9600,7 @@ function* runBypass(
     : `the policy did not load (${load.code}: ${load.message}), so no protected path beyond the built-ins was known here and no class could be resolved to human-only`;
 
   const described = describeToolCall(
-    describeDeadlineMs(),
+    describeDeadlineMs(harnessCapMs),
     input,
     adapter,
     protectedPaths,
@@ -10156,6 +10167,7 @@ function* runHarnessHook(
       // bypass record is appended against the head they ended at, so the
       // verdict and the record are one read of the log.
       looked.records === null ? null : { records: looked.records, head: looked.head },
+      harnessCapMs,
     );
   }
 
