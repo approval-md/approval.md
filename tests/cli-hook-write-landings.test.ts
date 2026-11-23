@@ -751,6 +751,31 @@ test("checks the A/B/C change had dropped are back (review of 2b91ad45)", () => 
   assert.ok(see("node x.js $(cat f)").classes.includes(GUARDED));
 });
 
+test("rule A fails closed for a tree copier; find's writes are read whatever rule main gave (review of dbb980b7)", () => {
+  for (const command of ['rsync -a src/ "$DEST"', 'scp -r a "$H":x "$LOCAL"', "install -D a $X/b", 'rsync -a "$SRC"/ out/']) {
+    const seen = see(command);
+    if (!seen.ok) continue; // refused upstream (install): stricter still
+    assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+  // A program that writes no tree: an unreadable word is not a target.
+  assert.ok(!see('gh pr view "$N"').classes.includes(GUARDED));
+  for (const command of ["find . -delete -fprint ~/.zshrc", "find . -name x -fls ~/.ssh/k -delete"]) {
+    assert.ok(see(command).classes.includes(GUARDED), command);
+  }
+  // Main answers this line with its delete row (files.delete.out_of_scope):
+  // a delete row takes no out-of-scope entry beside it (decision A is not
+  // built), but its write primary is read, so a listed one is guarded.
+  assert.deepEqual(see("find . -name x -fls ../out -delete", optedIn()).segments, [[DELETE_OUT, "find-delete"]]);
+  // The main row stays exactly as main gave it.
+  assert.equal(see("find . -name x -fls ../out -delete").segments[0]?.[1], "find-delete");
+  // A guarded landing does not hide an out-of-scope one on the same segment.
+  const both = see("echo x > ~/.zshrc 2> ../x", optedIn());
+  assert.ok(both.classes.includes(GUARDED) && both.classes.includes(OUT), JSON.stringify(both.segments));
+  // A word after `--` is an operand.
+  mkdirSync(join(home, ".ssh"), { recursive: true });
+  assert.ok(see("cd ~/.ssh && touch -- -x").classes.includes(GUARDED));
+});
+
 test("what the pass cannot read at all fails to guarded, never to nothing", () => {
   // The classifier refuses these lines upstream; called on its own, the pass
   // still adds the guarded class rather than nothing.

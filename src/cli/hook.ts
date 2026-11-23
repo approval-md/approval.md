@@ -4804,7 +4804,10 @@ export function refineWriteLandings(
     const changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[] = shape.writes.map((word) => ({ word, kind: "write" as const }));
     const bin = shape.bin === null ? null : basename(shape.bin);
     if (bin === null) return { writes, intoDirs, trees, unreadable, changes };
-    const operands = shape.args.filter((arg) => !arg.startsWith("-") && arg.length > 0);
+    // Every word not spelled as a flag, and every word after `--` (`touch --
+    // -x` writes `-x`).
+    const ended = shape.args.indexOf("--");
+    const operands = shape.args.filter((arg, at) => arg.length > 0 && ((ended !== -1 && at > ended) || (!arg.startsWith("-") && arg !== "--")));
     if (LANDING_WRITE_EVERY.has(bin)) {
       writes.push(...operands);
       for (const word of operands) changes.push({ word, kind: bin === "mkdir" ? "mkdir" : "write" });
@@ -4873,8 +4876,12 @@ export function refineWriteLandings(
       const candidates = writeCandidates(shape.args);
       writes.push(...candidates);
       for (const word of candidates) changes.push({ word, kind: "link" });
-    } else if (bin === "find" && (segment === null || segment.rule === "find-write")) {
-      // Main's own table (FIND_WRITE_PRIMARIES): the word after each is a write.
+    } else if (bin === "find") {
+      // EVERY find segment, whatever rule main gave it (`find . -delete
+      // -fprint F` is main's delete row and still writes F): main's own table
+      // (FIND_WRITE_PRIMARIES), the word after each is a write. A delete's
+      // start points are what it may remove (point 7: no write entry).
+      if (segment !== null && segment.class.startsWith("files.delete")) for (const word of operands) changes.push({ word, kind: "remove" });
       for (const [at, arg] of shape.args.entries()) {
         const file = FIND_WRITE_PRIMARIES.includes(arg) ? shape.args[at + 1] : undefined;
         if (file === undefined) continue;
@@ -4991,71 +4998,86 @@ export function refineWriteLandings(
     }
     const segment = ownAnswer(shape);
     const { writes, intoDirs, trees, unreadable, changes } = targetsOf(shape, segment);
-    let verdict: WriteLanding | undefined =
+    // Both verdicts are kept (self-review of dbb980b7): a guarded landing does
+    // not hide an out-of-scope one on the same segment, so a policy that sets
+    // `files.write.out_of_scope` stricter than manual still decides. Judging
+    // stops early only once nothing more can be added.
+    let guarded: (WriteLanding & { kind: "guarded" }) | undefined =
       unreadable === null ? undefined : { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: shape.text.slice(0, 80), why: unreadable };
-    for (const word of verdict === undefined ? writes : []) {
-      verdict = stricter(verdict, judgeWord(word, index));
-      if (verdict.kind === "guarded") break;
+    let out: (WriteLanding & { kind: "out" }) | undefined;
+    const take = (judged: WriteLanding): void => {
+      if (judged.kind === "guarded") guarded ??= judged;
+      else if (judged.kind === "out") out ??= judged;
+    };
+    const settled = (): boolean => guarded !== undefined && (out !== undefined || !scope.optedIn);
+    for (const word of writes) {
+      if (settled()) break;
+      take(judgeWord(word, index));
     }
-    for (const word of verdict?.kind === "guarded" ? [] : trees) {
-      verdict = stricter(verdict, judgeWord(word, index, true));
-      if (verdict.kind === "guarded") break;
+    for (const word of trees) {
+      if (settled()) break;
+      take(judgeWord(word, index, true));
     }
     // Rule A: a segment main does not class as a workspace write or a read
     // (`network.call`, `deps.*`, `vcs.*`, `exec.*` ...) is not parsed. Every
     // word but the program's name, each `--opt=value`'s value and each tail
     // of a short cluster (`-oDIR` gives `DIR`), is judged as a tree root
     // against the list only: on it, inside it, or above a listed place.
-    // A delete (`rm`, `find -delete` ...) stays out, as point 7 rules.
+    // A delete (`rm`, `find -delete` ...) stays out, as point 7 rules. Only a
+    // guarded verdict counts here (the words are not known targets).
     const deletes = LANDING_DELETE_EVERY.has(bin ?? "") || (segment !== null && (segment.rule.startsWith("rm-") || segment.rule === "find-delete"));
-    if (verdict?.kind !== "guarded" && !deletes && (segment === null || (!segment.class.startsWith("read.") && segment.class !== WORKSPACE_WRITE))) {
-      // A program known to write trees keeps the whole tree test (a checkout
-      // on the disk included): it only adds cards.
-      const mode = TREE_PROGRAMS.has(bin ?? "") ? true : "listed";
+    if (guarded === undefined && !deletes && (segment === null || (!segment.class.startsWith("read.") && segment.class !== WORKSPACE_WRITE))) {
+      // The list test first, for every word. A program known to write trees
+      // then takes the whole tree test as an EXTRA (a checkout on the disk
+      // included), and fails closed there: an unreadable word of a tree
+      // copier (`rsync -a src/ "$DEST"`) is guarded too. So tree mode never
+      // yields less than list mode for the same word. For any other program an
+      // unreadable word names no write this hook knows of (see the hand-back).
+      const treeProgram = TREE_PROGRAMS.has(bin ?? "");
       for (const word of listWords(shape)) {
-        const judged = judgeWord(word, index, mode);
-        if (judged.kind === "guarded" && judged.rule === WRITE_GUARDED_RULE) {
-          verdict = judged;
+        const listed = judgeWord(word, index, "listed");
+        if (listed.kind === "guarded" && (listed.rule === WRITE_GUARDED_RULE || treeProgram)) {
+          guarded = listed;
+          break;
+        }
+        if (!treeProgram) continue;
+        const asTree = judgeWord(word, index, true);
+        if (asTree.kind === "guarded") {
+          guarded = asTree;
           break;
         }
       }
     }
     // A tree at the destination itself: contents copied there, or a
     // destination that is not an existing directory (it becomes the tree).
-    for (const { dir, tree, contents } of verdict?.kind === "guarded" ? [] : intoDirs) {
+    for (const { dir, tree, contents } of intoDirs) {
+      if (settled()) break;
       if (!tree || !(contents || !existingDirectory(dir, index))) continue;
-      verdict = stricter(verdict, judgeWord(dir, index, true));
-      if (verdict.kind === "guarded") break;
+      take(judgeWord(dir, index, true));
     }
     // A copy or move INTO a directory writes `<dir>/<source name>` too.
-    if (verdict?.kind !== "guarded") {
-      for (const { dir, sources, tree } of intoDirs) {
-        for (const source of sources) {
-          for (const name of intoNames(source, index)) {
-            if (name === null) {
-              verdict = { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: source, why: `${source}'s name cannot be read, so where it lands in ${dir} cannot be tested against the guarded list` };
-              break;
-            }
-            if (name.length === 0 || name === "." || name === "..") continue;
-            verdict = stricter(verdict, judgeWord(`${dir.replace(/\/+$/u, "")}/${name}`, index, tree));
-            if (verdict.kind === "guarded") break;
+    for (const { dir, sources, tree } of intoDirs) {
+      for (const source of sources) {
+        for (const name of settled() ? [] : intoNames(source, index)) {
+          if (name === null) {
+            guarded ??= { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: source, why: `${source}'s name cannot be read, so where it lands in ${dir} cannot be tested against the guarded list` };
+            continue;
           }
-          if (verdict?.kind === "guarded") break;
+          if (name.length === 0 || name === "." || name === "..") continue;
+          take(judgeWord(`${dir.replace(/\/+$/u, "")}/${name}`, index, tree));
         }
-        if (verdict?.kind === "guarded") break;
       }
     }
-    if (verdict !== undefined && verdict.kind !== "in") {
-      if (verdict.kind === "guarded") {
-        // Every write, whatever class main gave it: the guarded minimum is
-        // the one no policy setting may lift (point 5).
-        const cls = verdict.rule === WRITE_UNREADABLE_RULE ? DECISION_B_UNREADABLE_CLASS : WRITE_GUARDED_CLASS;
-        findings.push({ unit: index, text: host, cls, rule: verdict.rule, path: verdict.path, note: `${verdict.rule}: ${verdict.why}, so \`${host}\` is also ${cls}` });
-      } else if (scope.optedIn && !(segment?.class.startsWith("files.delete.") ?? false)) {
-        // A row main already tightens to `files.delete.*` stays exactly as
-        // main has it (decision A is not built).
-        findings.push({ unit: index, text: host, cls: WRITE_OUT_OF_SCOPE_CLASS, rule: WRITE_OUT_OF_SCOPE_RULE, path: verdict.path, note: `${WRITE_OUT_OF_SCOPE_RULE}: \`${host}\` lands at ${verdict.path}, outside every write root (${scope.roots.join(", ")}), so it is also ${WRITE_OUT_OF_SCOPE_CLASS}` });
-      }
+    if (guarded !== undefined) {
+      // Every write, whatever class main gave it: the guarded minimum is the
+      // one no policy setting may lift (point 5).
+      const cls = guarded.rule === WRITE_UNREADABLE_RULE ? DECISION_B_UNREADABLE_CLASS : WRITE_GUARDED_CLASS;
+      findings.push({ unit: index, text: host, cls, rule: guarded.rule, path: guarded.path, note: `${guarded.rule}: ${guarded.why}, so \`${host}\` is also ${cls}` });
+    }
+    if (out !== undefined && scope.optedIn && !(segment?.class.startsWith("files.delete.") ?? false)) {
+      // A row main already tightens to `files.delete.*` stays exactly as main
+      // has it (decision A is not built).
+      findings.push({ unit: index, text: host, cls: WRITE_OUT_OF_SCOPE_CLASS, rule: WRITE_OUT_OF_SCOPE_RULE, path: out.path, note: `${WRITE_OUT_OF_SCOPE_RULE}: \`${host}\` lands at ${out.path}, outside every write root (${scope.roots.join(", ")}), so it is also ${WRITE_OUT_OF_SCOPE_CLASS}` });
     }
 
     for (const found of resolvedWordClasses(shape, index)) {
