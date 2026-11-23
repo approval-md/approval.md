@@ -745,8 +745,9 @@ test("finding 1: a destination is normalised lexically before the organ test", (
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
   assert.ok(classesOf("cp -r src/ .github/w/..").includes("policy.edit"));
-  // `..` that leaves the organ is not the organ.
-  assert.ok(ORDINARY(withListing("cp -r src/ .claude/..", { "/w": ["src", "a.js"], "/w/src": ["a.js"] })));
+  // `..` that leaves the organ lands in the working directory: strict as a contents copy there.
+  assert.ok(withListing("cp -r src/ .claude/..", { "/w": ["src", "a.js"], "/w/src": ["a.js"] }).includes("policy.core"));
+  assert.ok(ORDINARY(withListing("cp -r src/ out/.claude/..", { "/w/out": ["a.js"] })));
 });
 
 test("finding 1: a CONTENTS copy into an ancestor of an organ directory is the organ write", () => {
@@ -786,9 +787,10 @@ test("finding 1: a CONTENTS copy into an ancestor of an organ directory is the o
   assert.ok(withListing("tar -xf a.tar -C out", {}).includes("policy.core"));
   assert.ok(withListing('tar -xf a.tar -C "$OUT"', { "/w": [] }).includes("policy.core"));
   assert.ok(classesOf('cp -r src/ "$OUT"').includes("policy.core"));
-  // A caller with no disk at all keeps the text's answer beyond the home and `..`.
-  assert.deepEqual(classesOf("tar -xf a.tar"), ["files.write.workspace"]);
+  // The working directory, the home and `..` by the text alone; other places are the hook's.
+  assert.ok(classesOf("tar -xf a.tar").includes("policy.core"));
   assert.ok(classesOf("tar -xf a.tar -C ~").includes("policy.core"));
+  assert.deepEqual(classesOf("tar -xf a.tar -C out"), ["files.write.workspace"]);
   // A source landing AS an organ directory is one.
   assert.ok(classesOf("cp -r evil/.claude .").includes("policy.core"));
   assert.ok(classesOf("mv evil/.github .").includes("policy.edit"));
@@ -904,31 +906,47 @@ test("e6b7bf97 (1): an implied destination (`ln -s TARGET`) and a single operand
   assert.ok(ORDINARY(classesOf("ln -s ../lib/util.js")));
 });
 
-test("e6b7bf97 (2): a contents copy's names come from its source; unknown names at the working directory are strict", () => {
-  const root = { "/w": ["src", ".claude", "a.js"] };
-  // The source listed and holding no guarded name: nothing guarded is created.
-  for (const command of ["cp -r src/ .", "cp -R src/. .", "rsync -a src/ .", "cp -rT src .", "mv -T src ."]) {
-    assert.ok(ORDINARY(withListing(command, { ...root, "/w/src": ["a.js", "lib"] })), command);
+test("e6b7bf97 (2) and the decision after it: a contents copy into the working directory or an ancestor is strict, whatever is listed", () => {
+  const root = { "/w": ["src", "a.js"] };
+  // No listing of the source or the destination relaxes it.
+  for (const command of [
+    "cp -r src/ .",
+    "cp -R src/. .",
+    "cp -a src/ ./",
+    "rsync -a src/ .",
+    "cp -rT src .",
+    "mv -T src .",
+    "tar -xf a.tar",
+    "tar -xzf a.tgz -C .",
+    "cp -r src/ /w",
+    "cp -r src/ ..",
+    "cp -r src/ ~",
+    "rsync -a src/ /",
+    // --parents, rsync -R / --relative / --files-from, and a /./ component.
+    "cp -r --parents a/b .",
+    "rsync -R a/b .",
+    "rsync -a --relative a/b .",
+    "rsync -a --files-from=list.txt src .",
+    "rsync -a src/./a/b .",
+  ]) {
+    assert.ok(withListing(command, { ...root, "/w/src": ["a.js"], "/w/a": ["b"] }).includes("policy.core"), `${command} -> ${withListing(command, { ...root, "/w/src": ["a.js"] }).join(",")}`);
   }
-  // A source holding an organ directory, the policy file or .git creates it.
-  assert.ok(withListing("cp -r src/ .", { ...root, "/w/src": [".claude"] }).includes("policy.core"));
-  assert.ok(withListing("cp -r src/ out", { "/w/src": [".Cursor"], "/w/out": [] }).includes("policy.core"));
-  assert.ok(withListing("rsync -a src/ out/", { "/w/src": ["APPROVAL.md"], "/w/out": [] }).includes("policy.core"));
-  assert.ok(withListing("cp -r src/ out", { "/w/src": [".github"], "/w/out": [] }).includes("policy.edit"));
-  assert.ok(withListing("cp -r src/ out", { "/w/src": [".git"], "/w/out": [] }).includes("vcs.history.rewrite"));
-  // Names unknown (an archive, an unlisted or unlistable source): strict at the
-  // working directory whatever it holds, and where the destination holds one.
-  for (const command of ["tar -xf a.tar", "tar -xzf a.tgz -C .", "cp -r src/ .", "rsync -a h:src/ ."]) {
-    assert.ok(withListing(command, { "/w": ["a.js"], "/w/src": "unreadable" }).includes("policy.core"), command);
-  }
-  assert.ok(withListing("cp -r src/ out", { "/w/out": [".claude"] }).includes("policy.core"));
-  // The source's listing is trusted only on a one-segment line: an earlier
-  // segment may write under it (review of the uncommitted fold, HIGH).
-  for (const command of ["touch src/.claude; cp -r src/. ./", "tar -xf a.tar -C src && cp -a src/ .", "true; cp -r src/ .", "ls && rsync -a src/ ."]) {
+  // The examples of the stale-source finding are strict too.
+  for (const command of ["touch src/.claude; cp -r src/. ./", "tar -xf a.tar -C src && cp -a src/ ."]) {
     assert.ok(withListing(command, { ...root, "/w/src": ["a.js"] }).includes("policy.core"), command);
   }
-  // A destination that is not there is not an empty listing.
+  // Elsewhere, by the destination: holding a guarded name, not there, or unlistable is strict.
+  assert.ok(withListing("cp -r src/ out", { "/w/out": [".claude"] }).includes("policy.core"));
+  assert.ok(withListing("cp -r src/ out", { "/w/out": ["APPROVAL.md"] }).includes("policy.core"));
+  assert.ok(withListing("cp -r src/ out", { "/w/out": [".git"] }).includes("vcs.history.rewrite"));
   assert.ok(withListing("tar -xf a.tar -C out", { "/w/out": "missing" }).includes("policy.core"));
+  assert.ok(withListing("tar -xf a.tar -C out", { "/w/out": "unreadable" }).includes("policy.core"));
+  assert.ok(ORDINARY(withListing("tar -xf a.tar -C out", { "/w/out": ["a.js"] })));
+  assert.ok(ORDINARY(withListing("rsync -a src/ out/", { "/w/out": [] })));
+  // Plain copies keep their class.
+  for (const command of ["cp x .", "cp -r src .", "mv a.txt ..", "rsync -a src dst", "cp -p a b"]) {
+    assert.ok(ORDINARY(withListing(command, root)), command);
+  }
   // tar options that rename members may land them anywhere.
   for (const command of [
     "tar -xf a.tar --strip-components=1 -C out",
@@ -953,6 +971,17 @@ test("e6b7bf97 (3): only a real `$` names a special parameter; a quoted or escap
   }
   // Where the line may set options, an escaped `$` before `#` leaves zsh's `#`.
   assert.ok(!ORDINARY(classesOf("GLOBIGNORE=x; echo x > \\$#APPROVAL.md")));
+  // Finding 1 on 8dca8d93: a `$` that expands no name (`$"…"`, `$\x`, a final
+  // `$`, `$'…'`) turns the masking off for the word; never looser than main.
+  for (const command of ['echo x > $"APPROVAL.md"', "echo x > $\\APPROVAL.md", "echo x > a$", "echo x > $'x'*"]) {
+    const result = classifyCommand(command, []);
+    assert.ok(result.ok, command);
+  }
+  for (const command of ["echo x > $'A'*$?", 'echo x > $"A"*$#']) {
+    assert.ok(!ORDINARY(classesOf(command)), command);
+  }
+  // Every `$` real: `$*` and `$?` are names, so no pattern.
+  assert.ok(ORDINARY(classesOf("echo x > a$*$?")));
 });
 
 test("e6b7bf97 (4): a directory that was not there is empty only to a glob on a one-segment line", () => {

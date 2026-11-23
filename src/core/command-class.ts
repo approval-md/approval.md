@@ -9018,13 +9018,6 @@ interface CopyPlan {
   sources: string[];
   anyName: string[];
   contents: string[];
-  /**
-   * The directories whose names a contents copy creates at the top of each
-   * `contents` destination (`src` for `cp -r src/ .`), or `null` when the names
-   * come from somewhere this classifier cannot list (an archive, a remote, an
-   * option it does not know): review of e6b7bf97, finding 2.
-   */
-  contentsFrom: string[] | null;
   /** The destination is implied (`ln -s target` links into `.`). */
   implicitDest?: boolean;
   files: string[];
@@ -9049,7 +9042,7 @@ function remoteOperand(word: string): boolean {
 }
 
 function copyPlan(basename: string, args: readonly string[]): CopyPlan | null {
-  const empty = (operands: string[]): CopyPlan => ({ dests: [], sources: [], anyName: [], contents: [], contentsFrom: null, files: [], anywhere: null, unknown: null, operands });
+  const empty = (operands: string[]): CopyPlan => ({ dests: [], sources: [], anyName: [], contents: [], files: [], anywhere: null, unknown: null, operands });
   if (basename === "tar") return tarPlan(args);
   if (UNTABLED_COPY_TOOLS.has(basename)) {
     const words = args.flatMap((arg) => {
@@ -9071,7 +9064,7 @@ function copyPlan(basename: string, args: readonly string[]): CopyPlan | null {
   const targets = parsed.values.filter((entry) => entry.name === "t" || entry.name === "target-directory").map((entry) => entry.value);
   if (parsed.unknown !== null) {
     const all = local([...operands, ...targets]);
-    return { dests: all, sources: [...operands], anyName: [...all], contents: [...all], contentsFrom: null, files: [], anywhere: null, unknown: parsed.unknown, operands };
+    return { dests: all, sources: [...operands], anyName: [...all], contents: [...all], files: [], anywhere: null, unknown: parsed.unknown, operands };
   }
   // rsync with one operand lists it; every tool needs a source and a destination.
   // Review of e6b7bf97 (1): `ln TARGET` links into the working directory,
@@ -9083,33 +9076,26 @@ function copyPlan(basename: string, args: readonly string[]): CopyPlan | null {
   const slashed = (source: string): boolean => source.endsWith("/") || /(?:^|\/)\.\.?$/u.test(source);
   const slashSource = sources.some(slashed);
   const plan: CopyPlan = { ...empty(operands), dests, sources, ...(implicit ? { implicitDest: true } : {}) };
-  // The directories a contents copy's top names come from: a slashed source,
-  // or every source under -T. A remote or globbed one cannot be listed.
-  const from = (all: boolean): string[] | null => {
-    const dirs = sources.filter((source) => all || slashed(source));
-    return dirs.some((source) => remoteOperand(source) || source.includes("$") || hasGlobConstruct(source)) ? null : dirs;
-  };
   if (basename === "cp") {
     const recursive = has("r", "R", "a", "recursive", "archive");
     const noTarget = has("T", "no-target-directory");
     if (recursive || noTarget || slashSource) plan.anyName = [...dests];
-    if ((recursive && slashSource) || noTarget) {
-      plan.contents = [...dests];
-      plan.contentsFrom = from(noTarget);
-    }
+    // `--parents` and a `/./` component land a source under its own path.
+    const parents = has("parents") || sources.some((source) => source.includes("/./"));
+    if ((recursive && slashSource) || noTarget || parents) plan.contents = [...dests];
+    if (parents) plan.anyName = [...dests];
   } else if (basename === "mv" || basename === "ln") {
     plan.anyName = [...dests];
-    if (basename === "mv" && has("T", "no-target-directory")) {
-      plan.contents = [...dests];
-      plan.contentsFrom = from(true);
-    }
+    if (basename === "mv" && has("T", "no-target-directory")) plan.contents = [...dests];
   } else if (basename === "rsync" || basename === "scp") {
     plan.anyName = [...dests];
     const globbedRemote = sources.some((source) => remoteOperand(source) && /[*?[]/u.test(source));
-    if (slashSource || globbedRemote) {
-      plan.contents = [...dests];
-      plan.contentsFrom = globbedRemote ? null : from(false);
-    }
+    // rsync's `-R`/`--relative` and `--files-from`, and a `/./` component,
+    // land each source under a path of its own.
+    const relative =
+      basename === "rsync" &&
+      (has("R", "relative", "files-from") || sources.some((source) => source.includes("/./")));
+    if (slashSource || globbedRemote || relative) plan.contents = [...dests];
     if (basename === "rsync") {
       // Directories rsync writes any name into; relative ones are relative to the destination.
       for (const entry of parsed.values) {
@@ -9136,7 +9122,7 @@ const TAR_ALL_VALUE_LETTERS = "bfgCFHIKLNTVX";
 function tarPlan(args: readonly string[]): CopyPlan {
   const letters = tarModeLetters(args);
   const extracting = letters.includes("x") || args.some((arg) => /^--(?:ex|ext|extr|extra|extrac|extract|get?)$/u.test(arg));
-  const plan: CopyPlan = { dests: [], sources: [], anyName: [], contents: [], contentsFrom: null, files: [], anywhere: null, unknown: null, operands: [] };
+  const plan: CopyPlan = { dests: [], sources: [], anyName: [], contents: [], files: [], anywhere: null, unknown: null, operands: [] };
   if (!extracting) return plan;
   const dirs: string[] = [];
   for (let at = 0; at < args.length; at += 1) {
@@ -9201,97 +9187,56 @@ function lexicalParts(path: string): { absolute: boolean; parts: string[] } {
 }
 
 /**
- * The class a CONTENTS copy into `dest` earns because `dest` holds, or may
- * hold, a guarded directory (finding 1, the ancestor rule): the home and every
- * ancestor of the home or of the working directory (`..`, `/`) hold the
- * harness directories by construction; any other directory is judged by the
- * caller's listing of it (an organ directory or a bare-guarded one listed
- * there), and with no listing it may: `policy.core`. A destination the shell
- * may still change (a variable, a substitution, a pattern) is unknown: strict.
- * A caller with no disk at all (the pure classifier's other callers) gets the
- * text-only part; the hook always passes one.
+ * The class a CONTENTS copy or extraction into `dest` earns (reviews of
+ * 039b840a and e6b7bf97; lead decision to stop the churn): its names come from
+ * its source (an archive, a tree, a file list), so where `dest` is an organ
+ * directory's ANCESTOR it may create or fill one. STRICT, with no listing of
+ * the source or the destination able to relax it: the working directory
+ * (`.`, `./`, a path that normalises to it), `..` above it, the home (`~`,
+ * `~user`), `/`, and, where the hook places them, every ancestor of the
+ * working directory or the home. Any other destination is an ancestor when the
+ * hook's listing of it holds an organ directory or another guarded name, and
+ * may be one when the hook cannot list or place it, or the shell may still
+ * change it; a caller with no disk keeps the text part.
  */
-function organAncestor(
-  dest: string,
-  contentsFrom: readonly string[] | null,
-  protectedPaths: readonly ProtectedPathEntry[],
-  glob: GlobReading,
-): { surface: string; path: string } | null {
+function organAncestor(dest: string, protectedPaths: readonly ProtectedPathEntry[], glob: GlobReading): { surface: string; path: string } | null {
   const strict = { surface: "policy.core", path: dest };
   const { absolute, parts } = lexicalParts(dest);
-  // By the text alone: the home (`~`, `~user`) and `/`, and `..` above the
-  // working directory, are ancestors of organ directories.
   if (!absolute && parts[0] !== undefined && parts[0].startsWith("~")) {
     if (parts[0] !== "~" || parts.length === 1) return strict;
   }
   if (absolute && parts.length === 0) return strict;
-  if (!absolute && parts.length > 0 && parts.every((part) => part === "..")) return strict;
-  // Anything else is a disk question, the hook's (as the git-dir and write-
-  // scope passes are): a caller with no disk keeps the text's answer.
+  if (!absolute && parts.length === 0) return strict;
+  if (!absolute && parts.every((part) => part === "..")) return strict;
   const disk = glob.disk;
   if (disk === undefined) return null;
   if (dest.includes("$") || dest.includes(SUBSTITUTION_SENTINEL) || (globLive(glob, dest) && hasGlobConstruct(dest))) return strict;
   const placed = (absolute ? "/" : "") + parts.join("/");
-  const shown = placed.length === 0 ? "." : placed;
-  // The destination as an absolute path, where the text places it.
   const cwd = disk.cwd.replace(/\/+$/u, "");
   const whole =
     absolute ? placed : parts[0] === "~" || disk.relativeOk === false || !cwd.startsWith("/") ? null : [cwd, ...parts].join("/") || "/";
   const home = disk.home?.replace(/\/+$/u, "") ?? null;
   if (whole !== null) {
     if (home !== null && home.startsWith("/") && (home === whole || home.startsWith(`${whole}/`))) return strict;
-    if (cwd.startsWith("/") && cwd.startsWith(`${whole === "/" ? "" : whole}/`)) return strict;
+    if (cwd.startsWith("/") && (cwd === whole || cwd.startsWith(`${whole === "/" ? "" : whole}/`))) return strict;
   }
-  if (disk.listingsOk === false) return strict;
-  const listingOf = (path: string): readonly string[] | undefined => {
-    const where = lexicalParts(path);
-    if (where.parts.some((part) => part === ".." )) return undefined;
-    const dir = globListingDir(where.absolute ? ["", ...where.parts] : where.parts, disk);
-    if (dir === null) return undefined;
-    disk.collect?.add(dir);
-    // A directory that is not there is never empty to a contents copy.
-    return diskListing(disk, dir, false);
-  };
-  /** The strictest class a name at the top of the destination takes. */
-  const classOf = (names: readonly string[]): string | null => {
-    let best: string | null = null;
-    for (const name of names) {
-      const organ = ORGAN_DIRECTORIES[name.toLowerCase()];
-      const git = name.toLowerCase() === ".git" ? "vcs.history.rewrite" : undefined;
-      const bare = protectedPathClass(`${shown}/${name}`, protectedPaths);
-      for (const surface of [organ, bare, git]) {
-        if (surface !== undefined && surface !== null && (best === null || protectedRank(surface) < protectedRank(best))) best = surface;
-      }
-    }
-    return best;
-  };
-  // Review of e6b7bf97 (2): the names a contents copy CREATES come from its
-  // source. Listed, on a line with no other segment, they decide (each lands
-  // at the destination's top).
-  // Trusted only on a one-segment line: an earlier segment may write under
-  // the source (`touch src/.claude; cp -r src/. ./`).
-  if (contentsFrom !== null && contentsFrom.length > 0 && disk.singleSegment === true) {
-    const created: string[] = [];
-    let known = true;
-    for (const source of contentsFrom) {
-      const names = listingOf(source);
-      if (names === undefined) known = false;
-      else created.push(...names);
-    }
-    if (known) {
-      const cls = classOf(created);
-      return cls === null ? null : { surface: cls, path: dest };
-    }
-  }
-  // Names unknown (an archive, an unlisted source): the working directory may
-  // be an organ directory's parent once they land, and so may any directory
-  // that already holds one, or that the hook could not list.
-  if (whole !== null && whole === cwd) return strict;
-  if (!absolute && parts.length === 0) return strict;
-  const held = listingOf(dest);
+  if (disk.listingsOk === false || parts.includes("..")) return strict;
+  const dir = globListingDir(absolute ? ["", ...parts] : parts, disk);
+  if (dir === null) return strict;
+  disk.collect?.add(dir);
+  // A directory that is not there is never an empty one to a contents copy.
+  const held = diskListing(disk, dir, false);
   if (held === undefined) return strict;
-  const cls = classOf(held);
-  return cls === null ? null : { surface: cls, path: dest };
+  let best: string | null = null;
+  for (const name of held) {
+    const organ = ORGAN_DIRECTORIES[name.toLowerCase()];
+    const git = name.toLowerCase() === ".git" ? "vcs.history.rewrite" : undefined;
+    const bare = protectedPathClass(`${placed}/${name}`, protectedPaths);
+    for (const surface of [organ, bare, git]) {
+      if (surface !== undefined && surface !== null && (best === null || protectedRank(surface) < protectedRank(best))) best = surface;
+    }
+  }
+  return best === null ? null : { surface: best, path: dest };
 }
 
 /**
@@ -9411,8 +9356,9 @@ function specialParametersOnly(raw: string): boolean {
     }
     if (ch === "$") {
       const next = raw[at + 1];
-      if (next === "'") return false;
-      if (next !== undefined && /[?#*@!$\-0-9]/u.test(next)) {
+      // `$'…'`, `$"…"`, `$\x`, a `$` at the end: not an expansion of a name.
+      if (next === undefined || !/[?#*@!$\-0-9A-Za-z_{(]/u.test(next)) return false;
+      if (/[?#*@!$\-0-9]/u.test(next)) {
         special = true;
         at += 1;
       }
@@ -11031,7 +10977,7 @@ function classifySegment(
       ...(landed?.plain ?? []).map((path) => organDestination(path, () => false, glob)),
       // A landing the shell may still glob (`ln -s ../evil/.git?ub`), as a pattern.
       ...(landed?.patterns ?? []).map((path) => organDestination(path, () => true, { options: glob.options, budget: glob.budget, off: glob.off })),
-      ...(plan?.contents ?? []).map((dest) => organAncestor(dest, plan?.contentsFrom ?? null, protectedPaths, glob)),
+      ...(plan?.contents ?? []).map((dest) => organAncestor(dest, protectedPaths, glob)),
       ...(plan?.files.length ? [strictestProtectedWrite(plan.files, protectedPaths, inexact, false, glob)] : []),
       ...(plan?.anywhere == null ? [] : [{ surface: "policy.core", path: plan.anywhere }]),
     ].reduce<{ surface: string; path: string } | null>(

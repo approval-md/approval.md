@@ -153,27 +153,19 @@ test("review of 6e3cbc9e: a relative pattern is placed only when the cwd is know
   assert.deepEqual(sure.segments.map((segment) => segment.class), ["files.delete.out_of_scope"]);
 });
 
-test("review of 039b840a and e6b7bf97 through the hook: a contents copy by its source's names, an extraction by where it lands", async () => {
-  const organ = project({ ".claude": ["settings.json"], src: ["a.js"], evil: ["x"], "evil/.claude": ["settings.json"] });
+test("reviews of 039b840a and e6b7bf97 through the hook: a contents copy into the working directory is strict; elsewhere by the destination", async () => {
   const plain = project({ src: ["a.js"], docs: ["README.md"], out: ["b.js"] });
-  // Names unknown (an archive) at the working directory: strict wherever.
-  for (const cwd of [organ, plain]) assert.ok((await hookClasses("tar -xf a.tar", cwd)).includes("policy.core"));
+  for (const command of ["tar -xf a.tar", "cp -r src/ .", "rsync -a src/ ."]) {
+    assert.ok((await hookClasses(command, plain)).includes("policy.core"), command);
+  }
   // Into a directory holding nothing guarded: main's class.
   assert.ok(!(await hookClasses("tar -xf a.tar -C out", plain)).includes("policy.core"));
-  // A listed source decides: src holds a.js, evil holds .claude.
-  for (const cwd of [organ, plain]) {
-    for (const command of ["cp -r src/ .", "rsync -a src/ ."]) {
-      const classes = await hookClasses(command, cwd);
-      assert.ok(!classes.includes("policy.core"), `${command}: ${classes.join(",")}`);
-    }
-  }
-  assert.ok((await hookClasses("cp -r evil/ .", organ)).includes("policy.core"));
-  assert.ok((await hookClasses("cp -r evil/ build/", organ)).includes("policy.core"));
-  // A destination that is not there yet, filled from a listed source.
-  assert.ok(!(await hookClasses("cp -r src/ build/", plain)).includes("policy.core"));
-  // A source holding the policy file creates it.
-  const policy = project({ src: ["APPROVAL.md"] });
-  assert.ok((await hookClasses("cp -r src/ out", policy)).includes("policy.core"));
+  assert.ok(!(await hookClasses("cp -r src/ out", plain)).includes("policy.core"));
+  // Into one holding the policy file or an organ directory, or not there yet: strict.
+  const held = project({ out: ["APPROVAL.md"], gen: [], "gen/.claude": ["settings.json"], src: ["a.js"] });
+  assert.ok((await hookClasses("cp -r src/ out", held)).includes("policy.core"));
+  assert.ok((await hookClasses("rsync -a src/ gen/", held)).includes("policy.core"));
+  assert.ok((await hookClasses("tar -xf a.tar -C build", held)).includes("policy.core"));
 });
 
 test("review of e6b7bf97 (4) through the hook: a missing directory is empty only on a one-segment line", async () => {

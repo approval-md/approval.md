@@ -109,14 +109,15 @@ option, case folded), and takes the strictest class among them.
   `..`, every `mv`, `ln`, `rsync`, `scp`, and `tar -x`'s directory) is judged
   as the organ directory it is (`.claude`, `.cursor`, `.grok`, `.muse`,
   `.github`), normalised lexically first (`.claude/x/..`, `./.claude/.`). A
-  CONTENTS copy (`cp -r src/ .`, `rsync -a src/ .`, `cp -T`, `mv -T`, `tar -x`)
-  creates its source's names at the destination's top: through the hook, a
-  source listed on a one-segment line decides (an organ directory, `.git`,
-  `.approval` or the policy file among them is that write). With names
-  unknown (an archive, an unlisted source, another segment on the line) it is
-  the organ write into the home, `/`, `..` above the working directory, the
-  working directory itself, and any directory holding a guarded name, not
-  there, or not listable. tar's `--strip-components`, `--transform`/`--xform`,
+  CONTENTS copy or extraction (`cp -r src/ .`, `cp -R src/. .`, `cp -T`,
+  `mv -T`, `cp --parents`, `rsync -a src/ .`, `rsync -R`/`--relative`/
+  `--files-from`, a `/./` source, `tar -x`) creates names that come from its
+  source, so into the working directory, `..` above it, the home, `/`, or any
+  ancestor of the working directory or the home it is STRICT, and no listing
+  of the source or the destination relaxes it. Elsewhere it is strict where
+  the hook's listing of the destination holds an organ directory, `.git`,
+  `.approval` or the policy file, or the destination is not there or not
+  listable. tar's `--strip-components`, `--transform`/`--xform`,
   `--one-top-level` and `-s` rename members: anywhere. A directory not there
   is empty only to a glob on a one-segment line.
   `cp`, `mv`, `ln`, `install`, `rsync` and `scp` are read by per-tool option
@@ -127,10 +128,10 @@ option, case folded), and takes the strictest class among them.
   bundle `tar xCf .claude a.tar`), and `-P`/`--absolute-names` may write
   anywhere. `unzip`, `ditto`, `cpio`, `pax`, `bsdtar`, `gtar` and `7z` have no
   rule and stay refused; an archive or copy tool with no table whose operand
-  names an organ directory is the organ write. Stricter than main through the
-  hook: `tar -xf a.tar` in the working directory (always), `cp -r src/ .` and
-  `rsync -a src/ .` when `src` holds a guarded name or cannot be listed, or
-  beside another segment; `cp -r .claude backup/`; `ln -s ../evil/.claude`.
+  names an organ directory is the organ write. Stricter than main: `tar -xf
+  a.tar`, `tar -xzf a.tgz -C .`, `cp -r src/ .`, `cp -R src/. .` and `rsync -a
+  src/ .` in any directory; `tar -x … -C build` where `build` is not there yet;
+  `cp -r .claude backup/`; `ln -s ../evil/.claude`.
 
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),
