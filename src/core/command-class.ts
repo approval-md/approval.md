@@ -5739,7 +5739,8 @@ const FIND_EXEC_PRIMARIES: readonly string[] = ["-exec", "-execdir", "-ok", "-ok
  * `find` primaries that write. `-delete` removes every match; `-fprint`,
  * `-fprintf` and `-fls` each create or truncate the file named after them.
  */
-const FIND_WRITE_PRIMARIES: readonly string[] = ["-fprint", "-fprintf", "-fls"];
+/** `find`'s primaries that write the file named by the next word (`-fprint0` too: GNU find's, and a write). */
+export const FIND_WRITE_PRIMARIES: readonly string[] = ["-fprint", "-fprint0", "-fprintf", "-fls"];
 
 /**
  * `find` walks and prints, until a primary makes it act (APRV-283).

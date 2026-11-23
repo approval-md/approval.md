@@ -576,8 +576,9 @@ test("a tree written where a guarded entry can sit under it is guarded; one writ
       assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
     }
   }
-  // A program's argv is judged against the list only, never the roots.
-  assert.ok(!see("npx prettier --write ../x.md", optedIn()).classes.includes(OUT));
+  // A program main classes as a write may write any word it is handed: each
+  // is a judged write, against the roots as well as the list.
+  assert.ok(see("npx prettier --write ../x.md", optedIn()).classes.includes(OUT));
   for (const command of ["npx prettier --write src", "make build", "cp -R dotfiles ~/", "cp -R dotfiles out/", "mv a.d b.d", "rsync -a dotfiles/ dist/", "tar -xf a.tar -C sub", "tar -xf a.tar", "cp dotfiles/x ~/", "ln -s a.d l"]) {
     const seen = see(command);
     assert.ok(!seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
@@ -641,6 +642,9 @@ test("a tree written at a checkout, at home, or above a listed place is guarded;
     "mkdir -p nd/.git && tar -xf a.tar -C nd",
     "touch nd2/.git && cp -r dotfiles/. nd2",
     "ln -s repo nd3 && tar -xf a.tar -C nd3",
+    // Rule A with the whole tree test for a program known to write trees.
+    "rsync -a dotfiles/ repo/",
+    "scp -r h:x repo",
     // A link laid UNDER the landing first: the copy's contents go through it.
     "ln -s ~/.ssh nd4/sub && cp -r dotfiles/. nd4",
   ]) {
@@ -655,9 +659,6 @@ test("a tree written at a checkout, at home, or above a listed place is guarded;
     "mkdir -p out && cp -r dotfiles/. out",
     "npx prettier --write sub",
     "scp -P 22 a h:/tmp",
-    // Rule A is the list only: a checkout is a disk check, not a listed place,
-    // so an rsync into one is not caught (named in the hand-back).
-    "rsync -a dotfiles/ repo/",
   ]) {
     const seen = see(command);
     assert.ok(!seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
@@ -725,6 +726,29 @@ test("one tar reader, no other option parser (review of 90b809fe)", () => {
   // A read is not a write: its words are not judged.
   assert.ok(!see("cat ~/.zshrc").classes.includes(GUARDED));
   assert.ok(!see("ls ~").classes.includes(GUARDED));
+});
+
+test("checks the A/B/C change had dropped are back (review of 2b91ad45)", () => {
+  // 1. A key=value operand's value: main refuses dd (the refusal stands), and
+  // under rule A and rule C the value is judged.
+  for (const command of ["dd if=a of=~/.ssh/authorized_keys", "dd if=a of=../x"]) assert.equal(see(command).ok, false, command);
+  assert.ok(see("make DESTDIR=/usr/local/bin install").classes.includes(GUARDED));
+  assert.ok(see("gh api repos/o/r -f path=~/.ssh/k").classes.includes(GUARDED));
+  assert.ok(see("make OUT=../x", optedIn()).classes.includes(OUT));
+  // 2. find's write primaries (main's own table) are judged writes.
+  for (const command of ["find . -fprint ~/.zshrc", "find . -name x -fprint0 ~/.zshrc", "find . -fls ~/.ssh/k", "find . -fprintf ~/.zshrc %p"]) {
+    assert.ok(see(command).classes.includes(GUARDED), command);
+  }
+  assert.ok(see("find . -name x -fprint ../out.txt", optedIn()).classes.includes(OUT));
+  assert.ok(!see("find . -name x -fprint out.txt").classes.includes(GUARDED));
+  // 3. A tree program under rule A keeps the checkout test (see the tree test).
+  assert.ok(see("rsync -a dotfiles/ repo/").classes.includes(GUARDED));
+  // 4. chown and chgrp with chmod: main refuses the first two (the refusal
+  // stands); chmod's operands are judged writes.
+  for (const command of ["chown me ~/.ssh/x", "chgrp g ~/.ssh/x"]) assert.equal(see(command).ok, false, command);
+  assert.ok(see("chmod 600 ~/.ssh/config").classes.includes(GUARDED));
+  // A program's word the hook cannot resolve is unreadable, as any write's is.
+  assert.ok(see("node x.js $(cat f)").classes.includes(GUARDED));
 });
 
 test("what the pass cannot read at all fails to guarded, never to nothing", () => {

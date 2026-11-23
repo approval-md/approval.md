@@ -103,6 +103,7 @@ import {
   commandSegmentShapes,
   copyTargetDirectories,
   fetchOutputs,
+  FIND_WRITE_PRIMARIES,
   gitWriteTargets,
   readWriteTargets,
   commandSegmentWords,
@@ -4352,6 +4353,30 @@ export function readTar(
   return { mode: [...modes][0] as "extract" | "create" | "list", directory: directories[0] ?? null };
 }
 
+/** The value half of a `key=value` operand (`dd of=FILE`), or `null`. */
+function operandValue(arg: string): string | null {
+  if (arg.startsWith("-")) return null;
+  const match = /^[A-Za-z_][A-Za-z0-9_.-]*=(.+)$/su.exec(arg);
+  return match === null ? null : (match[1] as string);
+}
+
+/** Main's write candidates, plus the value of each `key=value` operand. */
+function writeCandidatesWithValues(args: readonly string[]): string[] {
+  const out = writeCandidates(args);
+  for (const arg of args) {
+    const value = operandValue(arg);
+    if (value !== null && !out.includes(value)) out.push(value);
+  }
+  return out;
+}
+
+/**
+ * The programs known to write TREES that main does not class as a workspace
+ * write (rule A): their words are judged against the list with the whole tree
+ * test, the checkout on the disk included. A name, not a flag table.
+ */
+const TREE_PROGRAMS: ReadonlySet<string> = new Set(["rsync", "scp", "sftp", "install", "ditto", "unzip", "cpio", "pax", "7z", "7za", "7zz", "jar", "rclone"]);
+
 /**
  * Rule A's words: every word of the segment but the program's name, the value
  * half of each `--opt=value`, and each tail of a short cluster (`-oDIR` gives
@@ -4363,6 +4388,8 @@ function listWords(shape: CommandSegmentShape): string[] {
   for (const arg of shape.args) {
     if (arg.length === 0) continue;
     words.push(arg);
+    const value = operandValue(arg);
+    if (value !== null) words.push(value);
     if (arg.startsWith("--")) {
       const equals = arg.indexOf("=");
       if (equals !== -1 && equals + 1 < arg.length) words.push(arg.slice(equals + 1));
@@ -4766,7 +4793,6 @@ export function refineWriteLandings(
     writes: string[];
     intoDirs: IntoDir[];
     trees: string[];
-    guardOnly: string[];
     unreadable: string | null;
     changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[];
   } => {
@@ -4774,12 +4800,10 @@ export function refineWriteLandings(
     const intoDirs: IntoDir[] = [];
     /** Words a tree is written at (judged with {@link guardedEntryBelow} too). */
     const trees: string[] = [];
-    /** Words a program MAY write (its argv, over-included): judged against the list only. */
-    const guardOnly: string[] = [];
     let unreadable: string | null = null;
     const changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[] = shape.writes.map((word) => ({ word, kind: "write" as const }));
     const bin = shape.bin === null ? null : basename(shape.bin);
-    if (bin === null) return { writes, intoDirs, trees, guardOnly, unreadable, changes };
+    if (bin === null) return { writes, intoDirs, trees, unreadable, changes };
     const operands = shape.args.filter((arg) => !arg.startsWith("-") && arg.length > 0);
     if (LANDING_WRITE_EVERY.has(bin)) {
       writes.push(...operands);
@@ -4814,7 +4838,7 @@ export function refineWriteLandings(
         intoDirs.push({ dir: extra, sources, tree, contents });
       }
       if (bin === "mv") for (const source of sources) changes.push({ word: source, kind: "move" });
-    } else if (bin === "chmod" || (bin === "sed" && (segment === null || segment.rule === "sed-in-place"))) {
+    } else if (bin === "chmod" || bin === "chown" || bin === "chgrp" || (bin === "sed" && (segment === null || segment.rule === "sed-in-place"))) {
       // Every operand, the mode and the script included (over-included).
       writes.push(...operands);
       for (const word of operands) changes.push({ word, kind: "write" });
@@ -4849,15 +4873,25 @@ export function refineWriteLandings(
       const candidates = writeCandidates(shape.args);
       writes.push(...candidates);
       for (const word of candidates) changes.push({ word, kind: "link" });
+    } else if (bin === "find" && (segment === null || segment.rule === "find-write")) {
+      // Main's own table (FIND_WRITE_PRIMARIES): the word after each is a write.
+      for (const [at, arg] of shape.args.entries()) {
+        const file = FIND_WRITE_PRIMARIES.includes(arg) ? shape.args[at + 1] : undefined;
+        if (file === undefined) continue;
+        writes.push(file);
+        changes.push({ word: file, kind: "write" });
+      }
     } else if (segment !== null && segment.class.startsWith("files.")) {
       // A write or delete this pass does not model by name: each operand is a
-      // path it may change. A program that writes (`npx prettier --write`,
-      // `make`, a node script, `npm run`) names no target this hook can tell
-      // from what it reads: every word it is handed is judged against the
-      // guarded list, never against the roots.
+      // path it may change. A program main classes as a write (`npx prettier
+      // --write`, `make`, a node script, `npm run`) may write any word it is
+      // handed, and below it: each candidate (a `key=value` operand's value
+      // included) is a judged write and a tree root, against the roots and
+      // the list alike.
       for (const word of operands) changes.push({ word, kind: segment.class.startsWith("files.delete") ? "remove" : "write" });
-      // (A redirect's own class is the redirect's: its target is judged above.)
-      if (segment.class.startsWith("files.write.") && segment.rule !== "redirect-write") guardOnly.push(...writeCandidates(shape.args));
+      // Not a redirect's row: its class is the redirect's (judged above), and
+      // the binary's own words (`echo`'s, `cat`'s) are data, not targets.
+      if (segment.class.startsWith("files.write.") && segment.rule !== "redirect-write") trees.push(...writeCandidatesWithValues(shape.args));
     }
     // A reader that writes through one of its own words (`sort -o`, `uniq in
     // out`, sed's `w`) and git's own write words (`git clone URL DIR`).
@@ -4868,7 +4902,7 @@ export function refineWriteLandings(
     }
     // What git writes is a checkout: a tree.
     if (bin === "git") trees.push(...gitWriteTargets(shape.args).filter((word) => word.length > 0));
-    return { writes, intoDirs, trees, guardOnly, unreadable, changes };
+    return { writes, intoDirs, trees, unreadable, changes };
   };
 
   /**
@@ -4956,7 +4990,7 @@ export function refineWriteLandings(
       continue;
     }
     const segment = ownAnswer(shape);
-    const { writes, intoDirs, trees, guardOnly, unreadable, changes } = targetsOf(shape, segment);
+    const { writes, intoDirs, trees, unreadable, changes } = targetsOf(shape, segment);
     let verdict: WriteLanding | undefined =
       unreadable === null ? undefined : { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: shape.text.slice(0, 80), why: unreadable };
     for (const word of verdict === undefined ? writes : []) {
@@ -4967,13 +5001,6 @@ export function refineWriteLandings(
       verdict = stricter(verdict, judgeWord(word, index, true));
       if (verdict.kind === "guarded") break;
     }
-    // A program's word is not a known target: only a word ON the list counts
-    // (an unreadable one names no write this hook knows of).
-    for (const word of verdict?.kind === "guarded" ? [] : guardOnly) {
-      const judged = judgeWord(word, index, true);
-      if (judged.kind === "guarded" && judged.rule === WRITE_GUARDED_RULE) verdict = judged;
-      if (verdict?.kind === "guarded") break;
-    }
     // Rule A: a segment main does not class as a workspace write or a read
     // (`network.call`, `deps.*`, `vcs.*`, `exec.*` ...) is not parsed. Every
     // word but the program's name, each `--opt=value`'s value and each tail
@@ -4982,8 +5009,11 @@ export function refineWriteLandings(
     // A delete (`rm`, `find -delete` ...) stays out, as point 7 rules.
     const deletes = LANDING_DELETE_EVERY.has(bin ?? "") || (segment !== null && (segment.rule.startsWith("rm-") || segment.rule === "find-delete"));
     if (verdict?.kind !== "guarded" && !deletes && (segment === null || (!segment.class.startsWith("read.") && segment.class !== WORKSPACE_WRITE))) {
+      // A program known to write trees keeps the whole tree test (a checkout
+      // on the disk included): it only adds cards.
+      const mode = TREE_PROGRAMS.has(bin ?? "") ? true : "listed";
       for (const word of listWords(shape)) {
-        const judged = judgeWord(word, index, "listed");
+        const judged = judgeWord(word, index, mode);
         if (judged.kind === "guarded" && judged.rule === WRITE_GUARDED_RULE) {
           verdict = judged;
           break;
