@@ -4,6 +4,7 @@ import { lstatSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { protectedPathClass, type ProtectedPathEntry } from "./command-class.js";
+import { eachNameReading } from "./name-fold.js";
 
 export type ApplyPatchOperation =
   | { kind: "add"; path: string; lines: string[] }
@@ -263,14 +264,20 @@ export function classifyApplyPatch(
       return `${path} resolves outside the patch execution directory or through an unreadable ancestor`;
     }
     const resolvedRelative = relative(root, resolved).split(sep).join("/");
-    const targetClasses = [
-      protectedPathClass(path, protectedPaths),
-      protectedPathClass(absolute, protectedPaths),
-      protectedPathClass(resolvedRelative, protectedPaths),
-      protectedPathClass(resolved, protectedPaths),
-    ].filter((value): value is string => value !== null);
-    if (targetClasses.length === 0) targetClasses.push("files.write.workspace");
-    const unique = [...new Set(targetClasses)];
+    // In both name readings (`name-fold.ts`), every class of each judged.
+    const unique: string[] = [];
+    for (const reading of eachNameReading(() => {
+      const targetClasses = [
+        protectedPathClass(path, protectedPaths),
+        protectedPathClass(absolute, protectedPaths),
+        protectedPathClass(resolvedRelative, protectedPaths),
+        protectedPathClass(resolved, protectedPaths),
+      ].filter((value): value is string => value !== null);
+      if (targetClasses.length === 0) targetClasses.push("files.write.workspace");
+      return targetClasses;
+    })) {
+      for (const cls of reading) if (!unique.includes(cls)) unique.push(cls);
+    }
     for (const cls of unique) if (!classes.includes(cls)) classes.push(cls);
     targets.push({ role, path, absolute, resolved, classes: unique });
     return null;

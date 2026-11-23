@@ -88,7 +88,7 @@ import {
 import {
   isGateOrganPath,
   POLICY_EDIT_SUBCLASS,
-  protectedPathClass,
+  protectedPathClassReadings,
   type ProtectedPathEntry,
 } from "../core/command-class.js";
 import { VALUES_INFO_STRING, loadValues } from "../core/values.js";
@@ -3990,10 +3990,11 @@ function listSignableFiles(root: string, extra: readonly ProtectedPathEntry[]): 
       return;
     }
     if (!isFile) return;
-    const routed = protectedPathClass(relative, extra);
-    if (routed === "policy.edit" || (routed !== null && POLICY_EDIT_SUBCLASS.test(routed))) {
-      found.add(relative);
-    }
+    // In every name reading (`name-fold.ts`), as the verb requires.
+    const signable = protectedPathClassReadings(relative, extra).every(
+      (routed) => routed === "policy.edit" || (routed !== null && POLICY_EDIT_SUBCLASS.test(routed)),
+    );
+    if (signable) found.add(relative);
   };
   for (const dir of dirs) {
     let names: string[];
