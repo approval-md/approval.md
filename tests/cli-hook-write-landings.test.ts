@@ -435,9 +435,13 @@ test("a glob over a directory that cannot be read is guarded", { skip: process.g
   mkdirSync(join(locked, "inner"), { recursive: true });
   chmodSync(locked, 0o000);
   try {
-    const seen = see("chmod +x locked/*/x");
-    assert.ok(seen.classes.includes(GUARDED), seen.notes);
-    assert.match(seen.notes, /could not be read from the disk/u);
+    // The second line is a read to the classifier (`sort`), so the pattern rule
+    // leaves it alone and only the write word's own landing says so.
+    for (const command of ["chmod +x locked/*/x", "sort -o locked/*/x a"]) {
+      const seen = see(command);
+      assert.ok(seen.classes.includes(GUARDED), `${command}: ${seen.notes}`);
+      assert.match(seen.notes, /could not be read from the disk/u, command);
+    }
   } finally {
     chmodSync(locked, 0o755);
   }
