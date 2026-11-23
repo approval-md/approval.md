@@ -38,8 +38,13 @@ export function cpuSeconds(run: () => void): number {
  * What {@link calibrationWork} costs, in CPU seconds, on the runner the
  * bounds were set on: a GitHub-hosted runner under the node the full gate
  * uses. The factor is this runner's time over it.
+ *
+ * Measured, not chosen: the full gate's node 22 job logged 0.418 CPU s for it
+ * (this PR's first CI run), and a laptop 0.17 to 0.30. The reference sits a
+ * little above the measurement, so that runner keeps every bound exactly as
+ * written (factor 1) and only a runner that is really slower stretches one.
  */
-export const REFERENCE_SECONDS = 0.4;
+export const REFERENCE_SECONDS = 0.45;
 
 /** The most a runner may stretch a bound. */
 export const MOST = 4;
