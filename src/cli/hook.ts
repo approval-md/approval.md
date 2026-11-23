@@ -8412,10 +8412,12 @@ export interface GlobTest {
  * ({@link walkGlobPieces}): the same answer, in at most the name's length
  * times the pattern's. A run of stars is one star.
  *
- * `walkFrom` is the number of stars at which the pieces are walked. Tests
- * pass 0 to hold the walk against the expression on every pattern.
+ * `walkFrom` is the number of stars at which the pieces are walked, for
+ * tests: they pass 0 to hold the walk against the expression on every
+ * pattern. It can only lower {@link GLOB_WALK_STARS}; no caller can ask for
+ * a pattern of three stars to be handed to the matcher whole.
  */
-export function globRegex(component: string, walkFrom = 3): GlobTest {
+export function globRegex(component: string, walkFrom = GLOB_WALK_STARS): GlobTest {
   const pieces: GlobPiece[] = [{ source: "", length: 0, sticky: null }];
   let whole = "";
   let inBracket = false;
@@ -8448,7 +8450,7 @@ export function globRegex(component: string, walkFrom = 3): GlobTest {
   let anchored: RegExp;
   try {
     anchored = new RegExp(`^${whole}$`, "u");
-    if (pieces.length - 1 < walkFrom) return anchored;
+    if (pieces.length - 1 < Math.min(walkFrom, GLOB_WALK_STARS)) return anchored;
     // The whole expression compiled, so every piece of it does.
     for (const piece of pieces) if (piece.length > 0) piece.sticky = new RegExp(piece.source, "uy");
   } catch {
@@ -8456,6 +8458,9 @@ export function globRegex(component: string, walkFrom = 3): GlobTest {
   }
   return { test: (name) => walkGlobPieces(pieces, name) };
 }
+
+/** The number of stars from which {@link globRegex} walks the pieces. Two stars cost at most the square of a name's length. */
+const GLOB_WALK_STARS = 3;
 
 /** A stretch of a glob's expression between two stars: what it is, and how many characters of a name it matches. */
 interface GlobPiece {

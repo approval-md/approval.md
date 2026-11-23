@@ -258,6 +258,8 @@ test("stars with a letter between them cost the name's length times the pattern'
     assert.equal(globRegex(`${"*a".repeat(100)}*b`).test(`${long.slice(1)}b`), true);
     assert.equal(globRegex(`${"*a".repeat(255)}*`).test(long), true);
     assert.equal(globRegex(`${"*a".repeat(256)}*`).test(long), false);
+    // No caller can raise the number of stars at which the pieces are walked.
+    assert.equal(globRegex(`${"*a".repeat(20)}*b`, 99).test(long), false);
   });
   assert.ok(most < 2, `${most.toFixed(3)} CPU s`);
 });
