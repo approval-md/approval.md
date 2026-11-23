@@ -239,7 +239,8 @@ tool call holds:
 
 - **Reading the call has a deadline of its own: 15s**, or the harness ceiling
   less two seconds where one is stated or assumed and that is shorter (8s
-  under `--harness-cap 10s`). A call the hook cannot classify and land on the
+  under `--harness-cap 10s`; under a ceiling too short to spare two seconds, a
+  quarter of it: 500ms under 2s). A call the hook cannot classify and land on the
   disk in that time is refused `hook-deadline`, with nothing registered or
   requested. Reading an ordinary call takes milliseconds; a megabyte of
   command takes a second or two. The environment variable

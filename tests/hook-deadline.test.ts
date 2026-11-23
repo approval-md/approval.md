@@ -689,6 +689,61 @@ test("what an embedding caller has left of the ceiling sets the read's deadline,
   assert.equal(ask("cat notes/a.txt").permission, "allow");
 });
 
+test("through the real hook, a read of seconds is timed by the real clock, and the wait that follows is the shortened one", { skip }, () => {
+  // Review of ab74cfbb (review-b, CLAIMS L62017): the wait test below owns the
+  // clock, so nothing held the clock every real caller gets. With that clock
+  // stopped the read always "took" nothing, and a long read plus a whole wait
+  // outran the harness again. Here nothing is supplied: the real CLI, a call
+  // that waits for a human (the POST), and a read of seconds.
+  //
+  // The read must take more than the free second and less than the 15 s
+  // deadline on a machine of any speed, at any load. So the line is sized
+  // here, now: path words enough to take about two seconds in this process
+  // (the CLI, starting cold, takes longer). If the machine is so busy that
+  // even that meets the deadline, a third of it is tried once.
+  const dir = lab();
+  const line = (words: number): string => `curl -X POST https://example.com/api -d call=1; cat ${"notes/a.txt ".repeat(words)}`;
+  const millisecondsFor = (words: number): number => {
+    const began = performance.now();
+    classifyForHook(line(words), [], dir);
+    return performance.now() - began;
+  };
+  millisecondsFor(500);
+  const sample = millisecondsFor(4_000);
+  const sized = Math.min(80_000, Math.max(4_000, Math.round((4_000 * 2_000) / sample)));
+  let said: RegExpExecArray | null = null;
+  let reason = "";
+  let err = "";
+  for (const words of [sized, Math.max(1_500, Math.round(sized / 3))]) {
+    const stdin = openSync(eventFile(dir, line(words)), "r");
+    try {
+      const ran = spawnSync(
+        process.execPath,
+        [CLI_ENTRY, "hook", "claude-code", "--as", "agent:cc", "--timeout", "2s", "--interval", "100ms"],
+        { cwd: dir, encoding: "utf8", env: { ...process.env }, stdio: [stdin, "pipe", "pipe"], timeout: 90_000 },
+      );
+      assert.equal(ran.error, undefined, String(ran.error));
+      assert.equal(ran.status, 0, ran.stderr);
+      const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+      assert.equal(output.permissionDecision, "deny", output.permissionDecisionReason);
+      reason = output.permissionDecisionReason;
+      err = ran.stderr;
+    } finally {
+      closeSync(stdin);
+    }
+    if (reason.startsWith("hook-deadline: ")) continue;
+    said = /reading this call took (\d+)ms, so the wait for a decision is (\d+)ms of its 2000ms/u.exec(err);
+    break;
+  }
+  assert.match(reason, /^hook-timeout: /u, `${String(sized)} words (4,000 took ${sample.toFixed(0)} ms here): ${reason.slice(0, 200)}`);
+  assert.ok(said !== null, `no line about the read on stderr, so the read was not timed: ${err.slice(0, 400)}`);
+  const readMs = Number(said[1]);
+  const left = Number(said[2]);
+  assert.ok(readMs > READ_FREE_MS && readMs < DESCRIBE_DEADLINE_MS, `the read took ${String(readMs)} ms by the hook's clock`);
+  assert.equal(left, waitAfterRead(2_000, readMs));
+  assert.ok(left < 2_000);
+});
+
 test("a read slower than a second shortens the wait by the rest; an ordinary read leaves it whole", () => {
   assert.equal(READ_FREE_MS, 1_000);
   assert.equal(waitAfterRead(55_000, 0), 55_000);

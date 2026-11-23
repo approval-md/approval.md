@@ -283,7 +283,9 @@ else was on it.
   That 100 KB word now takes 0.2 seconds, and a megabyte under two.
 - **Reading a call has its own deadline: 15 seconds**, or the harness ceiling
   less two seconds where one is stated or assumed and that is shorter (Hermes's
-  30 second default leaves the whole 15). A call
+  30 second default leaves the whole 15; a ceiling too short to spare two
+  seconds gives a quarter of itself). With a gate window open the deadline is
+  the same one. A call
   the hook cannot read in that time is refused `hook-deadline`, with nothing
   registered or requested, while the hook can still say so. The deadline stops
   the hook's own work from outside it, so no input can outrun it; it does not
