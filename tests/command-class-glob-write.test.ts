@@ -546,3 +546,44 @@ test("listings: which directories the hook lists, and none it cannot place", () 
   // Unplaceable stays strict even with a listing for the lexical directory.
   assert.deepEqual(withListing("cd x && rm -rf dist/*", { "/w/dist": [] }).slice(-1), ["policy.core"]);
 });
+
+test("listings, review of 6e3cbc9e: another command on the line, and a line-local HOME, keep the strict answer", () => {
+  const empty = { "/w/dist": [] as string[], "/h/dist": [] as string[] };
+  // Something earlier (or beside) may create, move, link or extract the guarded name.
+  for (const command of [
+    "touch dist/APPROVAL.md; rm -rf dist/*",
+    "mv x dist/approval.md && chmod +x dist/*",
+    "cp x dist/APPROVAL.md; rm -rf dist/*",
+    "ln -s x dist/APPROVAL.md; rm -rf dist/*",
+    "git checkout -- x; rm -rf dist/*",
+    "tar -xf a.tar; rm -rf dist/*",
+    "echo x > dist/APPROVAL.md; rm -rf dist/*",
+    "mkdir -p dist; rm -rf dist/*",
+    "make & rm -rf dist/*",
+  ]) {
+    assert.ok(withListing(command, empty).includes("policy.core"), command);
+  }
+  // A substitution that writes is refused outright; a read-only one still drops the listing.
+  const substituted = classifyCommand("rm -rf dist/* $(touch dist/APPROVAL.md)", [], {
+    globDisk: { cwd: "/w", home: "/h", listings: new Map(Object.entries(empty)) },
+  });
+  assert.equal(substituted.ok, false);
+  assert.ok(withListing("rm -rf dist/* $(pwd)", empty).includes("policy.core"));
+  // Read-only company keeps the listing.
+  for (const command of ["ls; rm -rf dist/*", "pwd && rm -rf dist/*", "rm -rf dist/* | cat", "true; rm -rf dist/*"]) {
+    assert.ok(!withListing(command, empty).includes("policy.core"), command);
+  }
+  // HOME named anywhere on the line: a `~` prefix is not placed.
+  for (const command of [
+    "HOME=/tmp/x; rm -rf ~/dist/*",
+    "export HOME=/tmp/x; rm -rf ~/dist/*",
+    "read HOME; rm -rf ~/dist/*",
+    "unset HOME; rm -rf ~/dist/*",
+    "for HOME in /tmp; do rm -rf ~/dist/*; done",
+  ]) {
+    const result = classifyCommand(command, [], { globDisk: { cwd: "/w", home: "/h", listings: new Map(Object.entries(empty)) } });
+    assert.ok(!result.ok || result.classes.includes("policy.core"), command);
+  }
+  assert.deepEqual(withListing("rm -rf ~/dist/*", empty), ["files.delete.out_of_scope"]);
+  assert.ok(withListing("rm -rf ~root/dist/*", empty).includes("policy.core"));
+});

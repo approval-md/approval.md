@@ -8340,8 +8340,45 @@ export interface GlobDisk {
   cwd: string;
   home: string | null;
   listings: ReadonlyMap<string, readonly string[] | "unreadable">;
+  /** `false`: a relative prefix is not placed (the line may change directory, or the caller is not sure `cwd` is the shell's). */
   relativeOk?: boolean;
+  /** `false`: a `~` prefix is not placed (the line names `HOME`). */
+  homeOk?: boolean;
+  /** `false`: no listing is used (something else on the line may create, move, link or extract a file). */
+  listingsOk?: boolean;
   collect?: Set<string>;
+}
+
+/** Commands that create, move, link and extract nothing: the only company a listed pattern may keep on its line. */
+const LISTING_SAFE_COMPANIONS: readonly string[] = [
+  "ls", "cat", "echo", "true", "false", "pwd", "test", "[", "head", "tail", "wc", "grep", "date", "whoami",
+];
+
+/**
+ * May a listing made before the line runs stand for what the pattern will
+ * meet (review of 6e3cbc9e, M2)? Only on a line with no substitution, no
+ * heredoc body to expand and no subshell, where at most one segment is
+ * anything but a plain {@link LISTING_SAFE_COMPANIONS} command with no write
+ * redirection: `touch dist/APPROVAL.md; rm -rf dist/*` creates the name the
+ * listing never saw, and a pipeline or a background job runs beside it.
+ */
+function lineListingSafe(command: string, segments: readonly LexSegment[]): boolean {
+  if (/[`]|\$\(|<\(|>\(/u.test(command)) return false;
+  let others = 0;
+  for (const segment of segments) {
+    if (segment.subshell || segment.heredoc || segment.bodySubstitutions.length > 0 || segment.opaque !== null) return false;
+    if (segment.words.some((word) => word.substitutions.length > 0)) return false;
+    const head = segment.words.find((word) => !ASSIGNMENT.test(word.text));
+    const plain =
+      head !== undefined &&
+      head.exact &&
+      LISTING_SAFE_COMPANIONS.includes(head.text) &&
+      segment.words.every((word) => !ASSIGNMENT.test(word.text) || word === head) &&
+      segment.redirects.every((redirect) => redirect.op === "<");
+    if (!plain) others += 1;
+    if (others > 1) return false;
+  }
+  return true;
 }
 
 /**
@@ -8360,7 +8397,7 @@ function globListingDir(prefix: readonly string[], disk: GlobDisk): string | nul
     base = "";
     parts = rest(1);
   } else if (prefix[0] === "~") {
-    if (disk.home === null || !disk.home.startsWith("/")) return null;
+    if (disk.homeOk === false || disk.home === null || !disk.home.startsWith("/")) return null;
     base = strip(disk.home);
     parts = rest(1);
   } else if (prefix[0]?.startsWith("~") === true) {
@@ -8866,7 +8903,7 @@ function globGuardClass(
       if (segments.length > GLOB_GUARD_SEGMENTS_CAP) return "log.mutate";
       // The caller's listing of the directory a prefix names, or `undefined`.
       const listingFor = (prefix: readonly string[]): readonly string[] | undefined => {
-        if (disk === undefined) return undefined;
+        if (disk === undefined || disk.listingsOk === false) return undefined;
         const dir = globListingDir(prefix, disk);
         if (dir === null) return undefined;
         disk.collect?.add(dir);
@@ -10400,10 +10437,18 @@ export function classifyCommand(
   const lineSetsDotglob = context.lineSetsDotglob === true || lineMaySetDotglob(command);
   // GLOB-WRITE (L61167): a relative pattern is placed by the caller's cwd only
   // on a line that cannot move the shell first.
+  // Review of 6e3cbc9e: listings are used only on a line where nothing else
+  // can create, move, link or extract a file before or beside the pattern
+  // (M2), and a `~` prefix only on a line that names no `HOME` (M3).
   const globDisk =
     context.globDisk === undefined
       ? undefined
-      : { ...context.globDisk, relativeOk: context.globDisk.relativeOk !== false && !segmentsMayChangeDirectory(lexed.segments) };
+      : {
+          ...context.globDisk,
+          relativeOk: context.globDisk.relativeOk !== false && !segmentsMayChangeDirectory(lexed.segments),
+          homeOk: context.globDisk.homeOk !== false && !command.includes("HOME"),
+          listingsOk: context.globDisk.listingsOk !== false && lineListingSafe(command, lexed.segments),
+        };
   const diskField = globDisk === undefined ? {} : { globDisk };
   context = { ...context, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false };
   execContext = { ...execContext, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false };

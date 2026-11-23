@@ -136,3 +136,15 @@ test("the CLI route lists before it classifies (hook classify)", () => {
     assert.deepEqual(parsed.segments.map((segment) => segment.class), [want], files.join(","));
   }
 });
+
+test("review of 6e3cbc9e: a relative pattern is placed only when the cwd is known to be the shell's", async () => {
+  const cwd = project({ dist: ["a.js"] });
+  const listings = await listGlobWriteDirsFor("rm -rf dist/*", [cwd]);
+  // Another directory the command may start in (Claude Code's envelope cwd differing from the hook's).
+  const unsure = classifyForHook("rm -rf dist/*", [], cwd, [], false, [join(scratch, "elsewhere")], false, listings).result;
+  assert.ok(unsure.ok);
+  assert.deepEqual(unsure.segments.map((segment) => segment.class), ["policy.core"]);
+  const sure = classifyForHook("rm -rf dist/*", [], cwd, [], false, [], false, listings).result;
+  assert.ok(sure.ok);
+  assert.deepEqual(sure.segments.map((segment) => segment.class), ["files.delete.out_of_scope"]);
+});

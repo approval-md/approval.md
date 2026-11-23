@@ -4116,7 +4116,11 @@ export function classifyForHook(
 ): RefinedClassification {
   const roots = resolveScratchRoots(cwd);
   const classified = classifyCommand(command, protectedPaths, {
-    ...(globListings === null ? {} : { globDisk: globDiskFor(cwd, globListings) }),
+    // Review of 6e3cbc9e (H1): a relative pattern is placed against `cwd` only
+    // when no other directory may be the shell's (`credentialCwds` empty).
+    ...(globListings === null
+      ? {}
+      : { globDisk: { ...globDiskFor(cwd, globListings), relativeOk: credentialCwds.length === 0 } }),
     scratchRoots: roots,
     ...(readRoots.length === 0 ? {} : { readRoots }),
     ...(execCode ? { execCode: true } : {}),

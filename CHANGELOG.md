@@ -69,8 +69,13 @@ option, case folded), and takes the strictest class among them.
   A directory that cannot be listed in full, a prefix the text cannot place
   (`..`, a variable, `~user`, a line that changes directory), a deeper globbed
   component, and every caller without listings (the core itself, `approval
-  serve`, the codex bridge) keep the strict answer. A file created between
-  the listing and the run is not seen.
+  serve`, the codex bridge) keep the strict answer. So does a line where
+  anything else may create, move, link or extract a file (only a plain `ls`,
+  `cat`, `echo`, `pwd`, `true`, `test`, `head`, `tail`, `wc`, `grep`, `date`
+  or `whoami` may keep the pattern company; no substitution, subshell or
+  heredoc), a `~` prefix on a line that names `HOME`, and a relative prefix
+  when the shell may start in another directory than the one listed. A file
+  created by another process between the listing and the run is not seen.
 - **Stricter than before, without a listing:** a write pattern that COULD name a guarded file is
   human-only even when no such file exists. `APPROVAL.md` is guarded at any
   depth, so a pattern for a file straight inside a directory stays strict:
