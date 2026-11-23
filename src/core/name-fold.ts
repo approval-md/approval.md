@@ -160,10 +160,19 @@ export function foldNameExact(text: string): string {
 export function foldNameLower(text: string): string {
   if (spelledReading) return text.toLowerCase();
   const folded = foldFileName(text);
-  // The as-spelled answer lowers the placeholder and the folded one keeps
-  // it: the same word either way, so that alone is no divergence.
-  if (!readingsDiverged && folded !== text.toLowerCase().split(SENTINEL_LOWERED).join(SUBSTITUTION_SENTINEL)) {
-    readingsDiverged = true;
+  if (!readingsDiverged) {
+    const lowered = text.toLowerCase();
+    // The as-spelled answer lowers the placeholder and the folded one keeps
+    // it: the same word either way, so that alone is no divergence. The
+    // placeholder is looked for only when the two already differ: this runs
+    // once per name compared, and 400,000 plain words must not each pay for
+    // a split and a join.
+    if (
+      folded !== lowered &&
+      (!lowered.includes(SENTINEL_LOWERED) || folded !== lowered.split(SENTINEL_LOWERED).join(SUBSTITUTION_SENTINEL))
+    ) {
+      readingsDiverged = true;
+    }
   }
   return folded;
 }
