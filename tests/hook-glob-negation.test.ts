@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { classifyForHook, joinContinuations } from "../src/cli/hook.js";
+import { classifyForHook, joinContinuations, zshOptionCommandReading } from "../src/cli/hook.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-glob-negation-")));
@@ -644,23 +644,74 @@ test("security review of aec23242: no segment skips the zsh reading for its spel
 
 test("coordinator on aec23242: a zsh form with no slash names only what the directory it runs in holds", () => {
   // Under extendedglob `^import` matches the entries of the working
-  // directory, a hidden one only under globdots: beside `.approval` and
-  // `.env` none of these reads a credential (at aec23242 each was refused
-  // as account.credential, which main allowed).
-  for (const [command, plain] of [
-    ["grep -r ^import src", "grep -r import src"],
-    ["grep ^foo README.md", "grep foo README.md"],
-    ["grep -n ^# README.md", "grep -n x README.md"],
-    ["rg ^use src", "rg use src"],
-    ["git log ^main", "git log main"],
-  ] as const) {
-    assert.ok(!classes(command).includes("account.credential"), `${command}: ${classes(command).join(", ")}`);
-    assert.ok(!classes(plain).includes("account.credential"), plain);
+  // directory, hidden ones too under globdots (the lead's ruling L61497). In
+  // a directory that holds no guarded entry none of these reads a credential
+  // (at aec23242 each was refused as account.credential, which main allowed).
+  const plainDir = join(scratch, "no-guarded-entries");
+  mkdirSync(join(plainDir, "src"), { recursive: true });
+  writeFileSync(join(plainDir, "README.md"), "x\n", "utf8");
+  for (const command of ["grep -r ^import src", "grep ^foo README.md", "grep -n ^# README.md", "rg ^use src", "git log ^main"]) {
+    assert.ok(!classesIn(plainDir, command).includes("account.credential"), `${command}: ${classesIn(plainDir, command).join(", ")}`);
   }
-  // A pattern that opens with `.` names hidden entries, and a non-hidden
-  // guarded file in the directory is named too.
+  // Beside `.approval` they name it, and take main's answer for the name as
+  // written (`grep x .approval README.md` is account.credential on main).
+  assert.ok(classes("grep .approval README.md").includes("account.credential"));
+  assert.ok(classes("grep ^foo README.md").includes("account.credential"));
+  assert.ok(classes("grep -r ^import src").includes("account.credential"));
   assert.ok(classes("grep -r .^zz src").includes("account.credential"));
   assert.ok(classes("echo x > APPROV^1").includes("policy.core"));
   // Where the directory may move, the plain glob answers (strict).
   assert.ok(classes("cd src; grep -r ^import x").includes("account.credential"));
+});
+
+/** {@link classes} for a command run in `dir`, which holds no gate. */
+function classesIn(dir: string, command: string): string[] {
+  const saved = process.env["HOME"];
+  process.env["HOME"] = lab.home;
+  try {
+    const judged = classifyForHook(command, [], dir, [], false, [dir], false) as {
+      result: { ok: boolean; classes?: string[]; code?: string };
+    };
+    return judged.result.ok ? (judged.result.classes ?? []) : [`refused:${judged.result.code ?? "?"}`];
+  } finally {
+    if (saved === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = saved;
+  }
+}
+
+test("security review of c53565eb: a word is read as the entries it matches only where the directory and what it holds are proven", () => {
+  // 1: a change of directory in any spelling before the word. zsh expands
+  // `^zz` in the Hermes home, where it names auth.json and .env; at c53565eb
+  // the quoted and escaped `cd` kept the listing of the start directory and
+  // each line was allowed.
+  for (const command of ["'c'd ~/.hermes; cat ^zz", "\\cd ~/.hermes; cat ^zz", "c\\d ~/.hermes; cat ^zz"]) {
+    for (const at of [lab, abstainLab]) assert.match(claude(command, at), /^deny: .*account\.credential/u, command);
+  }
+  // 2: hidden entries count (globdots may be set): at c53565eb `^zz` named
+  // no hidden entry, so a recursive read of it missed `.approval/env`.
+  for (const at of [lab, abstainLab]) assert.match(claude("grep -r ^zz README.md", at), /^deny: .*account\.credential/u);
+  // 3: every word is every entry it matches, as zsh passes it. At c53565eb
+  // the second `^zz` stood as its first match alone, so the copy's last
+  // word, its target, was `0.txt`; zsh's is APPROVAL.md.
+  const two = join(scratch, "two-entries");
+  mkdirSync(two, { recursive: true });
+  for (const name of ["0.txt", "APPROVAL.md"]) writeFileSync(join(two, name), "x\n", "utf8");
+  assert.equal(zshOptionCommandReading("cp ^zz ^zz", [two]), "cp '0.txt' 'APPROVAL.md' '0.txt' 'APPROVAL.md'");
+  assert.ok(classesIn(two, "cp ^zz ^zz").includes("policy.core"));
+  // 4: a word after a command that can make files is the plain glob, never
+  // the word as written: `zq#` is `z*`, as `zq*` is read. At c53565eb it was
+  // `zq#` as written (no entry matched when the hook ran), read in scope,
+  // where `zq*` is read out of scope.
+  const listed = (decision: string): string[] => {
+    assert.match(decision, /^allow: autonomous: /u);
+    return decision.replace(/^allow: autonomous: /u, "").split(", ");
+  };
+  for (const maker of ["git checkout other", "tar xf a.tar", "touch zq"]) {
+    const plain = listed(claude(`${maker}; cat zq*`));
+    const read = listed(claude(`${maker}; cat zq#`));
+    for (const cls of plain) assert.ok(read.includes(cls), `${maker}: ${cls} missing from ${read.join(", ")}`);
+  }
+  // In the first command, with nothing before the word that can move or
+  // make anything, the listing answers: `two` holds no credential.
+  assert.ok(!classesIn(two, "grep -r ^foo README.md").includes("account.credential"));
 });

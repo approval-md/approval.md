@@ -8655,23 +8655,30 @@ function optionGroupReading(command: string): string | null {
  * and is any name (`*`). A comment is left as written (security review of
  * aec23242: no segment is skipped for its spelling).
  *
- * A word with no `/` names entries of the directory the command runs in, and
- * a hidden one only when the pattern opens with `.` (zsh without globdots).
- * Where that directory is known (`cwds`, and no `cd`, `pushd` or `popd` in the
- * command), the word is written as the entries it matches there, or left as
- * written when it matches none (zsh refuses a pattern with no match), so
- * `grep ^foo README.md` beside `.env` reads `.env` only if zsh would; past
- * {@link OPTION_WORD_ENTRIES} entries, or where the directory is unknown, it
- * is the plain glob. `null` when nothing changes. One pass over the text.
+ * A word with no `/` names entries of the directory the command runs in,
+ * hidden ones too (`globdots` may be set as well; the lead's ruling L61497).
+ * The word is written as EVERY entry it matches there, or left as written
+ * when it matches none, only where that directory and what it holds are
+ * proven when the word expands (the security review of c53565eb): the
+ * directory is known (`cwds`), and the word is in the command's first simple
+ * command with nothing before it that can change directory or make a file.
+ * That is, no unquoted `;`, `&`, `|`, newline, `(` or `)` before it (a `cd` in
+ * any spelling, `eval`, a variable command, `AUTO_CD`, a glob qualifier's
+ * code, a subshell, a later command of a list or pipeline), no backquote or
+ * `$(` before it or in it, and no glob qualifier after it. Anywhere else the
+ * word is the plain glob, as it is past {@link OPTION_WORD_ENTRIES} matches for
+ * one word or {@link OPTION_COMMAND_ENTRIES} for the command. The listing is
+ * read when the hook runs, as the credential pass reads it for a plain glob.
+ * `null` when nothing changes. One pass over the text.
  */
-function zshOptionCommandReading(command: string, cwds: readonly string[] | null): string | null {
+export function zshOptionCommandReading(command: string, cwds: readonly string[] | null): string | null {
   if (!/[\^#{~]/u.test(command)) return null;
-  const known = cwds !== null && !/(?:^|[\s;&|(])(?:cd|pushd|popd)(?=[\s;&|)]|$)/u.test(command) ? cwds : null;
+  // The directories the words of the first simple command expand in, while
+  // nothing before them can have changed directory or made a file.
+  let proven = cwds;
   const listings = new Map<string, string[]>();
-  // Each entry is written once per command: a later word that matches only
-  // entries already written stands as its first match, so a line of many
-  // such words reads its directory once, not once a word.
-  const written = new Set<string>();
+  // Entries written for the whole command, every word's every match.
+  let written = 0;
   const separator = /[\s;&|<>()]/u;
   // The output as parts joined once at the end, and the last character
   // written: indexing a string built by `+=` flattens it on every word.
@@ -8687,6 +8694,7 @@ function zshOptionCommandReading(command: string, cwds: readonly string[] | null
   while (at < command.length) {
     const char = command[at] as string;
     if (separator.test(char)) {
+      if (!/[\s<>]/u.test(char) || char === "\n") proven = null;
       write(char);
       at += 1;
       continue;
@@ -8745,6 +8753,10 @@ function zshOptionCommandReading(command: string, cwds: readonly string[] | null
       units.push({ char: next, quoted: false, unknown: next === "$" || next === "`", end: at, ...(param ? { param: true as const } : {}) });
     }
     const word = command.slice(raw, at);
+    // A command substitution in this word may change directory or make a
+    // file before the word's glob expands, and a glob qualifier after it
+    // (`^x(e:…:)`) runs code: this word and every later one are unproven.
+    if (word.includes("`") || word.includes("$(") || command[at] === "(") proven = null;
     // The segments, split at each unquoted `/`, each with its raw text.
     const segments: Array<{ units: typeof units; from: number; to: number }> = [{ units: [], from: raw, to: at }];
     for (const unit of units) {
@@ -8777,12 +8789,12 @@ function zshOptionCommandReading(command: string, cwds: readonly string[] | null
       return zshOptionReading(plain) ?? "*";
     });
     let rewritten = read.join("/");
-    if (segments.length === 1 && known !== null) {
+    if (segments.length === 1 && proven !== null) {
       const pattern = read[0] as string;
       const glob = globPattern(pattern);
       const matches = new Set<string>();
       let tooMany = false;
-      for (const directory of known) {
+      for (const directory of proven) {
         let names = listings.get(directory);
         if (names === undefined) {
           try {
@@ -8792,18 +8804,14 @@ function zshOptionCommandReading(command: string, cwds: readonly string[] | null
           }
           listings.set(directory, names);
         }
-        for (const name of names) {
-          if (name.startsWith(".") && !pattern.startsWith(".")) continue;
-          if (glob.test(name)) matches.add(name);
-        }
+        for (const name of names) if (glob.test(name)) matches.add(name);
         if (matches.size > OPTION_WORD_ENTRIES) tooMany = true;
       }
+      if (written + matches.size > OPTION_COMMAND_ENTRIES) tooMany = true;
       if (!tooMany && matches.size === 0) rewritten = word;
       else if (!tooMany) {
-        const fresh = [...matches].filter((name) => !written.has(name));
-        for (const name of fresh) written.add(name);
-        const chosen = fresh.length > 0 ? fresh : [[...matches][0] as string];
-        rewritten = chosen.map((name) => `'${name.replaceAll("'", "'\\''")}'`).join(" ");
+        written += matches.size;
+        rewritten = [...matches].map((name) => `'${name.replaceAll("'", "'\\''")}'`).join(" ");
       }
     }
     if (rewritten !== word) changed = true;
@@ -8814,6 +8822,8 @@ function zshOptionCommandReading(command: string, cwds: readonly string[] | null
 
 /** Past this many matching entries, a word with no `/` is read as its plain glob. */
 const OPTION_WORD_ENTRIES = 256;
+/** Past this many entries written for one command's words, a further word is read as its plain glob. */
+const OPTION_COMMAND_ENTRIES = 1024;
 
 /** Names a credential file goes by, for a pattern to be tested against. */
 const CREDENTIAL_NAMES: readonly string[] = [".env", ".env.local", ".op.env", "auth.json", "env", "vault.enc", "keys"];
