@@ -1578,6 +1578,13 @@ interface LexWord {
    */
   zshGlob?: boolean;
   /**
+   * Every `$` in `text` is a real expansion (none was quoted or escaped) and
+   * one names a special parameter (`$?`, `$#`, `$*`, ...), so the character
+   * after each `$` is a name and not a glob (GLOB-WRITE; review of e6b7bf97,
+   * finding 3). Absent: not known, read as text.
+   */
+  paramNames?: boolean;
+  /**
    * Is `text` exactly the bytes the shell would hand the command for this
    * word? (APRV-510.) `false` when the shell would still change it: a `$`
    * outside single quotes (a parameter expansion), an unquoted glob or brace
@@ -1846,7 +1853,8 @@ function lex(command: string): LexResult {
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
     const assignment = ASSIGNMENT.test(command.slice(start, index));
-    return { text, quoted, substitutions, splits, expands, zshGlob, exact, assignment };
+    const paramNames = specialParametersOnly(command.slice(start, index));
+    return { text, quoted, substitutions, splits, expands, zshGlob, paramNames, exact, assignment };
   };
 
   while (index < command.length) {
@@ -8520,7 +8528,13 @@ function lineMaySetDotglob(command: string): boolean {
 export interface GlobDisk {
   cwd: string;
   home: string | null;
-  listings: ReadonlyMap<string, readonly string[] | "unreadable">;
+  listings: ReadonlyMap<string, readonly string[] | "unreadable" | "missing">;
+  /**
+   * `false`: the line has more than one segment, so a directory that was not
+   * there when listed (`"missing"`) may be made before the pattern runs
+   * (`mkdir -p d && cp x d/*`): it is not read as empty (review of e6b7bf97, 4).
+   */
+  singleSegment?: boolean;
   /** `false`: a relative prefix is not placed (the line may change directory, or the caller is not sure `cwd` is the shell's). */
   relativeOk?: boolean;
   /** `false`: a `~` prefix is not placed (the line names `HOME`). */
@@ -8528,6 +8542,19 @@ export interface GlobDisk {
   /** `false`: no listing is used (something else on the line may create, move, link or extract a file). */
   listingsOk?: boolean;
   collect?: Set<string>;
+}
+
+/**
+ * The names the caller listed in `dir`, or `undefined` (not listed, or not
+ * listable in full). A directory that was not there is empty only to a glob on
+ * a one-segment line (`missingIsEmpty`); to a contents copy it is never empty
+ * (review of e6b7bf97, findings 2 and 4).
+ */
+function diskListing(disk: GlobDisk, dir: string, missingIsEmpty: boolean): readonly string[] | undefined {
+  const listed = disk.listings.get(dir);
+  if (Array.isArray(listed)) return listed;
+  if (listed === "missing" && missingIsEmpty && disk.singleSegment === true) return [];
+  return undefined;
 }
 
 /** Commands that create, move, link and extract nothing: the only company a listed pattern may keep on its line. */
@@ -8644,10 +8671,12 @@ function strictestProtectedWrite(
     if (best !== null && (best as { surface: string }).surface === "log.mutate") break;
     if (!inexact(word)) continue;
     if (skipProse && /\s/u.test(word)) continue;
-    const { readings, overflow } = writeWordReadings(word);
+    // A special parameter's name is not a glob, where the word's every `$` is real.
+    const subject = glob.names?.(word) === true ? maskSpecialParameters(word) : word;
+    const { readings, overflow } = writeWordReadings(subject);
     if (overflow) offer("log.mutate", word);
     for (const reading of readings) {
-      if (reading !== word) offer(protectedPathClass(reading, protectedPaths), word);
+      if (reading !== subject) offer(protectedPathClass(reading, protectedPaths), word);
       // ONE matcher budget for the whole command line (review-b M1), shared
       // through the classifier context by every segment, word and reading.
       if (globLive(glob, word) && hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, glob.budget, glob.options, glob.disk), word);
@@ -8671,6 +8700,8 @@ interface GlobReading {
    * line may set options, `zshGlob`).
    */
   live?: (word: string) => boolean;
+  /** Is every `$` in this word a real expansion ({@link specialParametersOnly})? */
+  names?: (word: string) => boolean;
   options: boolean;
   disk?: GlobDisk;
   budget: { left: number };
@@ -8987,6 +9018,15 @@ interface CopyPlan {
   sources: string[];
   anyName: string[];
   contents: string[];
+  /**
+   * The directories whose names a contents copy creates at the top of each
+   * `contents` destination (`src` for `cp -r src/ .`), or `null` when the names
+   * come from somewhere this classifier cannot list (an archive, a remote, an
+   * option it does not know): review of e6b7bf97, finding 2.
+   */
+  contentsFrom: string[] | null;
+  /** The destination is implied (`ln -s target` links into `.`). */
+  implicitDest?: boolean;
   files: string[];
   anywhere: string | null;
   unknown: string | null;
@@ -9009,7 +9049,7 @@ function remoteOperand(word: string): boolean {
 }
 
 function copyPlan(basename: string, args: readonly string[]): CopyPlan | null {
-  const empty = (operands: string[]): CopyPlan => ({ dests: [], sources: [], anyName: [], contents: [], files: [], anywhere: null, unknown: null, operands });
+  const empty = (operands: string[]): CopyPlan => ({ dests: [], sources: [], anyName: [], contents: [], contentsFrom: null, files: [], anywhere: null, unknown: null, operands });
   if (basename === "tar") return tarPlan(args);
   if (UNTABLED_COPY_TOOLS.has(basename)) {
     const words = args.flatMap((arg) => {
@@ -9031,26 +9071,45 @@ function copyPlan(basename: string, args: readonly string[]): CopyPlan | null {
   const targets = parsed.values.filter((entry) => entry.name === "t" || entry.name === "target-directory").map((entry) => entry.value);
   if (parsed.unknown !== null) {
     const all = local([...operands, ...targets]);
-    return { dests: all, sources: [...operands], anyName: [...all], contents: [...all], files: [], anywhere: null, unknown: parsed.unknown, operands };
+    return { dests: all, sources: [...operands], anyName: [...all], contents: [...all], contentsFrom: null, files: [], anywhere: null, unknown: parsed.unknown, operands };
   }
   // rsync with one operand lists it; every tool needs a source and a destination.
-  const dests = local(targets.length > 0 ? targets : operands.length >= 2 ? operands.slice(-1) : []);
-  const sources = targets.length > 0 ? [...operands] : operands.slice(0, -1);
+  // Review of e6b7bf97 (1): `ln TARGET` links into the working directory,
+  // named by the target's basename.
+  const implicit = basename === "ln" && targets.length === 0 && operands.length === 1;
+  const dests = implicit ? ["."] : local(targets.length > 0 ? targets : operands.length >= 2 ? operands.slice(-1) : []);
+  const sources = targets.length > 0 || implicit ? [...operands] : operands.slice(0, -1);
   const has = (...names: string[]): boolean => names.some((name) => parsed.seen.has(name));
-  const slashSource = sources.some((source) => source.endsWith("/") || /(?:^|\/)\.\.?$/u.test(source));
-  const plan: CopyPlan = { ...empty(operands), dests, sources };
+  const slashed = (source: string): boolean => source.endsWith("/") || /(?:^|\/)\.\.?$/u.test(source);
+  const slashSource = sources.some(slashed);
+  const plan: CopyPlan = { ...empty(operands), dests, sources, ...(implicit ? { implicitDest: true } : {}) };
+  // The directories a contents copy's top names come from: a slashed source,
+  // or every source under -T. A remote or globbed one cannot be listed.
+  const from = (all: boolean): string[] | null => {
+    const dirs = sources.filter((source) => all || slashed(source));
+    return dirs.some((source) => remoteOperand(source) || source.includes("$") || hasGlobConstruct(source)) ? null : dirs;
+  };
   if (basename === "cp") {
     const recursive = has("r", "R", "a", "recursive", "archive");
     const noTarget = has("T", "no-target-directory");
     if (recursive || noTarget || slashSource) plan.anyName = [...dests];
-    if ((recursive && slashSource) || noTarget) plan.contents = [...dests];
+    if ((recursive && slashSource) || noTarget) {
+      plan.contents = [...dests];
+      plan.contentsFrom = from(noTarget);
+    }
   } else if (basename === "mv" || basename === "ln") {
     plan.anyName = [...dests];
-    if (basename === "mv" && has("T", "no-target-directory")) plan.contents = [...dests];
+    if (basename === "mv" && has("T", "no-target-directory")) {
+      plan.contents = [...dests];
+      plan.contentsFrom = from(true);
+    }
   } else if (basename === "rsync" || basename === "scp") {
     plan.anyName = [...dests];
     const globbedRemote = sources.some((source) => remoteOperand(source) && /[*?[]/u.test(source));
-    if (slashSource || globbedRemote) plan.contents = [...dests];
+    if (slashSource || globbedRemote) {
+      plan.contents = [...dests];
+      plan.contentsFrom = globbedRemote ? null : from(false);
+    }
     if (basename === "rsync") {
       // Directories rsync writes any name into; relative ones are relative to the destination.
       for (const entry of parsed.values) {
@@ -9077,7 +9136,7 @@ const TAR_ALL_VALUE_LETTERS = "bfgCFHIKLNTVX";
 function tarPlan(args: readonly string[]): CopyPlan {
   const letters = tarModeLetters(args);
   const extracting = letters.includes("x") || args.some((arg) => /^--(?:ex|ext|extr|extra|extrac|extract|get?)$/u.test(arg));
-  const plan: CopyPlan = { dests: [], sources: [], anyName: [], contents: [], files: [], anywhere: null, unknown: null, operands: [] };
+  const plan: CopyPlan = { dests: [], sources: [], anyName: [], contents: [], contentsFrom: null, files: [], anywhere: null, unknown: null, operands: [] };
   if (!extracting) return plan;
   const dirs: string[] = [];
   for (let at = 0; at < args.length; at += 1) {
@@ -9091,12 +9150,16 @@ function tarPlan(args: readonly string[]): CopyPlan {
         if (value !== undefined) dirs.push(value);
       }
       if (name.length >= 2 && "absolute-names".startsWith(name)) plan.anywhere = arg;
+      // Review of e6b7bf97 (2): options that rename members may land them anywhere.
+      if (name.length >= 2 && ["one-top-level", "transform", "xform", "strip-components"].some((option) => option.startsWith(name))) plan.anywhere = arg;
       continue;
     }
     const bundle = arg.startsWith("-") ? arg.slice(1) : at === 0 && /^[A-Za-z]+$/u.test(arg) ? arg : null;
     if (bundle === null || bundle.length === 0) continue;
     const c = bundle.indexOf("C");
-    if (bundle.slice(0, c === -1 ? bundle.length : c).includes("P")) plan.anywhere = arg;
+    // `-P` keeps absolute names; bsdtar's `-s` rewrites them (GNU's `-s` is
+    // only an order flag: read both ways).
+    if (/[Ps]/u.test(bundle.slice(0, c === -1 ? bundle.length : c))) plan.anywhere = arg;
     if (c === -1) continue;
     if (arg.startsWith("-") && c + 1 < bundle.length && !/^[A-Za-z]*$/u.test(bundle.slice(c + 1))) {
       dirs.push(bundle.slice(c + 1));
@@ -9148,7 +9211,12 @@ function lexicalParts(path: string): { absolute: boolean; parts: string[] } {
  * A caller with no disk at all (the pure classifier's other callers) gets the
  * text-only part; the hook always passes one.
  */
-function organAncestor(dest: string, protectedPaths: readonly ProtectedPathEntry[], glob: GlobReading): { surface: string; path: string } | null {
+function organAncestor(
+  dest: string,
+  contentsFrom: readonly string[] | null,
+  protectedPaths: readonly ProtectedPathEntry[],
+  glob: GlobReading,
+): { surface: string; path: string } | null {
   const strict = { surface: "policy.core", path: dest };
   const { absolute, parts } = lexicalParts(dest);
   // By the text alone: the home (`~`, `~user`) and `/`, and `..` above the
@@ -9163,38 +9231,67 @@ function organAncestor(dest: string, protectedPaths: readonly ProtectedPathEntry
   const disk = glob.disk;
   if (disk === undefined) return null;
   if (dest.includes("$") || dest.includes(SUBSTITUTION_SENTINEL) || (globLive(glob, dest) && hasGlobConstruct(dest))) return strict;
-  {
-    const placed = (absolute ? "/" : "") + parts.join("/");
-    // The destination as an absolute path, where the text places it.
-    const cwd = disk.cwd.replace(/\/+$/u, "");
-    const whole =
-      absolute ? placed : parts[0] === "~" || disk.relativeOk === false || !cwd.startsWith("/") ? null : [cwd, ...parts].join("/") || "/";
-    const home = disk.home?.replace(/\/+$/u, "") ?? null;
-    if (whole !== null) {
-      if (home !== null && home.startsWith("/") && (home === whole || home.startsWith(`${whole}/`))) return strict;
-      if (cwd.startsWith("/") && cwd.startsWith(`${whole === "/" ? "" : whole}/`)) return strict;
-    }
-    if (disk.listingsOk !== false) {
-      const prefix = absolute ? ["", ...parts] : parts.length === 0 ? [] : parts;
-      const dir = globListingDir(prefix, disk);
-      if (dir !== null) {
-        disk.collect?.add(dir);
-        const listing = disk.listings.get(dir);
-        if (Array.isArray(listing)) {
-          let best: string | null = null;
-          for (const name of listing) {
-            const organ = ORGAN_DIRECTORIES[name.toLowerCase()];
-            const bare = protectedPathClass(`${placed.length === 0 ? "." : placed}/${name}`, protectedPaths);
-            for (const surface of [organ, bare]) {
-              if (surface !== undefined && surface !== null && (best === null || protectedRank(surface) < protectedRank(best))) best = surface;
-            }
-          }
-          return best === null ? null : { surface: best, path: dest };
-        }
+  const placed = (absolute ? "/" : "") + parts.join("/");
+  const shown = placed.length === 0 ? "." : placed;
+  // The destination as an absolute path, where the text places it.
+  const cwd = disk.cwd.replace(/\/+$/u, "");
+  const whole =
+    absolute ? placed : parts[0] === "~" || disk.relativeOk === false || !cwd.startsWith("/") ? null : [cwd, ...parts].join("/") || "/";
+  const home = disk.home?.replace(/\/+$/u, "") ?? null;
+  if (whole !== null) {
+    if (home !== null && home.startsWith("/") && (home === whole || home.startsWith(`${whole}/`))) return strict;
+    if (cwd.startsWith("/") && cwd.startsWith(`${whole === "/" ? "" : whole}/`)) return strict;
+  }
+  if (disk.listingsOk === false) return strict;
+  const listingOf = (path: string): readonly string[] | undefined => {
+    const where = lexicalParts(path);
+    if (where.parts.some((part) => part === ".." )) return undefined;
+    const dir = globListingDir(where.absolute ? ["", ...where.parts] : where.parts, disk);
+    if (dir === null) return undefined;
+    disk.collect?.add(dir);
+    // A directory that is not there is never empty to a contents copy.
+    return diskListing(disk, dir, false);
+  };
+  /** The strictest class a name at the top of the destination takes. */
+  const classOf = (names: readonly string[]): string | null => {
+    let best: string | null = null;
+    for (const name of names) {
+      const organ = ORGAN_DIRECTORIES[name.toLowerCase()];
+      const git = name.toLowerCase() === ".git" ? "vcs.history.rewrite" : undefined;
+      const bare = protectedPathClass(`${shown}/${name}`, protectedPaths);
+      for (const surface of [organ, bare, git]) {
+        if (surface !== undefined && surface !== null && (best === null || protectedRank(surface) < protectedRank(best))) best = surface;
       }
     }
+    return best;
+  };
+  // Review of e6b7bf97 (2): the names a contents copy CREATES come from its
+  // source. Listed, on a line with no other segment, they decide (each lands
+  // at the destination's top).
+  // Trusted only on a one-segment line: an earlier segment may write under
+  // the source (`touch src/.claude; cp -r src/. ./`).
+  if (contentsFrom !== null && contentsFrom.length > 0 && disk.singleSegment === true) {
+    const created: string[] = [];
+    let known = true;
+    for (const source of contentsFrom) {
+      const names = listingOf(source);
+      if (names === undefined) known = false;
+      else created.push(...names);
+    }
+    if (known) {
+      const cls = classOf(created);
+      return cls === null ? null : { surface: cls, path: dest };
+    }
   }
-  return strict;
+  // Names unknown (an archive, an unlisted source): the working directory may
+  // be an organ directory's parent once they land, and so may any directory
+  // that already holds one, or that the hook could not list.
+  if (whole !== null && whole === cwd) return strict;
+  if (!absolute && parts.length === 0) return strict;
+  const held = listingOf(dest);
+  if (held === undefined) return strict;
+  const cls = classOf(held);
+  return cls === null ? null : { surface: cls, path: dest };
 }
 
 /**
@@ -9250,8 +9347,8 @@ function listedMatches(source: string, base: string, glob: GlobReading): string[
   const dir = globListingDir(prefix, disk);
   if (dir === null) return null;
   disk.collect?.add(dir);
-  const listing = disk.listings.get(dir);
-  if (!Array.isArray(listing)) return null;
+  const listing = diskListing(disk, dir, true);
+  if (listing === undefined) return null;
   const pattern = globSegmentTokens(base, glob.options);
   const dotted = glob.options || base.startsWith(".");
   const out: string[] = [];
@@ -9279,8 +9376,49 @@ const PARAMETER_MARK = "";
  */
 function hasGlobConstruct(word: string): boolean {
   if (word.includes(PARAMETER_MARK)) return true;
-  const outside = maskSpecialParameters(maskParameters(word).text);
+  const outside = maskParameters(word).text;
   return /[*?[\]{}()#^<>|]/u.test(outside) || outside.slice(1).includes("~");
+}
+
+/**
+ * Read on a word's SOURCE spelling: does it expand a special parameter, and is
+ * every `$` in it a real expansion (none inside single quotes, escaped by a
+ * backslash, or opening `$'…'`)? Only then may {@link maskSpecialParameters}
+ * read the character after each `$` in its text as a name.
+ */
+function specialParametersOnly(raw: string): boolean {
+  let quote: "" | "'" | '"' = "";
+  let special = false;
+  for (let at = 0; at < raw.length; at += 1) {
+    const ch = raw[at] as string;
+    if (quote === "'") {
+      if (ch === "'") quote = "";
+      else if (ch === "$") return false;
+      continue;
+    }
+    if (ch === "\\") {
+      if (raw[at + 1] === "$") return false;
+      at += 1;
+      continue;
+    }
+    if (quote === '"' && ch === '"') {
+      quote = "";
+      continue;
+    }
+    if (quote === "" && (ch === "'" || ch === '"')) {
+      quote = ch;
+      continue;
+    }
+    if (ch === "$") {
+      const next = raw[at + 1];
+      if (next === "'") return false;
+      if (next !== undefined && /[?#*@!$\-0-9]/u.test(next)) {
+        special = true;
+        at += 1;
+      }
+    }
+  }
+  return special;
 }
 
 /**
@@ -9691,8 +9829,7 @@ function globGuardClass(
         const dir = globListingDir(prefix, disk);
         if (dir === null) return undefined;
         disk.collect?.add(dir);
-        const listed = disk.listings.get(dir);
-        return Array.isArray(listed) ? listed : undefined;
+        return diskListing(disk, dir, true);
       };
       // A dot-name (`.approval`, `.hermes`, `..`) is reached only by an
       // explicit leading `.`, unless the line turns dot matching on (`dots`).
@@ -10350,8 +10487,12 @@ function classifySegment(
   const liveWords = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)]
     .filter((word) => word.splits || word.expands || (lineOptions && word.zshGlob !== false))
     .map((word) => word.text);
+  const namedWords = new Set(
+    [...segment.words, ...segment.redirects.map((redirect) => redirect.target)].filter((word) => word.paramNames === true).map((word) => word.text),
+  );
   const glob: GlobReading = {
     live: (text: string): boolean => liveWords.some((word) => word.includes(text)),
+    names: (text: string): boolean => namedWords.has(text),
     options: context.lineSetsDotglob === true,
     ...(context.globDisk === undefined ? {} : { disk: context.globDisk }),
     budget: context.globBudget ?? { left: GLOB_GUARD_STEP_CAP },
@@ -10770,11 +10911,15 @@ function classifySegment(
   // Review of 039b840a (finding 2): a copy tool's argv read by its option
   // table, so an option's value is never taken for the destination.
   const plan = copyPlan(basename, args);
+  // Review of e6b7bf97 (1): with no destination read, or an implied one,
+  // every positional is judged, as main judged them.
   const writtenOperands =
     plan !== null && ["cp", "ln", "install"].includes(basename)
       ? plan.unknown !== null
         ? [...plan.operands, ...plan.dests]
-        : plan.dests
+        : plan.dests.length === 0 || plan.implicitDest === true
+          ? [...positionals, ...plan.dests]
+          : plan.dests
       : globWriteOperands(basename, positionals);
   const writtenInexact = (text: string): boolean => writtenOperands.includes(text) && inexact(text);
   const targetDirectories = copyFamily ? copyTargetDirectories(args) : [];
@@ -10884,7 +11029,9 @@ function classifySegment(
     const organDest = [
       ...(plan?.anyName ?? []).map((dest) => organDestination(dest, inexact, glob)),
       ...(landed?.plain ?? []).map((path) => organDestination(path, () => false, glob)),
-      ...(plan?.contents ?? []).map((dest) => organAncestor(dest, protectedPaths, glob)),
+      // A landing the shell may still glob (`ln -s ../evil/.git?ub`), as a pattern.
+      ...(landed?.patterns ?? []).map((path) => organDestination(path, () => true, { options: glob.options, budget: glob.budget, off: glob.off })),
+      ...(plan?.contents ?? []).map((dest) => organAncestor(dest, plan?.contentsFrom ?? null, protectedPaths, glob)),
       ...(plan?.files.length ? [strictestProtectedWrite(plan.files, protectedPaths, inexact, false, glob)] : []),
       ...(plan?.anywhere == null ? [] : [{ surface: "policy.core", path: plan.anywhere }]),
     ].reduce<{ surface: string; path: string } | null>(
@@ -11321,6 +11468,7 @@ export function classifyCommand(
           relativeOk: context.globDisk.relativeOk !== false && !segmentsMayChangeDirectory(lexed.segments),
           homeOk: context.globDisk.homeOk !== false && !command.includes("HOME"),
           listingsOk: context.globDisk.listingsOk !== false && lineListingSafe(command, lexed.segments),
+          singleSegment: context.globDisk.singleSegment !== false && lexed.segments.length === 1,
         };
   const diskField = {
     ...(globDisk === undefined ? {} : { globDisk }),

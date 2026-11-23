@@ -641,8 +641,12 @@ test("hook classify answers the packaging tools a verification runs (APRV-397)",
     ["npm init -y", "files.write.workspace"],
     ["tar -tzf dist/pkg.tgz", "read.shell"],
     ["tar tvf dist/pkg.tgz", "read.shell"],
-    ["tar -xzf dist/pkg.tgz -C build/unpack", "files.write.workspace"],
-    ["tar -xzf dist/pkg.tgz -C /usr/local/lib", "files.delete.out_of_scope"],
+    // GLOB-WRITE (review of e6b7bf97, finding 2): an archive's member names are
+    // unknown, and a destination that is not there yet is not an empty one.
+    ["tar -xzf dist/pkg.tgz -C build/unpack", "policy.core"],
+    // The hook lists the destination: absent or unlistable on this machine it
+    // is strict, listed and holding no guarded name it is out of scope.
+    ["tar -xzf dist/pkg.tgz -C /usr/local/lib", "files.delete.out_of_scope|policy.core"],
     ["tar -czf dist/out.tgz src", "files.write.workspace"],
     ["gunzip -c dist/pkg.gz", "read.shell"],
     ["gunzip dist/pkg.gz", "files.write.workspace"],
@@ -654,11 +658,9 @@ test("hook classify answers the packaging tools a verification runs (APRV-397)",
   ] as const) {
     const run = runCli(["hook", "classify", "--json", "--", command], dir);
     assert.equal(run.code, 0, run.stderr);
-    assert.deepEqual(
-      (JSON.parse(run.stdout) as Record<string, unknown>)["classes"],
-      [expected],
-      command,
-    );
+    const classes = (JSON.parse(run.stdout) as Record<string, unknown>)["classes"] as string[];
+    assert.equal(classes.length, 1, command);
+    assert.ok(expected.split("|").includes(classes[0] as string), `${command}: ${classes.join(",")}`);
   }
   // And the refusals the rows deliberately leave in place: a `tar` with no
   // readable mode, and the openssl subcommands that are not digests.

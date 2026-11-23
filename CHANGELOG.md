@@ -93,24 +93,32 @@ option, case folded), and takes the strictest class among them.
   unquoted `$` whose value or `${…}` default the shell may still glob, makes a
   word a pattern (`"exit-$?.txt"`, `"$f[1,4]/out"` are their text), and the
   character after `$` in `$?`, `$#`, `$*`, `$@`, `$!`, `$$`, `$-` and `$0`-`$9`
-  is a parameter's name. zsh's `^` and `#` count where the line may set
-  options.
+  is a parameter's name only where every `$` in the word is a real
+  expansion (`'$'*` and `\$*` are a literal `$` and a live `*`). zsh's `^`
+  and `#` count where the line may set options.
 - **zsh's clobbering redirects (lead ruling L61195 (a)):** `>!`, `>>!`, `>|`,
   `>>|`, `>&!`, `>&|`, `>>&!`, `>>&|`, `&>!` and `&>>!` write the next word, as
   `>` does.
 - **Copies, moves, links, syncs and extractions (L61195 (b); reviews of
   b402adec and 039b840a):** a copy into a directory is judged by the file it
   lands (`cp evil/settings.json .claude/` is `.claude/settings.json`), and a
-  source landing AS an organ directory is one (`cp -r evil/.claude .`). A
+  source landing AS an organ directory is one (`cp -r evil/.claude .`,
+  `ln -s ../evil/.claude`, which links into `.`). With no destination read,
+  every operand is judged, as before. A
   destination any name may land in (`cp -r`, `-T`, a source ending `/`, `.` or
   `..`, every `mv`, `ln`, `rsync`, `scp`, and `tar -x`'s directory) is judged
   as the organ directory it is (`.claude`, `.cursor`, `.grok`, `.muse`,
   `.github`), normalised lexically first (`.claude/x/..`, `./.claude/.`). A
   CONTENTS copy (`cp -r src/ .`, `rsync -a src/ .`, `cp -T`, `mv -T`, `tar -x`)
-  into an ANCESTOR of one is the organ write: the home, `/`, `..` above the
-  working directory by the text, and any other directory by the hook's listing
-  of it (an organ directory, a bare-guarded directory or the policy file
-  there; a directory that is not there holds none; unlistable is strict).
+  creates its source's names at the destination's top: through the hook, a
+  source listed on a one-segment line decides (an organ directory, `.git`,
+  `.approval` or the policy file among them is that write). With names
+  unknown (an archive, an unlisted source, another segment on the line) it is
+  the organ write into the home, `/`, `..` above the working directory, the
+  working directory itself, and any directory holding a guarded name, not
+  there, or not listable. tar's `--strip-components`, `--transform`/`--xform`,
+  `--one-top-level` and `-s` rename members: anywhere. A directory not there
+  is empty only to a glob on a one-segment line.
   `cp`, `mv`, `ln`, `install`, `rsync` and `scp` are read by per-tool option
   tables, so an option's value is never the destination (`rsync -a src/
   .claude/ --exclude x`), and an option a table does not know makes every
@@ -120,9 +128,9 @@ option, case folded), and takes the strictest class among them.
   anywhere. `unzip`, `ditto`, `cpio`, `pax`, `bsdtar`, `gtar` and `7z` have no
   rule and stay refused; an archive or copy tool with no table whose operand
   names an organ directory is the organ write. Stricter than main through the
-  hook: `tar -xf a.tar`, `cp -r src/ .` and `rsync -a src/ .` in a directory
-  holding `.claude` (or `APPROVAL.md`, `.approval`, `.github`); `cp -r .claude
-  backup/`.
+  hook: `tar -xf a.tar` in the working directory (always), `cp -r src/ .` and
+  `rsync -a src/ .` when `src` holds a guarded name or cannot be listed, or
+  beside another segment; `cp -r .claude backup/`; `ln -s ../evil/.claude`.
 
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),

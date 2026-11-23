@@ -502,7 +502,7 @@ test("dot-names: the relaxed reading is an allowlist of plain lines (lead ruling
 // pattern's first globbed component sits in and passes the names in.
 // ---------------------------------------------------------------------------
 
-function withListing(command: string, listings: Record<string, readonly string[] | "unreadable">): string[] {
+function withListing(command: string, listings: Record<string, readonly string[] | "unreadable" | "missing">): string[] {
   const result = classifyCommand(command, [], {
     globDisk: { cwd: "/w", home: "/h", listings: new Map(Object.entries(listings)) },
   });
@@ -746,7 +746,7 @@ test("finding 1: a destination is normalised lexically before the organ test", (
   }
   assert.ok(classesOf("cp -r src/ .github/w/..").includes("policy.edit"));
   // `..` that leaves the organ is not the organ.
-  assert.ok(ORDINARY(withListing("cp -r src/ .claude/..", { "/w": ["src", "a.js"] })));
+  assert.ok(ORDINARY(withListing("cp -r src/ .claude/..", { "/w": ["src", "a.js"], "/w/src": ["a.js"] })));
 });
 
 test("finding 1: a CONTENTS copy into an ancestor of an organ directory is the organ write", () => {
@@ -778,11 +778,9 @@ test("finding 1: a CONTENTS copy into an ancestor of an organ directory is the o
   for (const command of ["cp x .", "cp x.txt ..", "mv a.txt ..", "cp -r src .", "cp a b", "cp -r a b", "rsync -a src dst"]) {
     assert.ok(ORDINARY(withListing(command, project)), `${command} -> ${withListing(command, project).join(",")}`);
   }
-  // A contents copy into a directory holding no guarded name, or not there yet, keeps its class.
-  for (const command of ["cp -r src/ .", "tar -xf a.tar", "rsync -a src/ ."]) {
-    assert.ok(ORDINARY(withListing(command, { "/w": ["src", "a.js", "README.md"] })), command);
-  }
+  // A contents copy whose names are unknown into a directory holding no guarded name keeps its class.
   assert.ok(ORDINARY(withListing("cp -r src/ build/", { "/w/build": [] })));
+  assert.ok(ORDINARY(withListing("tar -xf a.tar -C out", { "/w/out": ["a.js"] })));
   // The hook with no listing of it (unlistable, or a variable): it may hold one.
   assert.ok(withListing("tar -xf a.tar", { "/w": "unreadable" }).includes("policy.core"));
   assert.ok(withListing("tar -xf a.tar -C out", {}).includes("policy.core"));
@@ -872,4 +870,96 @@ test("review of 3230ecb6: a quoted glob character, and a special parameter's nam
   assert.ok(ORDINARY(classesOf('GLOBIGNORE=x; echo x > "^y"')));
   assert.ok(ORDINARY(classesOf("GLOBIGNORE=x; echo x > a\\^y")));
   assert.ok(ORDINARY(classesOf("echo x > ^y")));
+});
+
+// ---------------------------------------------------------------------------
+// Review of e6b7bf97: four findings.
+// ---------------------------------------------------------------------------
+
+/** Main 21fc5fdc's class for each form, recorded from its build (`classifyCommand(form, [])`). */
+const MAIN_21FC5FDC: readonly (readonly [string, string])[] = [
+  ["ln -s ../evil APPROVAL.md", "policy.core"],
+  ["ln -s .claude/settings.json", "policy.core"],
+  ["ln -s ../evil/APPROVAL.md", "policy.core"],
+  ["ln -sf x/APPROVAL.md", "policy.core"],
+  ["cp x/APPROVAL.md", "policy.core"],
+  ["mv APPROVAL.md", "policy.core"],
+  ["ln -s ~/.hermes/auth.json", "policy.core"],
+  ["ln -s ../evil/.claude", "files.write.workspace"],
+  ["ln -s /evil/APPROVAL.m?", "files.write.workspace"],
+  ["cp -r x", "files.write.workspace"],
+];
+const RANK = ["log.mutate", "policy.core", "policy.edit"];
+const rankOf = (classes: readonly string[]): number => Math.min(...classes.map((cls) => (RANK.includes(cls) ? RANK.indexOf(cls) : RANK.length)));
+
+test("e6b7bf97 (1): an implied destination (`ln -s TARGET`) and a single operand are never looser than main", () => {
+  for (const [command, main] of MAIN_21FC5FDC) {
+    const head = classesOf(command);
+    assert.ok(rankOf(head) <= rankOf([main]), `${command}: head ${head.join(",")} vs main ${main}`);
+  }
+  // `ln -s TARGET` creates `./basename(TARGET)`, judged as a landing.
+  assert.ok(classesOf("ln -s /evil/APPROVAL.m?").includes("policy.core"));
+  assert.ok(classesOf("ln -s ../evil/.claude").includes("policy.core"));
+  assert.ok(classesOf("ln -s ../evil/.git?ub").includes("policy.edit"));
+  assert.ok(ORDINARY(classesOf("ln -s ../lib/util.js")));
+});
+
+test("e6b7bf97 (2): a contents copy's names come from its source; unknown names at the working directory are strict", () => {
+  const root = { "/w": ["src", ".claude", "a.js"] };
+  // The source listed and holding no guarded name: nothing guarded is created.
+  for (const command of ["cp -r src/ .", "cp -R src/. .", "rsync -a src/ .", "cp -rT src .", "mv -T src ."]) {
+    assert.ok(ORDINARY(withListing(command, { ...root, "/w/src": ["a.js", "lib"] })), command);
+  }
+  // A source holding an organ directory, the policy file or .git creates it.
+  assert.ok(withListing("cp -r src/ .", { ...root, "/w/src": [".claude"] }).includes("policy.core"));
+  assert.ok(withListing("cp -r src/ out", { "/w/src": [".Cursor"], "/w/out": [] }).includes("policy.core"));
+  assert.ok(withListing("rsync -a src/ out/", { "/w/src": ["APPROVAL.md"], "/w/out": [] }).includes("policy.core"));
+  assert.ok(withListing("cp -r src/ out", { "/w/src": [".github"], "/w/out": [] }).includes("policy.edit"));
+  assert.ok(withListing("cp -r src/ out", { "/w/src": [".git"], "/w/out": [] }).includes("vcs.history.rewrite"));
+  // Names unknown (an archive, an unlisted or unlistable source): strict at the
+  // working directory whatever it holds, and where the destination holds one.
+  for (const command of ["tar -xf a.tar", "tar -xzf a.tgz -C .", "cp -r src/ .", "rsync -a h:src/ ."]) {
+    assert.ok(withListing(command, { "/w": ["a.js"], "/w/src": "unreadable" }).includes("policy.core"), command);
+  }
+  assert.ok(withListing("cp -r src/ out", { "/w/out": [".claude"] }).includes("policy.core"));
+  // The source's listing is trusted only on a one-segment line: an earlier
+  // segment may write under it (review of the uncommitted fold, HIGH).
+  for (const command of ["touch src/.claude; cp -r src/. ./", "tar -xf a.tar -C src && cp -a src/ .", "true; cp -r src/ .", "ls && rsync -a src/ ."]) {
+    assert.ok(withListing(command, { ...root, "/w/src": ["a.js"] }).includes("policy.core"), command);
+  }
+  // A destination that is not there is not an empty listing.
+  assert.ok(withListing("tar -xf a.tar -C out", { "/w/out": "missing" }).includes("policy.core"));
+  // tar options that rename members may land them anywhere.
+  for (const command of [
+    "tar -xf a.tar --strip-components=1 -C out",
+    "tar -xf a.tar --strip 1 -C out",
+    "tar -xf a.tar --transform s/a/b/ -C out",
+    "tar -xf a.tar --xform=s/a/b/ -C out",
+    "tar -xf a.tar --one-top-level -C out",
+    "tar -xsf a.tar -C out",
+    "tar -x -s /a/b/ -f a.tar -C out",
+  ]) {
+    assert.ok(withListing(command, { "/w/out": [] }).includes("policy.core"), command);
+  }
+});
+
+test("e6b7bf97 (3): only a real `$` names a special parameter; a quoted or escaped one leaves the glob", () => {
+  for (const command of ["echo x > exit-$?.txt", 'echo x > "exit-$?.txt"', "echo x > out-$$.txt", 'echo x > "$#:t.txt"']) {
+    assert.ok(!classesOf(command).includes("log.mutate"), command);
+  }
+  // `'$'*` and `\$*` are a literal `$` and a live `*`.
+  for (const command of ["echo x > '$'*", "echo x > \\$*", 'echo x > "\\$"*', "echo x > $'$'*"]) {
+    assert.ok(!ORDINARY(classesOf(command)), command);
+  }
+  // Where the line may set options, an escaped `$` before `#` leaves zsh's `#`.
+  assert.ok(!ORDINARY(classesOf("GLOBIGNORE=x; echo x > \\$#APPROVAL.md")));
+});
+
+test("e6b7bf97 (4): a directory that was not there is empty only to a glob on a one-segment line", () => {
+  assert.deepEqual(withListing("rm -rf d/*", { "/w/d": "missing" }), ["files.delete.out_of_scope"]);
+  for (const command of ["true; rm -rf d/*", "ls; echo x > d/*", "echo a && rm -rf d/*"]) {
+    assert.ok(withListing(command, { "/w/d": "missing" }).includes("policy.core"), command);
+  }
+  // Another writer on the line: no listing is used at all.
+  assert.ok(withListing("mkdir -p d && cp x d/*", { "/w/d": "missing" }).includes("policy.core"));
 });

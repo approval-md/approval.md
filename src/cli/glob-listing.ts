@@ -10,7 +10,9 @@
  * listing happens here, BEFORE classification, and is handed in as
  * `ClassifierContext.globDisk`.
  *
- * A directory that is not there (`ENOENT`, `ENOTDIR`) is listed as empty.
+ * A directory that is not there (`ENOENT`, `ENOTDIR`) is `"missing"`: empty
+ * to a glob on a one-segment line, unknown otherwise (a segment before it may
+ * create it), and never empty to a contents copy.
  *
  * FAIL CLOSED. A directory that cannot be listed in full (any other error, a symlink
  * loop, more than {@link GLOB_LISTING_ENTRY_CAP} entries, the
@@ -37,7 +39,7 @@ export const GLOB_LISTING_TIMEOUT_MS = 2_000;
 /** Most directories one command lists; the rest keep the strict answer. */
 export const GLOB_LISTING_DIR_CAP = 16;
 
-export type GlobListing = readonly string[] | "unreadable";
+export type GlobListing = readonly string[] | "unreadable" | "missing";
 
 /** The directory opener, injectable for tests (a slow or failing one). */
 export type DirOpener = (path: string) => Promise<Dir>;
@@ -49,7 +51,7 @@ export interface GlobListingOptions {
   dirCap?: number;
 }
 
-/** One directory's names, or `"unreadable"` on error, cap or timeout. */
+/** One directory's names, `"missing"` when it is not there, or `"unreadable"` on any other error, the cap or the timeout. */
 export async function listGlobDirectory(path: string, options: GlobListingOptions = {}): Promise<GlobListing> {
   const opener = options.opendir ?? ((dir: string) => fsOpendir(dir));
   const cap = options.entryCap ?? GLOB_LISTING_ENTRY_CAP;
@@ -79,10 +81,10 @@ export async function listGlobDirectory(path: string, options: GlobListingOption
     }
     return names;
   })().catch((error: unknown): GlobListing => {
-    // A directory that is not there (or a file) holds no name: a pattern in it
-    // matches nothing, and a copy into it lands beside no guarded directory.
+    // A directory that is not there (or a file): the classifier reads it as
+    // empty only for a glob on a one-segment line, never for a contents copy.
     const code = (error as { code?: unknown } | null)?.code;
-    return code === "ENOENT" || code === "ENOTDIR" ? [] : "unreadable";
+    return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unreadable";
   });
   const deadline = new Promise<GlobListing>((settle) => {
     timer = setTimeout(() => {
