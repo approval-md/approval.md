@@ -88,6 +88,11 @@ option, case folded), and takes the strictest class among them.
   the worst words measured cost about 0.05 CPU s.
 - **One budget (review-b M1):** the two million matcher steps are one budget
   for the whole command line, shared by every segment, word and reading.
+  A word judged once in a list is not walked again: `rsync -aR s0/*/./a*
+  s1/*/./a* …` lands every source as the last word's `<dest>/a*`, and at
+  7 KB the repeated walks took about 50 CPU s (now about 2). Each repeat
+  still draws the steps the first walk drew, so the budget runs out where
+  it did.
 - **Main's class is carried beside every raise (lead ruling L61926):** a line
   any GLOB-WRITE rule fires on is classified a second time with every
   GLOB-WRITE rule off (main's answer), and the two join: every class of each
