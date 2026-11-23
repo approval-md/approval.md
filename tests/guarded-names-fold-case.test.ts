@@ -1255,6 +1255,28 @@ test("through the real hook, a command that writes a design file and a workflow 
   }
 });
 
+test("a segment with a protected redirection is walked once: it costs about what it costs without the redirection", () => {
+  // The command in front of a protected redirection is asked for its own
+  // answer. That is the walk every segment takes, made once; a second
+  // classification of the segment would cost about twice the control. A
+  // ratio of CPU time, like the tests around it. 1 MiB of plain words.
+  const SIZE = 1024 * 1024;
+  const words = "x ".repeat(SIZE / 2);
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  const control = cpu(() => classifyCommand(`tee design/x ${words}`, TWO_ROUTES));
+  const spent = cpu(() => classifyCommand(`tee design/x ${words}> .github/workflows/ci.yml`, TWO_ROUTES));
+  assert.ok(spent <= 1.6 * control + 0.2, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
+  assert.deepEqual(pure(`tee design/x ${"x ".repeat(8)}> .github/workflows/ci.yml`, TWO_ROUTES), [
+    "policy.edit.ci redirect-protected",
+    "policy.edit.design protected-path",
+  ]);
+});
+
 test("a line of many folded segments costs about what the same line spelled canonically costs", () => {
   // Both readings run on the folded line and their segments are joined; the
   // join is keyed, so it stays linear in the number of segments. A ratio, for

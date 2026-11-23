@@ -9158,13 +9158,6 @@ function classifySegment(
   segment: LexSegment,
   protectedPaths: readonly ProtectedPathEntry[],
   context: ClassifierContext,
-  /**
-   * The segment's substitutions were already read by the call this one is
-   * made from (the command's own answer, asked beside a protected redirect):
-   * each was found to only read, so they are not read again. Without this a
-   * nest of substitutions would be read twice at every level.
-   */
-  substitutionsRead = false,
 ): SegmentOutcome {
   if (segment.opaque !== null) {
     return { ok: false, code: "opaque", detail: segment.opaque };
@@ -9195,7 +9188,7 @@ function classifySegment(
   // went through, on a line that spells no `.git`, is not read again.
   const bodyAlreadyRead = context.lineNamesGit === false && context.spelledSegments?.has(segment) === true;
   const substitutionDepth = (context.substitutionDepth ?? 0) + 1;
-  for (const word of substitutionsRead ? [] : expanded) {
+  for (const word of expanded) {
     for (const inner of word.substitutions) {
       // Review of the substitution fold: past this depth the recursion is
       // refused, not run until the call stack gives out (which it did near
@@ -9277,7 +9270,7 @@ function classifySegment(
     cursor += found.skip;
   }
 
-  const writeTargets = segment.redirects
+  const everyWriteTarget = segment.redirects
     .filter((redirect) => redirect.op !== "<")
     .map((redirect) => redirect.target.text)
     // APRV-283: a redirection to a discard device creates nothing, so it is not
@@ -9287,16 +9280,16 @@ function classifySegment(
   // APRV-503: the paths this segment READS through `<`, at any descriptor. They
   // are judged where a named argument is judged, below: a credential target is
   // `account.credential` and a protected one joins the effectful scan.
-  const readTargets = segment.redirects
+  const everyReadTarget = segment.redirects
     .filter((redirect) => redirect.op === "<")
     .map((redirect) => redirect.target.text);
-  const redirectTargets = segment.redirects.map((redirect) => redirect.target.text);
+  const everyRedirectTarget = segment.redirects.map((redirect) => redirect.target.text);
   // A redirection onto a protected path is a write to that path, whatever the
   // command in front of it was going to do. The CLASS says which surface was
   // aimed at (APRV-198); the RULE stays `redirect-protected`, because the
   // mechanism is unchanged and the hook's tiers and the channel's protected-path
   // view are keyed on the rule.
-  const redirected = strictestProtected(writeTargets, protectedPaths);
+  const redirected = strictestProtected(everyWriteTarget, protectedPaths);
   const bin = words[cursor];
   if (redirected !== null) {
     // APRV-503 recheck (SHOULD-FIX-R1): a segment that writes a protected path
@@ -9309,18 +9302,15 @@ function classifySegment(
       (writer === null
         ? null
         : credentialTouch(writer, writerArgs)) ??
-      redirectCredentialTouch(readTargets, redirectTargets);
+      redirectCredentialTouch(everyReadTarget, everyRedirectTarget);
     // The command in front of the redirect may write protected paths of its
     // own (`tee .github/workflows/ci.yml > design/x`): its own answer, the
     // write redirections set aside, is judged beside the redirect's. A reader
     // (`cat SPEC.md > design/x`) earns no protected answer and adds nothing.
+    // The segment is still walked once: this is the walk every other segment
+    // takes ({@link commandAnswer}), not a second classification.
     const own = foldedOnly((): ProtectedBeside[] => {
-      const answer = classifySegment(
-        { ...segment, redirects: segment.redirects.filter((redirect) => redirect.op === "<") },
-        protectedPaths,
-        context,
-        true,
-      );
+      const answer = commandAnswer(segment.redirects.filter((redirect) => redirect.op === "<"));
       if (!answer.ok || !PROTECTED_ANSWER_RULES.has(answer.rule)) return [];
       return [
         { class: answer.class, rule: answer.rule, ...(answer.path === undefined ? {} : { path: answer.path }) },
@@ -9337,6 +9327,22 @@ function classifySegment(
     };
   }
 
+  return commandAnswer(segment.redirects);
+
+  /**
+   * The segment's answer from its command and the redirections given: every
+   * redirection of the segment, or, beside a protected redirection's answer
+   * above, the `<` ones alone (the command's own answer). One walk either way.
+   * Its body keeps the indentation it had as the tail of this function, so the
+   * change that made it a function moves no line.
+   */
+  function commandAnswer(redirects: LexSegment["redirects"]): SegmentOutcome {
+  const writeTargets = redirects
+    .filter((redirect) => redirect.op !== "<")
+    .map((redirect) => redirect.target.text)
+    .filter((target) => !isDiscardTarget(target));
+  const readTargets = redirects.filter((redirect) => redirect.op === "<").map((redirect) => redirect.target.text);
+  const redirectTargets = redirects.map((redirect) => redirect.target.text);
   // APRV-521 (review-b M1). Every spelling of bash's assignment word is read
   // past by the cursor above ({@link ASSIGNMENT}), and only the plain one is
   // judged by the rules below. An append (`NAME+=v`) or a subscripted write
@@ -9464,7 +9470,7 @@ function classifySegment(
     !segment.stdinFed &&
     !segment.subshell &&
     segment.words.every((word) => word.substitutions.length === 0) &&
-    segment.redirects.every((redirect) => redirect.op !== "<" && isDiscardTarget(redirect.target.text)) &&
+    redirects.every((redirect) => redirect.op !== "<" && isDiscardTarget(redirect.target.text)) &&
     (segment.words[cursor]?.exact ?? false) &&
     isExecCodeInterpreter(bin)
       ? execCodeShape(basename, args, execWords)
@@ -9638,7 +9644,7 @@ function classifySegment(
     // protected path or a credential home; and when no word, as written or
     // resolved against each of those cwds, names a protected path or a
     // credential. Anything else keeps the refusal.
-    const lexWords = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
+    const lexWords = [...segment.words, ...redirects.map((redirect) => redirect.target)];
     const cwds = (context.noRuleCwds ?? []).map((dir) => dir.replace(/\/+$/u, ""));
     const resolvedWords = lexWords.flatMap((word) => cwds.map((dir) => `${dir}/${word.text}`));
     const cwdRefused = cwds.some(
@@ -9653,7 +9659,7 @@ function classifySegment(
       segment.heredoc ||
       segment.stdinFed ||
       segment.bodySubstitutions.length > 0 ||
-      segment.redirects.some((redirect) => redirect.op === "<") ||
+      redirects.some((redirect) => redirect.op === "<") ||
       lexWords.some((word) => !word.exact || word.substitutions.length > 0 || noRuleWordRefused(word.text)) ||
       deferredCredential !== null ||
       fetched.unknown !== null ||
@@ -9977,6 +9983,7 @@ function classifySegment(
     ...(sandbox === null ? {} : { sandbox }),
     ...(execCode === null ? {} : { execCode }),
   };
+  }
 }
 
 /**
