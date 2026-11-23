@@ -1252,7 +1252,10 @@ function scheduleGuardRemoval(): void {
  * removing the last listener before that turn drops it. So after the release:
  * a verb that returns or awaits dies of the signal at its next turn;
  * `approval run` awaits {@link yieldToTerminationSignals} before it spawns, so
- * a stop request during its append ends it first; and a synchronous wait calls
+ * a stop request during its append ends it first; `approval policy amend` (and
+ * `policy apply`, which ends in it) awaits it after the `policy.proposed`
+ * append, so a stop request during that append ends it before the attestation
+ * wait, and the wait sleeps on a timer; and a synchronous wait calls
  * {@link settleTerminationGuards} before it blocks, so the wait runs under the
  * default disposition, at the price of losing a signal that landed in the
  * append's own milliseconds. A create that fails EEXIST releases and settles at
