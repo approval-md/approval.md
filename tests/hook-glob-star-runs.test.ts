@@ -1,13 +1,16 @@
 /**
- * A run of `*` in a path word, and a pattern too wide to list.
+ * Stars in a path word, and a pattern too wide to list.
  *
  * A hook the harness kills at its timeout is a tool call that proceeds
  * (`docs/claude-code-hook.md`), so a word that holds the hook is a way past
  * it. Two such words are pinned here:
  *
- * 1. a run of `*`. Each star became its own `.*`, and a backtracking matcher
- *    tries every way of sharing a name between them: 441 bytes held the hook
- *    for minutes. A run is now written once, which matches the same names.
+ * 1. stars. Each star became its own `.*`, and a backtracking matcher tries
+ *    every way of sharing a name between them: 441 bytes of stars in a row
+ *    held the hook for minutes, and so did 24 bytes of `*a` against one file
+ *    named sixty a's. A pattern of three stars or more is now walked piece
+ *    by piece, with the same answers (held against the old expression by a
+ *    fuzz below).
  * 2. a word whose patterns go round a link back to where they started. Each
  *    component is listed from up to 256 places, so the same directory was
  *    listed that many times per lap, for as long as the word went on. The
@@ -24,7 +27,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { classifyForHook } from "../src/cli/hook.js";
+import { classifyForHook, globRegex } from "../src/cli/hook.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-stars-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -168,4 +171,93 @@ test("a pattern too wide to list is a read the hook cannot clear, answered in un
   assert.ok(spent < 2, `${spent.toFixed(3)} CPU s`);
   // A word with one pattern and no lap is listed, and clear.
   assert.deepEqual(classesOf(`ls ${"./".repeat(200)}only*`, dir), ["read.shell"]);
+});
+
+// ---------------------------------------------------------------------------
+// The piece walk against the expression it replaces
+// ---------------------------------------------------------------------------
+
+/** `globRegex` as it was: every star its own `.*`, the whole thing one expression. The oracle. */
+function globRegexBefore(component: string): RegExp {
+  let source = "";
+  for (const char of component) {
+    if (char === "*") source += ".*";
+    else if (char === "?") source += ".";
+    else if (char === "[" || char === "]") source += char;
+    else source += char.replace(/[.+^${}()|\\]/gu, "\\$&");
+  }
+  try {
+    return new RegExp(`^${source}$`, "u");
+  } catch {
+    return /^.*$/u;
+  }
+}
+
+/** A small deterministic generator (mulberry32). */
+function random(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+test("the piece walk answers as the expression it replaces, on 200,000 random patterns and names", () => {
+  // Stars often, and everything the expression treats specially: brackets
+  // (closed, unclosed, empty, reversed ranges, a star inside one), the
+  // characters it escapes, the line terminators a star does not cross, and a
+  // character that is two code units.
+  const PATTERN = ["a", "a", "b", "c", "*", "*", "*", "*", "*", "?", "[", "]", "-", "!", "^", ".", "\n", "\\", "{", "\u00e9", "\u{1f600}"];
+  const NAME = ["a", "a", "b", "c", ".", "-", "!", "^", "\n", "\r", "\u2028", "\\", "{", "\u00e9", "\u{1f600}", "*", "?", "[", "]"];
+  const next = random(20261123);
+  const pick = (from: readonly string[], most: number): string => {
+    let text = "";
+    const length = Math.floor(next() * (most + 1));
+    for (let index = 0; index < length; index += 1) text += from[Math.floor(next() * from.length)] as string;
+    return text;
+  };
+  let matched = 0;
+  let walked = 0;
+  for (let round = 0; round < 200_000; round += 1) {
+    const pattern = pick(PATTERN, 10);
+    // Half the names are made from the pattern, so that a good share match.
+    const name = round % 2 === 0 ? pick(NAME, 9) : pattern.replace(/\*/gu, () => pick(NAME, 2)).replace(/\?/gu, () => pick(NAME, 1));
+    const expected = globRegexBefore(pattern).test(name);
+    if (expected) matched += 1;
+    if ((pattern.match(/\*/gu) ?? []).length >= 3) walked += 1;
+    // As it ships (walked from three stars), and walked always.
+    assert.equal(globRegex(pattern).test(name), expected, `${JSON.stringify(pattern)} against ${JSON.stringify(name)}`);
+    assert.equal(globRegex(pattern, 0).test(name), expected, `walked: ${JSON.stringify(pattern)} against ${JSON.stringify(name)}`);
+  }
+  // The fuzz is worth something only if it matches often and walks often.
+  assert.ok(matched > 20_000, `${String(matched)} matched`);
+  assert.ok(walked > 20_000, `${String(walked)} had three stars or more`);
+});
+
+test("stars with a letter between them cost the name's length times the pattern's, not a power of it", () => {
+  // The line the star-run fix alone left open: 24 bytes, and one file named
+  // sixty a's. Seven stars were 2 CPU seconds and each further star seven
+  // times that.
+  const dir = join(scratch, "letters");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "a".repeat(60)), "");
+  writeFileSync(join(dir, `${"a".repeat(59)}b`), "");
+  let got: string[] = [];
+  const spent = cpu(() => {
+    got = classesOf(`cat ${"*a".repeat(9)}*b`, dir);
+  });
+  assert.deepEqual(got, ["read.shell"]);
+  assert.ok(spent < 2, `${spent.toFixed(3)} CPU s`);
+  // The matcher itself, at the longest name a directory holds and a hundred stars.
+  const long = "a".repeat(255);
+  const most = cpu(() => {
+    assert.equal(globRegex(`${"*a".repeat(100)}*b`).test(long), false);
+    assert.equal(globRegex(`${"*a".repeat(100)}*`).test(long), true);
+    assert.equal(globRegex(`${"*a".repeat(100)}*b`).test(`${long.slice(1)}b`), true);
+    assert.equal(globRegex(`${"*a".repeat(255)}*`).test(long), true);
+    assert.equal(globRegex(`${"*a".repeat(256)}*`).test(long), false);
+  });
+  assert.ok(most < 2, `${most.toFixed(3)} CPU s`);
 });

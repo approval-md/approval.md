@@ -365,14 +365,19 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   Conformance: ten new `command-class` vectors; main's 382 are
   byte-identical. The vectors version is bumped once, at the release cut.
 
-**A run of `*` no longer holds the hook.** A hook the harness kills at its
-timeout is a tool call that proceeds, and 441 bytes were enough to hold this
-one for minutes: `echo x > "$(echo .****…x)"` with 400 stars. Each star
-became its own `.*` in the pattern the hook tests names against, and the
-matcher tried every way of sharing a name between them.
+**Stars in a pattern no longer hold the hook.** A hook the harness kills at
+its timeout is a tool call that proceeds, and 441 bytes were enough to hold
+this one for minutes: `echo x > "$(echo .****…x)"` with 400 stars. So were 24:
+`cat *a*a*a*a*a*a*a*a*a*b` beside one file named sixty a's. Each star became
+its own `.*` in the expression the hook tests names against, and the matcher
+tried every way of sharing a name between them.
 
-- **A run of stars is written once.** It matches the same names, so no answer
-  changes; the 400-star line takes milliseconds.
+- **A pattern of three stars or more is walked piece by piece.** The
+  expression is cut at its stars; every piece matches a fixed number of
+  characters, and the pieces are placed left to right over the name. The same
+  answer as the whole expression gave (held against it by a fuzz in the
+  tests), in at most the name's length times the pattern's. A run of stars is
+  one star. Both lines take milliseconds.
 - **Listing a pattern has a budget: a million steps** (a path walked on, or a
   name tested). A word whose patterns go round a link back to where they
   started listed the same directory up to 256 times a lap. Past the budget

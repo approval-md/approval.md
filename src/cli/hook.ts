@@ -3051,7 +3051,6 @@ function expandGlobPath(path: string): string[] | typeof GLOB_TOO_WIDE | null {
   for (const component of components) {
     const next: string[] = [];
     steps += current.length;
-    if (steps > GLOB_LISTING_STEPS) return GLOB_TOO_WIDE;
     for (const base of current) {
       if (component === "..") {
         next.push(dirname(base));
@@ -8387,35 +8386,132 @@ function hasGlobChars(text: string): boolean {
   return /[*?[]/u.test(text);
 }
 
+/** What a glob component is asked: does it match this name? */
+export interface GlobTest {
+  test(name: string): boolean;
+}
+
 /**
- * A shell glob component as an anchored regular expression.
+ * A shell glob component as a test of a name.
  *
- * A run of `*` is written once. `.*.*` matches exactly the names `.*` matches,
- * but a backtracking matcher asked for a run of them tries every way of
- * sharing a name between them before it says no: 400 stars and a ten-letter
- * name do not finish. (Inside a bracket the repeat only named the same
- * characters twice.)
+ * The component is an anchored regular expression: `*` is `.*`, `?` is `.`,
+ * a bracket is the matcher's own class, everything else is itself. That
+ * expression is still what decides, and with up to two stars it is asked
+ * directly.
+ *
+ * With more stars it is not handed to the matcher whole. A backtracking
+ * matcher tries every way of sharing a name between the stars before it says
+ * no: `*a*a*a*a*a*a*a*a*a*b` against a file named sixty a's is minutes, and
+ * 400 stars in a row never finish. A hook the harness kills at its timeout
+ * is a tool call that proceeds, so the time this takes is part of the gate.
+ *
+ * Instead the expression is cut at its stars into pieces. Every piece is
+ * letters, `?` and brackets, so it matches a fixed number of characters and
+ * the matcher has nothing to try twice. The pieces are placed left to right
+ * over the name, remembering only where the pieces so far can end
+ * ({@link walkGlobPieces}): the same answer, in at most the name's length
+ * times the pattern's. A run of stars is one star.
+ *
+ * `walkFrom` is the number of stars at which the pieces are walked. Tests
+ * pass 0 to hold the walk against the expression on every pattern.
  */
-function globRegex(component: string): RegExp {
-  let source = "";
+export function globRegex(component: string, walkFrom = 3): GlobTest {
+  const pieces: GlobPiece[] = [{ source: "", length: 0, sticky: null }];
+  let whole = "";
+  let inBracket = false;
   let afterStar = false;
   for (const char of component) {
-    if (char === "*") {
-      if (!afterStar) source += ".*";
+    if (char === "*" && !inBracket) {
+      if (!afterStar) {
+        whole += ".*";
+        pieces.push({ source: "", length: 0, sticky: null });
+      }
       afterStar = true;
       continue;
     }
     afterStar = false;
-    if (char === "?") source += ".";
-    else if (char === "[" || char === "]") source += char;
-    else source += char.replace(/[.+^${}()|\\]/gu, "\\$&");
+    let text: string;
+    // Inside a bracket a star and a question mark are the characters the
+    // expression always made of them there (`.` and `*`, and `.`).
+    if (char === "*") text = ".*";
+    else if (char === "?") text = ".";
+    else if (char === "[" || char === "]") text = char;
+    else text = char.replace(/[.+^${}()|\\]/gu, "\\$&");
+    const piece = pieces[pieces.length - 1] as GlobPiece;
+    // One character of a name per letter, per `?` and per bracket.
+    if (!inBracket) piece.length += 1;
+    if (char === "[" && !inBracket) inBracket = true;
+    else if (char === "]" && inBracket) inBracket = false;
+    whole += text;
+    piece.source += text;
   }
+  let anchored: RegExp;
   try {
-    return new RegExp(`^${source}$`, "u");
+    anchored = new RegExp(`^${whole}$`, "u");
+    if (pieces.length - 1 < walkFrom) return anchored;
+    // The whole expression compiled, so every piece of it does.
+    for (const piece of pieces) if (piece.length > 0) piece.sticky = new RegExp(piece.source, "uy");
   } catch {
     return /^.*$/u;
   }
+  return { test: (name) => walkGlobPieces(pieces, name) };
 }
+
+/** A stretch of a glob's expression between two stars: what it is, and how many characters of a name it matches. */
+interface GlobPiece {
+  source: string;
+  length: number;
+  /** The piece as an expression that matches at one place only; `null` for an empty piece. */
+  sticky: RegExp | null;
+}
+
+/**
+ * Does `^piece0.*piece1.*…pieceN$` match `name`? The pieces placed left to
+ * right, keeping the places the pieces so far can end.
+ *
+ * A star's `.` does not match a line terminator, so the stretch a star
+ * covers holds none: a place to start the next piece is open from an end of
+ * the piece before it up to the next terminator. Names are walked by
+ * character (code point), as the expression walks them.
+ */
+function walkGlobPieces(pieces: readonly GlobPiece[], name: string): boolean {
+  const points = Array.from(name);
+  const size = points.length;
+  const offsets: number[] = [0];
+  for (const point of points) offsets.push((offsets[offsets.length - 1] as number) + point.length);
+  const fits = (piece: GlobPiece, start: number): boolean => {
+    if (start + piece.length > size) return false;
+    if (piece.sticky === null) return true;
+    piece.sticky.lastIndex = offsets[start] as number;
+    return piece.sticky.test(name);
+  };
+  const first = pieces[0] as GlobPiece;
+  if (!fits(first, 0)) return false;
+  if (pieces.length === 1) return first.length === size;
+  let ends: number[] = [first.length];
+  for (let index = 1; index < pieces.length; index += 1) {
+    const piece = pieces[index] as GlobPiece;
+    const last = index === pieces.length - 1;
+    const next: number[] = [];
+    let open = false;
+    let cursor = 0;
+    for (let start = ends[0] as number; start <= size; start += 1) {
+      if (cursor < ends.length && ends[cursor] === start) {
+        open = true;
+        cursor += 1;
+      }
+      if (!open && cursor >= ends.length) break;
+      if (open && (!last || start + piece.length === size) && fits(piece, start)) next.push(start + piece.length);
+      if (start < size && LINE_TERMINATORS.has(points[start] as string)) open = false;
+    }
+    if (next.length === 0) return false;
+    ends = next;
+  }
+  return true;
+}
+
+/** The characters a regular expression's `.` does not match. */
+const LINE_TERMINATORS: ReadonlySet<string> = new Set(["\n", "\r", "\u2028", "\u2029"]);
 
 /** Names a credential file goes by, for a pattern to be tested against. */
 const CREDENTIAL_NAMES: readonly string[] = [".env", ".env.local", ".op.env", "auth.json", "env", "vault.enc", "keys"];
