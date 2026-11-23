@@ -913,3 +913,20 @@ test("under such a policy the real hook answers an ordinary write as main does, 
     assert.match(checked.stdout, new RegExp(`note: protected_paths entry "${path.replace(/[.]/gu, "\\.")}" names a built-in policy\\.core path in another spelling`, "u"));
   }
 });
+
+test("a line of many folded segments costs about what the same line spelled canonically costs", () => {
+  // Both readings run on the folded line and their segments are joined; the
+  // join is keyed, so it stays linear in the number of segments. A ratio, for
+  // the same reason as the Hermes test above.
+  const SIZE = 256 * 1024;
+  const fill = (unit: string): string => unit.repeat(Math.ceil(SIZE / unit.length)).slice(0, SIZE - 40);
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  const control = cpu(() => classifyCommand(fill("echo x > .cursor/hooks.json; ")));
+  const spent = cpu(() => classifyCommand(fill(`echo x > .Cursor/hoo${KELVIN}s.json; `)));
+  assert.ok(spent <= 8 * control + 1, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
+});

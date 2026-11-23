@@ -10016,10 +10016,18 @@ export function unionNameReadings(readings: readonly CommandClassification[]): C
   if (!spelled.ok) return spelled;
   const segments = [...folded.segments];
   const classes = [...folded.classes];
+  // Keyed, so a line of many segments joins in linear time.
+  const key = (segment: ClassifiedSegment): string => `${segment.class}\u0000${segment.text}`;
+  const have = new Set(segments.map(key));
+  const known = new Set(classes);
   for (const segment of spelled.segments) {
-    if (segments.some((have) => have.text === segment.text && have.class === segment.class)) continue;
+    if (have.has(key(segment))) continue;
+    have.add(key(segment));
     segments.push({ ...segment });
-    if (!classes.includes(segment.class)) classes.push(segment.class);
+    if (!known.has(segment.class)) {
+      known.add(segment.class);
+      classes.push(segment.class);
+    }
   }
   return { ok: true, segments, classes };
 }

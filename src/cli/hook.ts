@@ -4121,9 +4121,10 @@ export function classifyForHook(
     classifyForHookAsRead(command, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments),
   );
   if (spelled === undefined) return folded;
+  const seen = new Set(folded.notes);
   return {
     result: unionNameReadings([folded.result, spelled.result]),
-    notes: [...folded.notes, ...spelled.notes.filter((note) => !folded.notes.includes(note))],
+    notes: [...folded.notes, ...spelled.notes.filter((note) => !seen.has(note))],
   };
 }
 
