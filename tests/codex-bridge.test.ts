@@ -577,6 +577,33 @@ test("APRV-363: a legacy patch approval with an ordinary path is answered withou
   assertVerifies(dir);
 });
 
+test("a file change guarded only when its name is folded keeps the class it has as spelled", () => {
+  // `design/` is protected and the server names `Design/x.md`. Folded (how
+  // APFS opens it) that is `policy.edit`; as spelled, which is how the gate
+  // read it before names folded, it is an ordinary workspace write. Both
+  // classes are judged. This policy holds the workspace class human-only and
+  // `policy.edit` autonomous, so the change is refused, as it was before
+  // names folded; the folded class alone would have let it through.
+  const policy = POLICY.replace(
+    "  files.write.workspace:\n    autonomy: autonomous",
+    "  files.write.workspace:\n    autonomy: human-only\n  policy.edit:\n    autonomy: autonomous",
+  ).replace("classes:", "protected_paths:\n  - design/\nclasses:");
+  assert.match(policy, /human-only\n {2}policy\.edit/u);
+  const dir = ready(policy);
+  const refused = bridge(dir, [
+    legacyPatchRequest({ "Design/x.md": { add: { content: "hello\n" } } }, dir, "cwd"),
+  ]).report.answers[0] as BridgeAnswerRow;
+  assert.equal(refused.outcome, "decline", refused.detail);
+  assert.match(refused.detail, /files\.write\.workspace/u);
+  assert.match(refused.detail, /human-only/u);
+  // The canonical spelling is `policy.edit` in both readings: autonomous here.
+  const canonical = bridge(dir, [
+    legacyPatchRequest({ "design/x.md": { add: { content: "hello\n" } } }, dir, "cwd"),
+  ]).report.answers[0] as BridgeAnswerRow;
+  assert.equal(canonical.outcome, "accept", canonical.detail);
+  assertVerifies(dir);
+});
+
 test("APRV-363: a change naming a path outside the directory the server gave is refused", () => {
   const dir = ready();
   const before = rawLog(dir);

@@ -819,7 +819,9 @@ test("a long path of Hermes homes costs about what a same-length ordinary path c
     classifyCommand(`echo x > ${word}`);
   };
   const control = cpu(() => judge(`${fill(".hermez/x/")}.env`));
-  for (const unit of [".hermes/x/", ".HERMES/x/", `.herme${LONG_S}/x/`, "$X/x/"]) {
+  // `$X/../` is the shape that took one tail slice per `..` before the walk
+  // was linear: the square of the length in memory as well as time.
+  for (const unit of [".hermes/x/", ".HERMES/x/", `.herme${LONG_S}/x/`, "$X/x/", "$X/../"]) {
     for (const end of [".env", "../.env"]) {
       const word = `${fill(unit)}${end}`;
       const spent = cpu(() => judge(word));
