@@ -1257,9 +1257,11 @@ test("through the real hook, a command that writes a design file and a workflow 
 
 test("a segment with a protected redirection is walked once: it costs about what it costs without the redirection", () => {
   // The command in front of a protected redirection is asked for its own
-  // answer. That is the walk every segment takes, made once; a second
-  // classification of the segment would cost about twice the control. A
-  // ratio of CPU time, like the tests around it. 1 MiB of plain words.
+  // answer. That is the walk every segment takes, made once. A ratio of CPU
+  // time, like the tests around it, over 1 MiB of plain words. Measured five
+  // times each: with one walk the line costs 0.59 to 0.73 of the control;
+  // with the walk made twice, 1.04 to 1.34. The bound sits between, and each
+  // side is the least of three runs, so one slow run does not decide it.
   const SIZE = 1024 * 1024;
   const words = "x ".repeat(SIZE / 2);
   const cpu = (run: () => void): number => {
@@ -1268,9 +1270,10 @@ test("a segment with a protected redirection is walked once: it costs about what
     const used = process.cpuUsage(start);
     return (used.user + used.system) / 1e6;
   };
-  const control = cpu(() => classifyCommand(`tee design/x ${words}`, TWO_ROUTES));
-  const spent = cpu(() => classifyCommand(`tee design/x ${words}> .github/workflows/ci.yml`, TWO_ROUTES));
-  assert.ok(spent <= 1.6 * control + 0.2, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
+  const least = (run: () => void): number => Math.min(cpu(run), cpu(run), cpu(run));
+  const control = least(() => classifyCommand(`tee design/x ${words}`, TWO_ROUTES));
+  const spent = least(() => classifyCommand(`tee design/x ${words}> .github/workflows/ci.yml`, TWO_ROUTES));
+  assert.ok(spent <= 0.9 * control, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
   assert.deepEqual(pure(`tee design/x ${"x ".repeat(8)}> .github/workflows/ci.yml`, TWO_ROUTES), [
     "policy.edit.ci redirect-protected",
     "policy.edit.design protected-path",
