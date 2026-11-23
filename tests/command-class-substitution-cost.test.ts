@@ -74,21 +74,51 @@ function notAlreadyOver(label: string): void {
   assert.equal(overBound, null, `${label}: not timed, an earlier line passed the bound (${String(overBound)})`);
 }
 
-/** Fail if `seconds` is over {@link BOUND} as this runner stretches it, and remember it. */
-function withinBound(seconds: number, label: string): void {
-  const bound = scaledBound(BOUND);
+/**
+ * The bound of ONE line, "many command words, n=400000", in CPU seconds, not
+ * stretched by the runner's factor (lead, CLAIMS L61975; review of e30fab93).
+ *
+ * The calibration does not track this line: CI's node 22 runner reads it 4.4
+ * to 4.9 times slower than a laptop does, and the calibration only 1.55
+ * times, so the factor there is 1.00 while the line sits at the general
+ * bound of 8 (8.28 CPU s in run 45219782548, a head whose cost equals
+ * main's). So its bound is set from CI's own figure for main: 1.5 times the
+ * CPU seconds main's code takes on that runner, measured in this PR's own
+ * run (it changes tests only). A head 50% slower than main still fails.
+ *
+ * The figure: 7.35 CPU s, run 45231949630, the full gate's node 22 job, shard
+ * 1 (`# cost-line:` in its log; the calibration took 0.419 CPU s in the same
+ * process). One run, one measurement, taken cold as the test takes it. A
+ * laptop reads the line in 1.4 to 1.9, so this bound is loose there: it is
+ * CI that holds the line to it. The line logs its figure in every run.
+ */
+const MANY_COMMAND_WORDS_BOUND = 1.5 * 7.35;
+
+/**
+ * Fail if `seconds` is over the bound, and remember it. The bound is
+ * {@link BOUND} as this runner stretches it, or `own` as written.
+ */
+function withinBound(seconds: number, label: string, own?: number): void {
+  const bound = own ?? scaledBound(BOUND);
   if (seconds >= bound) overBound = label;
-  assert.ok(seconds < bound, `${label}: ${seconds.toFixed(2)} CPU s, bound ${bound.toFixed(2)} (${String(BOUND)} x ${runner().line})`);
+  const how = own === undefined ? `${String(BOUND)} x ${runner().line}` : "this line's own bound, set from main's figure on CI and not stretched";
+  assert.ok(seconds < bound, `${label}: ${seconds.toFixed(2)} CPU s, bound ${bound.toFixed(2)} (${how})`);
 }
 
-/** Classify `command` (pure) and fail if it took more than {@link BOUND} CPU seconds. */
-function bounded(command: string, label: string): string[] {
+/**
+ * Classify `command` (pure) and fail if it took more than {@link BOUND} CPU
+ * seconds, or more than `own` where the line has a bound of its own. A line
+ * with its own bound logs what it took, so the figure the bound came from can
+ * be read again in any run.
+ */
+function bounded(command: string, label: string, own?: number): string[] {
   notAlreadyOver(label);
   let answer: string[] = [];
   const seconds = cpuSeconds(() => {
     answer = pure(command);
   });
-  withinBound(seconds, label);
+  if (own !== undefined) console.log(`# cost-line: ${label}: ${seconds.toFixed(2)} CPU s (bound ${own.toFixed(2)}; node ${process.version})`);
+  withinBound(seconds, label, own);
   return answer;
 }
 
@@ -235,7 +265,7 @@ test("cost: review-b's shapes on b085cd91 (nested defaults, printf and echo bodi
     bounded(`${P}echo x > "$(printf '%.0s'${" a".repeat(n)})"`, `printf %.0s of many words, n=${String(n)}`);
     bounded(`${P}echo x > "$(printf '%s'${" a".repeat(n)})"`, `printf %s of many words, n=${String(n)}`);
     bounded(`${P}echo x > "$(echo${" -n".repeat(n)} a)"`, `echo of many flags, n=${String(n)}`);
-    bounded(`${P}echo x > "$(${"command ".repeat(n)}printf a)"`, `many command words, n=${String(n)}`);
+    bounded(`${P}echo x > "$(${"command ".repeat(n)}printf a)"`, `many command words, n=${String(n)}`, n === 400000 ? MANY_COMMAND_WORDS_BOUND : undefined);
   }
 });
 
