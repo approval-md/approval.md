@@ -2343,6 +2343,15 @@ export interface ClassifierContext {
    */
   lineNamesGit?: boolean;
   /**
+   * May the line itself turn on dot-name matching for its globs (GLOB-WRITE,
+   * lead ruling L60846)? bash's `dotglob` (and a `GLOBIGNORE` assignment, which
+   * sets it), zsh's `globdots` / `GLOB_DOTS` in any spelling, its `-4` flag, a
+   * `(D)` qualifier, or `emulate`. Set by {@link classifyCommand} for the whole
+   * line and its inner scripts; without it a pattern reaches a dot-name only
+   * through an explicit leading `.`, as every shell's default does.
+   */
+  lineSetsDotglob?: boolean;
+  /**
    * The segments whose words, targets and substitution bodies the line's own
    * reading for {@link lineNamesGit} already went through (review of the
    * substitution fold, M1). Set by {@link classifyCommand}; a caller leaves
@@ -8252,6 +8261,22 @@ function strictestProtected(
 // ---------------------------------------------------------------------------
 
 /**
+ * Could this command line turn on dot-name matching (bash `dotglob`, zsh
+ * `GLOB_DOTS`)? Read on the raw text with quotes, backslashes and underscores
+ * removed and case folded, so every spelling counts (`shopt -s dotglob`,
+ * `setopt GLOB_DOTS`, `set -o "glob"dots`, `options[globdots]=on`, `unsetopt
+ * noglobdots`); also a `GLOBIGNORE` assignment (bash sets `dotglob` with it),
+ * zsh's `-4` flag on `set`/`setopt`, a `(…D…)` glob qualifier, and `emulate`.
+ * FAIL CLOSED: a mention anywhere on the line counts, wherever it sits.
+ */
+function lineMaySetDotglob(command: string): boolean {
+  const folded = command.replace(/['"\\_]/gu, "").toLowerCase();
+  if (/dotglob|globdots|globignore|emulate/u.test(folded)) return true;
+  if (/\b(?:set|setopt)\s+(?:[-+][a-z0-9]*\s+)*[-+][a-z0-9]*4/iu.test(command)) return true;
+  return /\([^()]*D[^()]*\)/u.test(command);
+}
+
+/**
  * {@link strictestProtected} for words a command WRITES through, read the way
  * the shell may still read them. Nothing here may be looser than the shell.
  *
@@ -8275,6 +8300,7 @@ function strictestProtectedWrite(
   protectedPaths: readonly ProtectedPathEntry[],
   inexact: (word: string) => boolean,
   skipProse = false,
+  dots = false,
 ): { surface: string; path: string } | null {
   let best = strictestProtected(words, protectedPaths, skipProse);
   const offer = (surface: string | null, word: string): void => {
@@ -8291,7 +8317,7 @@ function strictestProtectedWrite(
     const budget = { left: GLOB_GUARD_STEP_CAP };
     for (const reading of readings) {
       if (reading !== word) offer(protectedPathClass(reading, protectedPaths), word);
-      if (hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, budget), word);
+      if (hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, budget, dots), word);
     }
   }
   return best;
@@ -8697,6 +8723,7 @@ function globGuardClass(
   word: string,
   protectedPaths: readonly ProtectedPathEntry[],
   budget: { left: number } = { left: GLOB_GUARD_STEP_CAP },
+  dots = false,
 ): string | null {
   if (word.includes(PARAMETER_MARK)) return "log.mutate";
   const extraNames = protectedPaths.flatMap((entry) => parseProtectedEntry(entry)?.segments ?? []);
@@ -8725,30 +8752,45 @@ function globGuardClass(
         });
       const segments = masked.text.split("/");
       if (segments.length > GLOB_GUARD_SEGMENTS_CAP) return "log.mutate";
-      const spanning = (segment: string): string[][] => {
+      // A dot-name (`.approval`, `.hermes`, `..`) is reached only by an
+      // explicit leading `.`, unless the line turns dot matching on (`dots`).
+      const nonDot = names.filter((name) => !name.startsWith("."));
+      const spanning = (segment: string, dotted: boolean): string[][] => {
+        const pool = dotted ? names : nonDot;
         const out: string[][] = [[], [segment]];
-        for (const first of names) {
+        for (const first of pool) {
           out.push([first]);
-          for (const second of names) out.push([first, second]);
+          for (const second of pool) out.push([first, second]);
         }
         return out;
       };
       let exhausted = false;
       const choices: string[][][] = segments.map((segment) => {
         if (segment.length === 0) return [[segment]];
-        if (segment === "**" || segment === "***") return spanning(segment);
+        // globstar and zsh's `**/` descend into dot-directories only with dot
+        // matching on; a variable's value and a braceccl range are literal text,
+        // which may hold a dot-name.
+        if (segment === "**" || segment === "***") return spanning(segment, dots);
         const glob = hasGlobConstruct(segment.split(PARAMETER_MARK).join(""));
-        if (segment.includes("$")) return glob ? spanning(segment) : [[segment]];
+        if (segment.includes("$")) return glob ? spanning(segment, true) : [[segment]];
         const pattern = globSegmentTokens(segment);
-        if (pattern.spans) return spanning(segment);
+        if (pattern.spans) return spanning(segment, true);
+        // An explicit leading `.`, a leading group (zsh `(.a|b)`, bash
+        // extglob `!(x)`, which matches a dot-name), or a leading braceccl
+        // class holding `.` may reach a dot-name with no option set.
+        const first = pattern.tokens[0];
+        const dotted =
+          dots ||
+          /^[.(]|^[!@?*+]\(/u.test(segment) ||
+          (first?.kind === "set" && first.chars.includes("."));
         const out: string[][] = [[segment]];
         const test = (name: string, prefix: boolean): boolean => {
           const hit = globTokensMatch(pattern, name, prefix, budget);
           if (hit === null) exhausted = true;
           return hit !== false;
         };
-        for (const name of names) if (name !== segment && test(name, false)) out.push([name]);
-        for (const name of GLOB_GUARD_PREFIXES) if (test(name, true)) out.push([name]);
+        for (const name of dotted ? names : nonDot) if (name !== segment && test(name, false)) out.push([name]);
+        for (const name of GLOB_GUARD_PREFIXES) if ((dotted || !name.startsWith(".")) && test(name, true)) out.push([name]);
         return out;
       });
       if (exhausted) return "log.mutate";
@@ -9308,7 +9350,8 @@ function classifySegment(
     .filter((word) => !word.exact)
     .map((word) => word.text);
   const inexact = (text: string): boolean => inexactWords.some((word) => word.includes(text));
-  const redirected = strictestProtectedWrite(writeTargets, protectedPaths, inexact);
+  const dots = context.lineSetsDotglob === true;
+  const redirected = strictestProtectedWrite(writeTargets, protectedPaths, inexact, false, dots);
   const bin = words[cursor];
   if (redirected !== null) {
     // APRV-503 recheck (SHOULD-FIX-R1): a segment that writes a protected path
@@ -9729,6 +9772,8 @@ function classifySegment(
     [...fetched.files, ...targetDirectories, ...fetchedDirectories],
     protectedPaths,
     inexact,
+    false,
+    dots,
   );
   if (fetchedProtected !== null) {
     return { ok: true, class: fetchedProtected.surface, rule: "protected-path", path: fetchedProtected.path };
@@ -9745,7 +9790,7 @@ function classifySegment(
   // named path already earns a class at least as strict (the log).
   const copyUnknown = copyFamily ? copyArgvUnknown(args, argFlags) : null;
   if (copyUnknown !== null) {
-    const named = strictestProtectedWrite([...positionals, ...readTargets], protectedPaths, writtenInexact);
+    const named = strictestProtectedWrite([...positionals, ...readTargets], protectedPaths, writtenInexact, false, dots);
     if (named !== null && protectedRank(named.surface) <= protectedRank("policy.core")) {
       return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
     }
@@ -9757,7 +9802,7 @@ function classifySegment(
   // that file, so a protected one, spelled plainly, by a pattern or by a
   // `${…}` default, takes its class as a redirection onto it would.
   if (cls.startsWith("read.")) {
-    const written = strictestProtectedWrite(readWriteTargets(basename, args), protectedPaths, inexact);
+    const written = strictestProtectedWrite(readWriteTargets(basename, args), protectedPaths, inexact, false, dots);
     if (written !== null) return { ok: true, class: written.surface, rule: "protected-path", path: written.path };
   }
 
@@ -9812,7 +9857,7 @@ function classifySegment(
     // GLOB-WRITE: a word the command WRITES that the shell may still glob, or
     // fill from a `${…}` default, is judged by every guarded path it could name
     // ({@link globWriteOperands}).
-    const named = strictestProtectedWrite(judged, protectedPaths, writtenInexact, true);
+    const named = strictestProtectedWrite(judged, protectedPaths, writtenInexact, true, dots);
     const fed = strictestProtected(readTargets, protectedPaths);
     const touched =
       fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))
@@ -10208,8 +10253,11 @@ export function classifyCommand(
   const lineNamesGit =
     context.lineNamesGit === true || (context.bodyAlreadyRead !== true && lineSpellsGitIndirectly(lexed.segments));
   const spelledSegments = new WeakSet<LexSegment>(lexed.segments);
-  context = { ...context, lineNamesGit, spelledSegments, bodyAlreadyRead: false };
-  execContext = { ...execContext, lineNamesGit, spelledSegments, bodyAlreadyRead: false };
+  // GLOB-WRITE (lead ruling L60846): an option an EARLIER call set is a known
+  // limit; one this line (or a script inside it) may set is read.
+  const lineSetsDotglob = context.lineSetsDotglob === true || lineMaySetDotglob(command);
+  context = { ...context, lineNamesGit, lineSetsDotglob, spelledSegments, bodyAlreadyRead: false };
+  execContext = { ...execContext, lineNamesGit, lineSetsDotglob, spelledSegments, bodyAlreadyRead: false };
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };

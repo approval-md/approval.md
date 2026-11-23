@@ -160,7 +160,9 @@ test("the zsh constructs a lexed word can carry are read as patterns too", () =>
   assert.equal(strictest("echo x > ~/.hermes/Z#auth.json"), "policy.core");
   assert.equal(strictest("echo x > ~/.hermes/a^Z"), "policy.core");
   assert.equal(strictest("echo x > APPROVAL.m*~x/y"), "policy.core");
-  assert.equal(strictest("echo x > ~/**/auth.json"), "log.mutate");
+  // A whole `**` descends into dot-directories only with dot matching on.
+  assert.deepEqual(classesOf("echo x > ~/**/auth.json"), ["files.write.workspace"]);
+  assert.equal(strictest("GLOBIGNORE=x; echo x > ~/**/auth.json"), "log.mutate");
   // Quoted, the word is a literal file name and never a pattern.
   assert.deepEqual(classesOf("echo x > '~/.hermes/?uth.json'"), ["files.write.workspace"]);
   assert.deepEqual(classesOf('echo x > "APPROVAL.m?"'), ["files.write.workspace"]);
@@ -310,4 +312,84 @@ test("review 5: the parameter placeholder cannot be forged, and $ beside a glob 
   // A variable beside a glob construct may hold a `/`: it may name anything.
   assert.equal(strictest("echo x > ${X}*"), "log.mutate");
   assert.equal(strictest("echo x > ~/.hermes/$1*.json"), "log.mutate");
+});
+
+// ---------------------------------------------------------------------------
+// Dot-names (lead ruling L60846): a form that needs an option is strict only
+// when the SAME command line may set it; set by an earlier call, it is a known
+// limit. `*`, `?` and `[...]` reach `.approval`, `.hermes` and the other
+// dot-names only through an explicit leading `.`, or with dotglob/globdots.
+// ---------------------------------------------------------------------------
+
+/** The class of the LAST segment, with no-rule setters (`shopt`, `setopt`) let through. */
+function lastClass(command: string): string {
+  const result = classifyCommand(command, [], { noRuleSegments: true });
+  if (!result.ok) return `refused:${result.code}`;
+  const last = result.segments[result.segments.length - 1];
+  assert.ok(last !== undefined, command);
+  return last.class;
+}
+
+const SAME_LINE_SETTERS: readonly string[] = [
+  "shopt -s dotglob; ",
+  "setopt globdots; ",
+  "set -o globdots; ",
+  "GLOBIGNORE=x; ",
+  "setopt glob_dots; ",
+  "unsetopt noglobdots; ",
+  "set -4; ",
+  "emulate ksh; ",
+  "options[globdots]=on; ",
+  "bash -c 'shopt -s dotglob'; ",
+];
+
+test("dot-names: an explicit leading dot reaches them with no option set", () => {
+  for (const command of [
+    "echo x > ~/.[!Z]ermes/auth.json",
+    "echo x > ~/.h*/auth.json",
+    "echo x > .appr*/env",
+    "echo x > .[!Z]pproval/env",
+    "cp a .c*/settings.json",
+  ]) {
+    assert.equal(strictest(command), "policy.core", command);
+  }
+});
+
+test("dot-names: *, ? and [...] do not reach them unless the same line turns dot matching on", () => {
+  for (const [command, alone] of [
+    ["echo x > dist/*/x.txt", "files.write.workspace"],
+    ["echo x > ~/*/auth.json", "files.write.workspace"],
+    ["echo x > */env", "files.write.workspace"],
+    ["echo x > ?approval/env", "files.write.workspace"],
+    ["echo x > [.]approval/env", "files.write.workspace"],
+    ["cp a ~/*/auth.json", "files.write.workspace"],
+  ] as const) {
+    assert.deepEqual(classesOf(command), [alone], command);
+    for (const setter of SAME_LINE_SETTERS) {
+      const cls = lastClass(`${setter}${command}`);
+      assert.ok(HUMAN_ONLY.has(cls) || cls.startsWith("refused:"), `${setter}${command} -> ${cls}`);
+    }
+  }
+  // An empty GLOBIGNORE assignment also turns dotglob on in bash.
+  assert.equal(strictest("GLOBIGNORE=; echo x > dist/*/x.txt"), "policy.core");
+});
+
+test("dot-names: the ruling's workflow lines, with and without dot matching on the line", () => {
+  // `*` can be APPROVAL.md (a guarded name at any depth, and matched with no
+  // option: on APFS, case folded, `*.md` and `*` reach it as bash does), so a
+  // write through `*` straight into a directory stays policy.core either way.
+  for (const command of ["rm -rf dist/*", "chmod +x scripts/*", "git add src/*", "npx prettier --write src/*", "git add *"]) {
+    assert.equal(strictest(command), "policy.core", command);
+    assert.equal(lastClass(`GLOBIGNORE=x; ${command}`), "policy.core", command);
+  }
+  // A pattern for a DIRECTORY reaches only dot-directories: main's class by
+  // default, strict when the line turns dot matching on.
+  assert.deepEqual(classesOf("echo x > dist/*/x.txt"), ["files.write.workspace"]);
+  assert.equal(lastClass("shopt -s dotglob; echo x > dist/*/x.txt"), "policy.core");
+  assert.equal(lastClass("setopt globdots; echo x > dist/*/x.txt"), "policy.core");
+  // Patterns that reach no guarded name keep their class either way.
+  for (const command of ["rm -rf dist/*.js", "chmod +x scripts/*.sh", "git add src/*.ts", "echo x > out/*.log"]) {
+    assert.ok(!classesOf(command).some((cls) => HUMAN_ONLY.has(cls)), command);
+    assert.ok(!HUMAN_ONLY.has(lastClass(`GLOBIGNORE=x; ${command}`)), command);
+  }
 });
