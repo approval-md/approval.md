@@ -530,7 +530,9 @@ test("listings: the four workflow lines by what the directory holds", () => {
     // The raised class, with a plain class that is not an ordinary write beside it (review-b S1).
     const raised = main.startsWith("files.") ? ["policy.core"] : ["policy.core", main];
     assert.deepEqual(withListing(command, { [dir]: ["APPROVAL.md"] }), raised, `${command} APPROVAL.md`);
-    assert.deepEqual(withListing(command, { [dir]: ["apprOVAL.MD"] }), raised, `${command} apprOVAL.MD`);
+    // Another spelling: guarded in the folded reading; as spelled it is another
+    // name, so main's class rides beside (review-b A686-FOLD5 M1).
+    assert.deepEqual(withListing(command, { [dir]: ["apprOVAL.MD"] }), ["policy.core", main], `${command} apprOVAL.MD`);
     assert.deepEqual(withListing(command, { [dir]: "unreadable" }), raised, `${command} unreadable`);
     assert.deepEqual(withListing(command, {}), raised, `${command} not listed`);
   }
@@ -1254,4 +1256,29 @@ test("one fold (#688's shared helper, lead ruling 04:11Z): listing names, organ 
   // A pattern character whose fold is not one character (the ligature fl is
   // `fl`): read as any run, strict, never a miss.
   assert.ok(classesOf("echo x > .github/workﬂow*/ci.yml").includes("policy.edit"));
+});
+
+test("review-b A686-FOLD5 M1: the as-spelled reading compares exactly, so a case variant keeps the class main gives that spelling", () => {
+  // Folded: the guarded name (#686's class). As spelled: another name (main's class). Both ride.
+  for (const [command, both] of [
+    ["cp a.js .gItHuB/WoRkFlOwS/Ci.yMl", ["policy.edit", "files.write.workspace"]],
+    ["mv .gItHuB gone", ["policy.edit", "files.write.workspace"]],
+    ["mv x .CLAUDE", ["policy.core", "files.write.workspace"]],
+    ["tar -xf e.tar -C .Claude", ["policy.core", "files.write.workspace"]],
+    ["ln -sfn x .Claude", ["policy.core", "files.write.workspace"]],
+    ["rsync -a x/ .Claude/", ["policy.core", "network.call"]],
+    ["mv x .muſe", ["policy.core", "files.write.workspace"]],
+  ] as const) {
+    const classes = classesOf(command);
+    for (const cls of both) assert.ok(classes.includes(cls), `${command} -> ${classes.join(",")}`);
+  }
+  // The listing and the glob matcher: exact as spelled, as bash matches without nocaseglob.
+  for (const [command, listing, both] of [
+    ["rm -rf .CL*", { "/w": [".claude"] }, ["policy.core", "files.delete.out_of_scope"]],
+    ["rm -rf .mus*", { "/w": [".muſe"] }, ["policy.core", "files.delete.out_of_scope"]],
+    ["rm -rf *", { "/w": [".GIT", "a"] }, ["vcs.history.rewrite", "files.delete.out_of_scope"]],
+  ] as const) {
+    const classes = withListing(command, listing);
+    for (const cls of both) assert.ok(classes.includes(cls), `${command} ${JSON.stringify(listing)} -> ${classes.join(",")}`);
+  }
 });

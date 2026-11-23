@@ -212,3 +212,93 @@ test("lead ruling L61587 through the hook: `rm -rf *` where an organ directory i
     assert.deepEqual(await hookClasses(command, plain), ["files.write.workspace"], command);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Review-b A686-FOLD5 M1: #688's as-spelled reading compares EXACTLY, so a
+// case variant keeps main's ordinary class beside the folded protected one,
+// and the strictest decision answers. Through the REAL hook with policy W:
+// files.write.workspace human-only, policy.edit autonomous, network.call
+// human-only (codex's L61672 shape). Main 324d87dc denies every line below.
+// ---------------------------------------------------------------------------
+
+function runCliIn(args: readonly string[], cwd: string, input = ""): { code: number; stdout: string; stderr: string } {
+  const env = { ...process.env };
+  delete env["APPROVAL_HUMAN"];
+  const ran = spawnSync(process.execPath, [CLI_ENTRY, ...args], { cwd, encoding: "utf8", env, input });
+  assert.equal(ran.error, undefined, String(ran.error));
+  return { code: ran.status ?? -1, stdout: ran.stdout, stderr: ran.stderr };
+}
+
+const POLICY_W = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: manual",
+  '  approval_ttl: "1h"',
+  "  on_expiry: reject",
+  "classes:",
+  "  read.*:",
+  "    autonomy: autonomous",
+  "  files.write.workspace:",
+  "    autonomy: human-only",
+  "  policy.edit:",
+  "    autonomy: autonomous",
+  "  network.call:",
+  "    autonomy: human-only",
+  "```",
+  "",
+].join("\n");
+
+let decided = 0;
+function decideW(dir: string, command: string): { permission: string; reason: string } {
+  decided += 1;
+  const ran = runCliIn(
+    ["hook", "claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    JSON.stringify({ hook_event_name: "PreToolUse", session_id: "m1", tool_use_id: `m1-${decided}`, cwd: dir, transcript_path: "/dev/null", tool_name: "Bash", tool_input: { command } }),
+  );
+  assert.equal(ran.code, 0, ran.stderr);
+  const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+  return { permission: output.permissionDecision, reason: output.permissionDecisionReason };
+}
+
+test("review-b A686-FOLD5 M1, through the real hook with policy W: a case variant keeps main's class beside the protected one, so main's deny stands", () => {
+  const dir = join(scratch, "m1-lab");
+  for (const [sub, file] of [["src", "a.ts"], [".github/workflows", "ci.yml"], [".claude", "settings.json"], [".git", "config"], ["x", "y"]] as const) {
+    mkdirSync(join(dir, sub), { recursive: true });
+    writeFileSync(join(dir, sub, file), "made-up\n");
+  }
+  writeFileSync(join(dir, "a.js"), "made-up\n");
+  writeFileSync(join(dir, "README.md"), "made-up\n");
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY_W);
+  const attested = runCliIn(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  // Main 324d87dc refuses these as human-only (files.write.workspace, or
+  // network.call for rsync); a manual wait would be lighter.
+  for (const command of [
+    "cp a.js .gItHuB/WoRkFlOwS/Ci.yMl",
+    "mv README.md .GitHub/",
+    "mv .gItHuB gone",
+    "echo x > .gItHuB/WoRkFlOwS/Ci.yMl",
+    "rm -rf .Claude",
+    "mv x .CLAUDE",
+    "rsync -a x/ .Claude/",
+  ]) {
+    const decision = decideW(dir, command);
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+    assert.match(decision.reason, /^hook-class-human-only: /u, command);
+  }
+  // Main waits on vcs.history.rewrite (manual, timed out): not allowed here either.
+  for (const command of ["rm -rf .GIT", "cp a.js .gIt*/x"]) {
+    assert.notEqual(decideW(dir, command).permission, "allow", command);
+  }
+  // Not pinned here: `cp a.js .github/workflowſ/ci.yml` and `mv a.js
+  // .github/WORKFLOWS/ci.yml`. `.github` is spelled exactly, so both readings
+  // take #686's organ-directory destination (policy.edit in place of the
+  // ordinary class), as `cp a.js .github/README` does: #686's canonical
+  // design since FOLD1, left to the lead (review-b A686-FOLD5, M1 last line).
+  // Controls: the canonical spelling keeps the policy's answer for policy.edit.
+  assert.equal(decideW(dir, "cp a.js .github/workflows/ci.yml").permission, "allow");
+});
