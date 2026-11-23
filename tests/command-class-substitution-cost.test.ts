@@ -12,7 +12,10 @@
  *
  * CPU time, not wall-clock time: this machine is shared. Each bound is about
  * ten times the slowest figure measured (0.7 s, a word of 10,000 brace
- * groups and outputs), and far under the 60 s a hook is given. Sizes run
+ * groups and outputs), and far under the 60 s a hook is given. The bound is
+ * written for one kind of runner and stretched by how slow THIS runner is,
+ * measured in this run (`tests/cost-runner.ts`): a slow runner is measured,
+ * not guessed, and a failure names the factor it was given. Sizes run
  * smallest first, and once one line passes the bound the larger ones fail
  * at once, so a slow build fails in minutes, not after hours.
  * Hermetic: HOME is a fixture directory; git runs only to make a checkout,
@@ -28,6 +31,7 @@ import { after, test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand, globSegmentMatches } from "../src/core/command-class.js";
+import { cpuSeconds, MOST, runner, scaledBound } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-subst-cost-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -45,16 +49,12 @@ delete process.env["CDPATH"];
 const GIT = spawnSync("git", ["--version"]).status === 0;
 const skip = GIT ? false : "no git binary";
 
-/** The most CPU seconds one classification may take here. */
+/**
+ * The most CPU seconds one classification may take on the runner the bound
+ * was set on. Every use goes through {@link scaledBound}, which stretches it
+ * by this runner's measured factor.
+ */
 const BOUND = 8;
-
-/** CPU seconds (user and system) spent in `run`. */
-function cpuSeconds(run: () => void): number {
-  const start = process.cpuUsage();
-  run();
-  const used = process.cpuUsage(start);
-  return (used.user + used.system) / 1e6;
-}
 
 /** Every segment as `class rule`, pure; a refusal as `refused <code>`. */
 function pure(command: string): string[] {
@@ -74,10 +74,11 @@ function notAlreadyOver(label: string): void {
   assert.equal(overBound, null, `${label}: not timed, an earlier line passed the bound (${String(overBound)})`);
 }
 
-/** Fail if `seconds` is over {@link BOUND}, and remember it. */
+/** Fail if `seconds` is over {@link BOUND} as this runner stretches it, and remember it. */
 function withinBound(seconds: number, label: string): void {
-  if (seconds >= BOUND) overBound = label;
-  assert.ok(seconds < BOUND, `${label}: ${seconds.toFixed(2)} CPU s, bound ${String(BOUND)}`);
+  const bound = scaledBound(BOUND);
+  if (seconds >= bound) overBound = label;
+  assert.ok(seconds < bound, `${label}: ${seconds.toFixed(2)} CPU s, bound ${bound.toFixed(2)} (${String(BOUND)} x ${runner().line})`);
 }
 
 /** Classify `command` (pure) and fail if it took more than {@link BOUND} CPU seconds. */
@@ -90,6 +91,16 @@ function bounded(command: string, label: string): string[] {
   withinBound(seconds, label);
   return answer;
 }
+
+test("cost: this runner is measured before any bound is used, and the measurement is logged", (t) => {
+  const { seconds, factor, line } = runner();
+  // In the log of every run, so a red on a bound can be read against it.
+  t.diagnostic(line);
+  console.log(`# cost: ${line}`);
+  assert.ok(seconds > 0);
+  assert.ok(factor >= 1 && factor <= MOST, line);
+  assert.equal(scaledBound(BOUND), BOUND * factor);
+});
 
 const DIR_WRITE = "vcs.history.rewrite git-dir-write";
 const OUT = "$(:)";
@@ -244,7 +255,7 @@ function nearControl(line: string, control: string, label: string): void {
   const seconds = cpuSeconds(() => {
     pure(line);
   });
-  const ok = seconds < CONTROL_FACTOR * base + 1;
+  const ok = seconds < CONTROL_FACTOR * base + scaledBound(1);
   if (!ok) overBound = label;
   assert.ok(ok, `${label}: ${seconds.toFixed(2)} CPU s, the control ${base.toFixed(2)}, factor ${String(CONTROL_FACTOR)}`);
 }
