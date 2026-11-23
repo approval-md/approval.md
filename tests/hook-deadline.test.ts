@@ -430,45 +430,59 @@ test("through the real hook, a call it cannot read inside its deadline is refuse
   assert.equal(decide(dir, "cat notes/a.txt", { [DESCRIBE_DEADLINE_ENV]: "999999999" }).permission, "allow");
 });
 
-test("through the real hook, the worst pattern found so far is answered inside the deadline: stars with a letter between them, against one long name", { skip }, () => {
-  // Review-b's finding (441 bytes of stars) and the line it left: a pattern
-  // matcher that backtracks takes a power of the name's length. Ten stars
-  // and one file named sixty a's are minutes of matching, in 24 bytes.
+test("through the real hook, the two worst patterns found so far are answered inside the deadline: 400 stars, and ten stars with a letter between them", { skip }, () => {
+  // Review-b's findings (lead RULED L61849 and L61857). A pattern matcher
+  // that backtracks tries every way of sharing a name between the stars:
+  // 441 bytes of stars in a row, or 24 bytes of `*a` against one file named
+  // sixty a's, are minutes of matching.
   const dir = lab();
   writeFileSync(join(dir, "a".repeat(60)), "");
-  const command = `cat ${"*a".repeat(9)}*b`;
-  assert.equal(command.length, 24);
-  labs += 1;
-  const began = Date.now();
-  const ran = spawnSync(
-    process.execPath,
-    [CLI_ENTRY, "hook", "claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "100ms"],
-    {
-      cwd: dir,
-      encoding: "utf8",
-      env: { ...process.env, [DESCRIBE_DEADLINE_ENV]: "500" },
-      input: JSON.stringify({
-        hook_event_name: "PreToolUse",
-        session_id: "deadline",
-        tool_use_id: `deadline-${String(labs)}`,
+  const stars = `git push --force && echo x > "$(echo .${"*".repeat(400)}x)"`;
+  const letters = `cat ${"*a".repeat(9)}*b`;
+  assert.equal(stars.length, 441);
+  assert.equal(letters.length, 24);
+  for (const command of [stars, letters]) {
+    labs += 1;
+    const began = Date.now();
+    const ran = spawnSync(
+      process.execPath,
+      [CLI_ENTRY, "hook", "claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "100ms"],
+      {
         cwd: dir,
-        transcript_path: "/dev/null",
-        tool_name: "Bash",
-        tool_input: { command },
-      }),
-      // Far past the 500 ms deadline, far short of the minutes the match
-      // takes: a hook with no deadline is stopped here and the test fails.
-      timeout: 30_000,
-    },
-  );
-  assert.equal(ran.error, undefined, `the hook was still running after ${String(Date.now() - began)} ms: ${String(ran.error)}`);
-  assert.equal(ran.status, 0, ran.stderr);
-  const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
-  // What must hold is an answer in time. While the matcher backtracks that
-  // answer is the refusal; a matcher that does not (it reads the line in
-  // milliseconds) may allow the read, which is what the line is.
-  if (output.permissionDecision === "deny") assert.match(output.permissionDecisionReason, /^hook-deadline: /u);
-  else assert.equal(output.permissionDecision, "allow", output.permissionDecisionReason);
+        encoding: "utf8",
+        env: { ...process.env, [DESCRIBE_DEADLINE_ENV]: "500" },
+        input: JSON.stringify({
+          hook_event_name: "PreToolUse",
+          session_id: "deadline",
+          tool_use_id: `deadline-${String(labs)}`,
+          cwd: dir,
+          transcript_path: "/dev/null",
+          tool_name: "Bash",
+          tool_input: { command },
+        }),
+        // Far past the 500 ms deadline, far short of the minutes the match
+        // takes: a hook with no deadline is stopped here and the test fails.
+        timeout: 30_000,
+      },
+    );
+    const label = command.slice(0, 40);
+    assert.equal(ran.error, undefined, `${label}: the hook was still running after ${String(Date.now() - began)} ms: ${String(ran.error)}`);
+    assert.equal(ran.status, 0, `${label}: ${ran.stderr}`);
+    const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+    // What must hold is an answer in time, and never an allow of a line the
+    // hook did not finish reading. While the matcher backtracks the answer
+    // is the `hook-deadline` refusal. A matcher that does not backtrack reads
+    // both lines in milliseconds, and then each has its own answer: the push
+    // waits for a human here and times out, the read is allowed.
+    if (/^hook-deadline: /u.test(output.permissionDecisionReason)) {
+      assert.equal(output.permissionDecision, "deny", label);
+    } else if (command === stars) {
+      assert.equal(output.permissionDecision, "deny", `${label}: ${output.permissionDecisionReason}`);
+      assert.match(output.permissionDecisionReason, /^hook-timeout: /u, label);
+    } else {
+      assert.equal(output.permissionDecision, "allow", `${label}: ${output.permissionDecisionReason}`);
+    }
+  }
 });
 
 test("through the real hook, a Write through a link and a step back is judged where the kernel lands it", { skip }, () => {
