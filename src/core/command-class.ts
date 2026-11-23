@@ -70,6 +70,7 @@ import {
   foldNameExact,
   foldNameLower,
   nameListIncludes,
+  SUBSTITUTION_SENTINEL,
   takeAmongEqual,
   withNamesAsSpelled,
 } from "./name-fold.js";
@@ -2341,8 +2342,9 @@ function readDoubleQuoted(
  * variable, which is exactly what the shell's substitution is to a classifier
  * that does not run it. The name cannot collide with a real expansion a
  * command would carry, and it is braced so no brace-expansion reading applies.
+ * Defined in `name-fold.ts`, which must leave it unfolded.
  */
-export const SUBSTITUTION_SENTINEL = "${__APPROVAL_SUBST__}";
+export { SUBSTITUTION_SENTINEL };
 
 /**
  * The characters a backslash escapes inside double quotes, in the shell's own

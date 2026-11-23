@@ -357,6 +357,12 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   strictest decision answers, for every spelling of the path. The most
   specific route still wins over a shallower one. One more classification
   pass per tied entry, on lines that name such a path.
+- **The placeholder a `$(…)` leaves in a word is not folded.** It is spelled
+  in capitals, so folding it like a name made every word with a substitution
+  count as a name whose two readings differ, and the whole as-spelled reading
+  ran for it: about twice the cost on any line with a `$(…)` in a path word,
+  for an answer that could not differ. One reading runs for it now, with the
+  same answers; a name beside the substitution that does fold still runs both.
 - **The Hermes-home walk is linear.** It sliced and re-walked the rest of
   the path at every home segment, so a 1 MiB path of `.hermes/x/` segments
   took about a minute of CPU on main (and through the fold, `.herme<U+017F>/x/`
