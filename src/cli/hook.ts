@@ -3937,6 +3937,12 @@ export function judgeWriteLanding(
   scope: WriteScopeContext,
   homes: readonly string[] = currentHomes(),
 ): WriteLanding {
+  // Longer than any path the kernel opens (PATH_MAX is 1024 on macOS and 4096
+  // on Linux): it cannot land anywhere this hook can name, and walking it one
+  // component at a time is the cost a 1 MiB word must not buy. Guarded.
+  if (spelled.length > MAX_LANDING_BYTES) {
+    return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: spelled.slice(0, 80), why: `a path of ${String(spelled.length)} bytes is longer than any the kernel opens, so where it lands cannot be placed` };
+  }
   const text = resolvePathSegments(spelled);
   const landing = landingPaths(spelled);
   const forms = [text, ...landing.paths];
@@ -4184,14 +4190,6 @@ function resolveWriteWord(
   return { spellings };
 }
 
-/** Is `path` at or under `prefix`, by folded path segment? */
-function atOrUnderFolded(path: string, prefix: string): boolean {
-  const have = path.split("/").filter((part) => part.length > 0).map(foldFileName);
-  const want = prefix.split("/").filter((part) => part.length > 0).map(foldFileName);
-  if (want.length === 0 || have.length < want.length) return false;
-  return want.every((part, index) => part === have[index]);
-}
-
 /** The literal directory a pattern word starts from: every segment before the first pattern one. */
 function staticPrefix(text: string): string {
   const parts = text.split("/");
@@ -4351,6 +4349,13 @@ export function refineWriteLandings(
   let cwdUnknown = here.length === 0;
   /** What earlier segments changed: each path and everything under it. */
   const changed: string[] = [];
+  /** `changed`, each path folded segment by segment, mapped to its spelling. */
+  const changedFolded = new Map<string, string>();
+  const noteChanged = (path: string): void => {
+    changed.push(path);
+    const key = `/${path.split("/").filter((part) => part.length > 0).map(foldFileName).join("/")}`;
+    if (key !== "/" && !changedFolded.has(key)) changedFolded.set(key, path);
+  };
   let changedUnknown: string | null = null;
 
   const findings: WriteFinding[] = [];
@@ -4382,39 +4387,131 @@ export function refineWriteLandings(
   /** The snapshot rule: has an earlier segment changed this path or a component of it? */
   const volatileOf = (spelled: string): string | null => {
     if (changedUnknown !== null) return changedUnknown;
+    if (changed.length === 0) return null;
     const forms = [resolvePathSegments(spelled), ...landingPaths(spelled).paths];
-    for (const prefix of changed) {
-      if (forms.some((form) => atOrUnderFolded(form, prefix))) {
-        return `${spelled} runs through ${prefix}, which an earlier segment of this line changes, so its landing on the disk is not trusted`;
+    // Each form folded once, and every prefix of it looked up in the set of
+    // changed paths (folded once as they were recorded): linear in the
+    // segments of the path, not in the number of earlier changes.
+    for (const form of forms) {
+      const parts = form.split("/").filter((part) => part.length > 0).map(foldFileName);
+      let prefix = "";
+      for (const part of parts) {
+        prefix = `${prefix}/${part}`;
+        const raw = changedFolded.get(prefix);
+        if (raw !== undefined) {
+          return `${spelled} runs through ${raw}, which an earlier segment of this line changes, so its landing on the disk is not trusted`;
+        }
       }
     }
     return null;
   };
 
+  /** A class one resolved word earns, before it is attached to its segment. */
+  type ResolvedClass = { cls: string; rule: string; path: string };
+
   /**
-   * Classes a RESOLVED spelling earns as a plain one would (review-b, CLAIMS
-   * L61530): `x=; echo x >> .appro${x}val/env` writes `.approval/env`, so it
-   * takes the class `echo x >> .approval/env` takes, by the classifier's own
-   * rules and the git-directory pass, never an ordinary workspace write.
-   * Collected per segment, added beside its own class.
+   * The classes a synthetic line earns: the classifier's own answer, then the
+   * git-directory pass from every directory the segment may run in. It fails
+   * to guarded, never to nothing: a line the classifier refuses, a directory
+   * that is unknown (the git-directory pass cannot run) and a pass that is not
+   * ok each add `files.write.guarded` with the unreadable rule (review of
+   * bd1bddc6, point 1).
    */
-  let resolvedClasses: Array<{ cls: string; rule: string; path: string }> = [];
-  const classifyResolved = (spelling: string): void => {
-    const quoted = `'${spelling.replaceAll("'", "'\\''")}'`;
-    const plain = classifyCommand(`true >> ${quoted}`, protectedPaths);
+  const synthetic = new Map<string, ResolvedClass[]>();
+  const classesOfSynthetic = (text: string, path: string): ResolvedClass[] => {
+    // The same synthetic line from the same directories answers the same way:
+    // judged once per line (a cost bound). The key carries the directory state.
+    const key = `${cwdUnknown ? "?" : here.join("\0")}\0${text}`;
+    const known = synthetic.get(key);
+    if (known !== undefined) return known;
+    const out: ResolvedClass[] = [];
+    synthetic.set(key, out);
+    const take = (segments: readonly ClassifiedSegment[]): void => {
+      for (const segment of segments) {
+        if (segment.class.startsWith("read.") || segment.class === "files.write.workspace" || segment.class === GATE_SELF_CLASS) continue;
+        if (out.some((each) => each.cls === segment.class)) continue;
+        out.push({ cls: segment.class, rule: WRITE_RESOLVED_RULE, path });
+      }
+    };
+    const unreadable = (): void => {
+      if (!out.some((each) => each.cls === WRITE_GUARDED_CLASS)) out.push({ cls: WRITE_GUARDED_CLASS, rule: WRITE_UNREADABLE_RULE, path });
+    };
+    const plain = classifyCommand(text, protectedPaths);
     if (!plain.ok) {
-      resolvedClasses.push({ cls: WRITE_GUARDED_CLASS, rule: WRITE_UNREADABLE_RULE, path: spelling });
-      return;
+      unreadable();
+      return out;
     }
-    for (const from of cwdUnknown ? [] : here) {
+    take(plain.segments);
+    if (cwdUnknown || here.length === 0) {
+      unreadable();
+      return out;
+    }
+    for (const from of here) {
       const raised = refineGitDirWrites(plain, from).result;
-      if (!raised.ok) continue;
-      for (const segment of raised.segments) {
-        if (segment.class.startsWith("read.") || segment.class === "files.write.workspace") continue;
-        if (resolvedClasses.some((each) => each.cls === segment.class)) continue;
-        resolvedClasses.push({ cls: segment.class, rule: WRITE_RESOLVED_RULE, path: spelling });
+      if (!raised.ok) {
+        unreadable();
+        continue;
+      }
+      take(raised.segments);
+    }
+    return out;
+  };
+
+  /** A word as the shell would hand it over, single-quoted for a synthetic line. */
+  const quote = (word: string): string => `'${word.replaceAll("'", "'\\''")}'`;
+
+  /**
+   * Classes the RESOLVED spellings of a segment's words earn as plain ones
+   * would (review-b, CLAIMS L61530): `x=; echo x >> .appro${x}val/env` writes
+   * `.approval/env`, so it takes the class `echo x >> .approval/env` takes.
+   * Every word the resolver reads to a different spelling, not only the write
+   * targets (review of bd1bddc6, point 2): a redirect target as `true >> W`, a
+   * `<` source as `true < W`, and an argv word in the binary's own argv with
+   * that word replaced (`cp W y`, `ln W x`, `cp -t W a`), so a copy FROM a
+   * credential is a credential read and a link TO an organ is what the
+   * classifier says a link to it is. Returned, never shared: the caller
+   * attaches them once the segment is wholly judged.
+   */
+  const resolvedWordClasses = (shape: CommandSegmentShape, at: number): ResolvedClass[] => {
+    const out: ResolvedClass[] = [];
+    const add = (found: readonly ResolvedClass[]): void => {
+      for (const each of found) if (!out.some((known) => known.cls === each.cls)) out.push(each);
+    };
+    const spellingsOf1 = (word: string): string[] | null => {
+      if (!/[$~{]/u.test(word)) return null;
+      const resolved = resolveWriteWord(word, at, line);
+      if ("unreadable" in resolved) return null;
+      return resolved.spellings.every((spelling) => spelling === word) ? null : resolved.spellings;
+    };
+    for (const word of shape.writes) for (const spelling of spellingsOf1(word) ?? []) add(classesOfSynthetic(`true >> ${quote(spelling)}`, spelling));
+    for (const word of shape.reads) for (const spelling of spellingsOf1(word) ?? []) add(classesOfSynthetic(`true < ${quote(spelling)}`, spelling));
+    if (shape.bin !== null) {
+      const bin = /^[A-Za-z0-9_./+-]+$/u.test(shape.bin) ? shape.bin : quote(shape.bin);
+      const words = shape.args;
+      const settled = words.map((word) => {
+        const spellings = spellingsOf1(word);
+        return spellings !== null && spellings.length === 1 ? (spellings[0] as string) : word;
+      });
+      for (const [index, word] of words.entries()) {
+        for (const spelling of spellingsOf1(word) ?? []) {
+          const argv = [...settled];
+          argv[index] = spelling;
+          add(classesOfSynthetic([bin, ...argv.map(quote)].join(" "), spelling));
+        }
       }
     }
+    return out;
+  };
+
+  // One landing per spelling per line: the disk is read once for a target the
+  // line names many times (a cost bound; the disk does not change within it).
+  const landed = new Map<string, WriteLanding>();
+  const landOnce = (spelled: string): WriteLanding => {
+    const known = landed.get(spelled);
+    if (known !== undefined) return known;
+    const judged = judgeWriteLanding(spelled, scope, homes);
+    landed.set(spelled, judged);
+    return judged;
   };
 
   const judgeWord = (word: string, at: number): WriteLanding => {
@@ -4423,13 +4520,13 @@ export function refineWriteLandings(
     if ("unreadable" in resolved) {
       return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: resolved.unreadable };
     }
-    for (const spelling of resolved.spellings) if (spelling !== word) classifyResolved(spelling);
     const spelled = spellingsOf(resolved);
     if (spelled === null) {
       return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: `${word} is relative, after a cd this hook cannot follow` };
     }
     let verdict: WriteLanding = { kind: "in" };
     for (const each of spelled) {
+      if (each.length > MAX_LANDING_BYTES) return judgeWriteLanding(each, scope, homes);
       const moved = volatileOf(each);
       if (moved !== null) return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: moved };
       if (/[*?[]/u.test(each)) {
@@ -4446,7 +4543,7 @@ export function refineWriteLandings(
         }
         continue;
       }
-      verdict = stricter(verdict, judgeWriteLanding(each, scope, homes));
+      verdict = stricter(verdict, landOnce(each));
       if (verdict.kind === "guarded") return verdict;
     }
     return verdict;
@@ -4569,7 +4666,7 @@ export function refineWriteLandings(
       }
       const next = new Set(here);
       for (const each of spelled) {
-        if (volatileOf(each) !== null) {
+        if (each.length > MAX_LANDING_BYTES || volatileOf(each) !== null) {
           cwdUnknown = true;
           break;
         }
@@ -4584,7 +4681,6 @@ export function refineWriteLandings(
     }
 
     const segment = segmentFor(shape, index);
-    resolvedClasses = [];
     const { writes, intoDirs, changes } = targetsOf(shape, segment);
     let verdict: WriteLanding | undefined;
     for (const word of writes) {
@@ -4611,6 +4707,7 @@ export function refineWriteLandings(
       }
     }
 
+    const resolvedClasses = resolvedWordClasses(shape, index);
     for (const found of resolvedClasses) {
       // A class the segment already carries needs no second entry.
       if (result.segments.some((each) => each.text === shape.text && each.class === found.cls)) continue;
@@ -4622,9 +4719,10 @@ export function refineWriteLandings(
         note: `${found.rule}: a word of \`${shape.text}\` resolves to ${found.path}, which is ${found.cls} as a plain spelling, so the segment is also ${found.cls}`,
       });
     }
-    // Decision A is judged here, from the directories this segment runs in.
+    // Decision A is judged here, from the directories this segment runs in,
+    // and never for a segment a resolved word already gave a class of its own.
     if (scope.optedIn && segment !== undefined && segment.class === OUT_OF_SCOPE_WRITE_CLASS && DECISION_A_WRITE_RULES_BY_LANDING.includes(segment.rule)) {
-      aVerdicts.set(index, decisionALanding(shape, segment, judgeWord, index, cwds));
+      aVerdicts.set(index, resolvedClasses.length > 0 ? null : decisionALanding(shape, segment, judgeWord, index, cwds));
     }
 
     // What this segment changes is in place before the next one runs.
@@ -4641,8 +4739,12 @@ export function refineWriteLandings(
         continue;
       }
       for (const each of spelled) {
-        changed.push(resolvePathSegments(each));
-        for (const path of landingPaths(each).paths) changed.push(path);
+        if (each.length > MAX_LANDING_BYTES) {
+          changedUnknown ??= `an earlier segment (\`${shape.text}\`) changes a path longer than any the kernel opens, so no later landing on the disk is trusted`;
+          continue;
+        }
+        noteChanged(resolvePathSegments(each));
+        for (const path of landingPaths(each).paths) noteChanged(path);
       }
     }
   }
@@ -4691,6 +4793,9 @@ export function refineWriteLandings(
   for (const segment of all) if (!classes.includes(segment.class)) classes.push(segment.class);
   return { result: { ok: true, segments: all, classes }, notes };
 }
+
+/** The longest spelling this pass lands on the disk; longer is guarded (cost bound). */
+const MAX_LANDING_BYTES = 4096;
 
 /** Milliseconds one glob expansion may take before the write is guarded (point 6). */
 const GLOB_TIME_LIMIT_MS = 250;

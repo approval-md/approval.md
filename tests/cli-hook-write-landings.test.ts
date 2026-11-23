@@ -434,9 +434,40 @@ test("a variable spliced inside a guarded name is read where the line sets it, a
       const seen = see(command, scope, repo);
       assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
     }
+    // Every word, not only write targets, in the binary's own argv; and a
+    // resolved word the hook cannot fully judge fails to guarded.
+    // After `&&` the assignment is conditional, so the word is unreadable.
+    assert.ok(see('cd "$D" && x=; echo y >> .appro${x}val/env', scope, repo).classes.includes(GUARDED));
+    // Set plainly, then a cd the hook cannot follow: the plain spelling's
+    // class AND guarded (the git-directory pass cannot run from an unknown
+    // directory), never nothing.
+    const unknownCd = see('x=; cd "$D" && echo y >> .appro${x}val/env', scope, repo);
+    assert.ok(unknownCd.classes.includes(GUARDED) && unknownCd.classes.includes("policy.core"), JSON.stringify(unknownCd.segments));
+    for (const [command, cls] of [
+      ["x=; cp .appro${x}val/env out.txt", "account.credential"],
+      ["x=; ln -s .appro${x}val/env l", "policy.core"],
+      ["x=; cp -t .appro${x}val a", "policy.core"],
+      ["x=; cat .appro${x}val/env", "account.credential"],
+    ] as const) {
+      const seen = see(command, scope, repo);
+      assert.ok(seen.classes.includes(cls), `${command}: ${JSON.stringify(seen.segments)}`);
+    }
     // `.gi$x/config` with x empty is `.gi/config`, which is no git directory.
     const plain = see("x=; echo x >> .gi$x/config", scope, repo);
     assert.ok(!plain.classes.includes("vcs.history.rewrite") && !plain.classes.includes(GUARDED), JSON.stringify(plain.segments));
+  }
+});
+
+test("decision A never lightens a segment a resolved word gave a class of its own (review of bd1bddc6)", () => {
+  const repo = join(base, "splice-a");
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, "a"), "a", "utf8");
+  for (const command of ["x=; cp .appro${x}val/env ../x/", "x=; y=; cp .appro${x}val/env A${y}PPROVAL.md ../x/"]) {
+    const before = see(command, WRITE_SCOPE_OFF, repo);
+    const after = see(command, optedIn(), repo);
+    assert.ok(!after.segments.some(([, rule]) => rule === "write-out-of-scope-landed" || rule === "write-in-scope-resolved"), `${command}: ${JSON.stringify(after.segments)}`);
+    assert.deepEqual(withoutLandingEntries(after), withoutLandingEntries(before), command);
+    assert.ok(after.classes.some((cls) => cls === "account.credential" || cls === "policy.core"), JSON.stringify(after.segments));
   }
 });
 
