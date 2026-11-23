@@ -385,3 +385,47 @@ test("review-b A686-FOLD5 M1, through the real hook with policy W: a case varian
   // Controls: the canonical spelling keeps the policy's answer for policy.edit.
   assert.equal(decideW(dir, "cp a.js .github/workflows/ci.yml").permission, "allow");
 });
+
+test("review-b A686-FOLD5 M1 for the parents rule, through the hook's listing: a listed organ directory in another case keeps the segment's own class", async () => {
+  // In process: through the real hook a decision cannot isolate this, since
+  // the hook's own directory holds APPROVAL.md (guarded as spelled), and a
+  // shell elsewhere fails closed. With the class set, both readings show:
+  // folded `.Claude` is `.claude` (policy.core); as spelled it is another
+  // name, so main's class rides beside, and a policy that holds
+  // files.write.workspace stricter still sees it.
+  const savedHome = process.env["HOME"];
+  const home = join(scratch, "home-m1p");
+  mkdirSync(home, { recursive: true });
+  process.env["HOME"] = home;
+  try {
+    const sub = project({ ".Claude": ["settings.json"], src: ["a.ts"] });
+    for (const command of ["chmod -R 000 .", "chmod 000 .", "chmod -R -w ."]) {
+      const classes = await hookClasses(command, sub);
+      assert.ok(classes.includes("policy.core") && classes.includes("files.write.workspace"), `${command} -> ${classes.join(",")}`);
+    }
+    const deleted = await hookClasses('rm -rf "$PWD"', sub);
+    assert.ok(deleted.includes("policy.core") && deleted.includes("files.delete.out_of_scope"), deleted.join(","));
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});
+
+test("lead ruling L61587, parents, through the real hook with policy W: the rule adds its class and never takes the segment's own away", () => {
+  // The lab holds `.github` (policy.edit, autonomous under W) and the policy
+  // file. Main 324d87dc answers files.write.workspace, human-only under W;
+  // the parents rule's class rides beside it, so main's refusal stands.
+  const dir = join(scratch, "parents-w-lab");
+  for (const [sub, file] of [["src", "a.ts"], [".github/workflows", "ci.yml"]] as const) {
+    mkdirSync(join(dir, sub), { recursive: true });
+    writeFileSync(join(dir, sub, file), "made-up\n");
+  }
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY_W);
+  const attested = runCliIn(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  for (const command of ["chmod -R 000 .", "chmod 000 .", "chmod -R -w ."]) {
+    const decision = decideW(dir, command);
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+    assert.match(decision.reason, /^hook-class-human-only: /u, `${command}: ${decision.reason}`);
+  }
+});

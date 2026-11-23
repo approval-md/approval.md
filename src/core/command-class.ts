@@ -67,6 +67,7 @@ import {
 } from "./read-scope.js";
 import {
   eachNameReading,
+  foldFileName,
   foldNameExact,
   foldNameLower,
   nameListIncludes,
@@ -2633,7 +2634,9 @@ export interface ClassifierContext {
   /** The plain pass: no pattern or `${…}` reading (review-b S1). Internal. */
   globPatternsOff?: boolean;
   /** Records that a pattern reading raised a segment's class (review-b S1). Internal. */
-  globTracker?: { raised: boolean };
+  globTracker?: { raised: boolean; parent?: boolean };
+  /** The pass without the parents rule (lead ruling L61587), for the class it rides beside. Internal. */
+  organParentsOff?: boolean;
   /**
    * The segments whose words, targets and substitution bodies the line's own
    * reading for {@link lineNamesGit} already went through (review of the
@@ -8983,7 +8986,7 @@ interface GlobReading {
   disk?: GlobDisk;
   budget: { left: number };
   off: boolean;
-  tracker?: { raised: boolean };
+  tracker?: { raised: boolean; parent?: boolean };
 }
 /**
  * `(text) => words.some((word) => word.includes(text))`, the segment's
@@ -9301,8 +9304,9 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
     target = `/${[...parts.slice(0, Math.max(0, parts.length - ups)), ...names].join("/")}`;
   }
   const under = (dir: string, top: string): boolean => dir === top || top === "/" || dir.startsWith(`${top}/`);
-  // Paths compare by the shared fold too (#688: one fold).
-  const fold = (path: string): string => foldNameLower(path);
+  // Paths compare by the shared fold too (#688: one fold): folded in the
+  // folded reading, exactly as spelled in the other (review-b A686-FOLD5 M1).
+  const fold = (path: string): string => foldNameExact(path);
   const sides = [disk.relativeOk === false ? null : disk.cwd, disk.homeOk === false ? null : disk.home].filter(
     (dir): dir is string => dir !== null && dir.startsWith("/"),
   );
@@ -9369,8 +9373,9 @@ function guardedSpellingsByFold(): Map<string, string[]> {
   if (guardedSpellings !== null) return guardedSpellings;
   const map = new Map<string, string[]>();
   for (const spelling of [...Object.keys(ORGAN_DIRECTORIES), ...GLOB_GUARD_NAMES, ...CORE_FILENAMES, ...PROTECTED_FILENAMES]) {
-    // The spellings are ASCII, which both name readings fold alike, so one cache serves both.
-    const key = foldNameLower(spelling);
+    // Candidates by the full fold, the same in both readings; each is then
+    // compared in the current reading by sameGuardedName.
+    const key = foldFileName(spelling);
     map.set(key, [...(map.get(key) ?? []), spelling]);
   }
   guardedSpellings = map;
@@ -9385,17 +9390,18 @@ function guardedSpellingsByFold(): Map<string, string[]> {
  * the parent rule does not depend on how the bare-directory rule is scoped.
  */
 function guardedEntryClass(name: string, protectedPaths: readonly ProtectedPathEntry[]): { protectedClass: string | null; git: boolean } {
-  // Every guarded spelling equal to the name folded by the shared fold
-  // (security review, 3; #688): `.Claude`, `.mu<U+017F>e` are the guarded names on APFS.
-  const folded = foldNameLower(name);
-  const spellings = [name, ...(guardedSpellingsByFold().get(folded) ?? [])];
+  // Every guarded spelling that is this name in the current reading (security
+  // review, 3; #688; review-b A686-FOLD5 M1): folded, `.Claude` and
+  // `.mu<U+017F>e` are the guarded names, as APFS opens them; as spelled they
+  // are other names, so the segment's own class answers there too.
+  const spellings = [name, ...(guardedSpellingsByFold().get(foldFileName(name)) ?? []).filter((spelling) => sameGuardedName(spelling, name))];
   let best: string | null = null;
   for (const spelling of spellings) {
     for (const cls of [Object.hasOwn(ORGAN_DIRECTORIES, spelling) ? (ORGAN_DIRECTORIES[spelling] as string) : null, protectedPathClass(spelling, protectedPaths)]) {
       if (cls !== null && (best === null || protectedRank(cls) < protectedRank(best))) best = cls;
     }
   }
-  return { protectedClass: best, git: folded === ".git" };
+  return { protectedClass: best, git: sameGuardedName(name, ".git") };
 }
 
 /**
@@ -10875,6 +10881,13 @@ type SegmentOutcome =
        * beside it as a second segment, so no class is taken away.
        */
       patternAlso?: CredentialOutcome;
+      /**
+       * The segment's class without the parents rule (lead ruling L61587),
+       * where the rule changed it: it rides beside the parent's class as one
+       * more segment, ordinary classes too, so the rule never takes away the
+       * class main gives the line (review-b A686-FOLD5 M1's bar).
+       */
+      parentAlso?: CredentialOutcome;
       /** The program an `exec.code` answer runs (APRV-510). */
       execCode?: ExecCodeSource;
     }
@@ -10913,6 +10926,18 @@ function besidePlain(raised: SegmentOutcome, plain: SegmentOutcome): SegmentOutc
     ...raised,
     patternAlso: { class: plain.class, rule: plain.rule, ...(plain.path === undefined ? {} : { path: plain.path }) },
   };
+}
+
+/**
+ * The outcome with the parents rule, and the class the segment takes without
+ * it beside (lead ruling L61587). A refusal without the rule stands; a class
+ * that differs rides beside, ordinary classes included.
+ */
+function besideParent(withRule: SegmentOutcome, without: SegmentOutcome): SegmentOutcome {
+  if (!without.ok) return without;
+  if (!withRule.ok) return withRule;
+  if (without.class === withRule.class) return withRule;
+  return { ...withRule, parentAlso: { class: without.class, rule: without.rule, ...(without.path === undefined ? {} : { path: without.path }) } };
 }
 
 function classifySegment(
@@ -11501,7 +11526,11 @@ function classifySegment(
   // Lead ruling L61587: a recursive delete, move or chmod of a PARENT of an
   // organ directory (`rm -rf .`, `mv "$PWD" ../x`, `chmod -R 000 ~`), decided
   // by the hook's listing of it ({@link organParentClass}).
-  const organParent = organParentClass(organParentOperands(basename, args, positionals, plan), segment.words, protectedPaths, glob.disk);
+  const organParent =
+    context.organParentsOff === true
+      ? { named: null, git: new Set<string>() }
+      : organParentClass(organParentOperands(basename, args, positionals, plan), segment.words, protectedPaths, glob.disk);
+  if ((organParent.named !== null || organParent.git.size > 0) && glob.tracker !== undefined) glob.tracker.parent = true;
   // Review of e6b7bf97 (1): with no destination read, or an implied one,
   // every positional is judged, as main judged them.
   const writtenOperands =
@@ -12208,11 +12237,17 @@ function classifyCommandAsRead(
     // the segment, the plain (text-only) answer is classified too, and a
     // different one rides beside the raised class (`patternAlso`), so a policy
     // that prices the plain class stricter than the raised one still sees it.
-    const tracker = { raised: false };
+    const tracker: { raised: boolean; parent?: boolean } = { raised: false };
     const raisedOutcome = classifySegment(segment, protectedPaths, { ...execContext, globTracker: tracker });
-    const outcome = tracker.raised
+    const patterned = tracker.raised
       ? besidePlain(raisedOutcome, classifySegment(segment, protectedPaths, { ...execContext, globPatternsOff: true }))
       : raisedOutcome;
+    // Lead ruling L61587: the parents rule adds its class and never takes one
+    // away. Where it fired, the segment is classified without it too, and that
+    // class (an ordinary write included) rides beside: under a policy that
+    // holds files.write.workspace stricter than policy.edit, `chmod -R 000 .`
+    // in a tree holding `.github` keeps main's answer.
+    const outcome = tracker.parent === true ? besideParent(patterned, classifySegment(segment, protectedPaths, { ...execContext, organParentsOff: true })) : patterned;
     if (!outcome.ok && outcome.noRule === true && context.noRuleSegments === true && !movesDirectory) {
       segments.push({ text: segment.text, class: NO_RULE_CLASS, rule: "no-rule", noRule: outcome.detail });
       if (!classes.includes(NO_RULE_CLASS)) classes.push(NO_RULE_CLASS);
@@ -12251,6 +12286,15 @@ function classifyCommandAsRead(
         ...(outcome.patternAlso.path === undefined ? {} : { path: outcome.patternAlso.path }),
       });
       if (!classes.includes(outcome.patternAlso.class)) classes.push(outcome.patternAlso.class);
+    }
+    if (outcome.parentAlso !== undefined && outcome.parentAlso.class !== outcome.class && outcome.parentAlso.class !== outcome.patternAlso?.class) {
+      segments.push({
+        text: segment.text,
+        class: outcome.parentAlso.class,
+        rule: outcome.parentAlso.rule,
+        ...(outcome.parentAlso.path === undefined ? {} : { path: outcome.parentAlso.path }),
+      });
+      if (!classes.includes(outcome.parentAlso.class)) classes.push(outcome.parentAlso.class);
     }
   }
   return { ok: true, segments, classes };

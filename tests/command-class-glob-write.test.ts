@@ -1197,6 +1197,16 @@ test("lead ruling (CLAIMS L61492, L61497): a write's * or ? that would match a g
   assert.deepEqual(classesOf("rsync -a evil/ .cl*/"), ["policy.core"]);
 });
 
+/**
+ * The parents rule's class answers first, and at most the segment's own class
+ * (the one it takes without the rule) rides beside: the rule never takes a
+ * class away (lead ruling L61587; review-b A686-FOLD5 M1's bar).
+ */
+function leads(classes: readonly string[], cls: string): void {
+  assert.equal(classes[0], cls, classes.join(","));
+  assert.ok(classes.length <= 2, classes.join(","));
+}
+
 test("lead ruling L61587 (review-b A686-FOLD3 M1): a delete, move or chmod of an organ directory ITSELF takes its strictest class, as bare .approval, .codex and .hermes do", () => {
   const ORGANS: readonly (readonly [string, string])[] = [
     [".claude", "policy.core"],
@@ -1247,7 +1257,7 @@ test("lead ruling L61587 (review-b A686-FOLD3 M1): a delete, move or chmod of an
     assert.deepEqual(classesOf(command), [main], command);
   }
   // A parent of an organ directory is the parent rule's (below): with no listing, strict.
-  assert.deepEqual(classesOf("rm -rf ."), ["policy.core"]);
+  leads(classesOf("rm -rf ."), "policy.core");
 });
 
 test("lead ruling L61587, parents: a recursive delete, move or chmod of a directory that holds an organ directory takes its class", () => {
@@ -1283,14 +1293,14 @@ test("lead ruling L61587, parents: a recursive delete, move or chmod of a direct
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
   // With a listing, by what the directory holds: the strictest guarded name.
-  assert.deepEqual(withListing("rm -rf .", { "/w": [".claude", "src"] }), ["policy.core"]);
-  assert.deepEqual(withListing("rm -rf .", { "/w": [".github", "src"] }), ["policy.edit"]);
-  assert.deepEqual(withListing("rm -rf .", { "/w": ["APPROVAL.md", "src"] }), ["policy.core"]);
-  assert.deepEqual(withListing("chmod -R u+w .", { "/w": [".git", "src"] }), ["vcs.history.rewrite"]);
-  assert.deepEqual(withListing("rm -rf ~", { "/h": [".claude"] }), ["policy.core"]);
+  leads(withListing("rm -rf .", { "/w": [".claude", "src"] }), "policy.core");
+  leads(withListing("rm -rf .", { "/w": [".github", "src"] }), "policy.edit");
+  leads(withListing("rm -rf .", { "/w": ["APPROVAL.md", "src"] }), "policy.core");
+  leads(withListing("chmod -R u+w .", { "/w": [".git", "src"] }), "vcs.history.rewrite");
+  leads(withListing("rm -rf ~", { "/h": [".claude"] }), "policy.core");
   // An ancestor: the directories from it down to the working directory.
-  assert.deepEqual(withListing("rm -rf ..", { "/": ["w", "x"], "/w": [".cursor"] }), ["policy.core"]);
-  assert.deepEqual(withListing("rm -rf ..", { "/": ["w", ".grok"], "/w": ["src"] }), ["policy.core"]);
+  leads(withListing("rm -rf ..", { "/": ["w", "x"], "/w": [".cursor"] }), "policy.core");
+  leads(withListing("rm -rf ..", { "/": ["w", ".grok"], "/w": ["src"] }), "policy.core");
   // None held: the segment's own class, unchanged from main.
   assert.deepEqual(withListing("rm -rf .", { "/w": ["src", "dist", ".cache"] }), ["files.delete.out_of_scope"]);
   assert.deepEqual(withListing("chmod -R u+w .", { "/w": ["src", ".cache"] }), ["files.write.workspace"]);
@@ -1298,8 +1308,8 @@ test("lead ruling L61587, parents: a recursive delete, move or chmod of a direct
   assert.deepEqual(withListing("rm -rf ..", { "/": ["w", "h"], "/w": ["src"], "/h": ["notes.txt"] }), ["files.delete.out_of_scope"]);
   assert.deepEqual(withListing("rm -rf ~/", { "/h": ["notes.txt"] }), ["files.delete.out_of_scope"]);
   // Not listed (over the cap, unreadable, not asked for): strict.
-  assert.deepEqual(withListing("rm -rf .", { "/w": "unreadable" }), ["policy.core"]);
-  assert.deepEqual(withListing("rm -rf ..", { "/w": ["src"] }), ["policy.core"]);
+  leads(withListing("rm -rf .", { "/w": "unreadable" }), "policy.core");
+  leads(withListing("rm -rf ..", { "/w": ["src"] }), "policy.core");
   // Not a parent, or not one the text can tell: the segment's own class.
   for (const [command, main] of [
     ["rm -rf ./dist", "files.write.workspace"],
@@ -1324,7 +1334,7 @@ test("security review of the parents rule (L61587), 1: a chmod mode that starts 
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
   assert.deepEqual(withListing("chmod -R -w .", { "/w": ["src", ".cache"] }), ["files.write.workspace"]);
-  assert.deepEqual(withListing("chmod 000 .", { "/w": [".claude"] }), ["policy.core"]);
+  leads(withListing("chmod 000 .", { "/w": [".claude"] }), "policy.core");
 });
 
 test("security review of the parents rule (L61587), 2: `..` after a name", () => {
@@ -1334,23 +1344,25 @@ test("security review of the parents rule (L61587), 2: `..` after a name", () =>
   for (const command of ["rm -rf sub/../..", "rm -rf ~/x/../..", "rm -rf ./a/../../", "rm -rf ../w", "rm -rf ../other-project"]) {
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
-  assert.deepEqual(withListing("rm -rf ../w", { "/": ["w", "h"], "/w": [".claude"], "/h": [] }), ["policy.core"]);
-  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": [".claude"], ...realpaths("/other-project", "/w", "/h") }), ["policy.core"]);
+  leads(withListing("rm -rf ../w", { "/": ["w", "h"], "/w": [".claude"], "/h": [] }), "policy.core");
+  leads(withListing("rm -rf ../other-project", { "/other-project": [".claude"], ...realpaths("/other-project", "/w", "/h") }), "policy.core");
   assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": ["x.js"], ...realpaths("/other-project", "/w", "/h") }), ["files.delete.out_of_scope"]);
   // A sibling that is not there holds nothing on a one-segment line; where an
   // earlier segment may make it, or it cannot be read: strict.
   assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": "missing", ...realpaths("/other-project", "/w", "/h") }), ["files.delete.out_of_scope"]);
   assert.ok(withListing("true && rm -rf ../other-project", { "/other-project": "missing", ...realpaths("/other-project", "/w", "/h") }).includes("policy.core"));
-  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": "unreadable", ...realpaths("/other-project", "/w", "/h") }), ["policy.core"]);
+  leads(withListing("rm -rf ../other-project", { "/other-project": "unreadable", ...realpaths("/other-project", "/w", "/h") }), "policy.core");
   // No canonical path for it (every caller but the hook): it cannot be shown to be elsewhere.
-  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": ["x.js"] }), ["policy.core"]);
+  leads(withListing("rm -rf ../other-project", { "/other-project": ["x.js"] }), "policy.core");
   assert.deepEqual(withListing("rm -rf ~/../other", { "/other": ["notes"], ...realpaths("/other", "/w", "/h") }), ["files.delete.out_of_scope"]);
 });
 
 test("security review of the parents rule (L61587), 3: a listed name in another letter case", () => {
-  // A listed name in another letter case is the same directory on a case-insensitive volume.
-  assert.deepEqual(withListing("rm -rf .", { "/w": [".Claude", "src"] }), ["policy.core"]);
-  assert.deepEqual(withListing("rm -rf .", { "/w": ["Approval.MD", "src"] }), ["policy.core"]);
+  // A listed name in another letter case is the same directory on a
+  // case-insensitive volume (the folded reading); as spelled it is another
+  // name, so the segment's own class rides beside (review-b A686-FOLD5 M1).
+  assert.deepEqual(withListing("rm -rf .", { "/w": [".Claude", "src"] }), ["policy.core", "files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("rm -rf .", { "/w": ["Approval.MD", "src"] }), ["policy.core", "files.delete.out_of_scope"]);
   assert.ok(withListing("rm -rf .", { "/w": [".GIT", "src"] }).includes("vcs.history.rewrite"));
   // By the shared fold (#688): the long s and the Kelvin sign open the ASCII names on APFS.
   assert.ok(withListing("rm -rf .", { "/w": [".mu\u017Fe", "src"] }).includes("policy.core"));
@@ -1368,7 +1380,7 @@ test("security review of the parents rule (L61587), 4: an operand the text canno
     const result = classifyCommand(command);
     assert.ok(!result.ok || classesOf(command).includes("policy.core"), command);
   }
-  assert.deepEqual(withListing("rm -rf $(pwd -P)", {}), ["policy.core"]);
+  leads(withListing("rm -rf $(pwd -P)", {}), "policy.core");
   // A variable with a named tail is not the directory itself: main's class.
   assert.deepEqual(classesOf('rm -rf "$TMPDIR"/x'), ["files.delete.out_of_scope"]);
   assert.deepEqual(classesOf("rm -rf $BUILD/dist"), ["files.delete.out_of_scope"]);
@@ -1426,23 +1438,24 @@ test("security review of the parents rule (L61587), 6: an absolute operand that 
   const real = (paths: readonly string[], to: (path: string) => string = (path) => path): Record<string, string[]> =>
     Object.fromEntries(paths.map((path) => [realpathKey(path), [to(path)]]));
   // Another letter case (a case-insensitive volume): strict.
-  assert.deepEqual(withDisk("rm -rf /W", "/w/proj", { "/W": ["proj"] }), ["policy.core"]);
-  assert.deepEqual(withDisk("chmod -R 000 /W/Proj", "/w/proj", { "/W/Proj": [".claude"] }), ["policy.core"]);
+  leads(withDisk("rm -rf /W", "/w/proj", { "/W": ["proj"] }), "policy.core");
+  leads(withDisk("chmod -R 000 /W/Proj", "/w/proj", { "/W/Proj": [".claude"] }), "policy.core");
   // Even where the volume's realpath keeps the letter case as written.
-  assert.deepEqual(withDisk("rm -rf /W", "/w/proj", { "/W": ["proj"], ...real(["/W", "/w/proj", "/h"]) }), ["policy.core"]);
+  // (As spelled, on such a volume `/W` is another directory, judged by its own listing: main's class beside.)
+  assert.deepEqual(withDisk("rm -rf /W", "/w/proj", { "/W": ["proj"], ...real(["/W", "/w/proj", "/h"]) }), ["policy.core", "files.delete.out_of_scope"]);
   // A symlink to an ancestor (/tmp is /private/tmp on macOS): strict.
   const alias = { "/tmp/x": ["proj"], ...real(["/tmp/x"], () => "/private/tmp/x"), ...real(["/private/tmp/x/proj", "/h"]) };
-  assert.deepEqual(withDisk("rm -rf /tmp/x/", "/private/tmp/x/proj", alias), ["policy.core"]);
-  assert.deepEqual(
+  leads(withDisk("rm -rf /tmp/x/", "/private/tmp/x/proj", alias), "policy.core");
+  leads(
     withDisk("chmod -R 000 /tmp/x/proj", "/private/tmp/x/proj", { "/tmp/x/proj": ["src"], ...real(["/tmp/x/proj"], () => "/private/tmp/x/proj"), ...real(["/private/tmp/x/proj", "/h"]) }),
-    ["policy.core"],
+    "policy.core",
   );
   // No canonical path for it: it cannot be shown to be elsewhere: strict.
-  assert.deepEqual(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": ["a.o"] }), ["policy.core"]);
+  leads(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": ["a.o"] }), "policy.core");
   // Provably elsewhere: judged by its own listing.
   const elsewhere = real(["/tmp/build-xyz", "/w", "/h"], (path) => (path.startsWith("/tmp") ? `/private${path}` : path));
   assert.deepEqual(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": ["a.o"], ...elsewhere }), ["files.delete.out_of_scope"]);
-  assert.deepEqual(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": [".claude"], ...elsewhere }), ["policy.core"]);
+  leads(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": [".claude"], ...elsewhere }), "policy.core");
   assert.deepEqual(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": "missing", ...elsewhere }, { singleSegment: true }), [
     "files.delete.out_of_scope",
   ]);
@@ -1460,11 +1473,11 @@ test("security review of the parents rule (L61587), 7: `..` after a name the ker
   for (const command of ["chmod -R 000 link/..", "rm -rf link/../x", "chmod -R 000 a/b/../..", "rm -rf /tmp/a/../b"]) {
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
-  assert.deepEqual(withDisk("chmod -R 000 link/..", "/w", { "/w": ["src", "link"], ...sides }), ["policy.core"]);
+  leads(withDisk("chmod -R 000 link/..", "/w", { "/w": ["src", "link"], ...sides }), "policy.core");
   // Resolved: link/.. is /elsewhere, which holds an organ directory: its class.
-  assert.deepEqual(
+  leads(
     withDisk("chmod -R 000 link/..", "/w", { "/w": ["src", "link"], "/w/link/..": [".claude", "deep"], ...written("/w/link/..", "/elsewhere"), ...sides }),
-    ["policy.core"],
+    "policy.core",
   );
   // Resolved to a place that holds none: main's class.
   assert.deepEqual(
@@ -1475,11 +1488,9 @@ test("security review of the parents rule (L61587), 7: `..` after a name the ker
   assert.deepEqual(withDisk("chmod -R 000 sub/..", "/w", { "/w": ["src", "sub"], ...written("/w/sub/..", "/w"), ...written("/w", "/w"), ...sides }), [
     "files.write.workspace",
   ]);
-  assert.deepEqual(withDisk("chmod -R 000 sub/..", "/w", { "/w": [".claude", "sub"], ...written("/w/sub/..", "/w"), ...sides }), ["policy.core"]);
+  leads(withDisk("chmod -R 000 sub/..", "/w", { "/w": [".claude", "sub"], ...written("/w/sub/..", "/w"), ...sides }), "policy.core");
   // Resolved through a symlink to an ancestor of the working directory by another road: strict.
-  assert.deepEqual(withDisk("chmod -R 000 link/..", "/p/w", { "/p/w": ["src"], ...written("/p/w/link/..", "/p"), ...written("/p/w", "/p/w"), ...written("/h", "/h") }), [
-    "policy.core",
-  ]);
+  leads(withDisk("chmod -R 000 link/..", "/p/w", { "/p/w": ["src"], ...written("/p/w/link/..", "/p"), ...written("/p/w", "/p/w"), ...written("/h", "/h") }), "policy.core");
 });
 
 test("one fold (#688's shared helper, lead ruling 04:11Z): listing names, organ directories and pattern characters fold as APFS does", () => {
@@ -1520,4 +1531,14 @@ test("review-b A686-FOLD5 M1: the as-spelled reading compares exactly, so a case
     const classes = withListing(command, listing);
     for (const cls of both) assert.ok(classes.includes(cls), `${command} ${JSON.stringify(listing)} -> ${classes.join(",")}`);
   }
+});
+
+test("lead ruling L61587, parents: the rule adds its class and never takes the segment's own class away", () => {
+  // Main's class rides beside the parent's (ordinary writes too), so a policy
+  // that holds files.write.workspace stricter than policy.edit keeps main's answer.
+  assert.deepEqual(withListing("chmod -R 000 .", { "/w": [".github", "src"] }), ["policy.edit", "files.write.workspace"]);
+  assert.deepEqual(withListing("rm -rf .", { "/w": [".claude", "src"] }), ["policy.core", "files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("chmod -R u+w .", { "/w": [".git", "src"] }), ["vcs.history.rewrite", "files.write.workspace"]);
+  // Where main's class is the parent's own, one class: `mv "$PWD" ../x` is policy.core on main too.
+  assert.deepEqual(classesOf('mv "$PWD" ../x'), ["policy.core"]);
 });
