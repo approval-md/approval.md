@@ -46,18 +46,24 @@ for (const [dir, file] of [[".claude", "settings.json"], [".github/workflows", "
 }
 
 // Each bound: 1.5 x CI's figure for this line, read from the full gate's node
-// 22 job (`# cost-line: COST686 <name>:` in its log), as #694 set "many
-// command words". Lead ruling L62051 asked for "1.5 times its CPU seconds on
-// CI's runner": for glob_sources and rm_dot_names that is THIS head's figure
-// (the coordinator's reading, not corrected by the lead; review-b to check).
-// rsync_relative awaits the lead (L62090 asks for 1.5 x MAIN's figure, which
-// the fixed head does not reach: see the PR body's floor table).
-// PROVISIONAL (local figure, replace with CI's): 1.5 x 1.28 s, the slowest of three local runs at ef8b0884.
-const BOUND_GLOB_SOURCES_S = 1.92;
-// PROVISIONAL (local figure, replace with CI's): 1.5 x 4.62 s, the slowest of three local runs at ef8b0884.
-const BOUND_RSYNC_RELATIVE_S = 6.93;
-// PROVISIONAL (local figure, replace with CI's): 1.5 x 1.81 s, the slowest of three local runs at ef8b0884.
-const BOUND_RM_DOT_NAMES_S = 2.72;
+// 22 job, shard 2 (`# COST686 <name> cpu_s=` before 945bba1c, `# cost-line:
+// COST686 <name>:` since), as #694 set "many command words". Lead ruling
+// L62051 asked for "1.5 times its CPU seconds on CI's runner": for
+// glob_sources and rm_dot_names that is THIS branch's figure (the
+// coordinator's reading, not corrected by the lead; review-b to check), taken
+// at 5cba746b, whose cost on these two lines 945bba1c leaves as it was
+// (locally 0.69 and 0.95 CPU s at 5cba746b, 0.65 and 0.94 at 945bba1c).
+// Run 45260235850 (#686 at 5cba746b), shard 2: 2.20 CPU s.
+const BOUND_GLOB_SOURCES_S = 1.5 * 2.2;
+// Run 45260235850 (#686 at 5cba746b), shard 2: 3.86 CPU s.
+const BOUND_RM_DOT_NAMES_S = 1.5 * 3.86;
+// rsync_relative: lead ruling L62090 bounds it at 1.5 x MAIN's CI figure for
+// the same input, which this branch does not reach (about 10 x main locally,
+// see the PR body's floor table); the lead rules on that. Until then the line
+// logs its figure under a bound that cannot red CI and catches only a return
+// of the repeated walks: PROVISIONAL, 3 x the local figure at 945bba1c (1.94
+// CPU s), not a pin. The repeated walks took about 50.
+const BOUND_RSYNC_RELATIVE_S = 3 * 1.94;
 
 /** `head`, then `format(i)` for i = 0, 1, ... while the line stays within `bytes`. */
 function distinct(head: string, format: (index: string) => string, bytes: number): string {
@@ -97,12 +103,12 @@ test("cost (L62051): distinct glob sources, `cp .c0*/x.json .c1*/x.json …` at 
   assert.ok(classes.length > 0);
 });
 
-test("cost (L62051): rsync -aR with many distinct sources, `rsync -aR s0/*/./a* …` at 500 bytes", async () => {
-  // 46 sources. Each source's preserved landing is the last word's `<dest>/a*`:
-  // walked again for every source, the same shape took about 50 CPU s at 7 KB;
-  // it is judged once now. The lead (L62090) asks for an input near 7 KB bound at 1.5 x
-  // main's CI figure; this line and its bound wait on that ruling.
-  const command = distinct("rsync -aR", (index) => ` s${index}/*/./a*`, 500);
+test("cost (L62090): rsync -aR with many distinct sources, `rsync -aR s0/*/./a* …` at 7 KB", async () => {
+  // 7 KB, where the cost peaked (lead ruling L62090: "an input near 7 KB").
+  // Each source's preserved landing is the last word's `<dest>/a*`: walked
+  // again for every source it took about 50 CPU s here; it is judged once now,
+  // and the cost grows with the length (no peak) up to the matcher's budget.
+  const command = distinct("rsync -aR", (index) => ` s${index}/*/./a*`, 7000);
   const classes = await pinned("rsync_relative", command, BOUND_RSYNC_RELATIVE_S);
   assert.ok(classes.includes("network.call"), classes.join(","));
 });
