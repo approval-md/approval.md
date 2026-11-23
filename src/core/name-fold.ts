@@ -143,6 +143,23 @@ export function foldNameLower(text: string): string {
   return folded;
 }
 
+/**
+ * A glob pattern compared with a guarded name where no compare stood before
+ * names folded (#682's protected glob reading): folded, letter case ignored
+ * (`blind`), how a case-insensitive volume may open what the pattern names;
+ * as spelled, exactly (`exact`), as bash and zsh match a pattern against the
+ * names a directory lists (review-b's M1 at 3774fdd4: `CLAUDE.M?` never
+ * matches `CLAUDE.md` in bash, so the write lands on a new file there, and
+ * that reading keeps the class it had before the glob was read). `exact` must
+ * never match where `blind` does not; it runs only to record a divergence.
+ */
+export function globNameMatches(blind: () => boolean, exact: () => boolean): boolean {
+  if (spelledReading) return exact();
+  const hit = blind();
+  if (hit && !readingsDiverged && !exact()) readingsDiverged = true;
+  return hit;
+}
+
 const foldedLists = new WeakMap<readonly string[], readonly string[]>();
 
 /**
@@ -213,8 +230,8 @@ export function takeAmongEqual<T>(claims: readonly T[]): T {
  * Inside the as-spelled reading this is `[run()]`, already as spelled. In the
  * folded one, `run` runs folded first, and the as-spelled run is SKIPPED when
  * no name compare during the folded run met a name whose two readings differ
- * ({@link foldNameExact}, {@link foldNameLower} and {@link nameListIncludes}
- * record it). The skip is sound because those three helpers and
+ * ({@link foldNameExact}, {@link foldNameLower}, {@link nameListIncludes} and
+ * {@link globNameMatches} record it). The skip is sound because those helpers and
  * {@link takeAmongEqual} are the only places the readings differ: when every
  * name helper returned what it would have returned as spelled, the as-spelled
  * run takes the same branches over the same values, and where it meets equal

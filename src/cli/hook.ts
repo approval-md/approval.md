@@ -2800,6 +2800,10 @@ function steeredReadCouldNameCredential(
  * takes; both readings are judged.
  */
 function physicalLanding(from: string, text: string): string {
+  return remembered(diskMemo?.physical, `${from}\u0000${text}`, () => physicalLandingOnDisk(from, text));
+}
+
+function physicalLandingOnDisk(from: string, text: string): string {
   let current = isAbsolute(text) ? sep : from;
   try {
     current = realpathSync(current);
@@ -3034,7 +3038,11 @@ function curlValuesNotRead(
  * pattern could name a credential at all. Over-matches rather than under:
  * `*` matches a leading dot here, which the shell's glob does not.
  */
-function expandGlobPath(path: string): string[] | null {
+function expandGlobPath(path: string): readonly string[] | null {
+  return remembered(diskMemo?.globs, `${shellOptionsSet ? 1 : 0}\u0000${path}`, () => expandGlobPathOnDisk(path));
+}
+
+function expandGlobPathOnDisk(path: string): string[] | null {
   // Fix round 2 (path-parser differential): the shell's glob splits on `/`
   // alone and reads a backslash as an escape, so a pattern holding one is not
   // listed here (the caller judges whether it could name a credential).
@@ -3155,8 +3163,14 @@ export function credentialReadLandings(
   env: NodeJS.ProcessEnv = process.env,
 ): Array<{ segment: string; path: string }> {
   const found: Array<{ segment: string; path: string }> = [];
+  // Whether a path is a credential read, by path and recursion, for this
+  // call: one name reading, one set of shell options (review-b's M3 at 3774fdd4).
+  const landed = new Map<string, boolean>();
+  const recorded = new Set<string>();
   const record = (segment: string, path: string): void => {
-    if (!found.some((entry) => entry.segment === segment && entry.path === path)) {
+    const key = `${segment}\u0000${path}`;
+    if (!recorded.has(key)) {
+      recorded.add(key);
       found.push({ segment, path });
     }
   };
@@ -3272,14 +3286,19 @@ export function credentialReadLandings(
         continue;
       }
       const hit = (path: string): void => record(shape.text, path);
-      const lands = (path: string, recursive: boolean): boolean => {
-        const canonical = canonicalPath(path);
-        return (
-          isCredentialPath(path) ||
-          isCredentialPath(canonical) ||
-          (recursive && (holdsCredentials(canonical) || holdsCredentials(path)))
-        );
-      };
+      const lands = (path: string, recursive: boolean): boolean =>
+        remembered(landed, `${recursive ? 1 : 0}${path}`, () => {
+          const canonical = canonicalPath(path);
+          return (
+            isCredentialPath(path) ||
+            isCredentialPath(canonical) ||
+            (recursive && (holdsCredentials(canonical) || holdsCredentials(path)))
+          );
+        });
+      // Review-b's M3 at 3774fdd4: a word this segment already judged, with
+      // the same flags, from the same directories, records what it recorded
+      // then, so it is judged once (`grep -r ^import ^import …`).
+      const judgedHere = new Set<string>();
       // Fix round 2 (the narrowed M-B rule): is a relative word read under a
       // directory a `CDPATH` lookup may have chosen a credential read? Every
       // recursive reader is (a recursive read of an unknown directory could
@@ -3413,6 +3432,9 @@ export function credentialReadLandings(
         }
       };
       const judge = (word: string, recursive: boolean, steeredToo = true, homeSpelled = true): void => {
+        const key = `${recursive ? 1 : 0}${steeredToo ? 1 : 0}${homeSpelled ? 1 : 0}${word}`;
+        if (judgedHere.has(key)) return;
+        judgedHere.add(key);
         // APRV-524 (review-b M1): a word holding the substitution sentinel is
         // judged a second time with every sentinel removed. That is how the
         // release before APRV-511 read it, its lexer adding nothing for a
@@ -4134,6 +4156,10 @@ export function classifyForHook(
   const bases = [...new Set([joined, command.replaceAll("\\\n", ""), ...(shellMayKeep ? [command] : [])])];
   const outer = shellOptionsSet;
   shellOptionsSet = outer || bases.some(setsShellOption);
+  // Review-b's M3 at 3774fdd4: every reading below lands its words on the
+  // disk again, so each landing is kept for the length of this call.
+  const outerMemo = diskMemo;
+  diskMemo ??= newDiskMemo();
   try {
     const once = (text: string): RefinedClassification =>
       classifyForHookOnce(text, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments);
@@ -4167,7 +4193,41 @@ export function classifyForHook(
     return judged;
   } finally {
     shellOptionsSet = outer;
+    diskMemo = outerMemo;
   }
+}
+
+/**
+ * What the disk answered during one {@link classifyForHook} call, by the
+ * path asked (review-b's M3 at 3774fdd4): the same word in the base text,
+ * the zsh option reading, the group readings and both name readings, or
+ * repeated n times in one command, costs one landing, not one per reading per
+ * word. Only answers the disk alone gives are kept, never one a name reading
+ * or a shell option changes; nothing writes to the disk while a command is
+ * judged, before it runs. `null` outside a call: every caller then asks the
+ * disk each time, as before.
+ */
+interface DiskMemo {
+  canonical: Map<string, string>;
+  physical: Map<string, string>;
+  directory: Map<string, boolean>;
+  /** {@link expandGlobPath}'s answers, keyed by whether a shell option is set as well. */
+  globs: Map<string, readonly string[] | null>;
+}
+
+let diskMemo: DiskMemo | null = null;
+
+function newDiskMemo(): DiskMemo {
+  return { canonical: new Map(), physical: new Map(), directory: new Map(), globs: new Map() };
+}
+
+/** `compute(key)`, kept in `map` while a {@link DiskMemo} is live. */
+function remembered<K, V>(map: Map<K, V> | undefined, key: K, compute: () => V): V {
+  if (map === undefined) return compute();
+  if (map.has(key)) return map.get(key) as V;
+  const value = compute();
+  map.set(key, value);
+  return value;
 }
 
 /**
@@ -9372,11 +9432,13 @@ function expandGlob(path: string): string[] | null {
 }
 
 function isDirectoryPath(path: string): boolean {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
+  return remembered(diskMemo?.directory, path, () => {
+    try {
+      return statSync(path).isDirectory();
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -9512,6 +9574,10 @@ const RECURSIVE_READERS: ReadonlySet<string> = new Set([
  * yet is judged by where it would be created (APRV-445 recheck SF2(e)).
  */
 function canonicalPath(path: string): string {
+  return remembered(diskMemo?.canonical, path, () => canonicalPathOnDisk(path));
+}
+
+function canonicalPathOnDisk(path: string): string {
   let current = path;
   const tail: string[] = [];
   for (;;) {

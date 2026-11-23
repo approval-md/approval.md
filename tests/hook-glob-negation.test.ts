@@ -17,13 +17,21 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { classifyForHook, joinContinuations, zshOptionCommandReading } from "../src/cli/hook.js";
+import {
+  classifiedSegmentShapes,
+  classifyCommandInThisReading,
+  commandSegmentShapes,
+  globSegmentMatches,
+  globSegmentMatchesExactly,
+} from "../src/core/command-class.js";
+import { withNamesAsSpelled } from "../src/core/name-fold.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-glob-negation-")));
@@ -435,8 +443,10 @@ test("security review of 54624872: a glob last segment that names a top-level ga
       assert.match(decision, /^deny: .*policy\.core/u, `${command}: ${decision}`);
     }
   }
+  // Each also keeps main's workspace write: the glob names a new file when
+  // nothing matches it (review-b's M1 at 3774fdd4).
   for (const command of ["echo x > CL?UDE.md", "echo x > CLAUDE.m[d]", "echo x > [A]GENTS.md", "echo x > .npmr?"]) {
-    assert.deepEqual(classes(command), ["policy.edit"], command);
+    assert.deepEqual(classes(command), ["policy.edit", "files.write.workspace"], command);
   }
   // `*` alone and `*` with an extension keep main's answer exactly.
   for (const command of ["echo x > *.md", "echo x > *", "cp src/* out/", "echo x > docs/*.md"]) {
@@ -757,4 +767,170 @@ test("security review of 901a37c6: only one plain read command is answered by a 
     const read = zshOptionCommandReading(command, [two]) ?? command;
     assert.equal(read.includes("'0.txt'"), listed, `${command}: ${read}`);
   }
+});
+
+/**
+ * review-b's policy W2 (approval init's classes with `files.write.workspace`
+ * human-only and `policy.edit` autonomous, every other class human-only), the
+ * gate's top-level files beside it: a policy that holds a workspace write
+ * stricter than an edit of an agent's instructions.
+ */
+const workspaceLab = ((): { dir: string; home: string } => {
+  const dir = join(scratch, "proj-workspace");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    POLICY.replace("  autonomy: autonomous\n", "  autonomy: human-only\n").replace(
+      "classes:\n",
+      "classes:\n  read.*:\n    autonomy: autonomous\n  policy.edit:\n    autonomy: autonomous\n  files.write.workspace:\n    autonomy: human-only\n",
+    ),
+    "utf8",
+  );
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir, lab.home);
+  assert.equal(attested.code, 0, attested.stderr);
+  for (const name of ["CLAUDE.md", "AGENTS.md", "README.md", "a.txt"]) writeFileSync(join(dir, name), "made-up\n", "utf8");
+  return { dir, home: lab.home };
+})();
+
+test("review-b's M1 at 3774fdd4: a glob read as a top-level gate file keeps main's workspace class beside it", () => {
+  // bash matches a glob with letter case kept: `CLAUDE.M?` does not name
+  // CLAUDE.md, so each of these writes or deletes a new workspace file where
+  // nothing matches, and main (324d87dc) denied each under W2 as
+  // files.write.workspace / files.delete.out_of_scope. At 3774fdd4 the glob
+  // reading's policy.edit replaced that class, and W2 allowed each.
+  for (const command of [
+    "echo x > CLAUDE.M?",
+    "cp a.txt C[L]AUDE.MD",
+    "tee cLaUdE.M? < a.txt",
+    "echo x > AGENTſ.m?",
+    "cat > AGENTS.M? <<'EOF'\nx\nEOF",
+    "rm -f ?LAUDE.md",
+    "cp README.md C*",
+  ]) {
+    assert.match(claude(command, workspaceLab), /^deny: .*files\.(write\.workspace|delete)/u, command);
+  }
+  // A canonical-case glob does name CLAUDE.md: policy.edit, with main's
+  // workspace write beside it, since the glob names a new file when nothing
+  // matches it.
+  assert.deepEqual(classes("echo x > CLAUDE.m?"), ["policy.edit", "files.write.workspace"]);
+  assert.match(claude("echo x > CLAUDE.m?", workspaceLab), /^deny: .*files\.write\.workspace/u);
+  // The plain file keeps its one class, and W2 lets it through.
+  assert.deepEqual(classes("echo x > CLAUDE.md"), ["policy.edit"]);
+  assert.match(claude("echo x > CLAUDE.md", workspaceLab), /^allow: /u);
+  // The same for `[!g]`, any one character since #682 where main read every
+  // character but `g`: the `.git` write, beside main's workspace write.
+  for (const command of ["echo x > .[\\!g]it/config", "cp README.md .gi[^t]/config"]) {
+    const judged = classes(command);
+    assert.ok(judged.includes("vcs.history.rewrite") && judged.includes("files.write.workspace"), `${command}: ${judged.join(", ")}`);
+  }
+  assert.deepEqual(classes("echo x > .gi[!x]/config"), ["vcs.history.rewrite"]);
+});
+
+test("review-b's M1 at 3774fdd4: the as-spelled reading matches a glob with letter case kept, as bash does", () => {
+  assert.equal(globSegmentMatches("CLAUDE.M?", "CLAUDE.md"), true);
+  assert.equal(globSegmentMatchesExactly("CLAUDE.M?", "CLAUDE.md"), false);
+  assert.equal(globSegmentMatchesExactly("CLAUDE.m?", "CLAUDE.md"), true);
+  assert.equal(globSegmentMatchesExactly("AGENTſ.m?", "AGENTS.md"), false);
+  assert.equal(globSegmentMatchesExactly("C[L]AUDE.MD", "CLAUDE.md"), false);
+  assert.equal(globSegmentMatchesExactly("?LAUDE.md", "CLAUDE.md"), true);
+  // Folded, the case-variant glob may name the file; as spelled it names a
+  // new one only. Both readings are judged.
+  const asSpelled = (command: string): string[] => {
+    const result = withNamesAsSpelled(() => classifyCommandInThisReading(command, []));
+    return result.ok ? result.classes : [`refused:${result.code}`];
+  };
+  assert.deepEqual(asSpelled("echo x > CLAUDE.M?"), ["files.write.workspace"]);
+  assert.deepEqual(asSpelled("echo x > CLAUDE.m?"), ["policy.edit", "files.write.workspace"]);
+  const folded = classifyCommandInThisReading("echo x > CLAUDE.M?", []);
+  assert.deepEqual(folded.ok ? folded.classes : [], ["policy.edit", "files.write.workspace"]);
+});
+
+test("review-b's M2 at 3774fdd4: a heredoc written through a glob into .git keeps vcs.history.rewrite", () => {
+  // bash and zsh -f replace .git/config with the body. Main denied each under
+  // `lab`'s policy (vcs.history.rewrite human-only, policy.edit at the
+  // autonomous default); at 3774fdd4 `c*` read as CLAUDE.md made each
+  // policy.edit alone, allowed.
+  for (const command of [
+    "cat > .git/c* <<'EOF'\n[core]\nEOF",
+    "cat > .git/c* <<EOF\nx\nEOF",
+    "tee .git/c* <<'EOF'\nx\nEOF",
+    "echo x > .git/c*",
+  ]) {
+    assert.match(claude(command, lab), /^deny: .*vcs\.history\.rewrite/u, JSON.stringify(command));
+    assert.ok(classes(command).includes("vcs.history.rewrite"), JSON.stringify(command));
+  }
+});
+
+test("review-b's M2 at 3774fdd4: the git-directory pass reads a heredoc's segment, whose text leaves the body out", () => {
+  // The pass lexed each segment's text alone, and a heredoc's segment ends
+  // before its body, so it was refused as never terminated and skipped: a
+  // heredoc written through a link into .git was a workspace write, on main
+  // too, where the same write with `echo` was the git-directory write.
+  const repo = join(scratch, "proj-git-link");
+  mkdirSync(join(repo, ".git"), { recursive: true });
+  writeFileSync(join(repo, ".git", "config"), "[core]\n", "utf8");
+  writeFileSync(join(repo, "APPROVAL.md"), POLICY, "utf8");
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], repo, lab.home);
+  assert.equal(attested.code, 0, attested.stderr);
+  symlinkSync(join(repo, ".git", "config"), join(repo, "cfg"));
+  const at = { dir: repo, home: lab.home };
+  for (const command of ["echo x > cfg", "cat > cfg <<'EOF'\nx\nEOF", "cat > cfg <<EOF\nx\nEOF", "tee -a cfg <<'EOF'\nx\nEOF"]) {
+    assert.match(claude(command, at), /^deny: .*vcs\.history\.rewrite/u, JSON.stringify(command));
+  }
+  assert.equal(classifiedSegmentShapes("cat > cfg <<'EOF'")?.[0]?.writes[0], "cfg");
+  assert.equal(commandSegmentShapes("cat > cfg <<'EOF'"), null);
+  // An ordinary heredoc into the workspace stays what it was.
+  assert.match(claude("cat > notes.txt <<'EOF'\nx\nEOF", at), /^allow: /u);
+});
+
+test("review-b's N3 at 3774fdd4: a directory pattern the Hermes home cannot list is judged by its folded spelling too", (t) => {
+  // Where the home cannot be listed, the pattern alone is judged
+  // (globCouldNameCredential): `hermeſ-agen?` and `pro?ileſ` fold to names
+  // that reach a credential file, though neither the pattern nor its
+  // lowered form matches them. Review-b's plant p4 (the folded pattern taken
+  // back to toLowerCase) survived every test file before this one.
+  const home = join(scratch, "home-unlistable");
+  mkdirSync(join(home, ".hermes", "hermes-agent"), { recursive: true });
+  mkdirSync(join(home, ".hermes", "profiles", "p1"), { recursive: true });
+  writeFileSync(join(home, ".hermes", "hermes-agent", ".env"), "SYNTHETIC=1\n", "utf8");
+  writeFileSync(join(home, ".hermes", "profiles", "p1", "auth.json"), "SYNTHETIC=1\n", "utf8");
+  chmodSync(join(home, ".hermes"), 0o000);
+  const saved = process.env["HOME"];
+  try {
+    try {
+      readdirSync(join(home, ".hermes"));
+      t.skip("this user can list a mode-000 directory");
+      return;
+    } catch {
+      // Unlistable, as intended.
+    }
+    process.env["HOME"] = home;
+    for (const command of ["cat ~/.hermes/hermeſ-agen?/.env", "cat ~/.hermes/pro?ileſ/p1/auth.json", "cat ~/.hermes/hermes‌-agen?/.env"]) {
+      const judged = classifyForHook(command, [], lab.dir, [], false, [lab.dir]).result;
+      assert.ok(judged.ok && judged.classes.includes("account.credential"), `${command}: ${JSON.stringify(judged)}`);
+    }
+  } finally {
+    chmodSync(join(home, ".hermes"), 0o755);
+    if (saved === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = saved;
+  }
+});
+
+test("review-b's N1 at 3774fdd4: a bad pattern and a lone repeat are read as zsh 5.9 reads them under extendedglob", () => {
+  // zsh -f -o extendedglob: `^#`, `x^#`, `d/#b` and `##b` are bad patterns,
+  // and nothing from that command on runs, so the word is read as written;
+  // `b#` and `bb#` name `b` and `bb` only, never APPROVAL.md.
+  assert.equal(zshOptionCommandReading("cat a.txt | grep -v ^#", null), null);
+  assert.equal(zshOptionCommandReading("cp a.txt b#", null), "cp a.txt b*");
+  for (const [command, unwanted] of [
+    ["cat a.txt | grep -v ^#", "account.credential"],
+    ["cp a.txt b#", "policy.core"],
+    ["cp a.txt bb#", "policy.core"],
+  ] as const) {
+    assert.ok(!classes(command).includes(unwanted), `${command}: ${classes(command).join(", ")}`);
+  }
+  // The forms that do expand keep their readings.
+  assert.equal(zshOptionCommandReading("cat ~/.hermes/au#th.json", null), "cat ~/.hermes/a*th.json");
+  assert.equal(zshOptionCommandReading("cat ~/.Z#hermes/auth.json", null), "cat ~/.*hermes/auth.json");
+  assert.match(claude("cat ~/.hermes/au#th.json"), /^deny: /u);
 });

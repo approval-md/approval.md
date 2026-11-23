@@ -33,7 +33,7 @@ import { dirname, join, normalize, sep } from "node:path";
 import { foldNameLower } from "../core/name-fold.js";
 
 import {
-  commandSegmentShapes,
+  classifiedSegmentShapes,
   expandBraces,
   GATE_SELF_CLASS,
   gitWriteTargets,
@@ -504,7 +504,10 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
   // Why the shell may stand somewhere this step cannot name, once it may.
   let unknown: string | null = null;
   for (const [index, segment] of result.segments.entries()) {
-    const shapes = commandSegmentShapes(segment.text);
+    // The segment's own text, which leaves out a heredoc's body: read as the
+    // segment it is (review-b's M2 at 3774fdd4), never refused as a heredoc
+    // never terminated and skipped.
+    const shapes = classifiedSegmentShapes(segment.text);
     if (shapes === null) continue;
     const before = dirs;
     const unknownBefore = unknown;

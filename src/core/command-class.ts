@@ -69,6 +69,7 @@ import {
   eachNameReading,
   foldNameExact,
   foldNameLower,
+  globNameMatches,
   nameListIncludes,
   takeAmongEqual,
   withNamesAsSpelled,
@@ -907,11 +908,15 @@ const PROTECTED_GLOB_SEGMENTS = 64;
  * pattern segments or {@link PROTECTED_GLOB_READINGS} readings.
  */
 function protectedGlobReadings(word: string, extra: readonly ProtectedPathEntry[]): string[] | null {
+  if (!protectedGlobsRead) return [word];
   const segments = pathSegments(word);
   let patterns = 0;
   for (const segment of segments) if (isPatternSegment(segment)) patterns += 1;
   if (patterns === 0) return [word];
-  if (patterns > PROTECTED_GLOB_SEGMENTS) return null;
+  if (patterns > PROTECTED_GLOB_SEGMENTS) {
+    protectedGlobHits += 1;
+    return null;
+  }
   const names = new Set(PROTECTED_SEGMENT_NAMES);
   for (const raw of extra) for (const segment of parseProtectedEntry(raw)?.segments ?? []) names.add(segment);
   const choices: Array<{ at: number; options: string[] }> = [];
@@ -922,13 +927,24 @@ function protectedGlobReadings(word: string, extra: readonly ProtectedPathEntry[
       at === segments.length - 1 && !BARE_STAR_LAST.test(segment)
         ? [...names, ...CORE_FILENAMES, ...PROTECTED_FILENAMES]
         : [...names];
-    const matched = candidates.filter((name) => globSegmentMatches(segment, name));
+    // Letter case ignored in the folded reading, exact as spelled
+    // ({@link globNameMatches}; review-b's M1 at 3774fdd4).
+    const matched = candidates.filter((name) =>
+      globNameMatches(
+        () => globSegmentMatches(segment, name),
+        () => globSegmentMatchesExactly(segment, name),
+      ),
+    );
     if (matched.length === 0) continue;
     count *= matched.length + 1;
-    if (count > PROTECTED_GLOB_READINGS) return null;
+    if (count > PROTECTED_GLOB_READINGS) {
+      protectedGlobHits += 1;
+      return null;
+    }
     choices.push({ at, options: [segment, ...matched] });
   }
   if (choices.length === 0) return [word];
+  protectedGlobHits += 1;
   const readings: string[] = [];
   const parts = [...segments];
   const walk = (index: number): void => {
@@ -945,6 +961,25 @@ function protectedGlobReadings(word: string, extra: readonly ProtectedPathEntry[
   walk(0);
   return readings;
 }
+
+/**
+ * Is {@link protectedGlobReadings} on? Off only while
+ * {@link classifyCommandAsRead} classifies a segment again as main did, where
+ * no glob was read as a protected name (review-b's M1 and M2 at 3774fdd4):
+ * `echo x > CLAUDE.M?` and `rm -f ?LAUDE.md` keep main's
+ * `files.write.workspace` / `files.delete.out_of_scope`, and
+ * `cat > .git/c* <<'EOF'` its `vcs.history.rewrite`, beside the class the
+ * glob reading gives (#688's rule: a spelling keeps the class main gave it).
+ * Restored by a `finally`; the classifier is synchronous.
+ */
+let protectedGlobsRead = true;
+
+/**
+ * How many words {@link protectedGlobReadings} has read as a protected name
+ * (or judged past its caps) in this process: a segment whose classification
+ * moved it is classified again as main did.
+ */
+let protectedGlobHits = 0;
 
 /**
  * {@link protectedPathClass} in each name reading: the folded answer, then the
@@ -1808,7 +1843,14 @@ export function credentialReadWords(basename: string, args: readonly string[]): 
 }
 
 function credentialTouch(basename: string, args: readonly string[]): CredentialOutcome | null {
-  const named = credentialReadWords(basename, args).find((word) => isCredentialPathAsRead(word));
+  // A word repeated is judged once: the same answer (review-b's M3 at
+  // 3774fdd4, a word the zsh option reading repeats thousands of times).
+  const judged = new Set<string>();
+  const named = credentialReadWords(basename, args).find((word) => {
+    if (judged.has(word)) return false;
+    judged.add(word);
+    return isCredentialPathAsRead(word);
+  });
   if (named !== undefined) {
     return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
   }
@@ -2030,7 +2072,7 @@ interface PendingHeredoc {
  * covered in both quote styles by `tests/command-class-quoting.test.ts`, so an
  * edit that loses the property fails there rather than in someone's notes.
  */
-function lex(command: string): LexResult {
+function lex(command: string, bodiesCut = false): LexResult {
   const segments: LexSegment[] = [];
   let words: LexWord[] = [];
   let redirects: LexRedirect[] = [];
@@ -2356,7 +2398,7 @@ function lex(command: string): LexResult {
     words.push(word);
   }
 
-  if (pending.length > 0) {
+  if (pending.length > 0 && !bodiesCut) {
     const heredoc = pending[0] as PendingHeredoc;
     return { ok: false, detail: `heredoc <<${heredoc.terminator} is never terminated` };
   }
@@ -4488,10 +4530,10 @@ const GLOB_ELEMENT_LIMIT = 1024;
  * (`*`, and an unclosed bracket expression holding a class), or exactly one
  * character, tested by the expression source of that one character.
  */
-type GlobElement = { star: true } | { star: false; source: string; test?: RegExp };
+type GlobElement = { star: true } | { star: false; source: string; test?: RegExp; exact?: RegExp };
 
 /** The last pattern read into elements, so a disk walk reads it once. */
-let globElementsCache: { pattern: string; elements: GlobElement[] | null } | null = null;
+let globElementsCache: { pattern: string; asMain: boolean; elements: GlobElement[] | null } | null = null;
 
 /**
  * A glob pattern segment as elements (review of the substitution fold, M1),
@@ -4504,13 +4546,15 @@ let globElementsCache: { pattern: string; elements: GlobElement[] | null } | nul
  * bracket expression cannot be turned into an expression: the caller judges
  * both the strict way.
  */
-function globElements(pattern: string): GlobElement[] | null {
-  if (globElementsCache !== null && globElementsCache.pattern === pattern) return globElementsCache.elements;
+function globElements(pattern: string, asMain = false): GlobElement[] | null {
+  if (globElementsCache !== null && globElementsCache.pattern === pattern && globElementsCache.asMain === asMain) {
+    return globElementsCache.elements;
+  }
   let globs = 0;
   for (let at = 0; at < pattern.length; at += 1) {
     const char = pattern[at];
     if ((char === "*" || char === "?" || char === "[") && (globs += 1) > GLOB_ELEMENT_LIMIT) {
-      globElementsCache = { pattern, elements: null };
+      globElementsCache = { pattern, asMain, elements: null };
       return null;
     }
   }
@@ -4587,6 +4631,13 @@ function globElements(pattern: string): GlobElement[] | null {
         continue;
       }
       const body = pattern.slice(at + 1, close);
+      if (asMain && (body.startsWith("^") || body.startsWith("!"))) {
+        // As main read it: a class of every character but the members
+        // ({@link protectedGlobsRead}; review-b's M1 at 3774fdd4).
+        one(`[^${body.slice(1).replace(/[\\\]^]/gu, "\\$&")}]`);
+        at = close;
+        continue;
+      }
       if (body.startsWith("^") || body.startsWith("!")) {
         // `[!...]` and `[^...]` are any one character, as in the hook's own
         // reader (src/core/glob-match.ts): bash and zsh negate both, dash
@@ -4605,7 +4656,7 @@ function globElements(pattern: string): GlobElement[] | null {
           builds = false;
         }
         if (body[1] === "]" || !builds) {
-          globElementsCache = { pattern, elements: null };
+          globElementsCache = { pattern, asMain, elements: null };
           return null;
         }
         one("[\\s\\S]");
@@ -4629,7 +4680,7 @@ function globElements(pattern: string): GlobElement[] | null {
       break;
     }
   }
-  globElementsCache = { pattern, elements: result };
+  globElementsCache = { pattern, asMain, elements: result };
   return result;
 }
 
@@ -4651,8 +4702,37 @@ function globElements(pattern: string): GlobElement[] | null {
  */
 export function globSegmentMatches(pattern: string, name: string): boolean {
   if (!isPatternSegment(pattern)) return foldNameLower(pattern) === foldNameLower(name);
+  return globElementsMatch(pattern, name, false);
+}
+
+/**
+ * {@link globSegmentMatches} with letter case kept, as bash and zsh match a
+ * pattern against a directory's names: `CLAUDE.M?` and `cLaUdE.md` do not
+ * name `CLAUDE.md`, nor `AGENTſ.m?` `AGENTS.md` (review-b's M1 at 3774fdd4).
+ * It never matches where {@link globSegmentMatches} does not.
+ */
+export function globSegmentMatchesExactly(pattern: string, name: string): boolean {
+  if (!isPatternSegment(pattern)) return pattern === name;
+  return globElementsMatch(pattern, name, true);
+}
+
+/** The position walk of {@link globSegmentMatches}, letter case ignored or `exact`. */
+function globElementsMatch(pattern: string, name: string, exact: boolean): boolean {
   if (name.startsWith(".") && (pattern.startsWith("*") || pattern.startsWith("?"))) return false;
-  const elements = globElements(pattern);
+  const matched = walkGlobElements(globElements(pattern, !protectedGlobsRead), name, exact);
+  // `[!g]` and `[^g]` are any one character since #682, where main read a
+  // class of every character but `g`: a name that matches only so counts as
+  // a glob read anew, and the segment is classified again as main read it
+  // (review-b's M1 at 3774fdd4: `echo x > .[\!g]it/config` keeps main's
+  // workspace write beside the `.git` write).
+  if (matched && protectedGlobsRead && /\[[!^]/u.test(pattern) && !walkGlobElements(globElements(pattern, true), name, exact)) {
+    protectedGlobHits += 1;
+  }
+  return matched;
+}
+
+/** The position walk over `elements`; `null` elements match any name, the strict side. */
+function walkGlobElements(elements: GlobElement[] | null, name: string, exact: boolean): boolean {
   if (elements === null) return true;
   const chars = Array.from(name);
   // live[p]: the first p characters of the name are matched so far.
@@ -4669,9 +4749,9 @@ export function globSegmentMatches(pattern: string, name: string): boolean {
         }
       }
     } else {
-      element.test ??= new RegExp(`^${element.source}$`, "iu");
+      const test = exact ? exactElementTest(element) : (element.test ??= new RegExp(`^${element.source}$`, "iu"));
       for (let p = 0; p < chars.length; p += 1) {
-        if (live[p] === 1 && element.test.test(chars[p] as string)) {
+        if (live[p] === 1 && test.test(chars[p] as string)) {
           next[p + 1] = 1;
           any = true;
         }
@@ -4681,6 +4761,22 @@ export function globSegmentMatches(pattern: string, name: string): boolean {
     live = next;
   }
   return live[chars.length] === 1;
+}
+
+/**
+ * The expression of one element with letter case kept. An element whose
+ * source builds under `"iu"` builds under `"u"` too; one that did not would
+ * be read as any one character, the strict side.
+ */
+function exactElementTest(element: { source: string; exact?: RegExp }): RegExp {
+  if (element.exact === undefined) {
+    try {
+      element.exact = new RegExp(`^${element.source}$`, "u");
+    } catch {
+      element.exact = /^[\s\S]$/u;
+    }
+  }
+  return element.exact;
 }
 
 /**
@@ -10340,7 +10436,20 @@ function classifyCommandAsRead(
       }
       continue;
     }
+    const globHitsBefore = protectedGlobHits;
     const outcome = classifySegment(segment, protectedPaths, execContext);
+    // Review-b's M1 and M2 at 3774fdd4 (#688's rule: a spelling keeps the
+    // class main gave it): where a glob in this segment was read as a
+    // protected name, the segment is classified again with no glob so read,
+    // as main classified it, and that class is kept beside the glob
+    // reading's. `CLAUDE.M?` and `?LAUDE.md` name a new workspace file when
+    // nothing matches them, and `.git/c*` is a git-directory write whatever
+    // else `c*` may name. A refusal of that reading refuses the line, as it
+    // did on main.
+    const asMain =
+      outcome.ok && protectedGlobsRead && protectedGlobHits !== globHitsBefore
+        ? classifySegmentAsMain(segment, protectedPaths, execContext)
+        : null;
     if (!outcome.ok && outcome.noRule === true && context.noRuleSegments === true && !movesDirectory) {
       segments.push({ text: segment.text, class: NO_RULE_CLASS, rule: "no-rule", noRule: outcome.detail });
       if (!classes.includes(NO_RULE_CLASS)) classes.push(NO_RULE_CLASS);
@@ -10349,6 +10458,10 @@ function classifyCommandAsRead(
     if (!outcome.ok) {
       return { ok: false, code: outcome.code, segment: segment.text, detail: outcome.detail };
     }
+    if (asMain !== null && !asMain.ok && !(asMain.noRule === true && context.noRuleSegments === true && !movesDirectory)) {
+      return { ok: false, code: asMain.code, segment: segment.text, detail: asMain.detail };
+    }
+    const firstOfSegment = segments.length;
     segments.push({
       text: segment.text,
       class: outcome.class,
@@ -10380,8 +10493,59 @@ function classifyCommandAsRead(
       });
       if (!classes.includes(outcome.also.class)) classes.push(outcome.also.class);
     }
+    if (asMain !== null) {
+      // Each class main's reading gives this segment that the glob reading
+      // lacks, as its own entry with main's rule and path.
+      const have = new Set(segments.slice(firstOfSegment).map((entry) => entry.class));
+      const beside = (entry: ClassifiedSegment): void => {
+        if (have.has(entry.class)) return;
+        have.add(entry.class);
+        segments.push(entry);
+        if (!classes.includes(entry.class)) classes.push(entry.class);
+      };
+      if (!asMain.ok) {
+        beside({ text: segment.text, class: NO_RULE_CLASS, rule: "no-rule", noRule: asMain.detail });
+        continue;
+      }
+      const path = asMain.path === undefined ? {} : { path: asMain.path };
+      beside({
+        text: segment.text,
+        class: asMain.class,
+        rule: asMain.rule,
+        ...path,
+        ...(asMain.sandbox === undefined ? {} : { sandbox: asMain.sandbox }),
+        ...(asMain.execCode === undefined ? {} : { execCode: asMain.execCode }),
+      });
+      for (const cls of asMain.alsoClasses ?? []) beside({ text: segment.text, class: cls, rule: asMain.rule, ...path });
+      if (asMain.also !== undefined) {
+        beside({
+          text: segment.text,
+          class: asMain.also.class,
+          rule: asMain.also.rule,
+          ...(asMain.also.path === undefined ? {} : { path: asMain.also.path }),
+        });
+      }
+    }
   }
   return { ok: true, segments, classes };
+}
+
+/**
+ * {@link classifySegment} with no glob read as a protected name
+ * ({@link protectedGlobsRead}): the class main gave the segment.
+ */
+function classifySegmentAsMain(
+  segment: LexSegment,
+  protectedPaths: readonly ProtectedPathEntry[],
+  context: ClassifierContext,
+): SegmentOutcome {
+  const before = protectedGlobsRead;
+  protectedGlobsRead = false;
+  try {
+    return classifySegment(segment, protectedPaths, context);
+  } finally {
+    protectedGlobsRead = before;
+  }
 }
 
 // ===========================================================================
@@ -10491,7 +10655,24 @@ export interface CommandSegmentShape {
 }
 
 export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
-  const lexed = lex(command);
+  return shapesOf(lex(command));
+}
+
+/**
+ * {@link commandSegmentShapes} of ONE classified segment's text, which ends
+ * where its line ends and so leaves out the body of a heredoc it opens:
+ * `cat > .git/c* <<'EOF'` is read as the segment it is, where lexing it as a
+ * whole command refuses it as a heredoc never terminated (review-b's M2 at
+ * 3774fdd4: the git-directory pass skipped every heredoc segment, so
+ * `cat > .git/c* <<'EOF' … EOF` lost the `vcs.history.rewrite` that
+ * `echo x > .git/c*` kept). The body is data, or a substitution the
+ * classifier read from the whole line; nothing here reads it.
+ */
+export function classifiedSegmentShapes(text: string): CommandSegmentShape[] | null {
+  return shapesOf(lex(text, true));
+}
+
+function shapesOf(lexed: LexResult): CommandSegmentShape[] | null {
   if (!lexed.ok) return null;
   const expands = (word: LexWord): boolean => word.substitutions.length > 0 || /[$`]/u.test(word.text);
   return lexed.segments.map((segment) => {

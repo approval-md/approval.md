@@ -103,9 +103,10 @@ test("S1: a glob or brace target that .git matches is git-dir-write, any letter 
   for (const command of ["echo x > .{f..h}it/config", "echo x > .G[I]T/config", "cd .GI? && echo x > config", "echo x > {a,.git}/config"]) {
     assert.ok(pure(command).includes(DIR_WRITE), command);
   }
-  // `.g*` names `.grok` too, whose `hooks/` is Grok's hook organ: the stricter
-  // class answers (build-2's sweep v3 on 83f30bdc).
-  assert.deepEqual(pure("tee -a sub/.g*/hooks/pre-push"), ["policy.core protected-path"]);
+  // `.g*` names `.grok` too, whose `hooks/` is Grok's hook organ: that class
+  // is reported (build-2's sweep v3 on 83f30bdc), beside the `.git` write main
+  // gave it (review-b's M1 at 3774fdd4).
+  assert.deepEqual(pure("tee -a sub/.g*/hooks/pre-push"), ["policy.core protected-path", DIR_WRITE]);
 });
 
 test("S1: ordinary glob and brace lines do not move", () => {
@@ -201,9 +202,10 @@ test("S1 review: a bracket expression with a POSIX class, an equivalence class o
   ]) {
     assert.deepEqual(pure(command), [DIR_WRITE], command);
   }
-  // An undecided pattern may name any directory, the gate's own among them,
-  // so the strictest class answers (build-2's sweep v3 on 83f30bdc).
-  assert.deepEqual(pure("echo x > .[[:alpha:]/config"), ["policy.core redirect-protected"]);
+  // An undecided pattern may name any directory, the gate's own among them
+  // (build-2's sweep v3 on 83f30bdc), and `.git` as main read it (review-b's
+  // M1 at 3774fdd4): both classes are reported.
+  assert.deepEqual(pure("echo x > .[[:alpha:]/config"), ["policy.core redirect-protected", DIR_WRITE]);
   assert.deepEqual(pure("echo x > out[1].txt"), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure("echo x > [[:alpha:]]*.txt"), ["files.write.workspace redirect-write"]);
 });

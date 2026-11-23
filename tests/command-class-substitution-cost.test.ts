@@ -166,10 +166,12 @@ test("cost: past 1,024 glob characters one pattern segment is judged to name .gi
   // `y`, since `.*x` names `.codex`, a gate directory, under the bound (build-2's
   // sweep v3 on 83f30bdc); past it the pattern may name any directory, the
   // gate's own among them and `.npmrc`, so each class it may name is reported
-  // (review-b N1 at bcb1be08).
+  // (review-b N1 at bcb1be08), beside main's `.git` write (review-b's M1 at
+  // 3774fdd4: a spelling keeps the class main gave it).
   assert.deepEqual(pure(`echo x > .${"*".repeat(1023)}y`), ["files.write.workspace redirect-write"]);
-  assert.deepEqual(pure(`echo x > .${"*".repeat(1025)}y`), ["policy.core redirect-protected", "policy.edit redirect-protected"]);
-  assert.deepEqual(bounded(`echo x > .${"*".repeat(100000)}y`, "100,000 *"), ["policy.core redirect-protected", "policy.edit redirect-protected"]);
+  const pastBound = ["policy.core redirect-protected", "policy.edit redirect-protected", DIR_WRITE];
+  assert.deepEqual(pure(`echo x > .${"*".repeat(1025)}y`), pastBound);
+  assert.deepEqual(bounded(`echo x > .${"*".repeat(100000)}y`, "100,000 *"), pastBound);
   // Under the bound the walk answers as the expression did.
   assert.equal(globSegmentMatches(`.${"*".repeat(1000)}t`, ".git"), true);
   assert.equal(globSegmentMatches(`.${"?*".repeat(500)}`, ".git"), false);
@@ -374,11 +376,14 @@ test("cost: the gate follow-up's readers (zsh forms, printf modifiers and words)
 test("cost: a word of many glob segments is read in one pass (security review of 54624872)", () => {
   // Each segment's protected names are found once and the readings joined at
   // the end; copying each prefix per segment took 11 CPU s for the second.
-  assert.deepEqual(bounded(`echo x > ${"a*/".repeat(100000)}f`, "100,000 a*/"), ["policy.core redirect-protected"]);
-  assert.deepEqual(bounded(`echo x > ${"x/".repeat(100000)}.g*/hooks/pre-push`, "100,000 x/ then .g*"), ["policy.core redirect-protected"]);
+  // Main's class for the word rides beside (review-b's M1 at 3774fdd4).
+  const CORE = "policy.core redirect-protected";
+  const WORKSPACE = "files.write.workspace redirect-write";
+  assert.deepEqual(bounded(`echo x > ${"a*/".repeat(100000)}f`, "100,000 a*/"), [CORE, WORKSPACE]);
+  assert.deepEqual(bounded(`echo x > ${"x/".repeat(100000)}.g*/hooks/pre-push`, "100,000 x/ then .g*"), [CORE, DIR_WRITE]);
   // Past 64 pattern segments a word is judged policy.core; at 64 it is read.
-  assert.deepEqual(pure(`echo x > ${"b*/".repeat(64)}f`), ["files.write.workspace redirect-write"]);
-  assert.deepEqual(pure(`echo x > ${"b*/".repeat(65)}f`), ["policy.core redirect-protected"]);
+  assert.deepEqual(pure(`echo x > ${"b*/".repeat(64)}f`), [WORKSPACE]);
+  assert.deepEqual(pure(`echo x > ${"b*/".repeat(65)}f`), [CORE, WORKSPACE]);
 });
 
 test("cost: a word past either glob cap keeps the stricter class it has on its own (codex on bcb1be08)", () => {
@@ -391,12 +396,14 @@ test("cost: a word past either glob cap keeps the stricter class it has on its o
   assert.deepEqual(pure("echo x > .approval/log/*/*"), [LOG, CORE]);
   assert.deepEqual(pure(`echo x > .approval/log/${"b*/".repeat(65)}x`), [LOG, CORE]);
   assert.deepEqual(pure("echo x > {.approval/log,build}/*/*"), [LOG, CORE]);
-  // A plain path past either cap is policy.core, the strict side.
-  assert.deepEqual(pure("echo x > build/*/*"), [CORE]);
-  assert.deepEqual(pure(`echo x > build/${"b*/".repeat(65)}x`), [CORE]);
+  // A plain path past either cap is policy.core, the strict side, beside
+  // main's workspace write (review-b's M1 at 3774fdd4).
+  const WORKSPACE = "files.write.workspace redirect-write";
+  assert.deepEqual(pure("echo x > build/*/*"), [CORE, WORKSPACE]);
+  assert.deepEqual(pure(`echo x > build/${"b*/".repeat(65)}x`), [CORE, WORKSPACE]);
   // Under both caps the glob readings answer as before.
-  assert.deepEqual(pure(`echo x > build/${"b*/".repeat(64)}x`), ["files.write.workspace redirect-write"]);
-  assert.deepEqual(pure("echo x > build/b*/*"), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(pure(`echo x > build/${"b*/".repeat(64)}x`), [WORKSPACE]);
+  assert.deepEqual(pure("echo x > build/b*/*"), [WORKSPACE]);
 });
 
 test("cost: a command with a line continuation is classified once, not again as written (review-b S1 at 41e6fd1b)", () => {
@@ -416,4 +423,32 @@ test("cost: a command with a line continuation is classified once, not again as 
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
+});
+
+test("cost: a word the zsh option reading changes, repeated, is landed on the disk once (review-b's M3 and S1 at 3774fdd4)", () => {
+  // Every command is read as zsh reads it under extendedglob and braceccl
+  // too (the lead's ruling L61492), and each reading landed each word on the
+  // disk again: through the real hook at 3774fdd4, `grep -r ^import` x n took
+  // 107 CPU s at 80 KB (main 6) and `cat ~/.hermes/(#a1)auth.json` x n 82 s at
+  // 320 KB (main 0.3). In process, 40 KB of the first took 14 s there. Now a
+  // landing is kept for the call and a word judged once per segment.
+  const dir = join(scratch, "m3-words");
+  mkdirSync(join(dir, "src"), { recursive: true });
+  for (let at = 0; at < 40; at += 1) writeFileSync(join(dir, `f${String(at)}.txt`), "x\n");
+  mkdirSync(join(HOME, ".hermes"), { recursive: true });
+  writeFileSync(join(HOME, ".hermes", "auth.json"), "SYNTHETIC=1\n");
+  const hook = (command: string): number => cpuSeconds(() => { classifyForHook(command, [], dir, [], false, [dir]); });
+  const words = (word: string): string => `git push --force && grep -r${` ${word}`.repeat(Math.floor(40000 / (word.length + 1)))}`;
+  hook(words("import")); // warm the compiled readers once
+  const plain = hook(words("import"));
+  for (const word of ["^import", "~/.hermes/(#a1)auth.json", "~/^zz/auth.json", "~/.hermes/{a-z}uth.json", "~/.hermes/au#th.json"]) {
+    notAlreadyOver(word);
+    const seconds = hook(words(word));
+    withinBound(seconds, `${word} x n, 40 KB`);
+    assert.ok(seconds < plain * 1.5 + 0.5, `${word}: ${seconds.toFixed(2)} s against the plain word's ${plain.toFixed(2)} s`);
+  }
+  // The same answer as the plain reading gives each word alone: the credential
+  // the option forms name is still read.
+  const judged = classifyForHook(words("~/.hermes/(#a1)auth.json"), [], dir, [], false, [dir]).result;
+  assert.ok(judged.ok && judged.classes.includes("account.credential"), JSON.stringify(judged.ok ? judged.classes : judged));
 });

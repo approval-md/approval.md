@@ -361,8 +361,13 @@ export function globPattern(component: string): GlobPattern {
  * answers). The segment itself when it holds none of the forms.
  *
  * - `{hZ}`, `{a-z}` (braceccl): the class `[hZ]`, `[a-z]`.
- * - `X#` (zero or more X): `*` in X's place; `X##` (one or more): `X*`. A
- *   `#` with no X before it is any name.
+ * - `X#` (zero or more X): `*` in X's place, and `X*` where X opens the
+ *   segment and `#` ends it (`b#` names `b`, `bb`; no name is empty: review-b's
+ *   N1 at 3774fdd4); `X##` (one or more): `X*`.
+ * - A `#` or `##` with nothing before it to repeat (`^#`, `x^#`, `d/#b`) is a bad
+ *   pattern: zsh runs nothing from that command on, so the segment is read
+ *   as written, the plain reading the shell without the option takes
+ *   (review-b's N1 at 3774fdd4: `grep -v ^#`).
  * - `^rest` (negation): any name at the segment's start; after a literal
  *   prefix, the prefix and `*`.
  * - `a~b` (exclusion, not at the start): `a`.
@@ -406,17 +411,20 @@ export function zshOptionReading(segment: string): string | null {
         continue;
       }
     }
+    // A bad pattern (zsh 5.9 with extendedglob: `bad pattern: ^#`).
+    if (char === "^" && text[at + 1] === "#") return segment;
     if (char === "^") return out.length === 0 ? null : `${out}*`;
     if (char === "~" && at > 0) return out.length === 0 ? null : out;
     if (char === "#") {
       if (text[at + 1] === "#") {
-        if (out.length === 0) return null;
+        if (out.length === 0) return segment;
         out += "*";
         at += 1;
         continue;
       }
-      if (out.length === 0) return null;
-      out = `${out.slice(0, unit)}*`;
+      if (out.length === 0) return segment;
+      // `X#` alone: one X or more, since zero leaves an empty name.
+      out = unit === 0 && at === text.length - 1 ? `${out}*` : `${out.slice(0, unit)}*`;
       continue;
     }
     unit = out.length;
