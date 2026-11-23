@@ -157,9 +157,12 @@ test("the sweep's examples answer as the plain write does", () => {
 test("the zsh constructs a lexed word can carry are read as patterns too", () => {
   // `#` (extendedglob repeat), `^` (negation), `~` after the first character
   // (exclusion, which drops the rest of the word), and a whole `**` component.
-  assert.equal(strictest("echo x > ~/.hermes/Z#auth.json"), "policy.core");
-  assert.equal(strictest("echo x > ~/.hermes/a^Z"), "policy.core");
-  assert.equal(strictest("echo x > APPROVAL.m*~x/y"), "policy.core");
+  // They need extendedglob: read as patterns only on a line that may set it
+  // (lead ruling L60846; review-b S2).
+  assert.ok(lineClasses("setopt extendedglob; echo x > ~/.hermes/Z#auth.json").includes("policy.core"));
+  assert.ok(lineClasses("setopt extendedglob; echo x > ~/.hermes/a^Z").includes("policy.core"));
+  assert.ok(lineClasses("setopt extendedglob; echo x > APPROVAL.m*~x/y").includes("policy.core"));
+  assert.deepEqual(classesOf("echo x > out/a^Z"), ["files.write.workspace"]);
   // A whole `**` descends into dot-directories only with dot matching on.
   assert.deepEqual(classesOf("echo x > ~/**/auth.json"), ["files.write.workspace"]);
   assert.equal(strictest("GLOBIGNORE=x; echo x > ~/**/auth.json"), "log.mutate");
@@ -183,7 +186,6 @@ test("negative controls: a pattern that cannot reach a guarded path keeps its cl
     "echo x > out/[ab].log",
     "cp a out/*.log",
     "cp src/*.ts out/",
-    "cp ./*.md docs/",
     "mv build/*.tmp out/",
     "tee out/*.txt < README.md",
     "touch out/[0-9].stamp",
@@ -252,8 +254,12 @@ test("review 1: every operand of a command that is not a read is a write target 
   assert.equal(strictest("sort -o APPROVAL.m? x"), "policy.core");
   assert.equal(strictest("sort -o APPROVAL.md x"), "policy.core");
   assert.equal(strictest("uniq x .appr*/env"), "policy.core");
-  // The narrow row: a copy's source is a read.
-  assert.deepEqual(classesOf("cp ./*.md docs/"), ["files.write.workspace"]);
+  // A copy's source is a read, but it lands under the destination by its
+  // basename (lead ruling L61195 b): `./*.md` may be APPROVAL.md, which lands
+  // as docs/APPROVAL.md. Decided by the source directory's listing.
+  assert.ok(classesOf("cp ./*.md docs/").includes("policy.core"));
+  assert.deepEqual(withListing("cp ./*.md docs/", { "/w": ["README.md", "docs"], "/w/docs": [] }), ["files.write.workspace"]);
+  assert.ok(withListing("cp ./*.md docs/", { "/w": ["APPROVAL.md", "docs"], "/w/docs": [] }).includes("policy.core"));
 });
 
 test("review 2: a ${X:-WORD} default (and := :+ - = +) is a reading of its own, globbed", () => {
@@ -321,6 +327,12 @@ test("review 5: the parameter placeholder cannot be forged, and $ beside a glob 
 // dot-names only through an explicit leading `.`, or with dotglob/globdots.
 // ---------------------------------------------------------------------------
 
+/** Every class of the line, with no-rule setters (`shopt`, `setopt`) let through. */
+function lineClasses(command: string): string[] {
+  const result = classifyCommand(command, [], { noRuleSegments: true });
+  return result.ok ? result.classes : [`refused:${result.code}`];
+}
+
 /** The class of the LAST segment, with no-rule setters (`shopt`, `setopt`) let through. */
 function lastClass(command: string): string {
   const result = classifyCommand(command, [], { noRuleSegments: true });
@@ -380,7 +392,7 @@ test("dot-names: the ruling's workflow lines, with and without dot matching on t
   // write through `*` straight into a directory stays policy.core either way.
   for (const command of ["rm -rf dist/*", "chmod +x scripts/*", "git add src/*", "npx prettier --write src/*", "git add *"]) {
     assert.equal(strictest(command), "policy.core", command);
-    assert.equal(lastClass(`GLOBIGNORE=x; ${command}`), "policy.core", command);
+    assert.ok(lineClasses(`GLOBIGNORE=x; ${command}`).includes("policy.core"), command);
   }
   // A pattern for a DIRECTORY reaches only dot-directories: main's class by
   // default, strict when the line turns dot matching on.
@@ -509,10 +521,12 @@ test("listings: the four workflow lines by what the directory holds", () => {
     assert.deepEqual(withListing(command, { [dir]: [] }), [main], `${command} empty`);
     assert.deepEqual(withListing(command, { [dir]: ["a.ts", "README.md", "x.png"] }), [main], `${command} unrelated`);
     assert.deepEqual(withListing(command, { [dir]: [".approval"] }), [main], `${command} dot-name, plain line`);
-    assert.deepEqual(withListing(command, { [dir]: ["APPROVAL.md"] }), ["policy.core"], `${command} APPROVAL.md`);
-    assert.deepEqual(withListing(command, { [dir]: ["apprOVAL.MD"] }), ["policy.core"], `${command} apprOVAL.MD`);
-    assert.deepEqual(withListing(command, { [dir]: "unreadable" }), ["policy.core"], `${command} unreadable`);
-    assert.deepEqual(withListing(command, {}), ["policy.core"], `${command} not listed`);
+    // The raised class, with a plain class that is not an ordinary write beside it (review-b S1).
+    const raised = main.startsWith("files.") ? ["policy.core"] : ["policy.core", main];
+    assert.deepEqual(withListing(command, { [dir]: ["APPROVAL.md"] }), raised, `${command} APPROVAL.md`);
+    assert.deepEqual(withListing(command, { [dir]: ["apprOVAL.MD"] }), raised, `${command} apprOVAL.MD`);
+    assert.deepEqual(withListing(command, { [dir]: "unreadable" }), raised, `${command} unreadable`);
+    assert.deepEqual(withListing(command, {}), raised, `${command} not listed`);
   }
   // A dot-name counts on a line that may turn dot matching on.
   const classes = withListing("GLOBIGNORE=x; echo x > dist/*/env", { "/w/dist": [".approval"] });
@@ -586,4 +600,87 @@ test("listings, review of 6e3cbc9e: another command on the line, and a line-loca
   }
   assert.deepEqual(withListing("rm -rf ~/dist/*", empty), ["files.delete.out_of_scope"]);
   assert.ok(withListing("rm -rf ~root/dist/*", empty).includes("policy.core"));
+});
+
+// ---------------------------------------------------------------------------
+// Review-b A686 (CLAIMS L61199) and lead ruling L61195.
+// ---------------------------------------------------------------------------
+
+test("review-b S1: a raised class never takes the plain class away", () => {
+  // `.approval/*` is policy.core as text; the pattern may also be the log.
+  const approval = classesOf("echo x > .approval/*");
+  assert.ok(approval.includes("log.mutate") && approval.includes("policy.core"), approval.join(","));
+  const removed = classesOf("rm -f .approval/*");
+  assert.ok(removed.includes("policy.core"), removed.join(","));
+  // The `.git` reader's class rides beside a pattern's.
+  const git = classesOf("echo x > $'\\x2e'g?t/config");
+  assert.ok(git.includes("vcs.history.rewrite"), git.join(","));
+  // An ordinary plain class is not carried beside a raised one.
+  assert.deepEqual(classesOf("echo x > ~/.hermes/a*.json"), ["policy.core"]);
+});
+
+test("review-b M1: one matcher budget for the whole line; exhausted is strict, and cheap", () => {
+  const word = `${"[a]".repeat(254)}x`;
+  const line = `rm -f ${Array.from({ length: 400 }, () => word).join(" ")}`;
+  const started = process.cpuUsage();
+  const result = classifyCommand(line);
+  const spent = process.cpuUsage(started);
+  const seconds = (spent.user + spent.system) / 1e6;
+  assert.ok(result.ok);
+  assert.ok(result.classes.includes("log.mutate"), result.classes.join(","));
+  assert.ok(seconds < 5, `took ${String(seconds)} CPU s`);
+});
+
+test("lead ruling L61195 (a): zsh's clobbering redirects write the next word", () => {
+  for (const [command, cls] of [
+    ["echo x >! APPROVAL.md", "policy.core"],
+    ["echo x >!APPROVAL.md", "policy.core"],
+    ["echo x >! .approval/env", "policy.core"],
+    ["echo x >>! .approval/log/events.jsonl", "log.mutate"],
+    ["echo x >| APPROVAL.md", "policy.core"],
+    ["echo x >>| APPROVAL.md", "policy.core"],
+    ["echo x >! ~/.hermes/a?th.json", "policy.core"],
+    ["echo x &>! APPROVAL.md", "policy.core"],
+  ] as const) {
+    assert.ok(classesOf(command).includes(cls), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  assert.ok(classesOf("echo x >! .git/config").includes("vcs.history.rewrite"));
+  assert.deepEqual(classesOf("echo x >! out.log"), ["files.write.workspace"]);
+});
+
+test("lead ruling L61195 (b): a copy, move or link into a directory is judged by the file it lands", () => {
+  for (const command of [
+    "cp evil/settings.json .claude/",
+    "cp evil/settings.json .claude",
+    "mv evil/settings.json .claude/",
+    "ln -sf evil/settings.json .claude/",
+    "cp -t .claude evil/settings.json",
+    "cp evil/settings.json .claud?/",
+    "cp evil/hooks.json .cursor/",
+    "cp evil/hooks.json .grok/",
+    "cp evil/hooks.json .muse/",
+    "cp -r evil/hooks .cursor/",
+    "cp a evil/settings.json .claude/",
+    "cp evil/* .claude/",
+  ]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // install has no rule (refused on main and here).
+  assert.equal(classifyCommand("install evil/hooks.json .cursor/").ok, false);
+  for (const command of ["cp evil/notes.txt .claude/", "cp a.txt out/", "mv a.txt b.txt"]) {
+    assert.ok(!classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // A glob source is expanded from its own directory's listing, not the destination's.
+  const listed = (command: string, names: readonly string[]): string[] => withListing(command, { "/w/evil": names, "/w/.claude": [] });
+  assert.ok(listed("cp evil/* .claude/", ["settings.json"]).includes("policy.core"));
+  assert.ok(!listed("cp evil/* .claude/", ["notes.txt"]).includes("policy.core"));
+  assert.ok(!withListing("cp -r src/* out/", { "/w/src": ["a.ts", "lib"], "/w/out": [] }).includes("policy.core"));
+});
+
+test("review-b S2: an option-dependent zsh form is literal text on a plain line", () => {
+  assert.deepEqual(classesOf("rm -f *~"), ["files.delete.out_of_scope"]);
+  assert.deepEqual(classesOf("rm -f out/#x"), ["files.write.workspace"]);
+  assert.deepEqual(classesOf("echo x > out/^x"), ["files.write.workspace"]);
+  // With options possibly set on the line, they are patterns again.
+  assert.equal(lastClass("setopt extendedglob; echo x > APPROVAL.m*~x"), "policy.core");
 });

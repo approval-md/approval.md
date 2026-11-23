@@ -1885,7 +1885,10 @@ function lex(command: string): LexResult {
     }
 
     // Redirections, including the fd-prefixed and dup forms.
-    const redirect = /^(\d*)(>>|>&|>\||>|<<-|<<|<&|<)/u.exec(command.slice(index));
+    // Lead ruling L61195 (a): zsh's clobbering forms `>!`, `>>!` (and `>|`,
+    // `>>|`) write the NEXT word, as `>` and `>>` do; `&>!` lexes as `&` and
+    // `>!`. Read as zsh reads them: Claude Code's Bash tool runs zsh on macOS.
+    const redirect = /^(\d*)(>>!|>>\||>>|>&|>\||>!|>|<<-|<<|<&|<)/u.exec(command.slice(index));
     if (redirect !== null) {
       const op = redirect[2] as string;
       index += (redirect[0] as string).length;
@@ -1972,7 +1975,7 @@ function lex(command: string): LexResult {
       if (target === null) {
         return { ok: false, detail: `redirection ${op} has no target` };
       }
-      redirects.push({ op: op === ">>" ? ">>" : op === "<" ? "<" : ">", target });
+      redirects.push({ op: op.startsWith(">>") ? ">>" : op === "<" ? "<" : ">", target });
       continue;
     }
 
@@ -2360,6 +2363,12 @@ export interface ClassifierContext {
    * over-approximated answer.
    */
   globDisk?: GlobDisk;
+  /** The line's one matcher step budget (review-b M1); set by {@link classifyCommand}, shared by nested reads. */
+  globBudget?: { left: number };
+  /** The plain pass: no pattern or `${…}` reading (review-b S1). Internal. */
+  globPatternsOff?: boolean;
+  /** Records that a pattern reading raised a segment's class (review-b S1). Internal. */
+  globTracker?: { raised: boolean };
   /**
    * The segments whose words, targets and substitution bodies the line's own
    * reading for {@link lineNamesGit} already went through (review of the
@@ -8447,28 +8456,51 @@ function strictestProtectedWrite(
   protectedPaths: readonly ProtectedPathEntry[],
   inexact: (word: string) => boolean,
   skipProse = false,
-  dots = false,
-  disk?: GlobDisk,
+  glob: GlobReading = defaultGlobReading(),
 ): { surface: string; path: string } | null {
   let best = strictestProtected(words, protectedPaths, skipProse);
+  // The text answer, for the record of whether a reading raised it.
+  const text = best;
+  if (glob.off) return best;
   const offer = (surface: string | null, word: string): void => {
     if (surface !== null && (best === null || protectedRank(surface) < protectedRank(best.surface))) {
       best = { surface, path: word };
     }
   };
   for (const word of words) {
+    // Review-b M1: nothing is stricter than log.mutate, so stop there.
+    if (best !== null && (best as { surface: string }).surface === "log.mutate") break;
     if (!inexact(word)) continue;
     if (skipProse && /\s/u.test(word)) continue;
     const { readings, overflow } = writeWordReadings(word);
     if (overflow) offer("log.mutate", word);
-    // One matcher budget for every reading of the word.
-    const budget = { left: GLOB_GUARD_STEP_CAP };
     for (const reading of readings) {
       if (reading !== word) offer(protectedPathClass(reading, protectedPaths), word);
-      if (hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, budget, dots, disk), word);
+      // ONE matcher budget for the whole command line (review-b M1), shared
+      // through the classifier context by every segment, word and reading.
+      if (hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, glob.budget, glob.options, glob.disk), word);
     }
   }
+  if (best !== text && glob.tracker !== undefined) glob.tracker.raised = true;
   return best;
+}
+
+/**
+ * How the write-target pattern reading runs for one segment (GLOB-WRITE):
+ * `options` true when the line may set shell options (dot matching, and the
+ * zsh/bash forms that need an option: extendedglob's `#`, `^`, `~`, braceccl),
+ * the caller's listings, the line's shared step budget, `off` for the plain
+ * (text-only) pass, and the tracker that records a raise.
+ */
+interface GlobReading {
+  options: boolean;
+  disk?: GlobDisk;
+  budget: { left: number };
+  off: boolean;
+  tracker?: { raised: boolean };
+}
+function defaultGlobReading(): GlobReading {
+  return { options: false, budget: { left: GLOB_GUARD_STEP_CAP }, off: false };
 }
 
 /**
@@ -8493,6 +8525,77 @@ function globWriteOperands(basename: string, positionals: readonly string[]): st
     return last === undefined ? [] : [last];
   }
   return [...positionals];
+}
+
+/**
+ * The files a `cp`, `mv`, `ln` or `install` would create inside a directory
+ * destination (lead ruling L61195 (b)): `<dest>/<basename>` for each source,
+ * the destination being every `-t` directory, or else the last operand. A
+ * source the shell may still glob is expanded from the caller's listing of
+ * its own directory where there is one (`plain`), and otherwise judged as a
+ * pattern under the destination (`patterns`, read with no listing: the names
+ * come from the source, not the destination). `install -d` creates
+ * directories only. Lexical: whether the destination IS a directory is not
+ * asked; a file destination makes a path that names nothing new.
+ */
+function copyLandings(
+  basename: string,
+  args: readonly string[],
+  positionals: readonly string[],
+  targetDirectories: readonly string[],
+  inexact: (word: string) => boolean,
+  glob: GlobReading,
+): { plain: string[]; patterns: string[] } | null {
+  if (basename === "install" && args.some((arg) => arg === "-d" || arg === "--directory" || /^-[A-Za-z]*d/u.test(arg))) return null;
+  const dests = targetDirectories.length > 0 ? [...targetDirectories] : positionals.length >= 2 ? [positionals[positionals.length - 1] as string] : [];
+  const sources = targetDirectories.length > 0 ? [...positionals] : positionals.slice(0, -1);
+  if (dests.length === 0 || sources.length === 0) return null;
+  const plain: string[] = [];
+  const patterns: string[] = [];
+  for (const source of sources) {
+    const parts = source.split("/").filter((part) => part.length > 0);
+    const base = parts[parts.length - 1];
+    if (base === undefined || base === "." || base === "..") continue;
+    const globbed = inexact(source) && hasGlobConstruct(base);
+    const listed = globbed ? listedMatches(source, base, glob) : null;
+    for (const dest of dests) {
+      const into = dest.replace(/\/+$/u, "");
+      // A destination the shell may still glob is a pattern too.
+      if (inexact(dest) && hasGlobConstruct(into)) patterns.push(`${into}/${base}`);
+      if (!globbed) plain.push(`${into}/${base}`);
+      else if (listed !== null) for (const name of listed) plain.push(`${into}/${name}`);
+      else patterns.push(`${into}/${base}`);
+    }
+  }
+  return { plain, patterns };
+}
+
+/**
+ * The names in a source pattern's own directory that its last component
+ * matches, from the caller's listing (GLOB-WRITE, L61167), or `null` when
+ * there is no listing to read (the pattern is then judged as a pattern).
+ */
+function listedMatches(source: string, base: string, glob: GlobReading): string[] | null {
+  const disk = glob.disk;
+  if (disk === undefined || disk.listingsOk === false) return null;
+  const segments = source.split("/");
+  const prefix = segments.slice(0, -1);
+  if (prefix.some((segment) => hasGlobConstruct(segment))) return null;
+  const dir = globListingDir(prefix, disk);
+  if (dir === null) return null;
+  disk.collect?.add(dir);
+  const listing = disk.listings.get(dir);
+  if (!Array.isArray(listing)) return null;
+  const pattern = globSegmentTokens(base, glob.options);
+  const dotted = glob.options || base.startsWith(".");
+  const out: string[] = [];
+  for (const name of listing) {
+    if (!dotted && name.startsWith(".")) continue;
+    const hit = globTokensMatch(pattern, name, false, glob.budget);
+    if (hit === null) return null;
+    if (hit) out.push(name);
+  }
+  return out;
 }
 
 /** The private-use character {@link maskParameters} marks a placeholder with. */
@@ -8704,12 +8807,14 @@ type GlobToken =
  * - `(…)` (zsh groups and qualifiers, bash extglob with its `?*+@!` prefix) and
  *   `<…>` (zsh numeric ranges) are any run.
  * - `#` (zsh extendedglob: zero or more of the atom before it) turns that atom
- *   into a run; `^` (zsh negation) leaves the rest of the segment free.
+ *   into a run; `^` (zsh negation) leaves the rest of the segment free. Both,
+ *   and braceccl below, only with `options` (the line may set one); otherwise
+ *   they are literal characters, as every shell reads them by default.
  * - `{…}` left by brace expansion is zsh's `braceccl`: from the `{` to the last
  *   `}`, a run of the characters inside, a range `a-z` counting every character
  *   between; a range over `/` may make several directories (`spans`).
  */
-function globSegmentTokens(segment: string): { tokens: GlobToken[]; closes: number[]; spans: boolean } {
+function globSegmentTokens(segment: string, options = true): { tokens: GlobToken[]; closes: number[]; spans: boolean } {
   const tokens: GlobToken[] = [];
   const closes: number[] = [];
   let spans = false;
@@ -8721,8 +8826,8 @@ function globSegmentTokens(segment: string): { tokens: GlobToken[]; closes: numb
     const ch = segment[at] as string;
     if (ch === "*") pushRun();
     else if (ch === "?") tokens.push({ kind: "one" });
-    else if (ch === "^") tokens.push({ kind: "rest" });
-    else if (ch === "#") {
+    else if (ch === "^" && options) tokens.push({ kind: "rest" });
+    else if (ch === "#" && options) {
       tokens.pop();
       pushRun();
     } else if (ch === "(" || ch === "<") {
@@ -8737,7 +8842,7 @@ function globSegmentTokens(segment: string): { tokens: GlobToken[]; closes: numb
       }
       pushRun();
       at = end - 1;
-    } else if (ch === "{" && lastClose > at) {
+    } else if (ch === "{" && options && lastClose > at) {
       const inside = segment.slice(at + 1, lastClose).replace(/[{},]/gu, "");
       const chars = new Set(inside.toLowerCase());
       let wide = false;
@@ -8874,11 +8979,15 @@ function globGuardClass(
   dots = false,
   disk?: GlobDisk,
 ): string | null {
+  // zsh's extendedglob forms (`#`, `^`, the `~` exclusion) and braceccl need an
+  // option; with none possibly set on the line they are literal text (lead
+  // ruling L60846; review-b S2: `rm -f *~` is the files ending in `~`).
+  const options = dots;
   if (word.includes(PARAMETER_MARK)) return "log.mutate";
   const extraNames = protectedPaths.flatMap((entry) => parseProtectedEntry(entry)?.segments ?? []);
   const names = [...new Set([...GLOB_GUARD_NAMES, ...extraNames])];
   const words = [word];
-  for (let at = 1; at < word.length; at += 1) if (word[at] === "~") words.push(word.slice(0, at));
+  if (options) for (let at = 1; at < word.length; at += 1) if (word[at] === "~") words.push(word.slice(0, at));
   let strictest: string | null = null;
   const consider = (surface: string | null): boolean => {
     if (surface !== null && (strictest === null || protectedRank(surface) < protectedRank(strictest))) strictest = surface;
@@ -8936,7 +9045,7 @@ function globGuardClass(
         if (segment === "**" || segment === "***") return spanning(segment, dots);
         const glob = hasGlobConstruct(segment.split(PARAMETER_MARK).join(""));
         if (segment.includes("$")) return glob ? spanning(segment, true) : [[segment]];
-        const pattern = globSegmentTokens(segment);
+        const pattern = globSegmentTokens(segment, options);
         if (pattern.spans) return spanning(segment, true);
         // An explicit leading `.`, a leading group (zsh `(.a|b)`, bash
         // extglob `!(x)`, which matches a dot-name), or a leading braceccl
@@ -9363,6 +9472,12 @@ type SegmentOutcome =
        * sees it: the hook refuses when ANY class is human-only.
        */
       also?: CredentialOutcome;
+      /**
+       * The plain (text-only) class of a segment a write-target pattern raised,
+       * where it differs (review-b S1): the raised class answers and this rides
+       * beside it as a second segment, so no class is taken away.
+       */
+      patternAlso?: CredentialOutcome;
       /** The program an `exec.code` answer runs (APRV-510). */
       execCode?: ExecCodeSource;
     }
@@ -9379,6 +9494,29 @@ type SegmentOutcome =
        */
       ruleless?: true;
     };
+
+/** Classes the PR raises a write from knowingly: the plain answer is not carried beside a raised one. */
+function ordinaryPlainClass(cls: string): boolean {
+  return cls === "files.write.workspace" || cls === "files.delete.out_of_scope" || cls.startsWith("read.");
+}
+
+/**
+ * The raised outcome with the plain one beside it (review-b S1). A refusal on
+ * the plain pass stands (a refusal is the stricter answer under every policy);
+ * a plain class that differs and is not an ordinary write or read rides beside
+ * the raised class as `patternAlso`, so `.approval/*` is `log.mutate` AND
+ * `policy.core`, and `$'\x2e'g?t/config` is `log.mutate` AND
+ * `vcs.history.rewrite`.
+ */
+function besidePlain(raised: SegmentOutcome, plain: SegmentOutcome): SegmentOutcome {
+  if (!plain.ok) return plain;
+  if (!raised.ok) return raised;
+  if (plain.class === raised.class || ordinaryPlainClass(plain.class)) return raised;
+  return {
+    ...raised,
+    patternAlso: { class: plain.class, rule: plain.rule, ...(plain.path === undefined ? {} : { path: plain.path }) },
+  };
+}
 
 function classifySegment(
   segment: LexSegment,
@@ -9527,9 +9665,14 @@ function classifySegment(
     .filter((word) => !word.exact)
     .map((word) => word.text);
   const inexact = (text: string): boolean => inexactWords.some((word) => word.includes(text));
-  const dots = context.lineSetsDotglob === true;
-  const disk = context.globDisk;
-  const redirected = strictestProtectedWrite(writeTargets, protectedPaths, inexact, false, dots, disk);
+  const glob: GlobReading = {
+    options: context.lineSetsDotglob === true,
+    ...(context.globDisk === undefined ? {} : { disk: context.globDisk }),
+    budget: context.globBudget ?? { left: GLOB_GUARD_STEP_CAP },
+    off: context.globPatternsOff === true,
+    ...(context.globTracker === undefined ? {} : { tracker: context.globTracker }),
+  };
+  const redirected = strictestProtectedWrite(writeTargets, protectedPaths, inexact, false, glob);
   const bin = words[cursor];
   if (redirected !== null) {
     // APRV-503 recheck (SHOULD-FIX-R1): a segment that writes a protected path
@@ -9951,8 +10094,7 @@ function classifySegment(
     protectedPaths,
     inexact,
     false,
-    dots,
-    disk,
+    glob,
   );
   if (fetchedProtected !== null) {
     return { ok: true, class: fetchedProtected.surface, rule: "protected-path", path: fetchedProtected.path };
@@ -9969,7 +10111,7 @@ function classifySegment(
   // named path already earns a class at least as strict (the log).
   const copyUnknown = copyFamily ? copyArgvUnknown(args, argFlags) : null;
   if (copyUnknown !== null) {
-    const named = strictestProtectedWrite([...positionals, ...readTargets], protectedPaths, writtenInexact, false, dots, disk);
+    const named = strictestProtectedWrite([...positionals, ...readTargets], protectedPaths, writtenInexact, false, glob);
     if (named !== null && protectedRank(named.surface) <= protectedRank("policy.core")) {
       return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
     }
@@ -9981,7 +10123,7 @@ function classifySegment(
   // that file, so a protected one, spelled plainly, by a pattern or by a
   // `${…}` default, takes its class as a redirection onto it would.
   if (cls.startsWith("read.")) {
-    const written = strictestProtectedWrite(readWriteTargets(basename, args), protectedPaths, inexact, false, dots, disk);
+    const written = strictestProtectedWrite(readWriteTargets(basename, args), protectedPaths, inexact, false, glob);
     if (written !== null) return { ok: true, class: written.surface, rule: "protected-path", path: written.path };
   }
 
@@ -10036,7 +10178,28 @@ function classifySegment(
     // GLOB-WRITE: a word the command WRITES that the shell may still glob, or
     // fill from a `${…}` default, is judged by every guarded path it could name
     // ({@link globWriteOperands}).
-    const named = strictestProtectedWrite(judged, protectedPaths, writtenInexact, true, dots, disk);
+    const operandNamed = strictestProtectedWrite(judged, protectedPaths, writtenInexact, true, glob);
+    // Lead ruling L61195 (b): a copy, move, link or install into a DIRECTORY
+    // writes `<dir>/<basename of each source>`, so that file is judged too
+    // (`cp evil/settings.json .claude/` is `.claude/settings.json`).
+    const landed = copyFamily ? copyLandings(basename, args, positionals, targetDirectories, inexact, glob) : null;
+    const landedNamed =
+      landed === null
+        ? null
+        : (() => {
+            const plainHit = strictestProtected(landed.plain, protectedPaths);
+            const patternHit = strictestProtectedWrite(landed.patterns, protectedPaths, () => true, false, {
+              options: glob.options,
+              budget: glob.budget,
+              off: glob.off,
+              ...(glob.tracker === undefined ? {} : { tracker: glob.tracker }),
+            });
+            return plainHit === null || (patternHit !== null && protectedRank(patternHit.surface) < protectedRank(plainHit.surface)) ? patternHit : plainHit;
+          })();
+    const named =
+      landedNamed !== null && (operandNamed === null || protectedRank(landedNamed.surface) < protectedRank(operandNamed.surface))
+        ? landedNamed
+        : operandNamed;
     const fed = strictestProtected(readTargets, protectedPaths);
     const touched =
       fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))
@@ -10449,7 +10612,11 @@ export function classifyCommand(
           homeOk: context.globDisk.homeOk !== false && !command.includes("HOME"),
           listingsOk: context.globDisk.listingsOk !== false && lineListingSafe(command, lexed.segments),
         };
-  const diskField = globDisk === undefined ? {} : { globDisk };
+  const diskField = {
+    ...(globDisk === undefined ? {} : { globDisk }),
+    // Review-b M1: ONE matcher budget for the whole line and every script read inside it.
+    globBudget: context.globBudget ?? { left: GLOB_GUARD_STEP_CAP },
+  };
   context = { ...context, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false };
   execContext = { ...execContext, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false };
   for (const segment of lexed.segments) {
@@ -10493,7 +10660,15 @@ export function classifyCommand(
       }
       continue;
     }
-    const outcome = classifySegment(segment, protectedPaths, execContext);
+    // Review-b S1: a pattern reading never takes a class AWAY. Where it raised
+    // the segment, the plain (text-only) answer is classified too, and a
+    // different one rides beside the raised class (`patternAlso`), so a policy
+    // that prices the plain class stricter than the raised one still sees it.
+    const tracker = { raised: false };
+    const raisedOutcome = classifySegment(segment, protectedPaths, { ...execContext, globTracker: tracker });
+    const outcome = tracker.raised
+      ? besidePlain(raisedOutcome, classifySegment(segment, protectedPaths, { ...execContext, globPatternsOff: true }))
+      : raisedOutcome;
     if (!outcome.ok && outcome.noRule === true && context.noRuleSegments === true && !movesDirectory) {
       segments.push({ text: segment.text, class: NO_RULE_CLASS, rule: "no-rule", noRule: outcome.detail });
       if (!classes.includes(NO_RULE_CLASS)) classes.push(NO_RULE_CLASS);
@@ -10523,6 +10698,15 @@ export function classifyCommand(
         ...(outcome.also.path === undefined ? {} : { path: outcome.also.path }),
       });
       if (!classes.includes(outcome.also.class)) classes.push(outcome.also.class);
+    }
+    if (outcome.patternAlso !== undefined) {
+      segments.push({
+        text: segment.text,
+        class: outcome.patternAlso.class,
+        rule: outcome.patternAlso.rule,
+        ...(outcome.patternAlso.path === undefined ? {} : { path: outcome.patternAlso.path }),
+      });
+      if (!classes.includes(outcome.patternAlso.class)) classes.push(outcome.patternAlso.class);
     }
   }
   return { ok: true, segments, classes };
