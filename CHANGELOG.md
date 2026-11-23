@@ -211,9 +211,12 @@ the ruling says.
 
 **GLOB-WRITE names fold with the shared fold (#688; lead ruling 04:11Z).**
 Listing names, organ-directory names, the `.git` check on a listing and the
-glob matcher's characters compare through `foldNameLower`, so they fold what
+glob matcher's characters compare through `foldNameExact`, so they fold what
 APFS folds (long s, the Kelvin sign, ligatures, sharp s, NFD) in the folded
-reading and lower case as before in the as-spelled one; there is one fold. The
+reading and compare exactly in the as-spelled one, as main does; there is one
+fold, and a case variant keeps the class main gives that spelling beside the
+guarded one (`cp a.js .gItHuB/WoRkFlOwS/Ci.yMl` is `policy.edit` and
+`files.write.workspace`; review-b A686-FOLD5 M1). The
 glob matcher folds each whole name before it matches, and reads a pattern
 character whose fold is not one character as any run (strict).
 
