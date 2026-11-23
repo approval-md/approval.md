@@ -398,3 +398,22 @@ test("cost: a word past either glob cap keeps the stricter class it has on its o
   assert.deepEqual(pure(`echo x > build/${"b*/".repeat(64)}x`), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure("echo x > build/b*/*"), ["files.write.workspace redirect-write"]);
 });
+
+test("cost: a command with a line continuation is classified once, not again as written (review-b S1 at 41e6fd1b)", () => {
+  // At 41e6fd1b the hook classified the text as written and again with the
+  // continuations removed: 30 CPU s at 500 KB against main's 14. Now the
+  // joined text is classified once, so the same words with a continuation in
+  // each cost about what they cost without one.
+  const repo = mkdtempSync(join(tmpdir(), "aprv-s1-cont-"));
+  try {
+    const words = (sep: string) => `cp README.md ${`d*/APPROVA${sep}?.md `.repeat(4000)}`;
+    const time = (command: string) => cpuSeconds(() => { classifyForHook(command, [], repo); });
+    time(words("")); // warm the compiled readers once
+    const plain = time(words(""));
+    const continued = time(words("\\\n"));
+    withinBound(continued, "hook, 4,000 continued words");
+    assert.ok(continued < plain * 1.5 + 0.5, `continued ${continued.toFixed(2)} s against plain ${plain.toFixed(2)} s`);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});

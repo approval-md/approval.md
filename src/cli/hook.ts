@@ -4103,20 +4103,25 @@ export function classifyForHook(
   // with that reading's refusal standing; and the text with every
   // `\`+newline removed, quoted or in a comment, where
   // {@link joinContinuations} keeps one (a refusal of that reading adds
-  // nothing). The text as written stays the answer's base, so its segments
-  // are the ones bound and recorded; a reading adds only the classes it has
-  // that the answer lacks, so a reader that disagrees with the shell can only
-  // add a class.
+  // nothing). The joined text is the answer's base, so its segments are the
+  // ones bound and recorded, as the shell runs them; the other reading adds
+  // only the classes it has that the answer lacks.
+  //
+  // Review-b's S1 at 41e6fd1b (lead's ruling): the command is classified ONCE,
+  // on the text after the shell's continuations are removed, never also as
+  // written (a word with a continuation was classified twice, doubling a
+  // fan-out's cost). Only where a `\`+newline sits in quotes or a comment,
+  // which the shell keeps, is the text with every one removed read as well.
   const joined = joinContinuations(command);
-  const bases = [...new Set([command, joined, command.replaceAll("\\\n", "")])];
+  const bases = [...new Set([joined, command.replaceAll("\\\n", "")])];
   const outer = shellOptionsSet;
   shellOptionsSet = outer || bases.some(setsShellOption);
   try {
     const once = (text: string): RefinedClassification =>
       classifyForHookOnce(text, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments);
-    let judged = once(command);
+    let judged = once(joined);
     for (const base of bases) {
-      if (base !== command) judged = togetherIfNew(judged, once(base), base === joined);
+      if (base !== joined) judged = togetherIfNew(judged, once(base), false);
       // Other readings of the same text, the stricter together: zsh's numeric
       // glob where bash reads a redirect (a refusal of that reading stands),
       // and a group a word carries, which zsh globs with no option set
