@@ -101,6 +101,7 @@ import {
   braceCandidates,
   copyArgvUnknown,
   classifyCommandInThisReading,
+  collapseBracedVariables,
   commandSegmentShapes,
   copyTargetDirectories,
   fetchOutputs,
@@ -10342,7 +10343,7 @@ function unresolvedReadCouldNameCredential(text: string): boolean {
  */
 function spanReadingsCouldNameCredential(text: string): boolean {
   // One segment per braced variable, so a default's `/` (`${H:-$HOME/.hermes}`) splits nothing.
-  const collapsed = text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/gu, "${$1}");
+  const collapsed = collapseBracedVariables(text);
   const segments = collapsed.split(/[/\\]+/u).filter((segment) => segment.length > 0);
   // A leading `~` this hook did not expand stands for an unknown directory.
   if (!collapsed.startsWith("/") && segments[0]?.startsWith("~") === true) segments[0] = "$~";
@@ -10443,7 +10444,7 @@ function lastComponentUnresolved(rest: string): boolean {
  * in (`.` when the word names none) and the rest, from the span's segment on.
  */
 function unresolvedPrefix(text: string): { prefix: string; rest: string } {
-  const collapsed = text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/gu, "${$1}");
+  const collapsed = collapseBracedVariables(text);
   const span = collapsed.search(/[$`]/u);
   const cut = span < 0 ? collapsed.lastIndexOf("/") : collapsed.lastIndexOf("/", span);
   if (cut < 0) return { prefix: ".", rest: collapsed };
