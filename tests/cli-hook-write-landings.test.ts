@@ -141,6 +141,23 @@ test("every write verb onto the list adds files.write.guarded and keeps its own 
   }
 });
 
+test("writes the pass reads beyond the plain rows: a substitution, a reader's own output, a name copied into a directory", () => {
+  writeFileSync(join(ws, ".zprofile"), "", "utf8");
+  for (const command of [
+    "echo $(echo x > ~/.zshrc)",
+    "X=$(tee ~/.ssh/k < a)",
+    "sort -o ~/.zshrc a",
+    "cp .zp* ~/",
+    "cp $SRC ~/",
+  ]) {
+    const seen = see(command);
+    if (!seen.ok) continue; // refused outright is stricter still
+    assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+  // A plain copy into the home under a name off the list stays as it was.
+  assert.ok(!see("cp a ~/").classes.includes(GUARDED));
+});
+
 test("a listed place compares through the fold", () => {
   for (const command of ["echo x > ~/.SSH/k", "echo x > ~/.ZSHRC", "echo x > /ETC/hosts"]) {
     assert.ok(see(command).classes.includes(GUARDED), command);

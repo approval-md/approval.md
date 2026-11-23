@@ -311,7 +311,7 @@ test("S2: ordinary git lines do not move", () => {
 test("S2 hook: a git output option is walked on disk like any other write", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "g"));
-  assert.deepEqual(hook("git diff --output=g/hooks/pre-push", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("git diff --output=g/hooks/pre-push", repo), [DIR_WRITE, LISTED]);
   assert.deepEqual(hook("git log -1 --output g/config", repo), [DIR_WRITE]);
   assert.deepEqual(hook("git diff --output=out.diff", repo), ["read.shell git-read"]);
 });

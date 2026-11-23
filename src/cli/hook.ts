@@ -103,6 +103,8 @@ import {
   commandSegmentShapes,
   copyTargetDirectories,
   fetchOutputs,
+  gitWriteTargets,
+  readWriteTargets,
   commandSegmentWords,
   CODE_EXECUTING_RULES,
   CONTRIBUTOR_SUFFIX,
@@ -4338,9 +4340,17 @@ export function refineWriteLandings(
   const top = commandSegmentShapes(command);
   if (top === null) return { result, notes: [] };
   // A login-shell wrapper is classified by the segments of its script.
-  const shapes = top.flatMap((shape) =>
-    shape.script === null ? [shape] : (commandSegmentShapes(shape.script) ?? [shape]),
-  );
+  // Every `$(…)` runs before its segment and writes like any other: its
+  // segments are judged in place, ahead of the segment that expands them
+  // (their assignments never reach the line: `lineVariables` taints them).
+  const withSubstitutions = (shape: CommandSegmentShape, depth: number): CommandSegmentShape[] => {
+    if (depth > 4) return [shape];
+    const inner = shape.substitutions.flatMap((text) => (commandSegmentShapes(text) ?? []).flatMap((each) => withSubstitutions(each, depth + 1)));
+    return [...inner, shape];
+  };
+  const shapes = top
+    .flatMap((shape) => (shape.script === null ? [shape] : (commandSegmentShapes(shape.script) ?? [shape])))
+    .flatMap((shape) => withSubstitutions(shape, 0));
   const homes = currentHomes(env);
   const start = cwds.find((each) => isAbsolute(each)) ?? cwds[0] ?? "/";
   const line = { shapes, vars: lineVariables(shapes), cwd: start, env };
@@ -4623,7 +4633,39 @@ export function refineWriteLandings(
       // path it may change.
       for (const word of operands) changes.push({ word, kind: segment.class.startsWith("files.delete") ? "remove" : "write" });
     }
+    // A reader that writes through one of its own words (`sort -o`, `uniq in
+    // out`, sed's `w`) and git's own write words (`git clone URL DIR`).
+    for (const word of [...readWriteTargets(bin, shape.args), ...(bin === "git" ? gitWriteTargets(shape.args) : [])]) {
+      if (word.length === 0 || writes.includes(word)) continue;
+      writes.push(word);
+      changes.push({ word, kind: bin === "git" ? "link" : "write" });
+    }
     return { writes, intoDirs, changes };
+  };
+
+  /**
+   * The names a source lands under when copied or moved INTO a directory:
+   * its resolved basename, or each match's for a pattern read from the disk.
+   * `null` stands for a name that cannot be read (fails to guarded).
+   */
+  const intoNames = (source: string, at: number): Array<string | null> => {
+    const resolved = resolveWriteWord(source, at, line);
+    if ("unreadable" in resolved) return [null];
+    const names: Array<string | null> = [];
+    for (const spelling of resolved.spellings) {
+      if (!/[*?[]/u.test(basename(spelling))) {
+        names.push(basename(spelling));
+        continue;
+      }
+      const spelled = spellingsOf({ spellings: [spelling] });
+      if (spelled === null) return [null];
+      for (const each of spelled) {
+        const expanded = expandOnDisk("/", each, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS });
+        if ("giveUp" in expanded) return [null];
+        for (const placed of expanded.paths) names.push(basename(placed.path));
+      }
+    }
+    return names;
   };
 
   const segmentFor = (shape: CommandSegmentShape, index: number): ClassifiedSegment | undefined =>
@@ -4691,11 +4733,18 @@ export function refineWriteLandings(
     if (verdict?.kind !== "guarded") {
       for (const { dir, sources } of intoDirs) {
         for (const source of sources) {
-          const name = basename(source);
-          if (name.length === 0 || name === "." || name === ".." || /[$`*?[{~]/u.test(name)) continue;
-          verdict = stricter(verdict, judgeWord(`${dir.replace(/\/+$/u, "")}/${name}`, index));
-          if (verdict.kind === "guarded") break;
+          for (const name of intoNames(source, index)) {
+            if (name === null) {
+              verdict = { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: source, why: `${source}'s name cannot be read, so where it lands in ${dir} cannot be tested against the guarded list` };
+              break;
+            }
+            if (name.length === 0 || name === "." || name === "..") continue;
+            verdict = stricter(verdict, judgeWord(`${dir.replace(/\/+$/u, "")}/${name}`, index));
+            if (verdict.kind === "guarded") break;
+          }
+          if (verdict?.kind === "guarded") break;
         }
+        if (verdict?.kind === "guarded") break;
       }
     }
     if (verdict !== undefined && verdict.kind !== "in") {
