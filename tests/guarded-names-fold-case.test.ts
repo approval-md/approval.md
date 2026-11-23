@@ -52,7 +52,15 @@ import {
   protectedPathClasses,
   type ProtectedPathEntry,
 } from "../src/core/command-class.js";
-import { eachNameReading, foldFileName, foldNameExact, namesReadAsSpelled, takeAmongEqual, withNamesAsSpelled } from "../src/core/name-fold.js";
+import {
+  eachNameReading,
+  foldFileName,
+  foldNameExact,
+  namesReadAsSpelled,
+  takeAmongEqual,
+  withNamesAsSpelled,
+  SUBSTITUTION_SENTINEL,
+} from "../src/core/name-fold.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-fold-case-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -1080,6 +1088,51 @@ test("under such a policy the real hook answers an ordinary write as main does, 
     assert.equal(checked.code, 0, checked.stderr);
     assert.match(checked.stdout, new RegExp(`note: protected_paths entry "${path.replace(/[.]/gu, "\\.")}" names a built-in policy\\.core path in another spelling`, "u"));
   }
+});
+
+// ---------------------------------------------------------------------------
+// The placeholder a `$(…)` leaves in a word is not a name: it is not folded,
+// and a word that differs from its folded form only there runs one reading.
+// ---------------------------------------------------------------------------
+
+test("the fold leaves the substitution placeholder as it is, and folds the text around it", () => {
+  const S = SUBSTITUTION_SENTINEL;
+  assert.notEqual(S.toLowerCase(), S, "the placeholder has capitals, which is why this matters");
+  assert.equal(foldFileName(S), S);
+  assert.equal(foldFileName(`Approval${S}.MD`), `approval${S}.md`);
+  assert.equal(foldFileName(`${S}${S}X${S}`), `${S}${S}x${S}`);
+  assert.equal(foldFileName(foldFileName(`A${S}${LONG_S}`)), foldFileName(`A${S}${LONG_S}`));
+  // Text that merely resembles it is folded like any other.
+  assert.equal(foldFileName("${__APPROVAL_SUBST_}"), "${__approval_subst_}");
+});
+
+test("a word with a substitution runs one reading unless a name in it folds, and its answers are unmoved", () => {
+  const readings = (command: string): number => eachNameReading(() => classifyCommand(command)).length;
+  // Only the placeholder would differ: one reading. Each of these ran two.
+  for (const command of [
+    'echo x > "$(echo a)"',
+    "echo x > .approval/$(echo a)",
+    "echo x > .git/$(echo a)",
+    'git push origin "$(echo main)"',
+    "cat $(echo a)/.env",
+    "cat .approval/$(echo a)",
+  ]) {
+    assert.equal(readings(command), 1, command);
+  }
+  // A name beside the substitution that does fold still runs both.
+  assert.equal(readings("echo x > .APPROVAL/$(echo a)"), 2);
+  assert.equal(readings("echo x > Approval.MD$(echo a)"), 2);
+  // The answers, in both readings, are what they were.
+  for (const [command, want] of [
+    ['echo x > "$(echo a)"', ["files.write.workspace redirect-write"]],
+    ["echo x > .approval/$(echo a)", [WRITE_CORE]],
+    ["echo x > .APPROVAL/$(echo a)", [WRITE_CORE, "files.write.workspace redirect-write"]],
+    ["cat $(echo a)/.env", ["account.credential credential-path"]],
+  ] as const) {
+    assert.deepEqual(pure(command), want, command);
+  }
+  assert.deepEqual(spelledPure("echo x > .APPROVAL/$(echo a)"), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(spelledPure("echo x > .approval/$(echo a)"), [WRITE_CORE]);
 });
 
 test("a line of many folded segments costs about what the same line spelled canonically costs", () => {
