@@ -10,10 +10,19 @@
  * (`toLowerCase()`, on the credential rows, the Hermes home, the `.git`
  * segment) missed ten of the eleven code points APFS folds to ASCII.
  *
- * Every guarded-name compare now goes through one helper, `foldFileName`. These
- * tests hold the helper to the measured table, and hold every spelling of every
+ * Every guarded-name compare now goes through one fold, `foldFileName`. These
+ * tests hold it to the measured table, and hold every spelling of every
  * guarded name to the class and rule its canonical spelling takes, pure and
  * through the hook. Controls that only contain a guarded name do not move.
+ *
+ * Folding can also change WHICH class a path takes (codex's SOURCE HOLD on
+ * #688): `.approval/LOG/x` is `policy.core` as spelled and `log.mutate` folded,
+ * and a policy may hold the first human-only and the second autonomous. So
+ * every guard is read twice, folded and as spelled (exactly as main 21fc5fdc
+ * read it), and a line reports both readings' classes: a spelling's answer
+ * CONTAINS its canonical spelling's class and rule, and also the class main
+ * gave that spelling. These tests pin that shape, hold the as-spelled reading
+ * to main's answers, and run codex's two cases through the real hook.
  *
  * Hermetic: HOME is a fixture directory; git runs only to make a checkout, and
  * no line is run.
@@ -26,16 +35,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
+import { fileURLToPath } from "node:url";
+
 import { classifyForHook } from "../src/cli/hook.js";
+import { classifyApplyPatch, parseApplyPatch } from "../src/core/apply-patch.js";
+import { loadPolicy, protectedRouteSpellingNotes } from "../src/core/policy-load.js";
 import {
   classifyCommand,
+  hermesTails,
   isCredentialPath,
   isGateOrganPath,
+  isProtectedPath,
   isSkillScriptPath,
   protectedPathClass,
+  protectedPathClassReadings,
+  protectedPathClasses,
   type ProtectedPathEntry,
 } from "../src/core/command-class.js";
-import { foldFileName } from "../src/core/name-fold.js";
+import { eachNameReading, foldFileName, foldNameExact, namesReadAsSpelled, withNamesAsSpelled } from "../src/core/name-fold.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-fold-case-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -77,6 +94,27 @@ function pure(command: string, extra: readonly ProtectedPathEntry[] = []): strin
 function hook(command: string, extra: readonly ProtectedPathEntry[] = []): string[] {
   const { result } = classifyForHook(command, extra, repo());
   return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [`refused ${result.code}`];
+}
+
+/** {@link pure} in the as-spelled reading: how main 21fc5fdc read the line. */
+function spelledPure(command: string, extra: readonly ProtectedPathEntry[] = []): string[] {
+  return withNamesAsSpelled(() => pure(command, extra));
+}
+
+/** {@link hook} in the as-spelled reading. */
+function spelledHook(command: string, extra: readonly ProtectedPathEntry[] = []): string[] {
+  return withNamesAsSpelled(() => hook(command, extra));
+}
+
+/**
+ * The answer a one-segment line takes: its folded answer (`folded`), then
+ * each as-spelled entry whose class the folded answer lacks.
+ */
+function union(folded: readonly string[], spelled: readonly string[]): string[] {
+  const classOf = (entry: string): string => entry.split(" ")[0] ?? entry;
+  if (folded[0]?.startsWith("refused ") === true) return [...folded];
+  if (spelled[0]?.startsWith("refused ") === true) return [...spelled];
+  return [...folded, ...spelled.filter((entry) => !folded.some((have) => classOf(have) === classOf(entry)))];
 }
 
 const KELVIN = "K";
@@ -133,10 +171,12 @@ test("foldFileName: the dotless i is the one stricter case; the rest APFS keeps 
   // as a different name, and the fold calls it `.git`. That costs a prompt.
   assert.equal(foldFileName(`.g${DOTLESS_I}t`), ".git");
   // Not folded to ASCII by APFS, and not by the fold: the dotted capital I,
-  // a fullwidth letter, a zero-width joiner.
+  // a fullwidth letter, a zero-width space (U+200B; HFS+ keeps it too, while
+  // it ignores the zero-width joiner U+200D: see the HFS+ tests below).
   assert.notEqual(foldFileName("İ"), "i");
   assert.notEqual(foldFileName("ａpproval.md"), "approval.md");
-  assert.notEqual(foldFileName("ap‍proval.md"), "approval.md");
+  assert.notEqual(foldFileName("ap\u200Bproval.md"), "approval.md");
+  assert.equal(foldFileName("ap\u200Dproval.md"), "approval.md");
 });
 
 /**
@@ -190,7 +230,7 @@ const ROWS: readonly Row[] = [
   { path: "~/.config/git/config", write: "vcs.history.rewrite git-config-file-write", read: READ, spellings: ["~/.CONFIG/git/config", `~/.con${LIGATURE_FI}g/git/config`] },
 ];
 
-test("every spelling of a guarded name takes the canonical spelling's class and rule, pure", () => {
+test("every spelling of a guarded name: its canonical spelling's class and rule, then main's class for it, pure", () => {
   for (const row of ROWS) {
     assert.deepEqual(pure(`echo x > ${row.path}`), [row.write], `canonical write ${row.path}`);
     assert.deepEqual(pure(`cat ${row.path}`), [row.read], `canonical read ${row.path}`);
@@ -200,18 +240,28 @@ test("every spelling of a guarded name takes the canonical spelling's class and 
       remove: pure(`rm -rf ${row.path}`),
       read: pure(`cat ${row.path}`),
     };
+    // A canonical spelling reads alike both ways: nothing is added to it.
+    assert.deepEqual(spelledPure(`echo x > ${row.path}`), canonical.write, `canonical write as spelled ${row.path}`);
     for (const spelled of row.spellings) {
       assert.notEqual(spelled, row.path);
-      assert.deepEqual(pure(`echo x > ${spelled}`), canonical.write, `write ${spelled}`);
-      assert.deepEqual(pure(`echo x >> ${spelled}`), canonical.append, `append ${spelled}`);
-      assert.deepEqual(pure(`rm -rf ${spelled}`), canonical.remove, `rm -rf ${spelled}`);
-      assert.deepEqual(pure(`cat ${spelled}`), canonical.read, `read ${spelled}`);
-      assert.deepEqual(pure(`echo x > a/b/${spelled.replace(/^~\//u, "")}`), pure(`echo x > a/b/${row.path.replace(/^~\//u, "")}`), `nested ${spelled}`);
+      const lines: readonly (readonly [string, readonly string[]])[] = [
+        [`echo x > ${spelled}`, canonical.write],
+        [`echo x >> ${spelled}`, canonical.append],
+        [`rm -rf ${spelled}`, canonical.remove],
+        [`cat ${spelled}`, canonical.read],
+        [`echo x > a/b/${spelled.replace(/^~\//u, "")}`, pure(`echo x > a/b/${row.path.replace(/^~\//u, "")}`)],
+      ];
+      for (const [line, canonicalAnswer] of lines) {
+        const got = pure(line);
+        // CONTAINS the canonical answer, and the as-spelled (main's) answer, and nothing else.
+        assert.deepEqual(got, union(canonicalAnswer, spelledPure(line)), line);
+        for (const entry of canonicalAnswer) assert.ok(got.includes(entry), `${line}: ${entry}`);
+      }
     }
   }
 });
 
-test("every spelling of a guarded name takes the canonical spelling's class and rule, through the hook", { skip }, () => {
+test("every spelling of a guarded name: its canonical spelling's class and rule, then main's class for it, through the hook", { skip }, () => {
   for (const row of ROWS) {
     const canonical = {
       write: hook(`echo x > ${row.path}`),
@@ -220,11 +270,33 @@ test("every spelling of a guarded name takes the canonical spelling's class and 
     };
     assert.notDeepEqual(canonical.write, ["files.write.workspace redirect-write"], `canonical write ${row.path}`);
     for (const spelled of row.spellings) {
-      assert.deepEqual(hook(`echo x > ${spelled}`), canonical.write, `hook write ${spelled}`);
-      assert.deepEqual(hook(`rm -rf ${spelled}`), canonical.remove, `hook rm -rf ${spelled}`);
-      assert.deepEqual(hook(`cat ${spelled}`), canonical.read, `hook read ${spelled}`);
+      for (const [line, canonicalAnswer] of [
+        [`echo x > ${spelled}`, canonical.write],
+        [`rm -rf ${spelled}`, canonical.remove],
+        [`cat ${spelled}`, canonical.read],
+      ] as const) {
+        const got = hook(line);
+        assert.deepEqual(got, union(canonicalAnswer, spelledHook(line)), `hook ${line}`);
+      }
     }
   }
+});
+
+test("a spelling's answer, pinned: the folded class first, then the class main gave that spelling", () => {
+  // The shape in exact arrays. Each second entry is what main 21fc5fdc
+  // answers for the same line (and the as-spelled reading below).
+  assert.deepEqual(pure("echo x > Approval.MD"), [WRITE_CORE, "files.write.workspace redirect-write"]);
+  // Codex's case 1: as spelled, `LOG` is not `log` and `.approval` is the
+  // approval home, so main says `policy.core`; folded it is the log. Both.
+  assert.deepEqual(pure("echo x > .approval/LOG/x"), ["log.mutate redirect-protected", WRITE_CORE]);
+  assert.deepEqual(pure(`cp x .approval/key${LONG_S}/k1`), ["account.credential credential-path", "policy.core protected-path"]);
+  assert.deepEqual(pure(`git push origin ma${LONG_S}ter`), ["vcs.push.main git-push-main", "vcs.push.branch git-push-branch"]);
+  assert.deepEqual(pure(`git push origin lane:refs/head${LONG_S}/main`)[0], "vcs.push.main git-push-main");
+  // A canonical spelling, or one main already folded, stays one entry.
+  assert.deepEqual(pure("echo x > .approval/log/x"), ["log.mutate redirect-protected"]);
+  assert.deepEqual(pure("echo x > ~/.HERMES/config.yaml"), [WRITE_CORE]);
+  assert.deepEqual(pure("cat .APPROVAL/ENV"), [CREDENTIAL]);
+  assert.deepEqual(pure("git push origin MAIN"), ["vcs.push.main git-push-main"]);
 });
 
 test("the brief's examples are guarded, not ordinary writes", () => {
@@ -245,11 +317,23 @@ test("the brief's examples are guarded, not ordinary writes", () => {
     [`echo x > ~/.codex/con${LIGATURE_FI}g.toml`, WRITE_CORE],
     [`cat ~/.herme${LONG_S}/.env`, CREDENTIAL],
   ] as const) {
-    assert.deepEqual(pure(command), [expected], command);
+    // The folded class first; main's class for the spelling may follow it.
+    const got = pure(command);
+    assert.equal(got[0], expected, command);
+    assert.deepEqual(got, union([expected], spelledPure(command)), command);
   }
 });
 
 test("the guard functions fold: protectedPathClass, isCredentialPath, isGateOrganPath", () => {
+  // `protectedPathClass` answers in the current reading (folded here);
+  // `protectedPathClasses` is every class of either reading, folded first.
+  assert.equal(protectedPathClass(".approval/LOG/x"), "log.mutate");
+  assert.deepEqual(protectedPathClasses(".approval/LOG/x"), ["log.mutate", "policy.core"]);
+  assert.deepEqual(protectedPathClassReadings(".approval/LOG/x"), ["log.mutate", "policy.core"]);
+  assert.deepEqual(protectedPathClassReadings("Approval.MD"), ["policy.core", null]);
+  assert.deepEqual(protectedPathClasses("Approval.MD"), ["policy.core"]);
+  assert.deepEqual(protectedPathClassReadings(".approval/log/x"), ["log.mutate"]);
+  assert.equal(isProtectedPath("Approval.MD"), true);
   assert.equal(protectedPathClass(".APPROVAL/log/x"), "log.mutate");
   assert.equal(protectedPathClass("Approval.MD"), "policy.core");
   assert.equal(protectedPathClass(`.claude/${LONG_S}ettings.json`), "policy.core");
@@ -258,9 +342,17 @@ test("the guard functions fold: protectedPathClass, isCredentialPath, isGateOrga
   assert.equal(isCredentialPath(`~/.herme${LONG_S}/auth.json`), true);
   assert.equal(isCredentialPath(`.approval/key${LONG_S}`), true);
   // An organ is attested by content; the policy file and the approval home
-  // never are, in any spelling. The exclusions fold with the class.
+  // never are, in any spelling. The exclusions fold with the class. Being an
+  // organ is a GRANT, so it must hold in both readings: `.Claude/Settings.json`
+  // is not an organ as spelled (main says no class at all), so it is not one.
   assert.equal(isGateOrganPath(".claude/settings.json"), true);
-  assert.equal(isGateOrganPath(".Claude/Settings.json"), true);
+  assert.equal(isGateOrganPath(".Claude/Settings.json"), false);
+  // Both readings call these organ files `policy.core`; the folded reading's
+  // exclusions (the approval home, the policy file) fold too, so neither is
+  // an organ (main called both organs: its exclusions were exact).
+  assert.equal(isGateOrganPath(".Approval/x/.claude/settings.json"), false);
+  assert.equal(isGateOrganPath(".claude/settings/Approval.md"), false);
+  assert.equal(isGateOrganPath("x/.claude/settings.json"), true);
   assert.equal(isGateOrganPath("APPROVAL.md"), false);
   assert.equal(isGateOrganPath("approval.md"), false);
   assert.equal(isGateOrganPath(`APPROVAL${LONG_S}.md`), false);
@@ -276,7 +368,7 @@ test("a policy-declared protected entry matches in another case, bare and routed
   assert.equal(protectedPathClass(`${LONG_S}pec/a.md`, extra), "policy.edit.spec");
   // The entry itself in another case matches the canonical spelling.
   assert.equal(protectedPathClass("design/x.md", ["DESIGN/"]), "policy.edit");
-  assert.deepEqual(pure("echo x > Design/notes.md", extra), [WRITE_EDIT]);
+  assert.deepEqual(pure("echo x > Design/notes.md", extra), [WRITE_EDIT, "files.write.workspace redirect-write"]);
   assert.deepEqual(pure("echo x > design/notes.md", extra), [WRITE_EDIT]);
   // Not a looser match: a name that only contains the entry does not move.
   assert.equal(protectedPathClass("designs/x.md", extra), null);
@@ -285,8 +377,49 @@ test("a policy-declared protected entry matches in another case, bare and routed
 
 test("a policy-declared protected entry matches in another case through the hook", { skip }, () => {
   const extra: ProtectedPathEntry[] = ["design/"];
-  assert.deepEqual(hook("echo x > Design/notes.md", extra), hook("echo x > design/notes.md", extra));
-  assert.notDeepEqual(hook("echo x > Design/notes.md", extra), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(hook("echo x > design/notes.md", extra), [WRITE_EDIT]);
+  assert.deepEqual(hook("echo x > Design/notes.md", extra), [WRITE_EDIT, "files.write.workspace redirect-write"]);
+});
+
+/** Codex's case 2: two routed entries that collide once names fold. */
+const OPEN_FIRST: ProtectedPathEntry[] = [
+  { path: "SPEC/", class: "policy.edit.open" },
+  { path: "spec/", class: "policy.edit.closed" },
+];
+const CLOSED_FIRST: ProtectedPathEntry[] = [
+  { path: "spec/", class: "policy.edit.closed" },
+  { path: "SPEC/", class: "policy.edit.open" },
+];
+
+test("routed entries that collide by case: each line keeps the class main gives it, in both declaration orders", () => {
+  // Main: `spec/x` is `closed` and `SPEC/x` is `open` in either order (each
+  // matches one entry). Folded, both entries match and declaration order
+  // picks one; the as-spelled class is reported beside it.
+  for (const extra of [OPEN_FIRST, CLOSED_FIRST]) {
+    assert.deepEqual(spelledPure("echo x > spec/x", extra), ["policy.edit.closed redirect-protected"]);
+    assert.deepEqual(spelledPure("echo x > SPEC/x", extra), ["policy.edit.open redirect-protected"]);
+    assert.ok(pure("echo x > spec/x", extra).includes("policy.edit.closed redirect-protected"));
+    assert.ok(pure("echo x > SPEC/x", extra).includes("policy.edit.open redirect-protected"));
+    assert.ok(protectedPathClasses("spec/x", extra).includes("policy.edit.closed"));
+    assert.ok(protectedPathClasses("SPEC/x", extra).includes("policy.edit.open"));
+  }
+  assert.deepEqual(pure("echo x > spec/x", OPEN_FIRST), ["policy.edit.open redirect-protected", "policy.edit.closed redirect-protected"]);
+  assert.deepEqual(pure("echo x > spec/x", CLOSED_FIRST), ["policy.edit.closed redirect-protected"]);
+  assert.deepEqual(pure("echo x > SPEC/x", CLOSED_FIRST), ["policy.edit.closed redirect-protected", "policy.edit.open redirect-protected"]);
+  // Nested depths: `Design/Frozen/` beside `design/`.
+  const nested: ProtectedPathEntry[] = [
+    { path: "Design/Frozen/", class: "policy.edit.frozen" },
+    { path: "design/", class: "policy.edit.design" },
+  ];
+  assert.deepEqual(pure("echo x > design/frozen/x", nested), ["policy.edit.frozen redirect-protected", "policy.edit.design redirect-protected"]);
+  assert.deepEqual(pure("echo x > Design/Frozen/x", nested), ["policy.edit.frozen redirect-protected"]);
+});
+
+test("routed entries that collide by case, through the hook", { skip }, () => {
+  for (const extra of [OPEN_FIRST, CLOSED_FIRST]) {
+    assert.ok(hook("echo x > spec/x", extra).includes("policy.edit.closed redirect-protected"));
+    assert.ok(hook("echo x > SPEC/x", extra).includes("policy.edit.open redirect-protected"));
+  }
 });
 
 const CONTROLS: readonly string[] = [
@@ -374,7 +507,10 @@ test("the hook's own passes fold: a home or key folder spelled with the long s",
     for (const [canonical, spelled] of volumeFolds ? [...byText, ...onDisk] : byText) {
       const want = hook(canonical);
       assert.ok(want.includes(RESOLVED), `${canonical}: ${want.join(" ; ")}`);
-      assert.deepEqual(hook(spelled), want, spelled);
+      // The canonical line's answer, then what main gave the spelling.
+      const got = hook(spelled);
+      for (const entry of want) assert.ok(got.includes(entry), `${spelled}: ${entry} in ${got.join(" ; ")}`);
+      for (const entry of spelledHook(spelled)) assert.ok(got.some((have) => have.split(" ")[0] === entry.split(" ")[0]), `${spelled}: main's ${entry}`);
     }
   } finally {
     rmSync(join(HOME, ".hermes"), { recursive: true, force: true });
@@ -383,10 +519,415 @@ test("the hook's own passes fold: a home or key folder spelled with the long s",
   }
 });
 
-test("git ref names fold as file names: trunk and tag spellings", () => {
-  assert.deepEqual(pure(`git push origin ma${LONG_S}ter`), pure("git push origin master"));
-  assert.deepEqual(pure(`git push origin ma${LIGATURE_ST}er`), pure("git push origin master"));
-  assert.deepEqual(pure(`git push origin lane:refs/head${LONG_S}/main`), pure("git push origin lane:refs/heads/main"));
-  assert.deepEqual(pure(`git push origin tag${LONG_S}/v1`), pure("git push origin tags/v1"));
+test("git ref names fold as file names: trunk and tag spellings, beside main's class", () => {
+  for (const [spelled, canonical] of [
+    [`git push origin ma${LONG_S}ter`, "git push origin master"],
+    [`git push origin ma${LIGATURE_ST}er`, "git push origin master"],
+    [`git push origin lane:refs/head${LONG_S}/main`, "git push origin lane:refs/heads/main"],
+    [`git push origin tag${LONG_S}/v1`, "git push origin tags/v1"],
+  ] as const) {
+    assert.deepEqual(pure(spelled), union(pure(canonical), spelledPure(spelled)), spelled);
+    assert.notDeepEqual(pure(spelled), spelledPure(spelled), spelled);
+  }
   assert.notDeepEqual(pure("git push origin master"), pure("git push origin lane"));
+});
+
+test("the as-spelled reading answers what main 21fc5fdc answers, at each kind of compare", () => {
+  // Pinned from main 21fc5fdc's own classifier. A compare that was EXACT on
+  // main stays exact as spelled (`.APPROVAL`, `Approval.MD`, `claude.md`, a
+  // policy entry); one that LOWERED stays lowered (the Hermes home, the
+  // credential rows, `.git`, the trunk and tag names).
+  const MAIN: readonly (readonly [string, readonly ProtectedPathEntry[], readonly string[]])[] = [
+    ["echo x > .APPROVAL/env", [], ["files.write.workspace redirect-write"]],
+    ["echo x > Approval.MD", [], ["files.write.workspace redirect-write"]],
+    [">> Approval.md", [], ["files.write.workspace redirect-write"]],
+    ["echo x > .approval/LOG/x", [], [WRITE_CORE]],
+    ["echo x > claude.md", [], ["files.write.workspace redirect-write"]],
+    ["echo x > .Claude/settings.json", [], ["files.write.workspace redirect-write"]],
+    [`echo x > .cursor/hoo${KELVIN}s.json`, [], ["files.write.workspace redirect-write"]],
+    ["echo x > Design/x", ["design/"], ["files.write.workspace redirect-write"]],
+    ["echo x > design/x", ["DESIGN/"], ["files.write.workspace redirect-write"]],
+    ["echo x > ~/.HERMES/config.yaml", [], [WRITE_CORE]],
+    [`echo x > ~/.herme${LONG_S}/config.yaml`, [], ["files.write.workspace redirect-write"]],
+    ["cat .APPROVAL/ENV", [], [CREDENTIAL]],
+    [`cp x .approval/key${LONG_S}/k1`, [], ["policy.core protected-path"]],
+    ["echo x > .GIT/config", [], ["vcs.history.rewrite git-dir-write"]],
+    [`echo x > .g${DOTLESS_I}t/config`, [], ["files.write.workspace redirect-write"]],
+    ["echo x > ~/.GITCONFIG", [], ["vcs.history.rewrite git-config-file-write"]],
+    ["git push origin MAIN", [], ["vcs.push.main git-push-main"]],
+    ["git push origin TAGS/v1", [], ["release.publish git-push-tag"]],
+    [`git push origin ma${LONG_S}ter`, [], ["vcs.push.branch git-push-branch"]],
+  ];
+  for (const [line, extra, main] of MAIN) {
+    assert.deepEqual(spelledPure(line, extra), main, line);
+    // And the line's answer contains it.
+    const got = pure(line, extra);
+    for (const entry of main) assert.ok(got.includes(entry), `${line}: ${entry} in ${got.join(" ; ")}`);
+  }
+});
+
+test("the as-spelled reading is never left on: a throw, a nested reading and a promise all restore it", () => {
+  assert.equal(namesReadAsSpelled(), false);
+  assert.throws(
+    () =>
+      withNamesAsSpelled(() => {
+        assert.equal(namesReadAsSpelled(), true);
+        throw new Error("thrown inside");
+      }),
+    /thrown inside/u,
+  );
+  assert.equal(namesReadAsSpelled(), false);
+  // The as-spelled run of a two-reading call throws: still folded after.
+  assert.throws(
+    () =>
+      eachNameReading(() => {
+        foldNameExact("APPROVAL.md");
+        if (namesReadAsSpelled()) throw new Error("second reading");
+        return 1;
+      }),
+    /second reading/u,
+  );
+  assert.equal(namesReadAsSpelled(), false);
+  withNamesAsSpelled(() => {
+    withNamesAsSpelled(() => undefined);
+    assert.equal(namesReadAsSpelled(), true, "an inner reading restores the outer one");
+  });
+  assert.equal(namesReadAsSpelled(), false);
+  assert.throws(() => withNamesAsSpelled(() => Promise.resolve(1)), /synchronously/u);
+  assert.equal(namesReadAsSpelled(), false);
+  // And the classifier still folds afterwards.
+  assert.equal(pure("echo x > Approval.MD")[0], WRITE_CORE);
+});
+
+test("the second reading runs only where the two readings can differ", () => {
+  assert.equal(eachNameReading(() => classifyCommand("echo x > notes.txt")).length, 1);
+  assert.equal(eachNameReading(() => classifyCommand("echo x > .approval/log/x")).length, 1);
+  assert.equal(eachNameReading(() => classifyCommand("echo x > Approval.MD")).length, 2);
+  assert.equal(eachNameReading(() => classifyCommand("echo x > approval.md")).length, 2);
+  assert.equal(eachNameReading(() => classifyCommand(`echo x > .claude/${LONG_S}ettings.json`)).length, 2);
+  assert.equal(eachNameReading(() => classifyCommand("echo x > spec/x", OPEN_FIRST)).length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Codex's two cases through the REAL hook: `approval hook claude-code` with an
+// attested policy in a fixture checkout, for the Bash tool and the Write tool.
+// ---------------------------------------------------------------------------
+
+/** dist/tests/guarded-names-fold-case.test.js -> dist/src/cli/main.js */
+const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
+
+function runCli(args: readonly string[], cwd: string, input = ""): { code: number; stdout: string; stderr: string } {
+  const env = { ...process.env };
+  delete env["APPROVAL_HUMAN"];
+  const ran = spawnSync(process.execPath, [CLI_ENTRY, ...args], { cwd, encoding: "utf8", env, input });
+  assert.equal(ran.error, undefined, String(ran.error));
+  return { code: ran.status ?? -1, stdout: ran.stdout, stderr: ran.stderr };
+}
+
+const POLICY_HEAD = ["# Policy", "", "```yaml approval-policy", 'version: "0.1"', "defaults:", "  autonomy: manual", '  approval_ttl: "1h"', "  on_expiry: reject"];
+const POLICY_TAIL = ["  read.*:", "    autonomy: autonomous", "  files.write.workspace:", "    autonomy: autonomous"];
+
+/** Policy A: `policy.core` human-only, `log.mutate` autonomous. */
+const POLICY_A = [...POLICY_HEAD, "classes:", ...POLICY_TAIL, "  policy.core:", "    autonomy: human-only", "  log.mutate:", "    autonomy: autonomous", "```", ""].join("\n");
+
+/** Policy B: the two routed entries in one order, `open` autonomous and `closed` manual. */
+function policyB(entries: readonly ProtectedPathEntry[]): string {
+  const routed = entries.flatMap((entry) => (typeof entry === "string" ? [`  - ${entry}`] : [`  - path: ${entry.path}`, `    class: ${entry.class}`]));
+  return [...POLICY_HEAD, "protected_paths:", ...routed, "classes:", ...POLICY_TAIL, "  policy.edit.open:", "    autonomy: autonomous", "  policy.edit.closed:", "    autonomy: manual", "```", ""].join("\n");
+}
+
+let labs = 0;
+function attestedLab(policy: string): string {
+  labs += 1;
+  const dir = join(scratch, `lab-${labs}`);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "APPROVAL.md"), policy);
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  return dir;
+}
+
+/** The decision the real hook gives one tool call, and its reason. */
+function decide(dir: string, tool: Record<string, unknown>): { permission: string; reason: string } {
+  labs += 1;
+  const ran = runCli(
+    ["hook", "claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "100ms"],
+    dir,
+    JSON.stringify({ hook_event_name: "PreToolUse", session_id: "fold", tool_use_id: `fold-${labs}`, cwd: dir, transcript_path: "/dev/null", ...tool }),
+  );
+  assert.equal(ran.code, 0, ran.stderr);
+  const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+  return { permission: output.permissionDecision, reason: output.permissionDecisionReason };
+}
+
+const bash = (command: string): Record<string, unknown> => ({ tool_name: "Bash", tool_input: { command } });
+const write = (file: string): Record<string, unknown> => ({ tool_name: "Write", tool_input: { file_path: file, content: "x\n" } });
+
+/** How strict a decision is: allow, then a manual wait that timed out, then a human-only refusal. */
+function strictness(decision: { permission: string; reason: string }): number {
+  if (decision.permission === "allow") return 0;
+  if (decision.reason.startsWith("hook-timeout: ")) return 1;
+  return 2;
+}
+
+test("codex's case 1 through the real hook: policy.core human-only, log.mutate autonomous; .approval/LOG/x is refused as main refuses it", { skip }, () => {
+  const dir = attestedLab(POLICY_A);
+  // Main 21fc5fdc: `hook-class-human-only: class policy.core ...` for both tools.
+  for (const tool of [bash("echo x > .approval/LOG/x"), write(".approval/LOG/x")]) {
+    const decision = decide(dir, tool);
+    assert.equal(decision.permission, "deny", decision.reason);
+    assert.match(decision.reason, /^hook-class-human-only: class policy\.core /u);
+  }
+  // The canonical log path keeps the policy's own answer for it.
+  assert.equal(decide(dir, bash("echo x > .approval/log/x")).permission, "allow");
+});
+
+test("codex's case 2 through the real hook: colliding routed entries are never lighter than main, in both orders", { skip }, () => {
+  // Main 21fc5fdc, in either order: `spec/x` waits (closed, manual) and
+  // `SPEC/x` is allowed (open, autonomous).
+  const MAIN: Readonly<Record<string, number>> = { "spec/x": 1, "SPEC/x": 0 };
+  for (const entries of [OPEN_FIRST, CLOSED_FIRST]) {
+    const dir = attestedLab(policyB(entries));
+    for (const target of ["spec/x", "SPEC/x"]) {
+      for (const tool of [bash(`echo x > ${target}`), write(target)]) {
+        const decision = decide(dir, tool);
+        assert.ok(
+          strictness(decision) >= (MAIN[target] ?? 2),
+          `${JSON.stringify(entries)} ${JSON.stringify(tool)}: ${decision.permission} ${decision.reason}`,
+        );
+        if (target === "spec/x") assert.match(decision.reason, /policy\.edit\.closed/u);
+      }
+    }
+  }
+});
+
+test("a Codex apply_patch target keeps every class either reading gives it", () => {
+  const root = join(scratch, "patch");
+  mkdirSync(root, { recursive: true });
+  const parsed = parseApplyPatch(["*** Begin Patch", "*** Add File: .approval/LOG/x", "+x", "*** End Patch"].join("\n"));
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const classified = classifyApplyPatch(parsed, root);
+  assert.equal(classified.ok, true, classified.ok ? "" : classified.detail);
+  if (!classified.ok) return;
+  assert.deepEqual(classified.classes, ["log.mutate", "policy.core"]);
+});
+
+// ---------------------------------------------------------------------------
+// The Hermes-home walk is linear (the lead's S2 on #688), and answers as the
+// per-segment walk did.
+// ---------------------------------------------------------------------------
+
+/** The per-segment walk the linear one replaced (main 21fc5fdc's `hermesTailClass` and `maybeHomeTails`), as the oracle. */
+function oldTailClass(tail: readonly string[], judge: (tail: readonly string[]) => string | null): string | null {
+  const answers = [judge(tail)];
+  const resolved: string[] = [];
+  let escaped = false;
+  for (const part of tail) {
+    if (part === "..") {
+      if (resolved.length === 0) {
+        escaped = true;
+        break;
+      }
+      resolved.pop();
+    } else {
+      resolved.push(part);
+    }
+  }
+  if (!escaped && tail.includes("..")) answers.push(judge(resolved));
+  for (const strictest of ["policy.core", "cron.manage", "credential"]) if (answers.includes(strictest)) return strictest;
+  return null;
+}
+
+function oldMaybeTails(tail: readonly string[]): (readonly string[])[] {
+  const tails: (readonly string[])[] = [tail];
+  for (const [at, part] of tail.entries()) if (part === "..") tails.push(tail.slice(at + 1));
+  return tails;
+}
+
+/** The two judges, as the classifier has them in the folded reading (they read four segments at most). */
+function profileTail(tail: readonly string[]): readonly string[] {
+  const first = tail[0];
+  return first !== undefined && foldFileName(first) === "profiles" && tail[1] !== undefined ? tail.slice(2) : tail;
+}
+function organJudge(full: readonly string[]): string | null {
+  const tail = profileTail(full);
+  const next = tail[0] === undefined ? undefined : foldFileName(tail[0]);
+  if (
+    next === undefined || next === "config.yaml" || next === "config.yml" || next === "agent-hooks" || next === "approval" ||
+    next === ".env" || next.startsWith(".env.") || next === "auth.json" || next.startsWith("shell-hooks-allowlist.json") ||
+    next.startsWith("hooks") || next === "hermes-agent" || next === "plugins" || next === ".op.env" || next.startsWith(".op.env.")
+  ) return "policy.core";
+  return next === "scripts" ? "cron.manage" : null;
+}
+function credentialJudge(full: readonly string[]): string | null {
+  const tail = profileTail(full);
+  const next = tail[0] === undefined ? undefined : foldFileName(tail[0]);
+  if (next === undefined) return null;
+  if (next === ".env" || next.startsWith(".env.") || next === "auth.json" || next === ".op.env" || next.startsWith(".op.env.")) return "credential";
+  if (next !== "hermes-agent") return null;
+  const file = tail[1] === undefined ? undefined : foldFileName(tail[1]);
+  return file !== undefined && (file === ".env" || (file.startsWith(".env.") && tail[1] !== ".env.example")) ? "credential" : null;
+}
+
+test("the linear Hermes walk answers every tail as the per-segment walk did (seeded fuzz)", () => {
+  let seed = 688;
+  const next = (): number => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const NAMES = [
+    ".hermes", "$HERMES_HOME", "$X", "..", "..", "..", "profiles", "p", "config.yaml", "agent-hooks", "approval", ".env",
+    ".env.example", "auth.json", ".op.env", "shell-hooks-allowlist.json.lock", "hooks", "hermes-agent", "plugins", "scripts", "x", "workspace",
+  ];
+  let checked = 0;
+  for (let round = 0; round < 3000; round += 1) {
+    const segments = Array.from({ length: 1 + Math.floor(next() * 12) }, () => NAMES[Math.floor(next() * NAMES.length)] as string);
+    const tails = hermesTails(segments);
+    for (let start = 0; start <= segments.length; start += 1) {
+      const tail = segments.slice(start);
+      const want = [
+        tail.includes(".."),
+        oldTailClass(tail, organJudge),
+        oldMaybeTails(tail).some((each) => each.length > 0 && oldTailClass(each, organJudge) === "policy.core"),
+        oldTailClass(tail, credentialJudge) !== null,
+        oldMaybeTails(tail).some((each) => oldTailClass(each, credentialJudge) !== null),
+      ];
+      const got = [tails.dotdotFrom(start), tails.organClass(start), tails.maybeOrgan(start), tails.credential(start), tails.maybeCredential(start)];
+      assert.deepEqual(got, want, `${segments.join("/")} from ${start}`);
+      checked += 1;
+    }
+  }
+  assert.ok(checked > 10_000);
+});
+
+test("a long path of Hermes homes costs about what a same-length ordinary path costs", () => {
+  // A ratio, not a fixed bound: CI's runner is several times slower than a
+  // laptop. The per-segment walk cost the square of the length here (seconds
+  // at this size); the linear one is a few times the control at most.
+  const SIZE = 256 * 1024;
+  const fill = (unit: string): string => unit.repeat(Math.ceil(SIZE / unit.length)).slice(0, SIZE);
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  const judge = (word: string): void => {
+    protectedPathClasses(word);
+    isCredentialPath(word);
+    classifyCommand(`echo x > ${word}`);
+  };
+  const control = cpu(() => judge(`${fill(".hermez/x/")}.env`));
+  for (const unit of [".hermes/x/", ".HERMES/x/", `.herme${LONG_S}/x/`, "$X/x/"]) {
+    for (const end of [".env", "../.env"]) {
+      const word = `${fill(unit)}${end}`;
+      const spent = cpu(() => judge(word));
+      assert.ok(spent <= 8 * control + 1, `${unit}…${end}: ${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// HFS+ ignores some code points inside a name (the lead's S1 on #688),
+// measured on an HFS+ image: U+200C..U+200F, U+202A..U+202E, U+206A..U+206F
+// and U+FEFF, and no other code point from U+0080 up.
+// ---------------------------------------------------------------------------
+
+test("foldFileName drops the code points HFS+ ignores, each range whole, and nothing beside them", () => {
+  const RANGES: readonly (readonly [number, number])[] = [
+    [0x200c, 0x200f],
+    [0x202a, 0x202e],
+    [0x206a, 0x206f],
+    [0xfeff, 0xfeff],
+  ];
+  for (const [from, to] of RANGES) {
+    for (let cp = from; cp <= to; cp += 1) {
+      const ch = String.fromCodePoint(cp);
+      assert.equal(foldFileName(`APPRO${ch}VAL.md`), "approval.md", `U+${cp.toString(16)}`);
+      assert.equal(foldFileName(`${ch}.approval${ch}`), ".approval", `U+${cp.toString(16)} at the ends`);
+    }
+    // The neighbours stay: HFS+ opens them as other names.
+    for (const cp of [from - 1, to + 1]) {
+      assert.notEqual(foldFileName(`APPRO${String.fromCodePoint(cp)}VAL.md`), "approval.md", `U+${cp.toString(16)}`);
+    }
+  }
+  // A name made only of them folds to the empty name, which no guarded name is.
+  assert.equal(foldFileName("‍﻿"), "");
+  assert.equal(protectedPathClass("‍"), null);
+});
+
+test("HFS+ spellings of a guarded name take the canonical class, beside main's class", () => {
+  for (const [command, canonical] of [
+    ["echo x > APPRO‍VAL.md", "echo x > APPROVAL.md"],
+    ["echo x > APPROVAL.md﻿", "echo x > APPROVAL.md"],
+    ["echo x > .appro‍val/env", "echo x > .approval/env"],
+    ["rm -rf .appro‍val", "rm -rf .approval"],
+  ] as const) {
+    const want = pure(canonical);
+    assert.equal(pure(command)[0], want[0], command);
+    assert.deepEqual(pure(command), union(want, spelledPure(command)), command);
+  }
+  assert.deepEqual(pure("echo x > APPRO‍VAL.md"), [WRITE_CORE, "files.write.workspace redirect-write"]);
+});
+
+// ---------------------------------------------------------------------------
+// The route floor reads a policy entry as spelled (the lead's S3 on #688): no
+// policy that loads on main fails to load here.
+// ---------------------------------------------------------------------------
+
+function routedPolicy(path: string): string {
+  return [...POLICY_HEAD, "protected_paths:", `  - path: ${path}`, "    class: policy.edit.mine", "classes:", ...POLICY_TAIL, "  policy.edit.mine:", "    autonomy: autonomous", "```", ""].join("\n");
+}
+
+test("a routed entry spelled like a built-in path in another case loads, and its route never lightens that path", () => {
+  for (const path of [".APPROVAL/x", "Approval.md", ".Claude/settings.json"]) {
+    labs += 1;
+    const file = join(scratch, `routed-${labs}.md`);
+    writeFileSync(file, routedPolicy(path));
+    const loaded = loadPolicy({ file });
+    assert.equal(loaded.ok, true, loaded.ok ? "" : `${loaded.code}: ${loaded.message}`);
+    assert.equal(protectedRouteSpellingNotes(loaded).length, 1, path);
+  }
+  // The canonical spelling is refused, as on main.
+  const file = join(scratch, "routed-canonical.md");
+  writeFileSync(file, routedPolicy(".approval/x"));
+  const refused = loadPolicy({ file });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.ok ? "" : refused.code, "protected-route-floor");
+  // A command aimed at the spelled path keeps main's class (the route, as
+  // spelled) and takes the folded built-in class first.
+  const extra: ProtectedPathEntry[] = [{ path: ".APPROVAL/x", class: "policy.edit.mine" }];
+  assert.deepEqual(spelledPure("echo x > .APPROVAL/x", extra), ["policy.edit.mine redirect-protected"]);
+  assert.deepEqual(pure("echo x > .APPROVAL/x", extra), [WRITE_CORE, "policy.edit.mine redirect-protected"]);
+  assert.deepEqual(pure("echo x > .approval/x", extra), [WRITE_CORE]);
+});
+
+test("under such a policy the real hook answers an ordinary write as main does, and policy check names the entry", { skip }, () => {
+  for (const path of [".APPROVAL/x", "Approval.md", ".Claude/settings.json"]) {
+    const dir = attestedLab(routedPolicy(path));
+    const decision = decide(dir, bash("echo x > a.txt"));
+    assert.equal(decision.permission, "allow", `${path}: ${decision.reason}`);
+    const checked = runCli(["policy", "check", "files.write.workspace"], dir);
+    assert.equal(checked.code, 0, checked.stderr);
+    assert.match(checked.stdout, new RegExp(`note: protected_paths entry "${path.replace(/[.]/gu, "\\.")}" names a built-in policy\\.core path in another spelling`, "u"));
+  }
+});
+
+test("a line of many folded segments costs about what the same line spelled canonically costs", () => {
+  // Both readings run on the folded line and their segments are joined; the
+  // join is keyed, so it stays linear in the number of segments. A ratio, for
+  // the same reason as the Hermes test above. 1 MiB: a scanning join stays
+  // cheap below about 10,000 segments and costs tens of seconds here.
+  const SIZE = 1024 * 1024;
+  const fill = (unit: string): string => unit.repeat(Math.ceil(SIZE / unit.length)).slice(0, SIZE - 40);
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  const control = cpu(() => classifyCommand(fill("echo x > .cursor/hooks.json; ")));
+  const spent = cpu(() => classifyCommand(fill(`echo x > .Cursor/hoo${KELVIN}s.json; `)));
+  assert.ok(spent <= 8 * control + 1, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
 });

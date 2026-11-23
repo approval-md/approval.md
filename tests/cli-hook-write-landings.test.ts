@@ -771,6 +771,9 @@ test("rule A fails closed for a tree copier; find's writes are read whatever rul
   // A guarded landing does not hide an out-of-scope one on the same segment.
   const both = see("echo x > ~/.zshrc 2> ../x", optedIn());
   assert.ok(both.classes.includes(GUARDED) && both.classes.includes(OUT), JSON.stringify(both.segments));
+  // The fold strips what HFS+ ignores (U+200D here), in both name readings.
+  assert.ok(see("echo x > ~/.s\u200Dsh/x").classes.includes(GUARDED));
+  assert.ok(see("echo x > ~/.SSH/x").classes.includes(GUARDED));
   // A word after `--` is an operand.
   mkdirSync(join(home, ".ssh"), { recursive: true });
   assert.ok(see("cd ~/.ssh && touch -- -x").classes.includes(GUARDED));

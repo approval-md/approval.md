@@ -1171,10 +1171,15 @@
             "class": "policy.core",
             "rule": "redirect-protected",
             "path": "Approval.MD"
+          },
+          {
+            "class": "files.write.workspace",
+            "rule": "redirect-write"
           }
         ],
         "classes": [
-          "policy.core"
+          "policy.core",
+          "files.write.workspace"
         ]
       }
     },
@@ -1191,10 +1196,15 @@
             "class": "policy.core",
             "rule": "protected-path",
             "path": ".APPROVAL"
+          },
+          {
+            "class": "files.write.workspace",
+            "rule": "rm-workspace"
           }
         ],
         "classes": [
-          "policy.core"
+          "policy.core",
+          "files.write.workspace"
         ]
       }
     },
@@ -1211,10 +1221,15 @@
             "class": "log.mutate",
             "rule": "redirect-protected",
             "path": ".APPROVAL/log/events.jsonl"
+          },
+          {
+            "class": "files.write.workspace",
+            "rule": "redirect-write"
           }
         ],
         "classes": [
-          "log.mutate"
+          "log.mutate",
+          "files.write.workspace"
         ]
       }
     },
@@ -1231,10 +1246,15 @@
             "class": "policy.core",
             "rule": "redirect-protected",
             "path": ".Claude/settings.json"
+          },
+          {
+            "class": "files.write.workspace",
+            "rule": "redirect-write"
           }
         ],
         "classes": [
-          "policy.core"
+          "policy.core",
+          "files.write.workspace"
         ]
       }
     },
@@ -1251,10 +1271,15 @@
             "class": "policy.core",
             "rule": "redirect-protected",
             "path": ".cursor/hooKs.json"
+          },
+          {
+            "class": "files.write.workspace",
+            "rule": "redirect-write"
           }
         ],
         "classes": [
-          "policy.core"
+          "policy.core",
+          "files.write.workspace"
         ]
       }
     },
@@ -1271,10 +1296,15 @@
             "class": "policy.core",
             "rule": "redirect-protected",
             "path": ".claude/ſettings.json"
+          },
+          {
+            "class": "files.write.workspace",
+            "rule": "redirect-write"
           }
         ],
         "classes": [
-          "policy.core"
+          "policy.core",
+          "files.write.workspace"
         ]
       }
     },
@@ -1291,10 +1321,15 @@
             "class": "policy.core",
             "rule": "redirect-protected",
             "path": "~/.codex/conﬁg.toml"
+          },
+          {
+            "class": "files.write.workspace",
+            "rule": "redirect-write"
           }
         ],
         "classes": [
-          "policy.core"
+          "policy.core",
+          "files.write.workspace"
         ]
       }
     },
@@ -1311,10 +1346,15 @@
             "class": "policy.edit",
             "rule": "redirect-protected",
             "path": "claude.md"
+          },
+          {
+            "class": "files.write.workspace",
+            "rule": "redirect-write"
           }
         ],
         "classes": [
-          "policy.edit"
+          "policy.edit",
+          "files.write.workspace"
         ]
       }
     },
@@ -1331,10 +1371,15 @@
             "class": "account.credential",
             "rule": "credential-path",
             "path": "~/.hermeſ/.env"
+          },
+          {
+            "class": "read.shell",
+            "rule": "read-shell"
           }
         ],
         "classes": [
-          "account.credential"
+          "account.credential",
+          "read.shell"
         ]
       }
     },
