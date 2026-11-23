@@ -3897,11 +3897,15 @@ export const WRITE_IN_SCOPE_RULE = "write-in-scope-resolved";
 /** The rule a decision-A write takes when its landing is outside every root. */
 export const WRITE_OUT_OF_SCOPE_LANDED_RULE = "write-out-of-scope-landed";
 
+/** The rule an entry for a resolved spelling's own class reports (review-b, CLAIMS L61530). */
+export const WRITE_RESOLVED_RULE = "write-resolved-landing";
+
 /** Every rule this pass writes, so a caller can tell its entries from the classifier's. */
 export const WRITE_LANDING_RULES: readonly string[] = [
   WRITE_GUARDED_RULE,
   WRITE_UNREADABLE_RULE,
   WRITE_OUT_OF_SCOPE_RULE,
+  WRITE_RESOLVED_RULE,
 ];
 
 /** The homes the guarded list is anchored on: `HOME` as given and resolved. */
@@ -4199,16 +4203,75 @@ function staticPrefix(text: string): string {
   return kept.join("/") || (text.startsWith("/") ? "/" : ".");
 }
 
+/** One binary's argv as decision A accepts it: every flag enumerated. */
+interface DecisionAShape {
+  /** Short flags that take no value; a cluster must hold only these. */
+  short: string;
+  /** Short flags that take the next word (alone, never in a cluster). */
+  shortWithValue: string;
+  /** Long flags that take no value, spelled in full. */
+  long: readonly string[];
+  /** Long flags that take a value (`--x=v` or `--x v`), spelled in full. */
+  longWithValue: readonly string[];
+}
+
 /**
- * The binaries decision A may decide by landing: each WRITES its targets and
- * removes nothing. Left out on purpose, so they keep `files.delete.out_of_scope`:
- * `mv` (it removes its sources), `rmdir`, `rm`, `unlink`, `shred` (deletes,
- * point 7), `gunzip` (it removes the `.gz` it reads), `rsync` (its
- * `--remove-source-files`), and `tar` with `--remove-files`.
+ * Decision A as an allowlist of exact shapes (second review of 0d6df3c4): the
+ * binaries whose whole write set is the words on the line, with the flags
+ * accepted for each. Anything else keeps the class it has: an unknown flag, an
+ * abbreviated long option, a cluster holding a letter not listed, `--`, an
+ * environment prefix, and every binary not here. Left out on purpose: `mv`
+ * (it removes its sources), `rmdir`, `rm`, `unlink`, `shred` (deletes, point
+ * 7), `rsync` (`--remove-source-files`), `gunzip` (removes the `.gz`), `tar`
+ * (an archive names its own members, absolute and `..` ones and links among
+ * them; `-P`, `-U`, `--recursive-unlink`, `--remove-files` and `TAR_OPTIONS`
+ * move or delete), `npm` (it runs scripts), and `base64` and `openssl` (kept
+ * out rather than parsed: their rows are packaging rows and stay as main has
+ * them).
+ *
+ * Why each write set is the words judged: `cp` and `ln` write only the
+ * destination (`-t DIR` included) and read the sources, which are judged too;
+ * `touch`, `tee`, `mkdir`, `chmod` and `truncate` write exactly their operands
+ * (`chmod`'s mode and the values of `-m`, `-r`, `-t`, `-d`, `-s` are judged as
+ * paths too, which can only keep a class, never lighten one).
  */
-const DECISION_A_BINS: ReadonlySet<string> = new Set([
-  "cp", "ln", "touch", "tee", "mkdir", "chmod", "truncate", "tar", "base64", "openssl", "npm",
-]);
+const DECISION_A_SHAPES: Readonly<Record<string, DecisionAShape>> = {
+  cp: { short: "afinprRvHLP", shortWithValue: "t", long: ["--force", "--interactive", "--no-clobber", "--recursive", "--verbose", "--archive"], longWithValue: ["--target-directory"] },
+  ln: { short: "sfnvhi", shortWithValue: "", long: ["--symbolic", "--force", "--no-dereference", "--verbose"], longWithValue: [] },
+  touch: { short: "acmh", shortWithValue: "rtd", long: ["--no-create"], longWithValue: [] },
+  tee: { short: "ai", shortWithValue: "", long: ["--append", "--ignore-interrupts"], longWithValue: [] },
+  mkdir: { short: "pv", shortWithValue: "m", long: ["--parents", "--verbose"], longWithValue: ["--mode"] },
+  chmod: { short: "Rvfh", shortWithValue: "", long: ["--recursive", "--verbose"], longWithValue: [] },
+  truncate: { short: "c", shortWithValue: "sr", long: ["--no-create"], longWithValue: ["--size", "--reference"] },
+};
+
+/** Does every flag of this argv fit the binary's enumerated shape? */
+function decisionAShapeKnown(shape: DecisionAShape, args: readonly string[]): boolean {
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") return false;
+    if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      const name = equals === -1 ? arg : arg.slice(0, equals);
+      if (shape.longWithValue.includes(name)) {
+        if (equals === -1) at += 1;
+        continue;
+      }
+      if (equals === -1 && shape.long.includes(name)) continue;
+      return false;
+    }
+    if (arg.startsWith("-") && arg.length > 1) {
+      const letters = arg.slice(1);
+      if (letters.length === 1 && shape.shortWithValue.includes(letters)) {
+        at += 1;
+        continue;
+      }
+      if ([...letters].every((letter) => shape.short.includes(letter))) continue;
+      return false;
+    }
+  }
+  return true;
+}
 
 /**
  * Decision A for one segment (coordinator's review of 15de94c7): the class it
@@ -4220,8 +4283,8 @@ const DECISION_A_BINS: ReadonlySet<string> = new Set([
  * ({@link writeCandidates}). So the same candidates are judged here, sources
  * and option values included, each through the write pass's own resolver and
  * landings; the segment is lighter only when EVERY one of them was read and
- * placed. It keeps its class when the binary is not one that only writes
- * ({@link DECISION_A_BINS}), when there is no candidate, and when the path the
+ * placed. It keeps its class when the argv is not an exact shape
+ * ({@link DECISION_A_SHAPES}), when there is no candidate, and when the path the
  * old pass recorded on the segment is not among the candidates or their
  * landings (the classifier's "flag present, value missing" answer has none).
  */
@@ -4233,20 +4296,21 @@ function decisionALanding(
   cwds: readonly string[],
 ): WriteLanding | null {
   const bin = shape.bin === null ? null : basename(shape.bin);
-  if (bin === null || !DECISION_A_BINS.has(bin)) return null;
-  if (bin === "tar" && shape.args.some((arg) => arg.startsWith("--remove-files"))) return null;
+  const known = bin === null ? undefined : DECISION_A_SHAPES[bin];
+  if (known === undefined || shape.assignments.length > 0) return null;
+  if (!decisionAShapeKnown(known, shape.args)) return null;
   const candidates = writeCandidates(shape.args);
   if (candidates.length === 0) return null;
   const recorded = segment.path;
   if (recorded === undefined) return null;
-  const known = new Set<string>(candidates);
+  const placed = new Set<string>(candidates);
   for (const candidate of candidates) {
     for (const from of cwds) {
       const resolved = resolvedWriteTarget(candidate, from);
-      if (resolved !== null) known.add(resolved);
+      if (resolved !== null) placed.add(resolved);
     }
   }
-  if (!known.has(recorded)) return null;
+  if (!placed.has(recorded)) return null;
   let verdict: WriteLanding = { kind: "in" };
   for (const candidate of candidates) {
     const judged = judge(candidate, at);
@@ -4270,6 +4334,7 @@ export function refineWriteLandings(
   cwds: readonly string[],
   scope: WriteScopeContext,
   env: NodeJS.ProcessEnv = process.env,
+  protectedPaths: readonly ProtectedPathEntry[] = [],
 ): RefinedClassification {
   if (!result.ok) return { result, notes: [] };
   const top = commandSegmentShapes(command);
@@ -4326,12 +4391,39 @@ export function refineWriteLandings(
     return null;
   };
 
+  /**
+   * Classes a RESOLVED spelling earns as a plain one would (review-b, CLAIMS
+   * L61530): `x=; echo x >> .appro${x}val/env` writes `.approval/env`, so it
+   * takes the class `echo x >> .approval/env` takes, by the classifier's own
+   * rules and the git-directory pass, never an ordinary workspace write.
+   * Collected per segment, added beside its own class.
+   */
+  let resolvedClasses: Array<{ cls: string; rule: string; path: string }> = [];
+  const classifyResolved = (spelling: string): void => {
+    const quoted = `'${spelling.replaceAll("'", "'\\''")}'`;
+    const plain = classifyCommand(`true >> ${quoted}`, protectedPaths);
+    if (!plain.ok) {
+      resolvedClasses.push({ cls: WRITE_GUARDED_CLASS, rule: WRITE_UNREADABLE_RULE, path: spelling });
+      return;
+    }
+    for (const from of cwdUnknown ? [] : here) {
+      const raised = refineGitDirWrites(plain, from).result;
+      if (!raised.ok) continue;
+      for (const segment of raised.segments) {
+        if (segment.class.startsWith("read.") || segment.class === "files.write.workspace") continue;
+        if (resolvedClasses.some((each) => each.cls === segment.class)) continue;
+        resolvedClasses.push({ cls: segment.class, rule: WRITE_RESOLVED_RULE, path: spelling });
+      }
+    }
+  };
+
   const judgeWord = (word: string, at: number): WriteLanding => {
     if (word.length === 0) return { kind: "in" };
     const resolved = resolveWriteWord(word, at, line);
     if ("unreadable" in resolved) {
       return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: resolved.unreadable };
     }
+    for (const spelling of resolved.spellings) if (spelling !== word) classifyResolved(spelling);
     const spelled = spellingsOf(resolved);
     if (spelled === null) {
       return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: `${word} is relative, after a cd this hook cannot follow` };
@@ -4492,6 +4584,7 @@ export function refineWriteLandings(
     }
 
     const segment = segmentFor(shape, index);
+    resolvedClasses = [];
     const { writes, intoDirs, changes } = targetsOf(shape, segment);
     let verdict: WriteLanding | undefined;
     for (const word of writes) {
@@ -4518,6 +4611,17 @@ export function refineWriteLandings(
       }
     }
 
+    for (const found of resolvedClasses) {
+      // A class the segment already carries needs no second entry.
+      if (result.segments.some((each) => each.text === shape.text && each.class === found.cls)) continue;
+      findings.push({
+        text: shape.text,
+        cls: found.cls,
+        rule: found.rule,
+        path: found.path,
+        note: `${found.rule}: a word of \`${shape.text}\` resolves to ${found.path}, which is ${found.cls} as a plain spelling, so the segment is also ${found.cls}`,
+      });
+    }
     // Decision A is judged here, from the directories this segment runs in.
     if (scope.optedIn && segment !== undefined && segment.class === OUT_OF_SCOPE_WRITE_CLASS && DECISION_A_WRITE_RULES_BY_LANDING.includes(segment.rule)) {
       aVerdicts.set(index, decisionALanding(shape, segment, judgeWord, index, cwds));
@@ -4941,7 +5045,7 @@ export function classifyForHook(
   // Design v4. Last of all, and it only ever adds an entry beside a segment
   // (decision A aside, for a policy that opts in): every write judged where
   // it lands, from the hook's directory and the envelope's.
-  const landed = refineWriteLandings(credentialed.result, command, [cwd, ...credentialCwds], writeScope);
+  const landed = refineWriteLandings(credentialed.result, command, [cwd, ...credentialCwds], writeScope, process.env, protectedPaths);
   return {
     result: landed.result,
     notes: [

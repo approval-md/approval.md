@@ -324,7 +324,9 @@ test("opted in, decision A: the write rows that are files.delete.out_of_scope to
   const scope = optedIn();
   assert.deepEqual(see("cp a ../sibling.txt", scope).segments, [[OUT, "write-out-of-scope-landed"]]);
   assert.deepEqual(see("cp a link-out/y", scope).segments, [[OUT, "write-out-of-scope-landed"]]);
-  assert.deepEqual(see("tar -x -f a.tgz -C ../out", scope).segments, [[OUT, "write-out-of-scope-landed"]]);
+  // tar is not an exact shape (its archive names its own members): it keeps
+  // main's class, with the out-of-scope class beside it.
+  assert.deepEqual(see("tar -x -f a.tgz -C ../out", scope).segments, [[DELETE_OUT, "packaging-write-out-of-scope"], [OUT, "write-out-of-scope"]]);
   // /etc is on the list and stays guarded beside the delete class.
   const etc = see("cp a /etc/hosts", scope);
   assert.ok(etc.classes.includes(GUARDED));
@@ -372,6 +374,69 @@ test("decision A lightens only a write whose every candidate the old pass read w
   // `mv ~/x ./y` and an rsync are not A rows at all: the head answers as main.
   for (const command of ["mv ~/x ./y", "rsync --remove-source-files ../outside/a b"]) {
     assert.deepEqual(withoutLandingEntries(see(command, scope)), withoutLandingEntries(see(command)), command);
+  }
+});
+
+test("decision A is an allowlist of exact shapes: tar, npm, an unknown flag or an env prefix keep main's class (second review of 0d6df3c4)", () => {
+  const scope = optedIn();
+  for (const command of [
+    "tar -xf a.tar -C ../out",
+    "tar -xPf a.tar",
+    "tar --rem -cf out.tar x",
+    "TAR_OPTIONS=-P tar -xf a.tar",
+    "npm pack --pack-destination ../x",
+    "cp --unknown-flag a ../x",
+    "cp --targ=../x a",
+    "cp -s a ../x",
+    "chmod -x ../x",
+    "cp -- a ../x",
+  ]) {
+    const before = see(command);
+    const after = see(command, scope);
+    // Opted in or not, every segment main gave is still there, unchanged.
+    assert.deepEqual(withoutLandingEntries(after), withoutLandingEntries(before), command);
+    assert.ok(!after.segments.some(([, rule]) => rule === "write-out-of-scope-landed" || rule === "write-in-scope-resolved"), command);
+  }
+  // An exact shape is decided by landing.
+  for (const command of ["cp a ../x", "cp -Rp a ../x", "cp -t ../x a", "cp --target-directory=../x a", "ln -sf a ../x", "touch ../x", "mkdir -p ../x", "chmod +x ../x", "truncate -s 0 ../x", "tee -a ../x"]) {
+    const seen = see(command, scope);
+    if (!seen.segments.some(([cls]) => cls === DELETE_OUT) && !seen.segments.some(([, rule]) => rule === "write-out-of-scope-landed")) continue; // not an A row on main
+    assert.ok(seen.segments.some(([, rule]) => rule === "write-out-of-scope-landed"), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+});
+
+test("a variable spliced inside a guarded name is read where the line sets it, and guarded where it cannot be (review-b, CLAIMS L61530)", () => {
+  const repo = join(base, "splice");
+  mkdirSync(repo, { recursive: true });
+  spawnSync("git", ["init", "-q"], { cwd: repo, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" } });
+  const resolved: Array<[command: string, cls: string]> = [
+    ["x=; echo x >> .appro${x}val/env", "policy.core"],
+    ["x=; echo x >> A${x}PPROVAL.md", "policy.core"],
+    ["x=; echo x >> .gi${x}t/config", "vcs.history.rewrite"],
+    ["x=t; echo y >> .gi${x}/config", "vcs.history.rewrite"],
+    ["x=t; echo y >> .gi$x/config", "vcs.history.rewrite"],
+    ['x=; echo x >> ".appro${x}val/env"', "policy.core"],
+    ["x=val; echo x >> .appro${x}/env", "policy.core"],
+  ];
+  const unreadable = [
+    "echo x >> .appro${x:-}val/env",
+    "echo x >> .appro${y}val/env",
+    "x=a; x=; echo x >> .appro${x}val/env",
+    "true && x=; echo x >> .appro${x}val/env",
+    "x=t; echo x >> .gi$xt/config",
+  ];
+  for (const scope of [WRITE_SCOPE_OFF, optedIn()]) {
+    for (const [command, cls] of resolved) {
+      const seen = see(command, scope, repo);
+      assert.ok(seen.classes.includes(cls), `${command}: ${JSON.stringify(seen.segments)}`);
+    }
+    for (const command of unreadable) {
+      const seen = see(command, scope, repo);
+      assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+    }
+    // `.gi$x/config` with x empty is `.gi/config`, which is no git directory.
+    const plain = see("x=; echo x >> .gi$x/config", scope, repo);
+    assert.ok(!plain.classes.includes("vcs.history.rewrite") && !plain.classes.includes(GUARDED), JSON.stringify(plain.segments));
   }
 });
 
