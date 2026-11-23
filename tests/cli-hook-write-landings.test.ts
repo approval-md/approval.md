@@ -447,6 +447,28 @@ test("a glob over a directory that cannot be read is guarded", { skip: process.g
   }
 });
 
+test("an empty spelling is no landing: a JSON body of `{}` in the home folder is not a tree written over the home", () => {
+  // The brace reader also reads a word with its stray braces removed, so `{}`
+  // came as nothing too, and nothing joined to the directory was the directory:
+  // from `~`, the overlay's `curl ... -d '{}'` recipes were guarded (CI's
+  // class-diff on the first push of this work).
+  for (const command of [
+    "curl -s -X POST -H \"Content-Type: application/json\" --url \"https://e.example/register/{event_id}\" -d '{}'",
+    "curl -s -d '{}' https://e.example/x",
+    "touch {}",
+    "touch {,x}",
+  ]) {
+    const seen = see(command, WRITE_SCOPE_OFF, home);
+    assert.equal(seen.ok, true, command);
+    assert.equal(seen.classes.includes(GUARDED), false, `${command}: ${seen.notes}`);
+  }
+  // A word that does name the home folder, or a listed place in it, still is.
+  for (const command of ["rsync -a src/ .", "touch {.zshrc,}", "curl -s -d '{}' -o .zshrc https://e.example/x"]) {
+    const seen = see(command, WRITE_SCOPE_OFF, home);
+    assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 5. The snapshot rule (codex, CLAIMS L61466)
 // ---------------------------------------------------------------------------

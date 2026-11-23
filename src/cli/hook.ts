@@ -4594,6 +4594,13 @@ export function refineWriteLandings(
   const spellingsOf = (resolved: { spellings: string[] }): string[] | null => {
     const out: string[] = [];
     for (const spelling of resolved.spellings) {
+      // An empty spelling is no landing. The brace reader also hands over a
+      // word with its stray braces removed, so `{}` (a JSON body: `curl -d
+      // '{}'`) comes as `{}` and as nothing, and "nothing" joined to the
+      // directory is the directory itself: at `~` that read as a tree written
+      // over the whole home. The shell makes no word of it either: an empty
+      // alternative (`{,x}`) is dropped, and `{}` stays as written.
+      if (spelling.length === 0) continue;
       if (isAbsolute(spelling)) {
         out.push(spelling);
         continue;
