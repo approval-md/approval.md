@@ -3032,16 +3032,26 @@ function curlValuesNotRead(
  * matches run past 256, so the caller falls back to asking whether the
  * pattern could name a credential at all. Over-matches rather than under:
  * `*` matches a leading dot here, which the shell's glob does not.
+ *
+ * {@link GLOB_TOO_WIDE} when the listing would take more than
+ * {@link GLOB_LISTING_STEPS} steps (a path walked on, or a name tested). Each
+ * component is walked from up to 256 places, so a word whose patterns go
+ * round a link back to where they started lists the same directory 256 times
+ * per lap, for as many laps as a path has room for. The caller judges such a
+ * word a read it cannot list.
  */
-function expandGlobPath(path: string): string[] | null {
+function expandGlobPath(path: string): string[] | typeof GLOB_TOO_WIDE | null {
   // Fix round 2 (path-parser differential): the shell's glob splits on `/`
   // alone and reads a backslash as an escape, so a pattern holding one is not
   // listed here (the caller judges whether it could name a credential).
   if (process.platform !== "win32" && path.includes("\\")) return null;
   const components = path.split(KERNEL_SEPARATORS).filter((component) => component.length > 0);
   let current: string[] = [sep];
+  let steps = 0;
   for (const component of components) {
     const next: string[] = [];
+    steps += current.length;
+    if (steps > GLOB_LISTING_STEPS) return GLOB_TOO_WIDE;
     for (const base of current) {
       if (component === "..") {
         next.push(dirname(base));
@@ -3058,6 +3068,8 @@ function expandGlobPath(path: string): string[] | null {
         if (!existsSync(base)) continue;
         return null;
       }
+      steps += names.length;
+      if (steps > GLOB_LISTING_STEPS) return GLOB_TOO_WIDE;
       const pattern = globRegex(component);
       for (const name of names) if (pattern.test(name)) next.push(join(base, name));
     }
@@ -3066,6 +3078,11 @@ function expandGlobPath(path: string): string[] | null {
   }
   return current.filter((candidate) => existsSync(candidate));
 }
+
+/** The steps {@link expandGlobPath} takes for one word before it gives up. */
+const GLOB_LISTING_STEPS = 1_000_000;
+/** {@link expandGlobPath}'s answer for a word whose listing it gave up on. */
+const GLOB_TOO_WIDE = "too-wide";
 
 /** Binaries that copy a directory they are handed, contents and all. */
 const DIRECTORY_COPIERS: ReadonlySet<string> = new Set(["cp", "rsync", "scp"]);
@@ -3391,7 +3408,11 @@ export function credentialReadLandings(
             const literal = physicalLanding(from, target.text);
             if (lands(literal, recursive)) hit(literal);
             const candidates = expandGlobPath(lexical);
-            if (candidates === null) {
+            if (candidates === GLOB_TOO_WIDE) {
+              // A pattern this pass cannot list in the steps it allows itself
+              // is a read it cannot clear, as a brace list past its cap is.
+              hit(lexical);
+            } else if (candidates === null) {
               if (globCouldNameCredential(lexical)) hit(lexical);
             } else {
               for (const candidate of candidates) {
@@ -8366,12 +8387,26 @@ function hasGlobChars(text: string): boolean {
   return /[*?[]/u.test(text);
 }
 
-/** A shell glob component as an anchored regular expression. */
+/**
+ * A shell glob component as an anchored regular expression.
+ *
+ * A run of `*` is written once. `.*.*` matches exactly the names `.*` matches,
+ * but a backtracking matcher asked for a run of them tries every way of
+ * sharing a name between them before it says no: 400 stars and a ten-letter
+ * name do not finish. (Inside a bracket the repeat only named the same
+ * characters twice.)
+ */
 function globRegex(component: string): RegExp {
   let source = "";
+  let afterStar = false;
   for (const char of component) {
-    if (char === "*") source += ".*";
-    else if (char === "?") source += ".";
+    if (char === "*") {
+      if (!afterStar) source += ".*";
+      afterStar = true;
+      continue;
+    }
+    afterStar = false;
+    if (char === "?") source += ".";
     else if (char === "[" || char === "]") source += char;
     else source += char.replace(/[.+^${}()|\\]/gu, "\\$&");
   }

@@ -365,6 +365,21 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   Conformance: ten new `command-class` vectors; main's 382 are
   byte-identical. The vectors version is bumped once, at the release cut.
 
+**A run of `*` no longer holds the hook.** A hook the harness kills at its
+timeout is a tool call that proceeds, and 441 bytes were enough to hold this
+one for minutes: `echo x > "$(echo .****…x)"` with 400 stars. Each star
+became its own `.*` in the pattern the hook tests names against, and the
+matcher tried every way of sharing a name between them.
+
+- **A run of stars is written once.** It matches the same names, so no answer
+  changes; the 400-star line takes milliseconds.
+- **Listing a pattern has a budget: a million steps** (a path walked on, or a
+  name tested). A word whose patterns go round a link back to where they
+  started listed the same directory up to 256 times a lap. Past the budget
+  the word is a read the hook cannot list, and is judged a credential read
+  (`account.credential`), as a brace list past its cap already is. Stricter,
+  and only for a word that asks for more than a million names.
+
 ### Added
 
 - **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536).**
