@@ -282,6 +282,89 @@ test("a glob is judged by what it matches on the disk", () => {
   assert.ok(see("chmod 600 ~/.ss?/*").classes.includes(GUARDED));
 });
 
+test("a pattern takes the class its matches take written out: the directory is listed (lead, CLAIMS L61914)", () => {
+  // A gate's own folder: the policy file beside ordinary ones.
+  const gated = join(base, "gated");
+  mkdirSync(join(gated, "plain"), { recursive: true });
+  mkdirSync(join(gated, "docs"), { recursive: true });
+  for (const name of ["APPROVAL.md", "README.md", "a.txt", "plain/a.md", "plain/b.md", "docs/a.md"]) writeFileSync(join(gated, name), "x", "utf8");
+  const at = (command: string, cwd = gated): Seen => see(command, WRITE_SCOPE_OFF, cwd);
+
+  // The plain spellings, as main has them: the control.
+  for (const plain of ["echo x > APPROVAL.md", "sed -i s/a/b/ APPROVAL.md README.md", "touch APPROVAL.md", "chmod +x APPROVAL.md", "git add APPROVAL.md"]) {
+    assert.ok(at(plain).classes.includes("policy.core"), plain);
+  }
+  // A pattern that reaches the policy file takes the same class, beside its own.
+  const REACHES = [
+    "echo x > *.md",
+    "echo x > A*",
+    "echo x > APPROVAL.m?",
+    "echo x > [A]PPROVAL.md",
+    "echo x > ./*.md",
+    "echo x >> $PWD/*.md",
+    "sed -i s/a/b/ *.md",
+    "touch *.md",
+    "chmod +x *.md",
+    "cp a.txt A*.md",
+    "git add *.md",
+    "prettier --write **/*.md",
+    "x='*.md'; echo hi > $x",
+    "x=*.md; sed -i s/a/b/ $x",
+    "cd plain && echo x > ../*.md",
+    "true && tee *.md < a.txt",
+  ];
+  for (const line of REACHES) {
+    const seen = at(line);
+    assert.ok(seen.ok, line);
+    assert.ok(seen.classes.includes("policy.core"), `${line}: ${JSON.stringify(seen.segments)}`);
+    assert.match(seen.notes, /write-resolved-landing: .* matches \d+ names? on the disk/u, line);
+  }
+  // Only ever beside: what the line had without the entry is what it has with it.
+  for (const line of REACHES) {
+    const seen = at(line);
+    const elsewhere = see(line, WRITE_SCOPE_OFF, join(gated, "docs"));
+    if (line.includes("..") || line.includes("$PWD") || line.startsWith("cd ") || line.startsWith("cp ")) continue;
+    assert.deepEqual(
+      seen.segments.filter(([cls]) => cls !== "policy.core"),
+      elsewhere.segments.filter(([cls]) => cls !== "policy.core"),
+      line,
+    );
+  }
+  // The same pattern where it reaches no such file adds nothing.
+  for (const line of ["echo x > plain/*.md", "sed -i s/a/b/ plain/*.md", "touch plain/*.md docs/*.md", "echo x > *.txt", "chmod +x docs/*.md"]) {
+    assert.ok(!at(line).classes.includes("policy.core"), `${line}: ${JSON.stringify(at(line).segments)}`);
+    assert.ok(!at(line).segments.some(([, rule]) => rule === "write-resolved-landing"), line);
+  }
+  for (const line of ["echo x > *.md", "sed -i s/a/b/ *.md", "touch *.md"]) {
+    assert.ok(!see(line, WRITE_SCOPE_OFF, join(gated, "plain")).classes.includes("policy.core"), `${line} in plain/`);
+  }
+  // A quoted pattern is a name, not a listing; a quoted variable is not globbed.
+  assert.ok(!at("touch '*.md'").classes.includes("policy.core"));
+  assert.ok(!at('x=*.md; sed -i s/a/b/ "$x"').classes.includes("policy.core"));
+  // A read stays a read: nothing is added for a line that writes nothing.
+  for (const line of ["ls *.md", "cat *.md", "grep -l foo *", "wc -l **/*.md"]) {
+    assert.deepEqual(at(line).segments.filter(([, rule]) => rule === "write-resolved-landing" || rule === "write-unreadable"), [], line);
+  }
+});
+
+test("a pattern too wide to read: a write is unreadable, a read is left alone", () => {
+  const wide = join(base, "wide");
+  mkdirSync(wide, { recursive: true });
+  for (let n = 0; n < 1100; n += 1) writeFileSync(join(wide, `f${String(n).padStart(4, "0")}.md`), "", "utf8");
+  const written = see("touch *.md", WRITE_SCOPE_OFF, wide);
+  assert.ok(written.classes.includes(GUARDED), JSON.stringify(written.segments));
+  assert.match(written.notes, /write-unreadable: \*\.md matches more names than this hook reads/u);
+  const redirected = see("echo x > f00*.md", WRITE_SCOPE_OFF, wide);
+  assert.ok(!redirected.classes.includes(GUARDED), "100 names are read");
+  const read = see("ls *.md", WRITE_SCOPE_OFF, wide);
+  assert.deepEqual(read.segments, [["read.shell", "read-shell"]]);
+  // Many patterns in one segment: each is a listing, and they are bounded.
+  const many = see(`touch ${Array.from({ length: 80 }, (_, n) => `f${String(n).padStart(4, "0")}.m?`).join(" ")}`, WRITE_SCOPE_OFF, wide);
+  assert.ok(many.classes.includes(GUARDED), JSON.stringify(many.segments.slice(0, 4)));
+  assert.match(many.notes, /more patterns than this hook reads in one segment/u);
+  assert.ok(!see(`touch ${Array.from({ length: 60 }, (_, n) => `f${String(n).padStart(4, "0")}.m?`).join(" ")}`, WRITE_SCOPE_OFF, wide).classes.includes(GUARDED), "sixty patterns are read");
+});
+
 test("a glob over a directory that cannot be read is guarded", { skip: process.getuid?.() === 0 ? "root reads every directory" : false }, () => {
   const locked = join(ws, "locked");
   mkdirSync(join(locked, "inner"), { recursive: true });

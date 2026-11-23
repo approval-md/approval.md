@@ -4622,7 +4622,7 @@ export function refineWriteLandings(
   };
 
   /** A class one resolved word earns, before it is attached to its segment. */
-  type ResolvedClass = { cls: string; rule: string; path: string };
+  type ResolvedClass = { cls: string; rule: string; path: string; why?: string };
 
   /**
    * The classes a synthetic line earns: the classifier's own answer, then the
@@ -4718,6 +4718,149 @@ export function refineWriteLandings(
           add(classesOfSynthetic([bin, ...argv.map(quote)].join(" "), spelling));
         }
       }
+    }
+    return out;
+  };
+
+  /**
+   * Classes the files a PATTERN word matches on the disk earn as plain
+   * spellings (lead, CLAIMS L61914). In a directory that holds `APPROVAL.md`,
+   * `echo x > *.md` writes it and `sed -i s/a/b/ *.md` edits it, so each takes
+   * the class the line takes with the names written out. No table of names
+   * here: the directory is listed, and the classifier answers for the argv the
+   * shell would build.
+   *
+   * - A redirect target: every match, as `true >> M1 >> M2` (bash refuses more
+   *   than one match; zsh writes them all).
+   * - The argv: every unquoted pattern word (`argFlags.expands`) replaced by
+   *   its matches at once, in the binary's own argv.
+   *
+   * A word that matches nothing stays as written, as the shell leaves it. `**`
+   * is read as one level and as none (`**` + `/*.md` finds `APPROVAL.md` beside
+   * it); deeper levels are not walked (see the hand-back).
+   *
+   * Bounded by {@link PATTERN_LISTINGS}, {@link PATTERN_MATCH_WORDS} and
+   * {@link PATTERN_LINE_BYTES}. Past
+   * any, or where the listing gives up, a segment main reads as a read adds
+   * nothing (it writes nothing), and any other is unreadable: guarded.
+   */
+  const patternWordClasses = (shape: CommandSegmentShape, at: number, segment: ClassifiedSegment | null): ResolvedClass[] => {
+    const out: ResolvedClass[] = [];
+    /**
+     * A word the shell may still turn into names: an unquoted pattern, or an
+     * unquoted variable, whose value it globs (`x='*.md'; touch $x`).
+     */
+    const openPattern = (word: string, index: number): boolean => {
+      const flags = shape.argFlags[index];
+      return ((flags?.expands ?? true) && /[*?[]/u.test(word)) || ((flags?.splits ?? true) && word.includes("$"));
+    };
+    const openTarget = (word: string): boolean => /[*?[$]/u.test(word);
+    const targets = shape.writes.some(openTarget);
+    const argv = shape.bin !== null && shape.args.some(openPattern);
+    if (!targets && !argv) return out;
+    const reads = segment !== null && segment.class.startsWith("read.") && !targets;
+    const tooWide = (pattern: string, why: string): ResolvedClass[] =>
+      reads ? [] : [{ cls: DECISION_B_UNREADABLE_CLASS, rule: WRITE_UNREADABLE_RULE, path: pattern, why: `${pattern} ${why}, so what \`${shape.text.slice(0, 80)}\` writes cannot be read from the disk` }];
+    const add = (found: readonly ResolvedClass[], pattern: string, count: number): void => {
+      for (const each of found) {
+        // A synthetic line the classifier refuses is unreadable for a write
+        // and nothing for a read, as above.
+        if (each.rule === WRITE_UNREADABLE_RULE && reads) continue;
+        if (out.some((known) => known.cls === each.cls)) continue;
+        out.push({ ...each, path: pattern, why: `${pattern} matches ${String(count)} name${count === 1 ? "" : "s"} on the disk, and with them written out the line is ${each.cls}` });
+      }
+    };
+    for (const from of cwdUnknown ? [null] : here) {
+      let words = 0;
+      let bytes = 0;
+      let listings = 0;
+      /** The words the shell hands over for one word: `null`, as written; a string, why it cannot be read. */
+      const matchesOf = (word: string): string[] | string | null => {
+        const resolved = resolveWriteWord(word, at, line);
+        if ("unreadable" in resolved) return null;
+        const placed: string[] = [];
+        let matched = false;
+        for (const spelling of resolved.spellings) {
+          if (!/[*?[]/u.test(spelling)) {
+            placed.push(spelling);
+            continue;
+          }
+          const absolute = isAbsolute(spelling);
+          if (!absolute && from === null) return null;
+          const kept = absolute ? 0 : (from as string).split("/").filter((part) => part.length > 0).length;
+          const levels = spelling.split("/");
+          const forms = levels.includes("**") ? [spelling, levels.filter((part) => part !== "**").join("/")] : [spelling];
+          const names: string[] = [];
+          for (const form of forms) {
+            if (form.length === 0) continue;
+            const spelled = absolute ? form : spelledAbsolute(from as string, form);
+            if (spelled.length > MAX_LANDING_BYTES) return "is longer than any path the kernel opens";
+            if (volatilePattern(spelled) !== null) return null;
+            // Each pattern is a listing of its own: a segment of very many
+            // patterns is not read one by one (a cost bound).
+            if ((listings += 1) > PATTERN_LISTINGS) return "is one of more patterns than this hook reads in one segment";
+            const expanded = expandOnDisk("/", spelled, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS });
+            if ("giveUp" in expanded) return `could not be read from the disk (${expanded.giveUp})`;
+            for (const each of expanded.paths) {
+              if (each.from !== "match") continue;
+              // A literal segment after a pattern one is joined unseen: only a
+              // name that is there is a word the shell makes.
+              try {
+                lstatSync(each.path);
+              } catch {
+                continue;
+              }
+              const name = absolute ? each.path : each.path.split("/").filter((part) => part.length > 0).slice(kept).join("/");
+              if (name.length === 0 || names.includes(name)) continue;
+              names.push(name);
+              words += 1;
+              bytes += name.length + 4;
+              if (words > PATTERN_MATCH_WORDS || bytes > PATTERN_LINE_BYTES) return "matches more names than this hook reads";
+            }
+          }
+          if (names.length === 0) {
+            placed.push(spelling);
+            continue;
+          }
+          matched = true;
+          placed.push(...names);
+        }
+        return matched ? placed : null;
+      };
+      let wide = false;
+      for (const word of shape.writes) {
+        if (!openTarget(word)) continue;
+        const names = matchesOf(word);
+        if (names === null) continue;
+        if (typeof names === "string") {
+          for (const each of tooWide(word, names)) if (!out.some((known) => known.cls === each.cls)) out.push(each);
+          wide = true;
+          break;
+        }
+        add(classesOfSynthetic(`true ${names.map((name) => `>> ${quote(name)}`).join(" ")}`, word), word, names.length);
+      }
+      if (wide || !argv || shape.bin === null) continue;
+      const bin = /^[A-Za-z0-9_./+-]+$/u.test(shape.bin) ? shape.bin : quote(shape.bin);
+      const built: string[] = [];
+      let pattern: string | null = null;
+      let count = 0;
+      for (const [index, word] of shape.args.entries()) {
+        const names = openPattern(word, index) ? matchesOf(word) : null;
+        if (typeof names === "string") {
+          for (const each of tooWide(word, names)) if (!out.some((known) => known.cls === each.cls)) out.push(each);
+          wide = true;
+          break;
+        }
+        if (names === null) {
+          built.push(word);
+          continue;
+        }
+        pattern ??= word;
+        count += names.length;
+        built.push(...names);
+      }
+      if (wide || pattern === null) continue;
+      add(classesOfSynthetic([bin, ...built.map(quote)].join(" "), pattern), pattern, count);
     }
     return out;
   };
@@ -5096,6 +5239,18 @@ export function refineWriteLandings(
       });
     }
 
+    for (const found of patternWordClasses(shape, index, segment)) {
+      if (result.classes.includes(found.cls)) continue;
+      findings.push({
+        unit: index,
+        text: host,
+        cls: found.cls,
+        rule: found.rule,
+        path: found.path,
+        note: `${found.rule}: ${found.why ?? found.path}, so \`${host}\` is also ${found.cls}`,
+      });
+    }
+
     // What this segment changes is in place before the next one runs.
     for (const change of changes) {
       // Every change counts for a tree landing; only SNAPSHOT_CHANGERS' kinds
@@ -5154,6 +5309,15 @@ const MAX_LANDING_BYTES = 4096;
 
 /** Milliseconds one glob expansion may take before the write is guarded (point 6). */
 const GLOB_TIME_LIMIT_MS = 250;
+
+/** The most patterns of one segment listed on the disk (a cost bound: each is a directory read). */
+const PATTERN_LISTINGS = 64;
+
+/** The most names a segment's patterns may match and still be read with them written out. */
+const PATTERN_MATCH_WORDS = 1024;
+
+/** The longest those names may be together, in bytes (a cost bound on the line re-read). */
+const PATTERN_LINE_BYTES = 65_536;
 
 // ===========================================================================
 // Skill scripts, the disk half (APRV-502)
