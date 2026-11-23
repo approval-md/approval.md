@@ -293,9 +293,9 @@ else was on it.
   again. `approval serve` retires the thread that was stopped, and the next
   call is read by a fresh one. `hook-deadline` joins the `hook_deny_codes`
   union of the conformance vectors.
-- **The wait for a decision is measured from when the hook started,** not from
-  when it finished reading the call, so a slow read shortens the wait instead
-  of pushing the hook's last answer past the harness's timeout.
+- **The wait is unchanged.** Under a known harness ceiling it already ends
+  60 seconds before the ceiling, which the read's deadline fits inside. Where
+  no ceiling is known the read comes on top of `--timeout`.
 - Still slow, and now refused rather than passed: a megabyte of many short
   path words takes about 20 seconds to read, which is past the deadline.
 

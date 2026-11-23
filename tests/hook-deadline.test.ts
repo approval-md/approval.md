@@ -3,14 +3,13 @@
  *
  * A hook the harness kills at its timeout is a tool call that PROCEEDS
  * (`docs/claude-code-hook.md`), so the time this hook takes is part of the
- * gate. Three things are pinned here:
+ * gate. Two things are pinned here:
  *
  * 1. the path walks that ran in the square of a word's length are linear, with
  *    the same answers (against the walks as they were, kept below as the
  *    reference, on a fixture of links, loops and missing components);
  * 2. describing a call has a deadline of its own, and a call that outlasts it
- *    is refused `hook-deadline` (through the real CLI);
- * 3. the wait for a decision is measured from the hook's start.
+ *    is refused `hook-deadline` (through the real CLI).
  *
  * Costs are CPU time and ratios, never wall-clock time: this machine is shared.
  * No input here is larger than 1 MiB, and none can exhaust memory: every walk
@@ -38,7 +37,6 @@ import {
   type HookInput,
   hookScope,
   physicalLanding,
-  waitDeadlineAt,
 } from "../src/cli/hook.js";
 import { runUnderDeadline } from "../src/core/deadline.js";
 
@@ -131,11 +129,6 @@ test("the describe deadline: 15 s, a quarter of a known harness ceiling when tha
     assert.equal(describeDeadlineMs(30_000, { [DESCRIBE_DEADLINE_ENV]: stated }), 7_500, JSON.stringify(stated));
   }
   assert.ok((HOOK_DENY_CODES as readonly string[]).includes("hook-deadline"));
-});
-
-test("the wait for a decision ends waitMs after the hook started, not after it finished reading the call", () => {
-  assert.equal(waitDeadlineAt({ startedAtMs: 1_000, waitMs: 55_000 }), 56_000);
-  assert.equal(waitDeadlineAt({ startedAtMs: 1_000, waitMs: 0 }), 1_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -507,7 +500,7 @@ test("through the real hook, a Write through a link and a step back is judged wh
 // ---------------------------------------------------------------------------
 
 /** One call through `decideHarnessCall`, the way a long-lived caller makes it. */
-function decideHere(dir: string, command: string, more: { timeoutMs?: number; startedAtMs?: number } = {}): HarnessVerdict {
+function decideHere(dir: string, command: string): HarnessVerdict {
   labs += 1;
   const { logPath, root, options } = hookScope({}, dir);
   const input: HookInput = {
@@ -533,25 +526,12 @@ function decideHere(dir: string, command: string, more: { timeoutMs?: number; st
     root,
     options,
     actor: "agent:cc",
-    timeoutMs: more.timeoutMs ?? 1_000,
+    timeoutMs: 1_000,
     intervalMs: 100,
     graceMs: 60_000,
     windowRecords: null,
-    ...(more.startedAtMs === undefined ? {} : { startedAtMs: more.startedAtMs }),
   });
 }
-
-test("the wait itself runs on the invocation's clock: a call that began a whole wait ago is answered without waiting again", { skip }, () => {
-  const dir = lab();
-  const began = Date.now();
-  // A class this policy waits for a human on, a 30 s wait, and an invocation
-  // that began a minute ago: its wait is over before it starts.
-  const verdict = decideHere(dir, "git push origin main", { timeoutMs: 30_000, startedAtMs: began - 60_000 });
-  assert.equal(verdict.permission, "deny", JSON.stringify(verdict));
-  assert.equal(verdict.permission === "deny" ? verdict.code : "", "hook-timeout", JSON.stringify(verdict));
-  // The one wall-clock bound in this file: half the wait it must not make.
-  assert.ok(Date.now() - began < 15_000, `${String(Date.now() - began)} ms`);
-});
 
 // LAST IN THIS FILE, and on purpose: after it this process describes no call.
 test("after one call has outlasted the deadline, this process reads no further call and says why", { skip }, () => {

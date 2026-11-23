@@ -5343,13 +5343,6 @@ interface HookRun {
    * changes nothing about it.
    */
   waitMs: number;
-  /**
-   * When this hook invocation began (`Date.now()`), which is when
-   * {@link waitMs} starts to run: the time spent reading and describing the
-   * call counts against the wait, so the hook's last answer comes
-   * {@link waitMs} after it started, not after it finished thinking.
-   */
-  startedAtMs: number;
   harness: HarnessKind;
   originApp: string;
   /** Exact native command bytes required in a Codex allow's identity update. */
@@ -6392,7 +6385,7 @@ function* gateHarnessSteps(
     expiryOf,
   );
 
-  const deadline = waitDeadlineAt(run);
+  const deadline = Date.now() + run.waitMs;
 
   // APRV-427. From the first poll to the last this invocation only READS the
   // verified log and sleeps, so an embedding caller (`approval serve`) may let
@@ -7323,17 +7316,6 @@ type ToolDescription =
   | { kind: "allow"; reason: string; unclaimed?: true }
   /** The classifier could not read it, or the input was malformed. */
   | { kind: "deny"; code: string; detail: string };
-
-/**
- * When the hook's wait for a decision ends (`Date.now()` terms): `waitMs`
- * after the invocation BEGAN. Measured from the wait's own start, the time
- * spent reading and describing the call came on top of it, and a description
- * that took seconds pushed the last answer past the harness's own timeout,
- * where a killed hook is a call that proceeds.
- */
-export function waitDeadlineAt(run: { startedAtMs: number; waitMs: number }): number {
-  return run.startedAtMs + run.waitMs;
-}
 
 /**
  * The longest this hook spends describing one tool call before it refuses it
@@ -9708,9 +9690,6 @@ function* runHarnessHook(
   adapter: HarnessAdapter,
   waitSeam: HookWaitSeam | null,
 ): GateSteps<number> {
-  // The harness's timer started when it spawned this process; the wait is
-  // measured from here, before the event is read ({@link HookRun.startedAtMs}).
-  const startedAtMs = Date.now();
   // Codex and (APRV-445) Hermes answer a misconfigured entry with a verdict:
   // on both a usage error's empty stdout is a harness that runs the call, and
   // on Hermes a non-zero exit with an empty stdout is an allow outright.
@@ -10143,7 +10122,6 @@ function* runHarnessHook(
       codexCommand,
       windowRecords: looked.records,
       waitSeam,
-      startedAtMs,
     }),
   );
 }
@@ -10177,11 +10155,6 @@ export interface DecideInput {
    * passes `null` and the policy's TTL governs alone.
    */
   harnessCapMs?: number | null;
-  /**
-   * When the invocation this decision belongs to began (`Date.now()`); the
-   * wait is measured from it. Absent, the decision's own start.
-   */
-  startedAtMs?: number;
   /**
    * Whether `harnessCapMs` was stated by the operator (`--harness-cap`) rather
    * than assumed from the adapter's documented defaults (APRV-423, second
@@ -10250,7 +10223,6 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     codexCommand,
     windowRecords,
   } = decide;
-  const startedAtMs = decide.startedAtMs ?? Date.now();
   const harnessCapMs = decide.harnessCapMs ?? null;
   const harnessCapStated = decide.harnessCapStated ?? false;
   const harnessCapCeilingMs = decide.harnessCapCeilingMs ?? null;
@@ -10379,7 +10351,6 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
       harnessCapMs === null
         ? timeoutMs
         : Math.max(0, Math.min(timeoutMs, harnessCapMs - HARNESS_CAP_MARGIN_MS)),
-    startedAtMs,
     harness: adapter.kind,
     originApp: adapter.originApp,
     ...(codexCommand === undefined ? {} : { codexCommand }),

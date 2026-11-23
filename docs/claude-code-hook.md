@@ -244,10 +244,11 @@ tool call holds:
   call takes milliseconds; a megabyte of command takes a second or two. The
   environment variable `APPROVAL_HOOK_DESCRIBE_DEADLINE_MS` can shorten the
   deadline and can never lengthen it.
-- **The wait for a decision is measured from when the hook started**, not from
-  when it finished reading the call: `--timeout` is the whole invocation's
-  budget, so a slow read shortens the wait instead of pushing the last answer
-  past the harness's timeout.
+- **The read fits inside the room the wait already leaves.** Under a known
+  harness ceiling the wait ends 60s before it (the margin below), and the
+  read's deadline is never more than 15s. Where no ceiling is known, the read
+  comes on top of `--timeout`: leave the harness's own timeout at least 15s
+  longer.
 
 The deadline interrupts the hook's own JavaScript. It does not interrupt a
 blocking system call. A read that is stopped is stopped part way, so a process
