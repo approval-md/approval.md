@@ -51,7 +51,7 @@
 
 import { parentPort, workerData } from "node:worker_threads";
 
-import { commandHook, type HookWaitSeam } from "../cli/hook.js";
+import { commandHook, describeDeadlineHit, type HookWaitSeam } from "../cli/hook.js";
 import {
   declareResolvedDaemonIdentity,
   narrowerAllowlist,
@@ -127,6 +127,11 @@ export type HookWorkerMessage =
        * sums it into its diagnostics so a test can assert it without timing.
        */
       coldReadsInLock: number;
+      /**
+       * This thread hit the hook's read deadline and must answer no further
+       * call: the listener retires it instead of keeping it warm.
+       */
+      spent?: true;
     }
   | { type: "failed"; message: string }
   /** The caller went away before the hook began: nothing was run or appended. */
@@ -254,7 +259,16 @@ port.on("message", (job: HookJob) => {
       seam,
     );
     settle();
-    post({ type: "done", code, stdout: out.join(""), stderr: err.join(""), coldReadsInLock });
+    post({
+      type: "done",
+      code,
+      stdout: out.join(""),
+      stderr: err.join(""),
+      coldReadsInLock,
+      // A read stopped at its deadline was stopped part way (`core/deadline.ts`):
+      // this thread answers no further call, so the listener must not keep it.
+      ...(describeDeadlineHit() ? { spent: true as const } : {}),
+    });
   } catch (cause) {
     // `commandHook` already turns a throw inside the harness path into an
     // ordinary deny, so reaching this is a failure of the thread itself. It is
