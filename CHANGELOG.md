@@ -164,14 +164,15 @@ readings `rm -rf .cl*`, `rm -rf .c?aude`, `rm -rf .*` and, where the hook's
 listing shows one, `rm -rf *`. An ordinary directory (`rm -rf dist`,
 `rm -rf node_modules`, `rm -rf build/`, `rm -rf .cache`) and a directory
 inside an organ that guards no file (`rm -rf .claude/commands`) keep their
-class. Released to main's class, only when every option is one listed and
-spelled in full (an unknown or abbreviated option keeps the folder's class):
-`mkdir` with `-p`/`-v` (not `-m`, which creates the folder with that mode),
-`touch` (timestamps only), and `tar` creating an archive from the folder
-(`tar -czf out.tgz -C .claude .`, never with `--remove-files`). Held, for
+class. Released to main's class: `mkdir` (with `-p`/`-v`; not `-m`, which
+creates a missing folder with that mode) and `touch`, and only in the plain
+form: the bare command name first in its segment (no assignment such as
+`PATH=` or `TAR_OPTIONS=` before it, no wrapper, no path), every word exactly
+its text (no parameter, substitution, glob, brace or tilde), every option
+known and spelled in full, each valued option's value present. Held, for
 example: `rm -f .claude`, `unlink .claude`, `rm --r .claude`,
-`tar --remove-files -cf x.tar .claude`, `tee .claude`, `> .claude`,
-`truncate -s 0 .claude`. A write INTO the folder stays
+`tar -czf out.tgz -C .claude .`, `tee .claude`, `> .claude`,
+`truncate -s 0 .claude`, `mkdir $X .claude`, `./mkdir .claude`. A write INTO the folder stays
 strict by the destination rule above (`cp -r evil/ .claude`,
 `rsync -a x/ .claude/`, `ln -s x .claude`, `tar -xf a.tar -C .claude`), as
 does a copy that lands one (`cp -r .claude backup/` writes

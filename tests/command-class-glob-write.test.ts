@@ -917,10 +917,11 @@ test("finding 3: tar's extraction directory in every spelling; other archive too
   for (const command of ["tar -xPf a.tar -C .claude", "tar -xf a.tar --strip-components=1 -C .cursor/x", "tar -x -f a.tar -C .github"]) {
     assert.ok(!ORDINARY(classesOf(command)), command);
   }
-  // Creating an archive from an organ directory reads it: main's class (lead
-  // ruling L62013, S2: the organ-directory rule is for the verbs that remove,
-  // move or change access). `.approval` is guarded bare on main, any verb.
-  assert.deepEqual(classesOf("tar -czf out.tgz -C .claude ."), ["files.write.workspace"]);
+  // Creating an archive from an organ directory names the directory itself:
+  // only mkdir and touch are released (lead ruling L62013; an option from the
+  // environment can make tar remove what it reads, security review of
+  // 8fe15089). `.approval` is guarded bare on main, any verb.
+  assert.ok(classesOf("tar -czf out.tgz -C .claude .").includes("policy.core"));
   assert.ok(classesOf("tar -czf out.tgz -C .approval .").includes("policy.core"));
   assert.ok(ORDINARY(classesOf("tar -czf out.tgz -C src .")));
   // No rule on either build: refused, so fail closed already.
@@ -1426,10 +1427,34 @@ test("lead ruling L62013 (S2), fail closed: every command naming the bare organ 
     "mkdir -Z .claude",
     "touch --no-c .claude",
     "tar -cf x.tar --unknown -C .claude .",
+    // Security review of 8fe15089: reads are not released (only mkdir and
+    // touch are), an option from the environment, the plain form only.
+    "tar -czf out.tgz -C .claude .",
+    "tar czf out.tgz -C .claude .",
+    "TAR_OPTIONS=--remove-files tar -czf x.tgz .claude",
+    "export TAR_OPTIONS=--remove-files; tar -czf x.tgz .claude",
+    "tar -cf .claude x",
+    "PATH=/tmp mkdir .claude",
+    "TZ=UTC touch .claude",
+    "./mkdir .claude",
+    "/tmp/mkdir .claude",
+    "/bin/mkdir .claude",
+    "command mkdir .claude",
+    "nice touch .claude",
+    'mkdir(){ rm -rf "$@"; }; mkdir .claude',
+    "alias mkdir='rm -rf'; mkdir .claude",
+    "hash -p /bin/rm mkdir; mkdir .claude",
+    "export PATH=/tmp; mkdir .claude",
+    "mkdir $X .claude",
+    "mkdir -p $(echo -m 000) .claude",
+    "touch .cl*",
+    "mkdir -p {.claude,x}",
+    "touch ~/.claude/../.claude",
+    "touch .claude -r",
   ]) {
     assert.ok(held(command), `${command} -> ${JSON.stringify(classifyCommand(command))}`);
   }
-  // Released to main's class: creating the folder, touching it, archiving it.
+  // Released to main's class: creating the folder, touching it (the plain form).
   for (const [command, main] of [
     ["mkdir .claude", "files.write.workspace"],
     ["mkdir -p .claude", "files.write.workspace"],
@@ -1439,9 +1464,9 @@ test("lead ruling L62013 (S2), fail closed: every command naming the bare organ 
     ["touch -c .claude", "files.write.workspace"],
     ["touch -t 202601010000 .claude", "files.write.workspace"],
     ["touch --no-create .claude", "files.write.workspace"],
-    ["tar -czf out.tgz -C .claude .", "files.write.workspace"],
-    ["tar czf out.tgz -C .claude .", "files.write.workspace"],
-    ["tar --create --gzip --file=out.tgz --directory=.claude .", "files.write.workspace"],
+    ["touch -r ref .claude", "files.write.workspace"],
+    ["touch -d 2026-01-01 -a .claude", "files.write.workspace"],
+    ["\\mkdir .claude", "files.write.workspace"],
   ] as const) {
     assert.deepEqual(classesOf(command), [main], command);
     const mainPass = classifyCommandWithMainRules(command);
