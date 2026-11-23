@@ -96,6 +96,7 @@ import {
 
 import { attestationRefusal, checkAttestation, checkAttestationOfBytes } from "../core/attest.js";
 import { childEnvironment } from "../core/child-env.js";
+import { runUnderDeadline } from "../core/deadline.js";
 import {
   braceCandidates,
   copyArgvUnknown,
@@ -387,6 +388,16 @@ export const HOOK_DENY_CODES = [
    * recording grants on calls nobody holds.
    */
   "hook-harness-cap-too-short",
+  /**
+   * Describing the tool call (classifying it, landing its paths on the disk)
+   * outlasted this hook's own deadline ({@link DESCRIBE_DEADLINE_MS}).
+   *
+   * A hook the harness kills at its timeout is a tool call that proceeds, so
+   * a call this hook cannot describe in time is refused while the hook can
+   * still say so. Nothing is registered and nothing is requested. The repair
+   * is the caller's: a shorter command, or the same work in several calls.
+   */
+  "hook-deadline",
   /** The gate refused intake; the gate's own code follows a colon. */
   "hook-gate-refused",
   /**
@@ -2798,30 +2809,43 @@ function steeredReadCouldNameCredential(
  * resolves `..` lexically first, which is the reading a shell's own `cd`
  * takes; both readings are judged.
  */
-function physicalLanding(from: string, text: string): string {
+export function physicalLanding(from: string, text: string): string {
   let current = isAbsolute(text) ? sep : from;
   try {
     current = realpathSync(current);
   } catch {
     // An ancestor that does not exist stays as spelled.
   }
+  // The components below the first one that does not resolve, as names.
+  // Nothing under a path that does not resolve can resolve, so they are not
+  // looked up: each lookup joined and resolved the whole path so far, which
+  // made a word of n components cost n squared (a 100 KB word of `b/` took
+  // over a minute, past the harness's own limit on this hook).
+  const below: string[] = [];
   // Fix round 2 (path-parser differential): the kernel's separator. On macOS
   // and Linux a backslash is a character of a name, never a place to climb a
   // `..` from; the credential rows still split on both (stricter).
   for (const component of text.split(KERNEL_SEPARATORS)) {
     if (component.length === 0 || component === ".") continue;
     if (component === "..") {
-      current = dirname(current);
+      if (below.length > 1) below.pop();
+      // The last name below `current`: its parent is `current`, spelled the
+      // way joining and climbing spells it.
+      else if (below.length === 1) current = dirname(join(current, below.pop() as string));
+      else current = dirname(current);
       continue;
     }
-    const next = join(current, component);
+    if (below.length > 0) {
+      below.push(component);
+      continue;
+    }
     try {
-      current = realpathSync(next);
+      current = realpathSync(join(current, component));
     } catch {
-      current = next;
+      below.push(component);
     }
   }
-  return current;
+  return below.length === 0 ? current : join(current, below.join(sep));
 }
 
 /**
@@ -5319,6 +5343,13 @@ interface HookRun {
    * changes nothing about it.
    */
   waitMs: number;
+  /**
+   * When this hook invocation began (`Date.now()`), which is when
+   * {@link waitMs} starts to run: the time spent reading and describing the
+   * call counts against the wait, so the hook's last answer comes
+   * {@link waitMs} after it started, not after it finished thinking.
+   */
+  startedAtMs: number;
   harness: HarnessKind;
   originApp: string;
   /** Exact native command bytes required in a Codex allow's identity update. */
@@ -6361,7 +6392,7 @@ function* gateHarnessSteps(
     expiryOf,
   );
 
-  const deadline = Date.now() + run.waitMs;
+  const deadline = waitDeadlineAt(run);
 
   // APRV-427. From the first poll to the last this invocation only READS the
   // verified log and sleeps, so an embedding caller (`approval serve`) may let
@@ -7107,6 +7138,7 @@ function abstainedEarlier(
   const load = loadPolicyText(read.path, read.bytes.toString("utf8"));
   if (!load.ok || load.policy.defaults?.unclassified_command !== "abstain") return false;
   const described = describeToolCall(
+    describeDeadlineMs(),
     input,
     adapter,
     load.policy.protected_paths ?? [],
@@ -7292,7 +7324,72 @@ type ToolDescription =
   /** The classifier could not read it, or the input was malformed. */
   | { kind: "deny"; code: string; detail: string };
 
+/**
+ * When the hook's wait for a decision ends (`Date.now()` terms): `waitMs`
+ * after the invocation BEGAN. Measured from the wait's own start, the time
+ * spent reading and describing the call came on top of it, and a description
+ * that took seconds pushed the last answer past the harness's own timeout,
+ * where a killed hook is a call that proceeds.
+ */
+export function waitDeadlineAt(run: { startedAtMs: number; waitMs: number }): number {
+  return run.startedAtMs + run.waitMs;
+}
+
+/**
+ * The longest this hook spends describing one tool call before it refuses it
+ * (`hook-deadline`). Well under the shortest harness limit it runs under
+ * (Claude Code's default is 60 s), because a hook that is killed there is a
+ * call that proceeds. Describing an ordinary call takes milliseconds.
+ */
+export const DESCRIBE_DEADLINE_MS = 15_000;
+
+/**
+ * An environment variable that SHORTENS {@link DESCRIBE_DEADLINE_MS}, in
+ * whole milliseconds. It can never lengthen it: a longer deadline is the
+ * unsafe direction, and the environment is not the place to choose it.
+ */
+export const DESCRIBE_DEADLINE_ENV = "APPROVAL_HOOK_DESCRIBE_DEADLINE_MS";
+
+/**
+ * The deadline for describing one call: {@link DESCRIBE_DEADLINE_MS}, a
+ * quarter of the harness ceiling where one is known and that is shorter, and
+ * {@link DESCRIBE_DEADLINE_ENV} where it is shorter still.
+ */
+export function describeDeadlineMs(harnessCapMs: number | null = null, env: NodeJS.ProcessEnv = process.env): number {
+  let deadline = DESCRIBE_DEADLINE_MS;
+  if (harnessCapMs !== null) deadline = Math.min(deadline, Math.floor(harnessCapMs / 4));
+  const stated = env[DESCRIBE_DEADLINE_ENV];
+  if (stated !== undefined && /^\d{1,9}$/u.test(stated)) deadline = Math.min(deadline, Number(stated));
+  return Math.max(1, deadline);
+}
+
+/**
+ * Set once a description has hit its deadline in this process. Termination
+ * runs no `finally` (`core/deadline.ts`), so the classifier's own state may be
+ * half written; nothing is described again here, every later call is refused
+ * the same way.
+ */
+let describeDeadlinePassed = false;
+
+/**
+ * {@link describeToolCallNow} under this hook's own deadline: the description,
+ * or a `hook-deadline` deny when it could not be made in `deadlineMs`.
+ */
 function describeToolCall(
+  deadlineMs: number,
+  ...described: Parameters<typeof describeToolCallNow>
+): ToolDescription {
+  const ran = describeDeadlinePassed ? ({ ok: false } as const) : runUnderDeadline(deadlineMs, () => describeToolCallNow(...described));
+  if (ran.ok) return ran.value;
+  describeDeadlinePassed = true;
+  return {
+    kind: "deny",
+    code: "hook-deadline",
+    detail: `this hook could not read the ${described[0].toolName} call within its own ${String(deadlineMs)}ms limit, so the call is refused rather than left to the harness's timeout, where a hook that is killed is a call that runs. Nothing was registered or requested. Make the call shorter, or do the same work in several calls.`,
+  };
+}
+
+function describeToolCallNow(
   input: HookInput,
   adapter: HarnessAdapter,
   protectedPaths: readonly ProtectedPathEntry[],
@@ -9038,10 +9135,21 @@ const RECURSIVE_READERS: ReadonlySet<string> = new Set([
  * symlinked parent is judged by where it lands and a path that does not exist
  * yet is judged by where it would be created (APRV-445 recheck SF2(e)).
  */
-function canonicalPath(path: string): string {
+export function canonicalPath(path: string): string {
   let current = path;
   const tail: string[] = [];
-  for (;;) {
+  for (let climbed = 0; ; climbed += 1) {
+    // A path whose last many components do not exist: the deepest ancestor
+    // that does is found by halving, not by climbing one component at a time.
+    // Each climb resolved the whole remaining path, so a word of n components
+    // cost n squared; this is the same answer in about log n resolutions.
+    if (climbed === CANONICAL_CLIMBS) {
+      const found = deepestExisting(current);
+      if (found !== null) {
+        tail.reverse();
+        return resolvePathSegments(found.real, [...found.rest, ...tail].join(sep));
+      }
+    }
     try {
       return resolvePathSegments(realpathSync(current), ...tail.reverse());
     } catch {
@@ -9051,6 +9159,51 @@ function canonicalPath(path: string): string {
       current = parent;
     }
   }
+}
+
+/** How many components {@link canonicalPath} climbs one at a time before it halves. */
+const CANONICAL_CLIMBS = 32;
+
+/**
+ * The deepest ancestor of `path` (or `path` itself) that resolves, as its
+ * realpath and the components below it, found by halving. `null` when `path`
+ * is not an absolute POSIX path in normal form (no empty, `.` or `..`
+ * component, no trailing separator), or when even the root does not resolve:
+ * the caller then climbs as it always did.
+ *
+ * Halving is sound because resolving is monotone along a normal-form path:
+ * when a prefix resolves, every shorter prefix resolves (it was traversed to
+ * get there). So the longest resolving prefix, which climbing from the leaf
+ * finds first, is the boundary a binary search finds. A `..` would break that
+ * (`realpathSync` cancels it textually, so `a/x/../b` can resolve where `a/x`
+ * does not), which is why such a path is left to the climb.
+ */
+function deepestExisting(path: string): { real: string; rest: string[] } | null {
+  if (sep !== "/" || !path.startsWith("/")) return null;
+  const names = path.slice(1).split("/");
+  if (path.length > 1 && names.some((name) => name.length === 0 || name === "." || name === "..")) return null;
+  if (path.length === 1) names.length = 0;
+  const resolves = (count: number): string | null => {
+    try {
+      return realpathSync(`/${names.slice(0, count).join("/")}`);
+    } catch {
+      return null;
+    }
+  };
+  let real = resolves(0);
+  if (real === null) return null;
+  let low = 0;
+  let high = names.length;
+  while (low < high) {
+    const middle = low + Math.ceil((high - low) / 2);
+    const found = resolves(middle);
+    if (found === null) high = middle - 1;
+    else {
+      low = middle;
+      real = found;
+    }
+  }
+  return { real, rest: names.slice(low) };
 }
 
 /** The symlink hops the kernel follows before it answers ELOOP (Linux and macOS: 40 / 32). */
@@ -9102,8 +9255,11 @@ function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | 
   let resolved = "/";
   let missing = false;
   let hops = 0;
+  // Walked last first from here on, so the next component is a pop: a shift
+  // from the front of a long array moves every other component each time.
+  queue.reverse();
   while (queue.length > 0) {
-    const part = queue.shift() as string;
+    const part = queue.pop() as string;
     if (part === "..") {
       if (volatile !== null && volatile(resolved)) return null;
       resolved = dirname(resolved);
@@ -9133,7 +9289,7 @@ function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | 
     if (hops > KERNEL_LINK_HOPS) return null;
     const parts = link.split("/").filter((piece) => piece.length > 0 && piece !== ".");
     if (link.startsWith("/")) resolved = "/";
-    queue.unshift(...parts);
+    for (let index = parts.length - 1; index >= 0; index -= 1) queue.push(parts[index] as string);
   }
   return resolved;
 }
@@ -9371,6 +9527,7 @@ function* runBypass(
     : `the policy did not load (${load.code}: ${load.message}), so no protected path beyond the built-ins was known here and no class could be resolved to human-only`;
 
   const described = describeToolCall(
+    describeDeadlineMs(),
     input,
     adapter,
     protectedPaths,
@@ -9532,6 +9689,9 @@ function* runHarnessHook(
   adapter: HarnessAdapter,
   waitSeam: HookWaitSeam | null,
 ): GateSteps<number> {
+  // The harness's timer started when it spawned this process; the wait is
+  // measured from here, before the event is read ({@link HookRun.startedAtMs}).
+  const startedAtMs = Date.now();
   // Codex and (APRV-445) Hermes answer a misconfigured entry with a verdict:
   // on both a usage error's empty stdout is a harness that runs the call, and
   // on Hermes a non-zero exit with an empty stdout is an allow outright.
@@ -9964,6 +10124,7 @@ function* runHarnessHook(
       codexCommand,
       windowRecords: looked.records,
       waitSeam,
+      startedAtMs,
     }),
   );
 }
@@ -9997,6 +10158,11 @@ export interface DecideInput {
    * passes `null` and the policy's TTL governs alone.
    */
   harnessCapMs?: number | null;
+  /**
+   * When the invocation this decision belongs to began (`Date.now()`); the
+   * wait is measured from it. Absent, the decision's own start.
+   */
+  startedAtMs?: number;
   /**
    * Whether `harnessCapMs` was stated by the operator (`--harness-cap`) rather
    * than assumed from the adapter's documented defaults (APRV-423, second
@@ -10065,6 +10231,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     codexCommand,
     windowRecords,
   } = decide;
+  const startedAtMs = decide.startedAtMs ?? Date.now();
   const harnessCapMs = decide.harnessCapMs ?? null;
   const harnessCapStated = decide.harnessCapStated ?? false;
   const harnessCapCeilingMs = decide.harnessCapCeilingMs ?? null;
@@ -10100,6 +10267,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
   // classifies exactly as the closed one does, and a second copy of this would
   // be a second answer to "what is this command".
   const described = describeToolCall(
+    describeDeadlineMs(harnessCapMs),
     input,
     adapter,
     protectedPaths,
@@ -10192,6 +10360,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
       harnessCapMs === null
         ? timeoutMs
         : Math.max(0, Math.min(timeoutMs, harnessCapMs - HARNESS_CAP_MARGIN_MS)),
+    startedAtMs,
     harness: adapter.kind,
     originApp: adapter.originApp,
     ...(codexCommand === undefined ? {} : { codexCommand }),

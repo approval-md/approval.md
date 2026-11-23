@@ -266,6 +266,34 @@ on the change above.
   and 10,000 levels of nesting each take under half a second of CPU through
   the hook.
 
+**The hook answers before the harness stops listening.** A hook the harness
+kills at its timeout is a tool call that proceeds, and reading one long word
+could take that long: `cat b/b/b/…/env`, a path of 100 KB that names nothing
+guarded, took 76 CPU seconds to classify, past Claude Code's default 60 second
+hook timeout. So a command line that long ran with no gate at all, whatever
+else was on it.
+
+- **The path walks are linear.** Two walks resolved the whole path once per
+  component: the search for a path's deepest existing ancestor
+  (`canonicalPath`) now halves after 32 climbs, and the kernel-order landing
+  (`physicalLanding`) keeps the components below the first missing one as a
+  list. Two more took each component from the front of an array, which moves
+  the rest every time; they pop from the end. Answers are unchanged, held
+  against the old walks on a fixture of links, loops and missing components.
+  That 100 KB word now takes 0.2 seconds, and a megabyte under two.
+- **Reading a call has its own deadline: 15 seconds**, or a quarter of the
+  harness ceiling where one is stated or assumed and that is shorter. A call
+  the hook cannot read in that time is refused `hook-deadline`, with nothing
+  registered or requested, while the hook can still say so. The deadline stops
+  the hook's own work from outside it, so no input can outrun it; it does not
+  interrupt a blocking system call. `APPROVAL_HOOK_DESCRIBE_DEADLINE_MS` can
+  shorten it and can never lengthen it.
+- **The wait for a decision is measured from when the hook started,** not from
+  when it finished reading the call, so a slow read shortens the wait instead
+  of pushing the hook's last answer past the harness's timeout.
+- Still slow, and now refused rather than passed: a megabyte of many short
+  path words takes about 20 seconds to read, which is past the deadline.
+
 **Guarded names fold case on every platform.** The guards compared a path's
 names with the guarded names by exact letter case, while APFS, macOS's
 default volume, opens a name under full Unicode case folding. So `echo x >
