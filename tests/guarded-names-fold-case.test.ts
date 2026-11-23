@@ -21,7 +21,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -326,12 +326,11 @@ test("grants stay exact: the skill-script shape and the install's .env.example",
   assert.equal(isCredentialPath("~/.hermes/hermes-agent/.env.EXAMPLE"), true);
 });
 
-test("the hook's on-disk passes fold: a home or key folder that exists, spelled with the long s", { skip }, () => {
+test("the hook's own passes fold: a home or key folder spelled with the long s", { skip }, (t) => {
   // The hook also reads the disk: a recursive read's root, a glob's
   // directory, a `cd` target. Made-up files stand in a fixture home and
-  // checkout; each line is classified, never run. APFS opens `.herme<U+017F>`
-  // as `.hermes`, so each spelling takes the canonical line's answer, and that
-  // answer names the credential the disk pass found.
+  // checkout; each line is classified, never run. Each spelling takes the
+  // canonical line's answer, and that answer names the credential found.
   const RESOLVED = "account.credential credential-path-resolved";
   mkdirSync(join(HOME, ".hermes", "profiles", "p"), { recursive: true });
   writeFileSync(join(HOME, ".hermes", ".env"), "MADE_UP=1\n");
@@ -345,25 +344,34 @@ test("the hook's on-disk passes fold: a home or key folder that exists, spelled 
   // root's own kind can call a recursive read of it a credential read.
   mkdirSync(join(dir, ".hermes", "profiles", "q"), { recursive: true });
   writeFileSync(join(dir, ".hermes", "profiles", "q", ".env"), "MADE_UP=1\n");
+  // Decided by the text alone, on every volume: the approval home's file
+  // names, the Hermes home and a credential file's name under a directory
+  // the line does not resolve. Each depends on one compare of the hook
+  // (found by planting `toLowerCase()` back in each, one at a time).
+  const byText: readonly (readonly [string, string])[] = [
+    ["cat $H/keys", `cat $H/key${LONG_S}`],
+    ["cat $X/.hermes/$F", `cat $X/.herme${LONG_S}/$F`],
+    ["cat $X/y/auth.json", `cat $X/y/auth.j${LONG_S}on`],
+  ];
+  // Decided on the disk, so only where the volume opens `.herme<U+017F>` as
+  // `.hermes` (APFS does; a case-sensitive volume keeps them apart, and there
+  // the spelled folder is another folder, which does not exist). The last two
+  // each depend on one compare: the read root's kind, and the folder that
+  // holds a credential.
+  const onDisk: readonly (readonly [string, string])[] = [
+    ["grep -r x ~/.hermes", `grep -r x ~/.herme${LONG_S}`],
+    ["cat ~/.hermes/*", `cat ~/.herme${LONG_S}/*`],
+    ["cd ~/.hermes && cat .env", `cd ~/.herme${LONG_S} && cat .env`],
+    ["tar cf - ~/.hermes", `tar cf - ~/.herme${LONG_S}`],
+    ["cp -r ~/.hermes /tmp/x", `cp -r ~/.herme${LONG_S} /tmp/x`],
+    ["cd .approval/keys && cat k1", `cd .approval/key${LONG_S} && cat k1`],
+    ["grep -r x .hermes", `grep -r x .herme${LONG_S}`],
+    ["grep -r x ~/.hermes/sub", `grep -r x ~/.herme${LONG_S}/sub`],
+  ];
+  const volumeFolds = existsSync(join(HOME, `.herme${LONG_S}`));
+  if (!volumeFolds) t.diagnostic("this volume does not fold names: the on-disk pairs are not asserted here");
   try {
-    for (const [canonical, spelled] of [
-      ["grep -r x ~/.hermes", `grep -r x ~/.herme${LONG_S}`],
-      ["cat ~/.hermes/*", `cat ~/.herme${LONG_S}/*`],
-      ["cd ~/.hermes && cat .env", `cd ~/.herme${LONG_S} && cat .env`],
-      ["tar cf - ~/.hermes", `tar cf - ~/.herme${LONG_S}`],
-      ["cp -r ~/.hermes /tmp/x", `cp -r ~/.herme${LONG_S} /tmp/x`],
-      ["cd .approval/keys && cat k1", `cd .approval/key${LONG_S} && cat k1`],
-      // Each of the next five is decided by one compare of the hook alone
-      // (found by planting `toLowerCase()` back in each, one at a time): the
-      // read root's kind, the folder that holds a credential, the approval
-      // home's file names, the Hermes home and a credential file's name under
-      // an unresolved directory.
-      ["grep -r x .hermes", `grep -r x .herme${LONG_S}`],
-      ["grep -r x ~/.hermes/sub", `grep -r x ~/.herme${LONG_S}/sub`],
-      ["cat $H/keys", `cat $H/key${LONG_S}`],
-      ["cat $X/.hermes/$F", `cat $X/.herme${LONG_S}/$F`],
-      ["cat $X/y/auth.json", `cat $X/y/auth.j${LONG_S}on`],
-    ] as const) {
+    for (const [canonical, spelled] of volumeFolds ? [...byText, ...onDisk] : byText) {
       const want = hook(canonical);
       assert.ok(want.includes(RESOLVED), `${canonical}: ${want.join(" ; ")}`);
       assert.deepEqual(hook(spelled), want, spelled);
