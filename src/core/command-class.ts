@@ -549,8 +549,15 @@ function braceSequence(inner: string): string[] | null {
  * the home; collapsed, `${HERMES_HOME:-/x}` is the home, as it is whenever the
  * variable is set, and any other name is a variable segment as before.
  */
-function collapseBracedVariables(candidate: string): string {
-  return candidate.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/gu, "${$1}");
+export function collapseBracedVariables(candidate: string): string {
+  // A closed `${…}` ends at a `}`, so only the text up to the LAST `}` can
+  // hold one, and there every `${NAME` finds its close. Read whole, a word
+  // of unclosed `${a:-` scanned to its end from each one: the square of its
+  // length, 105 CPU seconds through the hook at 1 MB, past the hook's
+  // timeout (review-b's N6 on #680). The answer is the same text either way.
+  const close = candidate.lastIndexOf("}");
+  if (close === -1) return candidate;
+  return `${candidate.slice(0, close + 1).replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/gu, "${$1}")}${candidate.slice(close + 1)}`;
 }
 
 /**
@@ -8781,13 +8788,18 @@ export function fetchOutputs(
         unknown ??= spelled;
         return;
       }
-      for (const match of value.matchAll(/%output\{(?:>>)?([^}]*)\}/gu)) {
+      // Both reads stop at the value's last `}`: a closed `%output{…}` ends
+      // at one, and scanning past it from every unclosed `%output{` cost the
+      // square of the value's length (the same shape as review-b's N6).
+      const lastClose = value.lastIndexOf("}");
+      for (const match of value.slice(0, lastClose + 1).matchAll(/%output\{(?:>>)?([^}]*)\}/gu)) {
         const target = match[1] ?? "";
         if (target.length === 0 || !placeable(target)) unknown ??= spelled;
         else files.push(target);
       }
-      // A `%output{` without its closing brace still names some file.
-      if (/%output\{(?![^}]*\})/u.test(value)) unknown ??= spelled;
+      // A `%output{` without its closing brace still names some file: the
+      // last one has no `}` after it.
+      if (value.lastIndexOf("%output{") > lastClose) unknown ??= spelled;
     }
   };
   /** Fix round 3 (S(open)): the word at `at`, in `slot`, may become an option. */
