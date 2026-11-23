@@ -59,6 +59,7 @@ import { payloadHash } from "./payload.js";
 import { payloadStoreDirFor, storePayload } from "./payload-store.js";
 import type { ValidationError } from "./validate.js";
 import { HUMAN_ACTOR_RULE, reservedKindNote } from "./identity.js";
+import { foldFileName } from "./name-fold.js";
 
 /**
  * Actors permitted to attest. Deliberately narrower than the event schema's
@@ -722,7 +723,7 @@ function organPathRefusal(candidate: string): OrganAttestError | null {
   if (isGateOrganPath(normalized)) return null;
   if (builtinProtectedPathClass(normalized) === "policy.core") {
     const last = normalized.split("/").pop() ?? normalized;
-    if (POLICY_FILE_NAMES.includes(last)) {
+    if (isPolicyFileName(last)) {
       return {
         code: "path-is-policy",
         message: `${normalized} is the policy file, not a gate organ; its attestation is \`approval policy attest\` with no --organ, and the gate reads that one on every operation`,
@@ -747,6 +748,16 @@ function organPathRefusal(candidate: string): OrganAttestError | null {
  * SPEC.md §5 constant rather than a loader detail.
  */
 const POLICY_FILE_NAMES: readonly string[] = ["APPROVAL.md", "APPROVALS.md"];
+
+/**
+ * Is `name` a policy filename, compared folded ({@link foldFileName}), as the
+ * classifier compares it? It picks which refusal names the file: since names
+ * fold, `approval.md` is the policy file to the classifier too.
+ */
+function isPolicyFileName(name: string): boolean {
+  const folded = foldFileName(name);
+  return POLICY_FILE_NAMES.some((each) => foldFileName(each) === folded);
+}
 
 /**
  * Is this record an organ attestation, and which bytes of which file does it
@@ -1041,7 +1052,7 @@ function signOffPathRefusal(
   const builtin = builtinProtectedPathClass(normalized);
   if (builtin === "policy.core") {
     const last = normalized.split("/").pop() ?? normalized;
-    if (POLICY_FILE_NAMES.includes(last)) {
+    if (isPolicyFileName(last)) {
       return {
         code: "path-is-policy",
         message: `${normalized} is the policy file, whose sign-off is its attestation: \`approval policy attest\` with no --path, which the gate reads on every operation. A second record about those bytes would be a thing that looks like an attestation and is not one`,

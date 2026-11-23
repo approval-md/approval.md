@@ -30,6 +30,8 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync, type Dirent } from "node:fs";
 import { dirname, join, normalize, sep } from "node:path";
 
+import { foldFileName } from "../core/name-fold.js";
+
 import {
   commandSegmentShapes,
   expandBraces,
@@ -113,15 +115,15 @@ function landing(path: string): string | null {
   return "landed" in walked ? walked.landed : null;
 }
 
-/** Does this absolute path have a `.git` segment, in any case? */
+/** Does this absolute path have a `.git` segment, in any case ({@link foldFileName})? */
 function hasGitSegment(path: string): boolean {
-  return path.split(sep).some((part) => part.toLowerCase() === ".git");
+  return path.split(sep).some((part) => foldFileName(part) === ".git");
 }
 
-/** Is `path` `root` or below it, compared without case (APFS folds it)? */
+/** Is `path` `root` or below it, compared folded (APFS folds it; {@link foldFileName})? */
 function within(path: string, root: string): boolean {
-  const p = path.toLowerCase();
-  const r = root.toLowerCase().replace(/\/+$/u, "");
+  const p = foldFileName(path);
+  const r = foldFileName(root).replace(/\/+$/u, "");
   return p === r || p.startsWith(`${r}/`);
 }
 
@@ -310,7 +312,7 @@ function expandOnDisk(base: string, word: string): Expansion {
         next.push({ path: join2(place.path, segment), from: "parent" });
         for (const entry of entries) {
           if (!globSegmentMatches(segment, entry.name)) continue;
-          if (DIRECTORY_OR_LINK(entry) || entry.name.toLowerCase() === ".git") next.push({ path: join2(place.path, entry.name), from: "match" });
+          if (DIRECTORY_OR_LINK(entry) || foldFileName(entry.name) === ".git") next.push({ path: join2(place.path, entry.name), from: "match" });
         }
       }
       places = next;
@@ -638,7 +640,7 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
         }
         for (const path of paths) {
           const last = path.replace(/(?:\/\.?)+$/u, "").split("/").pop() ?? "";
-          let carries = last.toLowerCase() === ".git";
+          let carries = foldFileName(last) === ".git";
           if (!carries) {
             try {
               carries = statSync(path).isDirectory() && existsSync(join(path, ".git"));

@@ -167,6 +167,7 @@ import {
   type EventRecord,
 } from "../core/log.js";
 import { settleTerminationGuards } from "../core/log-lock.js";
+import { foldFileName } from "../core/name-fold.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import {
@@ -2677,7 +2678,7 @@ function steeredSegments(text: string): string[][] | null {
   if (text.includes("\\")) splittings.push(text.split(/\/+/u));
   const out: string[][] = [];
   for (const raw of splittings) {
-    const segments = raw.filter((segment) => segment.length > 0 && segment !== ".").map((segment) => segment.toLowerCase());
+    const segments = raw.filter((segment) => segment.length > 0 && segment !== ".").map(foldFileName);
     if (segments.includes("..")) return null;
     out.push(segments);
   }
@@ -2711,7 +2712,7 @@ function configuredHermesNames(env: NodeJS.ProcessEnv): string[] {
   const names: string[] = [];
   for (const value of [env["APPROVAL_HERMES_HOME"], env["HERMES_HOME"]]) {
     if (value === undefined || value.length === 0) continue;
-    const name = basename(value).toLowerCase();
+    const name = foldFileName(basename(value));
     if (name.length > 0 && name !== "." && name !== ".." && !names.includes(name)) names.push(name);
   }
   return names;
@@ -7518,7 +7519,7 @@ function describeToolCall(
         if (isSideEffectingClass(segment.class)) {
           for (const possibleCwd of possibleCwds) {
             const cwdSegments = possibleCwd.split(/[/\\]+/u);
-            const cwdClass = cwdSegments.includes(".codex")
+            const cwdClass = cwdSegments.map(foldFileName).includes(".codex")
               ? "policy.core"
               : protectedPathClass(possibleCwd, protectedPaths);
             if (cwdClass !== null && !classes.includes(cwdClass)) classes.push(cwdClass);
@@ -8329,10 +8330,12 @@ function globCouldNameOrgan(path: string): boolean {
     const component = components[index] as string;
     if (!hasGlobChars(component)) continue;
     const parent = components[index - 1] as string;
+    // A literal parent is a name the volume folds ({@link foldFileName}).
+    const folded = (at: number): string => foldFileName(components[at] ?? "");
     const underHome =
-      parent === ".hermes" ||
+      folded(index - 1) === ".hermes" ||
       hasGlobChars(parent) ||
-      (components[index - 3] === ".hermes" && components[index - 2] === "profiles");
+      (folded(index - 3) === ".hermes" && folded(index - 2) === "profiles");
     if (underHome && ORGAN_NAMES.some((name) => globRegex(component).test(name))) return true;
   }
   const last = basename(path);
@@ -8340,7 +8343,7 @@ function globCouldNameOrgan(path: string): boolean {
   const pattern = globRegex(last);
   const parent = dirname(path);
   const parentIsHome =
-    parent.split(/[/\\]+/u).some((segment) => segment === ".hermes" || segment === ".approval") ||
+    parent.split(/[/\\]+/u).some((segment) => foldFileName(segment) === ".hermes" || foldFileName(segment) === ".approval") ||
     hasGlobChars(parent);
   return parentIsHome && ORGAN_NAMES.some((name) => pattern.test(name));
 }
@@ -8380,7 +8383,7 @@ function globCouldNameCredential(path: string): boolean {
     const component = components[index] as string;
     if (!hasGlobChars(component)) continue;
     const names = GLOB_DIRECTORY_NAMES.filter(
-      (name) => globRegex(component).test(name) || globRegex(component.toLowerCase()).test(name),
+      (name) => globRegex(component).test(name) || globRegex(foldFileName(component)).test(name),
     );
     if (names.length > 0) choices.push({ index, names });
   }
@@ -8457,7 +8460,7 @@ function globNamesCredentialOrHome(path: string): boolean {
  *   `profiles/<p>`. So an unknown last segment right under a literal home, a
  *   profile home or the `hermes-agent/` of either is a credential, and so are
  *   two unknown segments in a row at the end;
- * - ANYWHERE, an approval home (`.approval`, exact case) or an unknown segment
+ * - ANYWHERE, an approval home (`.approval`, any case) or an unknown segment
  *   is followed by `env`, `env.*`, `vault*`, `keys` or an unknown segment;
  * - a credential file name appears at or after the first unknown segment
  *   (which may have stood for a home, a profile home or a profiles directory).
@@ -8465,8 +8468,9 @@ function globNamesCredentialOrHome(path: string): boolean {
  * Not covered, by the model: in a single-file read, an unknown segment that
  * expands to several segments (a `/` or `..` inside it) and so moves the
  * literal names after it; a recursive reader of any unresolved word is
- * `account.credential` regardless. `.approval` and its file names in another
- * case are not matched, as in the classifier's text rule.
+ * `account.credential` regardless. Every name is compared folded
+ * ({@link foldFileName}), as in the classifier's text rule, so `.APPROVAL` and
+ * `.herme<U+017F>` are the homes they open on APFS.
  */
 function unresolvedReadCouldNameCredential(text: string): boolean {
   if (isCredentialPath(text) || globCouldNameCredential(text)) return true;
@@ -8526,21 +8530,23 @@ function segmentsCouldNameCredential(segments: readonly string[]): boolean {
   const named =
     (name: string): Element =>
     (segment) =>
-      unknownSegment(segment) || segment.toLowerCase() === name;
+      unknownSegment(segment) || foldFileName(segment) === name;
   const credentialFile = (segment: string): boolean => {
-    const name = segment.toLowerCase();
+    const name = foldFileName(segment);
     return name === ".env" || name.startsWith(".env.") || name === ".op.env" || name.startsWith(".op.env.") || name === "auth.json";
   };
-  const hermesHome: Element = (segment) => unknownSegment(segment) || segment.toLowerCase() === ".hermes";
+  const hermesHome: Element = (segment) => unknownSegment(segment) || foldFileName(segment) === ".hermes";
   const homeCredential: Element = (segment) => unknownSegment(segment) || credentialFile(segment);
   const installEnv: Element = (segment) => {
-    const name = segment.toLowerCase();
+    const name = foldFileName(segment);
     return unknownSegment(segment) || name === ".env" || (name.startsWith(".env.") && segment !== ".env.example");
   };
   const anyName: Element = () => true;
-  const approvalHome: Element = (segment) => unknownSegment(segment) || segment === ".approval";
-  const approvalFile: Element = (segment) =>
-    unknownSegment(segment) || segment === "env" || segment.startsWith("env.") || segment.startsWith("vault") || segment === "keys";
+  const approvalHome: Element = (segment) => unknownSegment(segment) || foldFileName(segment) === ".approval";
+  const approvalFile: Element = (segment) => {
+    const name = foldFileName(segment);
+    return unknownSegment(segment) || name === "env" || name.startsWith("env.") || name.startsWith("vault") || name === "keys";
+  };
 
   const endsWith = (row: readonly Element[]): boolean => {
     const start = segments.length - row.length;
@@ -8829,10 +8835,10 @@ function gateRootKind(directory: string): "home" | "approval-home" | "home-appro
 
 function gateRootKindOf(split: readonly string[]): "home" | "approval-home" | "home-approval" | "scripts" | null {
   // APRV-522: case folded, as the credential rule is, for a case-insensitive
-  // volume (`grep -r . .APPROVAL`).
+  // volume (`grep -r . .APPROVAL`), by the full fold ({@link foldFileName}).
   const segments = split
     .filter((segment) => segment.length > 0)
-    .map((segment) => segment.toLowerCase());
+    .map(foldFileName);
   const last = segments[segments.length - 1];
   const isHome = (at: number): boolean =>
     segments[at] === ".hermes" ||
@@ -8877,7 +8883,7 @@ function holdsCredentials(directory: string): boolean {
   if (
     !directory
       .split(/[/\\]+/u)
-      .some((segment) => [".hermes", ".approval"].includes(segment.toLowerCase()))
+      .some((segment) => [".hermes", ".approval"].includes(foldFileName(segment)))
   ) return false;
   return CREDENTIAL_FILE_NAMES.some((name) => existsSync(join(directory, name)));
 }

@@ -25,6 +25,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { protectedPathClass } from "../core/command-class.js";
 import { canonicalize } from "../core/jcs.js";
+import { foldFileName } from "../core/name-fold.js";
 import type { PolicyLoadResult } from "../core/policy-load.js";
 import { resolve as resolvePolicy } from "../core/policy-match.js";
 import { payloadHash } from "../core/payload.js";
@@ -347,7 +348,8 @@ function endpoints(operation: ParsedOperation): string[] {
 }
 
 function conflictPath(operations: readonly ParsedOperation[]): string | null {
-  const all = operations.flatMap(endpoints).map((path) => ({ path, folded: path.toLowerCase() }));
+  // Folded ({@link foldFileName}): APFS opens two spellings that fold alike as one file.
+  const all = operations.flatMap(endpoints).map((path) => ({ path, folded: foldFileName(path) }));
   for (let left = 0; left < all.length; left += 1) {
     for (let right = left + 1; right < all.length; right += 1) {
       const a = all[left];
@@ -446,7 +448,7 @@ function checkSpelling(parent: string, name: string): "exact" | "alias" | "absen
       if (entry === null) break;
       count += 1;
       if (count > MAX_WORKSPACE_DIRECTORY_ENTRIES) return "unsafe";
-      if (entry.name.toLowerCase() === name.toLowerCase()) matches.push(entry.name);
+      if (foldFileName(entry.name) === foldFileName(name)) matches.push(entry.name);
     }
     if (matches.length === 0) return "absent";
     if (matches.length === 1 && matches[0] === name) return "exact";

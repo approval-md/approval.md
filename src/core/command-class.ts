@@ -65,6 +65,7 @@ import {
   readTargetVerdict,
   readTargetsOf,
 } from "./read-scope.js";
+import { foldFileName } from "./name-fold.js";
 
 // ===========================================================================
 // Result shape
@@ -277,6 +278,15 @@ const CORE_FILENAMES: readonly string[] = ["APPROVAL.md", "APPROVALS.md"];
  */
 const PROTECTED_FILENAMES: readonly string[] = ["CLAUDE.md", "AGENTS.md", ".npmrc"];
 
+/**
+ * {@link CORE_FILENAMES} and {@link PROTECTED_FILENAMES} folded, for the
+ * guards, which compare a candidate's folded segments with these.
+ * Guarded names fold case on every platform ({@link foldFileName}): APFS opens
+ * `approval.md` and `Claude.MD` as the policy file and the instructions.
+ */
+const CORE_FILENAMES_FOLDED: readonly string[] = CORE_FILENAMES.map(foldFileName);
+const PROTECTED_FILENAMES_FOLDED: readonly string[] = PROTECTED_FILENAMES.map(foldFileName);
+
 /** Split a path into segments, dropping `./` noise. Never touches the disk. */
 function pathSegments(candidate: string): string[] {
   return candidate
@@ -334,15 +344,22 @@ export function parseProtectedEntry(entry: ProtectedPathEntry): ProtectedEntry |
   return { segments, directory, routed };
 }
 
-/** Does `segments` match one parsed entry? */
+/**
+ * Does `segments` match one parsed entry? Both sides are compared folded
+ * ({@link foldFileName}), as the built-in names are: a policy that protects
+ * `design/` protects `Design/` on a volume that opens it as the same folder.
+ * `segments` must arrive folded, as {@link protectedPathClassOfWord}, the
+ * only caller, passes them.
+ */
 function matchesEntry(segments: readonly string[], entry: ProtectedEntry): boolean {
-  const want = entry.segments;
-  if (want.length > segments.length) return false;
+  const want = entry.segments.map(foldFileName);
+  const have = segments;
+  if (want.length > have.length) return false;
   if (entry.directory) {
     // A directory prefix matches wherever its segments appear as a contiguous
     // run, exactly as the built-in `.approval/` and `.github/workflows/` do.
-    for (let start = 0; start + want.length <= segments.length; start += 1) {
-      if (want.every((segment, offset) => segment === segments[start + offset])) return true;
+    for (let start = 0; start + want.length <= have.length; start += 1) {
+      if (want.every((segment, offset) => segment === have[start + offset])) return true;
     }
     return false;
   }
@@ -350,8 +367,8 @@ function matchesEntry(segments: readonly string[], entry: ProtectedEntry): boole
   // `/repo/docs/x.md` and `./docs/x.md`, and a bare filename (a one-segment
   // entry) matches that filename in any directory, which is how the built-in
   // filenames have always behaved.
-  const offset = segments.length - want.length;
-  return want.every((segment, index) => segment === segments[offset + index]);
+  const offset = have.length - want.length;
+  return want.every((segment, index) => segment === have[offset + index]);
 }
 
 /** The most words one brace-expanded path may stand for before it is judged unknown. */
@@ -544,7 +561,8 @@ function collapseBracedVariables(candidate: string): string {
  *   since `$OUT` alone or `$OUT/scripts/x.sh` is ordinary work far more often.
  */
 function hermesHomeKind(segment: string): "home" | "maybe" | null {
-  if (segment.toLowerCase() === ".hermes") return "home";
+  // Folded ({@link foldFileName}): `.HERMES` and `.herme<U+017F>` are the home on APFS.
+  if (foldFileName(segment) === ".hermes") return "home";
   if (segment === "$HERMES_HOME" || segment === "${HERMES_HOME}") return "home";
   if (/\$(?:[A-Za-z_]|\{)/u.test(segment)) return "maybe";
   return null;
@@ -597,16 +615,17 @@ function maybeHomeTails(tail: readonly string[]): (readonly string[])[] {
 
 /** The tail below a profile home (`profiles/<p>/...`), or the tail itself. */
 function hermesProfileTail(tail: readonly string[]): readonly string[] {
-  return tail[0]?.toLowerCase() === "profiles" && tail[1] !== undefined ? tail.slice(2) : tail;
+  const first = tail[0];
+  return first !== undefined && foldFileName(first) === "profiles" && tail[1] !== undefined ? tail.slice(2) : tail;
 }
 
 /**
  * The class a write below a Hermes home takes, by the home's organ rows
- * (APRV-398, APRV-445, APRV-511). Names compare without case.
+ * (APRV-398, APRV-445, APRV-511). Names compare folded ({@link foldFileName}).
  */
 function hermesOrganClass(fullTail: readonly string[]): string | null {
   const tail = hermesProfileTail(fullTail);
-  const next = tail[0]?.toLowerCase();
+  const next = tail[0] === undefined ? undefined : foldFileName(tail[0]);
   if (
     next === undefined ||
     next === "config.yaml" ||
@@ -636,17 +655,18 @@ function hermesOrganClass(fullTail: readonly string[]): string | null {
  * the 1Password bootstrap file Hermes loads into the gateway; and the source
  * install's `hermes-agent/.env` and `.env.*`, its PROJECT_ROOT dotenv, except
  * `.env.example`, the template the install ships. Reading the rest of the
- * runtime's source is not a credential read. Names compare without case.
+ * runtime's source is not a credential read. Names compare folded
+ * ({@link foldFileName}).
  */
 function hermesCredentialTail(fullTail: readonly string[]): boolean {
   const tail = hermesProfileTail(fullTail);
-  const next = tail[0]?.toLowerCase();
+  const next = tail[0] === undefined ? undefined : foldFileName(tail[0]);
   if (next === undefined) return false;
   if (next === ".env" || next.startsWith(".env.")) return true;
   if (next === "auth.json") return true;
   if (next === ".op.env" || next.startsWith(".op.env.")) return true;
   if (next === "hermes-agent") {
-    const file = tail[1]?.toLowerCase();
+    const file = tail[1] === undefined ? undefined : foldFileName(tail[1]);
     // `.env.example` exactly: on a case-sensitive filesystem `.env.EXAMPLE` is
     // another file, and only the template the install ships is exempt.
     return file !== undefined && (file === ".env" || (file.startsWith(".env.") && tail[1] !== ".env.example"));
@@ -730,7 +750,14 @@ export function protectedPathClass(
 
 /** {@link protectedPathClass} for one word that brace expansion has already made. */
 function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): string | null {
-  const segments = pathSegments(collapseBracedVariables(candidate));
+  // Every guarded name below is compared with the candidate's FOLDED segments
+  // ({@link foldFileName}), on every platform: APFS opens `Approval.MD`,
+  // `.Claude/Settings.json` and `.APPROVAL/env` as the guarded files, and a
+  // name compared by its exact case let those through as ordinary writes.
+  // `spelled` keeps the segments as written for the one row that reads a
+  // variable by its exact name (`$HERMES_HOME`).
+  const spelled = pathSegments(collapseBracedVariables(candidate));
+  const segments = spelled.map(foldFileName);
 
   // 1. The log directory, before anything else that would call it a policy file.
   for (let index = 0; index < segments.length; index += 1) {
@@ -739,7 +766,7 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
 
   // 2. The gate's own organs.
   const last = segments[segments.length - 1];
-  if (last !== undefined && CORE_FILENAMES.includes(last)) return "policy.core";
+  if (last !== undefined && CORE_FILENAMES_FOLDED.includes(last)) return "policy.core";
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
     // The rest of the approval home: payload store, vault, keys, environment
@@ -857,7 +884,10 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
     // other unexpanded variable (which MAY be the home, so only its organ rows
     // apply); the tail is judged as spelled and with its `..` resolved. See
     // {@link hermesHomeKind} and {@link hermesOrganClass}.
-    const home = segment === undefined ? null : hermesHomeKind(segment);
+    // The home's kind is read from the segment as spelled: a folded
+    // `$HERMES_HOME` would read as some other variable, a "maybe" home.
+    const spelledSegment = spelled[index];
+    const home = spelledSegment === undefined ? null : hermesHomeKind(spelledSegment);
     if (home !== null) {
       const cls = hermesTailClass(segments.slice(index + 1), hermesOrganClass);
       if (home === "home" && cls !== null) return cls;
@@ -895,7 +925,7 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
   if (routed !== null) return routed.entry.routed;
 
   // 4. The prose and configuration about the gate.
-  if (last !== undefined && PROTECTED_FILENAMES.includes(last)) return "policy.edit";
+  if (last !== undefined && PROTECTED_FILENAMES_FOLDED.includes(last)) return "policy.edit";
   for (let index = 0; index < segments.length; index += 1) {
     // CI configuration.
     if (segments[index] === ".github" && segments[index + 1] === "workflows") return "policy.edit";
@@ -985,9 +1015,12 @@ export function normalizePathSpelling(candidate: string): string {
  */
 export function isGateOrganPath(candidate: string): boolean {
   if (builtinProtectedPathClass(candidate) !== "policy.core") return false;
-  const segments = pathSegments(candidate);
+  // Folded, as the class above is: `approval.md` and `.APPROVAL/x` are
+  // `policy.core` now, and an exact exclusion would let an organ record stand
+  // in for the policy file or the approval home.
+  const segments = pathSegments(candidate).map(foldFileName);
   const last = segments[segments.length - 1];
-  if (last !== undefined && CORE_FILENAMES.includes(last)) return false;
+  if (last !== undefined && CORE_FILENAMES_FOLDED.includes(last)) return false;
   return !segments.includes(".approval");
 }
 
@@ -1052,7 +1085,9 @@ function credentialWordReadings(candidate: string): boolean {
   // Case is folded on every platform. macOS and Windows volumes are case
   // insensitive by default, so an upper-case spelling opens the environment map
   // there; on a case-sensitive volume the fold names a different file as a
-  // credential, which costs an approval prompt and never an exposure.
+  // credential, which costs an approval prompt and never an exposure. The fold
+  // is {@link foldFileName}'s full one: APFS opens `.approval/<U+017F>ault.enc`
+  // as the vault, which `toLowerCase()` alone did not fold.
   //
   // APRV-522 fix round 2 (path-parser differential): a backslash separates
   // segments only on Windows. On macOS and Linux it is a character of a name,
@@ -1073,7 +1108,7 @@ function credentialWordReadings(candidate: string): boolean {
  * "maybe" home).
  */
 function credentialSegmentsAsWrittenOrResolved(segments: readonly string[]): boolean {
-  const folded = segments.map((segment) => segment.toLowerCase());
+  const folded = segments.map(foldFileName);
   const spellings = folded.every((segment, index) => segment === segments[index]) ? [folded] : [folded, [...segments]];
   for (const written of spellings) {
     if (credentialSegments(written)) return true;
@@ -2520,7 +2555,7 @@ const V_PREFIXED_SEMVER = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[
  * there (tests/command-class-remote-config-case.test.ts).
  */
 function isTagRef(name: string): boolean {
-  const folded = name.toLowerCase();
+  const folded = foldFileName(name);
   if (folded.startsWith("refs/tags/")) return true;
   if (folded.startsWith("refs/heads/")) return false;
   // APRV-518: git's ref DWIM tries `refs/<name>` first, so `tags/t1` is
@@ -2546,7 +2581,11 @@ function isTagRef(name: string): boolean {
  * created a branch `HEADS/MAIN` for the second, so this costs nothing there.
  */
 function destinationBranch(destination: string): string | null {
-  const folded = destination.toLowerCase();
+  // Folded ({@link foldFileName}). Each prefix below is spelled only with
+  // letters whose every folding spelling is one UTF-16 unit (ASCII, U+017F),
+  // and a decomposed letter cannot match it, so slicing the spelled word by the
+  // prefix's length is exact.
+  const folded = foldFileName(destination);
   if (folded.startsWith("refs/heads/")) return destination.slice("refs/heads/".length);
   if (folded.startsWith("refs/")) return null;
   if (folded.startsWith("heads/")) return destination.slice("heads/".length);
@@ -2562,8 +2601,8 @@ const TRUNK_BRANCHES: readonly string[] = ["main", "master"];
  * filesystem a remote's loose `refs/heads/MAIN` is its `refs/heads/main`.
  */
 function isTrunkBranch(branch: string, trunks: readonly string[]): boolean {
-  const lower = branch.toLowerCase();
-  return trunks.some((trunk) => trunk.toLowerCase() === lower);
+  const folded = foldFileName(branch);
+  return trunks.some((trunk) => foldFileName(trunk) === folded);
 }
 
 /** Does either source or destination of this refspec explicitly name a tag? */
@@ -2955,7 +2994,7 @@ function gitPushClass(
   const legacy =
     remoteWord === undefined
       ? facts.legacyRemotes.length > 0
-      : facts.legacyRemotes.some((name) => name.toLowerCase() === remoteWord.toLowerCase());
+      : facts.legacyRemotes.some((name) => foldFileName(name) === foldFileName(remoteWord));
   if (legacy) return { class: "vcs.history.rewrite", rule: GIT_PUSH_CONFIG_UNREADABLE_RULE };
 
   const headAs = facts.head === null || facts.headIsDefault ? "main" : `refs/heads/${facts.head}`;
@@ -2990,7 +3029,7 @@ function gitPushClass(
   // filesystem a loose `refs/tags/v1` and `V1` may be one file. git 2.50.1 on
   // APFS refused `git push origin V1` beside a tag `v1`, so this costs nothing
   // there.
-  const foldedTags = new Set([...facts.tags].map((tag) => tag.toLowerCase()));
+  const foldedTags = new Set([...facts.tags].map(foldFileName));
   // The words whose SOURCE decides what kind of ref the push writes: a
   // colon-less word, and the source of a `src:dst` whose destination does not
   // start with `refs/` (git gives such a destination the kind of its source:
@@ -3005,7 +3044,7 @@ function gitPushClass(
       .map((refspec) => refspec.slice(0, refspec.indexOf(":")))
       .filter((source) => source.length > 0 && !/^(?:head|@)(?:[~^].*)?$/iu.test(source) && !source.startsWith("refs/")),
   ];
-  const localTags = sourced.filter((name) => foldedTags.has(name.toLowerCase()));
+  const localTags = sourced.filter((name) => foldedTags.has(foldFileName(name)));
   if (localTags.length > 0) {
     candidates.push({ class: "release.publish", rule: "git-push-local-tag", path: localTags.join(" ") });
   }
@@ -4278,7 +4317,7 @@ function globElements(pattern: string): GlobElement[] | null {
  * build past about ten thousand, and was then judged to match too).
  */
 export function globSegmentMatches(pattern: string, name: string): boolean {
-  if (!isPatternSegment(pattern)) return pattern.toLowerCase() === name.toLowerCase();
+  if (!isPatternSegment(pattern)) return foldFileName(pattern) === foldFileName(name);
   if (name.startsWith(".") && (pattern.startsWith("*") || pattern.startsWith("?"))) return false;
   const elements = globElements(pattern);
   if (elements === null) return true;
@@ -4346,7 +4385,7 @@ const GIT_CONFIG_FILE_WRITE_RULE = "git-config-file-write";
  * `.git/config` does.
  */
 function namesGitConfigFile(word: string): boolean {
-  const segments = pathSegments(word).map((segment) => segment.toLowerCase());
+  const segments = pathSegments(word).map(foldFileName);
   const last = segments[segments.length - 1];
   if (last === ".gitconfig" || last === "gitconfig") return true;
   // The directory itself too: `cp -t ~/.config/git x` writes into it.
@@ -5167,11 +5206,11 @@ function printerCommand(segment: LexSegment): { lexed: LexWord[]; start: number;
   // (`/usr/bin/printf`, `/bin/echo`; #680's gate, M2), written plainly.
   const command = lexed[start]?.text ?? "";
   const byPath = command.includes("/") && isSystemBinWord(command, lexed[start]?.exact ?? false);
-  const name = (byPath ? (command.split("/").pop() ?? "") : command).toLowerCase();
+  const name = foldFileName(byPath ? (command.split("/").pop() ?? "") : command);
   // Any other path whose last name is a printer (`/usr/bin//printf`,
   // `/bin/../usr/bin/printf`, `./printf`) may run the system's own: what it
   // prints is not read, and counts (review-b's read of #683, M1).
-  const otherPath = !byPath && command.includes("/") && /^(?:printf|echo|print)$/u.test((command.split("/").pop() ?? "").toLowerCase());
+  const otherPath = !byPath && command.includes("/") && /^(?:printf|echo|print)$/u.test(foldFileName(command.split("/").pop() ?? ""));
   return { lexed, start, name, byPath, otherPath };
 }
 
@@ -5647,7 +5686,7 @@ function sedLiteralGitWrite(
   dir: ShellDir | null | undefined,
   lineNamesGit: boolean,
 ): { class: string; rule: string; path: string } | null {
-  const literalGit = (path: string): boolean => pathSegments(path).some((segment) => segment.toLowerCase() === ".git");
+  const literalGit = (path: string): boolean => pathSegments(path).some((segment) => foldFileName(segment) === ".git");
   const hit = words.find(
     (word) =>
       literalGit(word) ||
@@ -9282,7 +9321,7 @@ function classifySegment(
       // F-12 fold (review-b N2): APFS and the default macOS volume are case-
       // insensitive, so `>> approval.md` is the policy file. Fail closed: a bare
       // word that names a protected file or a credential in ANY case refuses.
-      lexWords.some((word) => protectedNameFolded(word.text, protectedPaths) || isCredentialPath(word.text.toLowerCase())) ||
+      lexWords.some((word) => protectedNameFolded(word.text, protectedPaths) || isCredentialPath(foldFileName(word.text))) ||
       // F-12 fold (review-b M1, laundering): a known command behind a word the
       // table does not know (`uv run npm publish`, `caffeinate -i npm publish`,
       // `su x -c 'npm publish'`) is not a no-rule segment. Last, so it runs
@@ -9722,7 +9761,7 @@ function innerPartRefused(part: LexSegment, protectedPaths: readonly ProtectedPa
         protectedNameFolded(word.text, protectedPaths) ||
         strictestProtected([word.text], protectedPaths) !== null ||
         isCredentialPath(word.text) ||
-        isCredentialPath(word.text.toLowerCase()),
+        isCredentialPath(foldFileName(word.text)),
     )
   );
 }
@@ -9734,14 +9773,14 @@ function innerPartRefused(part: LexSegment, protectedPaths: readonly ProtectedPa
  * with a `/` or a leading `.`, so a bare name is the whole question.
  */
 function protectedNameFolded(text: string, protectedPaths: readonly ProtectedPathEntry[]): boolean {
-  const folded = text.toLowerCase();
+  const folded = foldFileName(text);
   if (folded.length === 0) return false;
   const names = [
     ...CORE_FILENAMES,
     ...PROTECTED_FILENAMES,
     ...protectedPaths.map((entry) => (typeof entry === "string" ? entry : entry.path)),
   ];
-  return names.some((name) => (name.split("/").filter((part) => part.length > 0).pop() ?? "").toLowerCase() === folded);
+  return names.some((name) => foldFileName(name.split("/").filter((part) => part.length > 0).pop() ?? "") === folded);
 }
 
 /**

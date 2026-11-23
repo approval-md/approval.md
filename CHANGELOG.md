@@ -266,6 +266,49 @@ on the change above.
   and 10,000 levels of nesting each take under half a second of CPU through
   the hook.
 
+**Guarded names fold case on every platform.** The guards compared a path's
+names with the guarded names by exact letter case, while APFS, macOS's
+default volume, opens a name under full Unicode case folding. So `echo x >
+Approval.MD`, `rm -rf .APPROVAL`, `echo x > .APPROVAL/log/events.jsonl`,
+`echo x > .Claude/settings.json`, `echo x > .Cursor/hooks.json`, `echo x >
+claude.md`, `echo x > .GitHub/workflows/ci.yml` and `echo x >
+~/.Codex/config.toml` classified as ordinary workspace writes, ran
+unattended, and each landed on the guarded file. The few rows that already
+folded (the credential rows, the Hermes home, the `.git` segment, git's ref
+names) used `toLowerCase()`, which misses ten of the eleven code points APFS
+opens as ASCII letters: `.claude/<U+017F>ettings.json`,
+`.cursor/hoo<U+212A>s.json`, `.codex/con<U+FB01>g.toml` and
+`~/.herme<U+017F>/.env` were the same holes in a narrower form.
+
+- **One fold, `foldFileName` (`src/core/name-fold.ts`).** NFD, then lower,
+  upper and lower case: the Kelvin sign is `k`, the long s is `s`, `ß` and
+  `ẞ` are `ss`, and the ligatures `ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ ﬆ` are their letters, as APFS
+  opens them. It is stricter than APFS on one code point, the dotless i,
+  which it folds to `i`. It refines `toLowerCase()` (checked over every code
+  point), so no row that already folded matches less.
+- **Every guarded-name compare uses it, on every platform:** the policy file
+  names, the approval home and its log, the Claude, Cursor, Grok, Muse,
+  Codex and Hermes rows and their second segments, `CLAUDE.md`, `AGENTS.md`,
+  `.npmrc`, `.github/workflows`, a policy's own `protected_paths` entries
+  (bare and routed), the credential rows, the `.git` segment and git's
+  configuration files, git's trunk, tag and remote names, the no-rule
+  guard's name check, the hook's own credential and home passes, the
+  organ-attestation exclusions, and the Codex workspace plan's alias check.
+  On a case-sensitive volume a folded match costs an approval prompt.
+- **Grants stay exact.** A compare that makes a line lighter (the Hermes
+  skill-script shape, the install's `.env.example`, the protected-path
+  guard's evidence carve-out for `.approval/log/`) keeps its exact spelling,
+  so a spelling in another case is never lighter than the canonical one.
+- **Evidence.** Against main's build, pure and through the hook: the 382
+  conformance vectors and the 63 overlay recipes are unmoved, and over 11,667
+  lines (each guarded name in every case and fold spelling, by nine verbs and
+  five positions) 0 are looser; every line that moves now takes the class
+  its canonical spelling takes on main. Run for real in bash and zsh on APFS
+  in a scratch folder, each case and fold spelling tried landed on the
+  guarded file, and the dotless i and a fullwidth a did not.
+  Conformance: `command-class` 1.13.0 (from 1.12.0), ten new vectors; main's
+  382 are byte-identical.
+
 ### Added
 
 - **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536).**
