@@ -185,10 +185,12 @@ keeps its class, unchanged from main (`rm -rf .` in a tree of sources is
 .`) is the mode, not an option. Fail closed, `policy.core`: no listing (every
 caller but the hook), a directory over the listing's 2,000-entry cap,
 unreadable or missing, a line that may change directory or names `HOME`, an
-operand the text cannot read (`$X`, `"$X"`, `$OLDPWD`, `$(pwd)`, any other
-`$(...)`, alone or followed only by `.` or `..`), and a chain of more than 8
-directories to list. Not a parent, and unchanged: `rm -rf ./dist`, `rm -rf
-"$TMPDIR"/x`, `rm -rf $TARGET/x`. `mv .`, `mv ./` and `mv sub/..` move nothing
+operand with a word the text cannot read (`$X`, `"$X"`, `$OLDPWD`, `$(pwd)`,
+any other `$(...)`, `~user`) last in the path (`$X`, `./$X`, `sub/$X`,
+`/tmp/$X`), followed by a glob, or removed again by a later `..`
+(`$(echo sub)/..`, `$X/a/../..`), since such a word may itself hold `..`;
+and a chain of more than 8 directories to list. Not a parent, and unchanged:
+`rm -rf ./dist`, `rm -rf "$TMPDIR"/x`, `rm -rf $TARGET/x`, `rm -rf $X/dist`. `mv .`, `mv ./` and `mv sub/..` move nothing
 (rename(2) refuses them) and keep their class; `rm -rf $(builtin pwd)` and
 `$(command pwd)` stay refused, as on main. Not covered (follow-up): `rmdir .`,
 `find . -delete`, `chown`/`chgrp` (refused), organ directories below the top

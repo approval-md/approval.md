@@ -1358,3 +1358,36 @@ test("security review of the parents rule (L61587), 4: an operand the text canno
   // Main refuses a substitution it cannot classify; that stays a refusal.
   assert.equal(classifyCommand("rm -rf $(cmd)").ok, false);
 });
+
+test("security review of the parents rule (L61587), 5: a tail after an unreadable word that comes back to it", () => {
+  // The tail is normalised before it is judged: a name that a later `..`
+  // removes is no name, and a `..` that removes the unreadable word itself
+  // (or a word that may hold `..`, like `$X` in `./$X`) leaves the target
+  // unknown: fail closed.
+  for (const command of [
+    "rm -rf $X/sub/..",
+    "chmod -R 000 $(echo x)/a/../..",
+    "rm -rf $(echo x)/a/..",
+    "rm -rf $HOME/x/..",
+    'rm -rf "$X"/..',
+    "rm -rf $X/*",
+    "chmod -R 000 ./$X",
+    "chmod -R 000 sub/$X",
+    'rm -rf "$X/$Y"',
+    "chmod -R 000 $X/$Y",
+    "rm -rf ~someone",
+    "chmod -R 000 ~someone/",
+  ]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // A named tail is not the unreadable directory itself: main's class.
+  assert.deepEqual(classesOf("rm -rf $X/dist"), ["files.delete.out_of_scope"]);
+  assert.deepEqual(classesOf("rm -rf $(echo x)/build/out"), ["files.delete.out_of_scope"]);
+  assert.deepEqual(classesOf('rm -rf "$TMPDIR"/x'), ["files.delete.out_of_scope"]);
+  assert.deepEqual(classesOf("rm -rf $TARGET/x"), ["files.delete.out_of_scope"]);
+  // A glob that names what a directory holds stays #686's listing rule.
+  assert.deepEqual(withListing("rm -rf dist/*", { "/w/dist": ["a.js"] }), ["files.delete.out_of_scope"]);
+  // Main refuses a substitution it cannot classify; that stays a refusal.
+  assert.equal(classifyCommand("rm -rf $(cmd)/build/out").ok, false);
+  assert.equal(classifyCommand("rm -rf $(cmd)/a/../..").ok, false);
+});

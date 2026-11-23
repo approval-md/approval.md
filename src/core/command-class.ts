@@ -8995,28 +8995,36 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
   else if (pwd !== null) [base, rest] = ["cwd", operand.slice(pwd[0].length)];
   else if (pwdWord && operand.startsWith(SUBSTITUTION_SENTINEL)) [base, rest] = ["cwd", operand.slice(SUBSTITUTION_SENTINEL.length)];
   else if (operand.startsWith("/")) [base, rest] = ["root", operand];
-  else {
-    // An expansion the text cannot read (`$X`, `"$X"`, `${X}/`, `$OLDPWD`, a
-    // substitution), alone or with only `.`/`..` after it, may be the working
-    // directory or the home: fail closed (security review, 4). With a named
-    // tail (`"$TMPDIR"/x`) it is not one of them.
-    const variable = /^(?:\$[A-Za-z_][A-Za-z0-9_]*|\$\{[^}]*\}|\$[0-9?#@*!$-])/u.exec(operand);
-    const head = operand.startsWith(SUBSTITUTION_SENTINEL) ? SUBSTITUTION_SENTINEL : (variable?.[0] ?? null);
-    const unread = head === null ? null : [head, operand.slice(head.length)];
-    if (unread !== null) {
-      const tail = (unread[1] ?? "").split("/").filter((part) => part.length > 0);
-      return tail.every((part) => part === "." || part === "..") ? "unplaced" : null;
-    }
-    [base, rest] = ["cwd", operand];
-  }
-  if (/[$*?[\]{}~`]/u.test(rest) || rest.includes(SUBSTITUTION_SENTINEL) || rest.includes(PARAMETER_MARK)) return null;
+  else [base, rest] = ["cwd", operand];
+  // Normalise lexically: `.` and empty parts go, a `..` removes the part
+  // before it. A word the text cannot read (`$X`, `"$X"`, `${X}`, `$OLDPWD`,
+  // a substitution, `~user`) may itself hold `..` or be the working
+  // directory or the home (security review, 4 and 5). So: a `..` that would
+  // remove such a word, or such a word (or a glob after one) last, leaves the
+  // target unknown: fail closed. A readable name after it (`$X/dist`,
+  // `"$TMPDIR"/x`) is not the directory itself: not judged here, as on main.
+  const unreadable = (part: string): boolean =>
+    /[$`]/u.test(part) || part.includes(SUBSTITUTION_SENTINEL) || part.includes(PARAMETER_MARK);
+  const globbed = (part: string): boolean => /[*?[\]{}~]/u.test(part);
+  const parts = rest.split("/");
+  // `~user` leads to a home, maybe this one: a word the text cannot read.
+  if (base === "cwd" && /^~[^/]/u.test(parts[0] ?? "")) parts[0] = "$~user";
   const stack: string[] = [];
-  for (const segment of rest.split("/")) {
+  for (const segment of parts) {
     if (segment.length === 0 || segment === ".") continue;
-    if (segment === ".." && stack.length > 0 && stack[stack.length - 1] !== "..") stack.pop();
-    else if (segment === ".." && base === "root") continue;
+    if (segment === ".." && stack.length > 0 && stack[stack.length - 1] !== "..") {
+      if (unreadable(stack.pop() as string)) return "unplaced";
+    } else if (segment === ".." && base === "root") continue;
     else stack.push(segment);
   }
+  const firstUnread = stack.findIndex(unreadable);
+  if (firstUnread >= 0) {
+    const last = stack[stack.length - 1] as string;
+    if (unreadable(last) || stack.slice(firstUnread + 1).some(globbed)) return "unplaced";
+    return null;
+  }
+  // A glob that names what a directory holds (`dist/*`) is the glob rule's.
+  if (stack.some(globbed)) return null;
   // Leading `..`s, then the names after them (security review, 2: `../w`,
   // `~/../other`). Names with no `..` before them stay inside the working
   // directory or the home (`./dist`, `~/build`): not a parent.

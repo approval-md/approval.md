@@ -471,8 +471,18 @@ const FIXTURES: readonly Fixture[] = [
     context: SCRATCH_ROOTS,
   },
   // Unreadable values: an unexpanded variable and a glob could name anything.
+  // A variable last may hold `..` and climb to the working directory, which
+  // may hold an organ directory (lead ruling L61587, parents; security review
+  // 5): fail closed. With a readable name after it, still not scratch.
   {
     command: "rm -rf /private/tmp/$SESSION",
+    class: "policy.core",
+    rule: "protected-path",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  {
+    command: "rm -rf /private/tmp/$SESSION/out",
     class: "files.delete.out_of_scope",
     rule: "rm-absolute",
     row: "rm",
