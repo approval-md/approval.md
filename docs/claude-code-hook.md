@@ -231,6 +231,42 @@ Install the CLI on `PATH` (`npm link`, or an absolute path in the `command`).
 which means the tool call proceeds.** An uninstalled CLI is therefore an open
 gate, and `approval doctor` will not know to look for it.
 
+### The hook's own deadline: `hook-deadline`
+
+A killed hook is a call that proceeds, so the hook must never be the thing the
+harness kills. Two rules keep it inside the harness's timeout whatever the
+tool call holds:
+
+- **Reading the call has a deadline of its own: 15s**, or the harness ceiling
+  less two seconds where one is stated or assumed and that is shorter (8s
+  under `--harness-cap 10s`; under a ceiling too short to spare two seconds, a
+  quarter of it: 500ms under 2s). A call the hook cannot classify and land on the
+  disk in that time is refused `hook-deadline`, with nothing registered or
+  requested. Reading an ordinary call takes milliseconds; a megabyte of
+  command takes a second or two. The environment variable
+  `APPROVAL_HOOK_DESCRIBE_DEADLINE_MS` can shorten the deadline and can never
+  lengthen it.
+- **An entry whose `timeout` is under about 17s must say so.** The hook does
+  not see the `timeout` you wrote. Without `--harness-cap` the deadline is the
+  full 15s, and a harness that stops listening sooner has let the call through
+  before the hook refuses it. `--harness-cap <that timeout>` puts the deadline
+  inside it. (A stated cap at or under 60s still leaves no window for a human,
+  so a call that needs one is refused `hook-harness-cap-too-short`; a call that
+  needs none is answered as usual.)
+- **A slow read shortens the wait.** `--timeout` sits a little under the
+  harness's own timeout, and the harness's timer started before the read did.
+  A read that takes more than one second shortens the wait for a decision by
+  the rest, down to none; the hook says so on stderr. The question stays open
+  for the retry grace as after any wait that ran out. An ordinary read takes
+  milliseconds and changes nothing.
+
+The deadline interrupts the hook's own JavaScript. It does not interrupt a
+blocking system call. A read that is stopped is stopped part way, so a process
+that answers many calls on one thread (the Codex bridge) refuses every later
+call `hook-deadline` too, and says so, until it is started again. A hook the
+harness runs once per call starts fresh each time, and `approval serve`
+retires the thread that was stopped.
+
 ### The effective window: `--harness-cap`, and the 60s margin (APRV-423)
 
 Claude Code kills the hook process at the `timeout` in `.claude/settings.json`,
@@ -1775,6 +1811,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-expired` | the TTL lapsed before a decision |
 | `hook-timeout` | no decision inside `--timeout` (clamped to what a stated or assumed harness ceiling leaves); the request stays OPEN, and a decision inside the RETRY GRACE authorizes an identical retry, once. Past the grace it authorizes nothing: the next gated call of this actor withdraws the question, and a retry does not carry a grant written after the grace ran out (APRV-410). Under a harness ceiling the deny names the instant the request expires |
 | `hook-harness-cap-too-short` | the `--harness-cap` this hook was told about does not clear the 60s margin, so no window is left for a human. Nothing registered, nothing requested, no prompt sent |
+| `hook-deadline` | reading the call (classifying it and landing its paths on the disk) outlasted the hook's own 15s limit, shorter under a short harness ceiling. The call is refused while the hook can still say so: a hook the harness kills at its timeout is a call that proceeds. Nothing registered, nothing requested. Make the call shorter or split it |
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. On this surface the record IS the authorization, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it. The grant is spent by then: the retry costs one prompt and authorizes nothing meanwhile |
