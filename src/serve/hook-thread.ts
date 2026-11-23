@@ -367,7 +367,10 @@ export function hookThreads(
           case "done":
             coldReadsInLock += message.coldReadsInLock;
             finish();
-            give(worker);
+            // A thread whose read was stopped at the hook's deadline refuses
+            // every later call it is handed: it is not kept warm.
+            if (message.spent === true) retire(worker);
+            else give(worker);
             settle({ code: message.code, stdout: message.stdout, stderr: message.stderr });
             return;
           case "failed":
