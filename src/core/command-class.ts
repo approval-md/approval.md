@@ -8924,6 +8924,157 @@ function organDestination(dest: string, inexact: (word: string) => boolean, glob
 }
 
 /**
+ * A PARENT of an organ directory (lead ruling, CLAIMS L61587: "a recursive
+ * delete, move, rename or chmod whose target IS a guarded organ directory (or
+ * a parent of one, up to the workspace root: rm -rf . counts) takes that
+ * directory's strictest class"). The operands it reads: a recursive `rm`'s, a
+ * `mv`'s sources, a recursive `chmod`'s files. `chown`, `chgrp`, `rename`,
+ * `find -delete` and `git clean` are not read here (refused, or a follow-up).
+ */
+function organParentOperands(basename: string, args: readonly string[], positionals: readonly string[], plan: CopyPlan | null): string[] {
+  const recursive = (...letters: string[]): boolean => hasFlag(args, ["--recursive"]) || hasShortFlag(args, letters);
+  if (basename === "rm") return recursive("r", "R") ? [...positionals] : [];
+  // `mv .`, `mv ./` and `mv sub/..` are refused by rename(2) (EINVAL in
+  // bash, zsh and dash on macOS): a source whose last component is `.` or
+  // `..` moves nothing, so only a parent spelled by name is read.
+  if (basename === "mv") {
+    return (plan?.sources ?? []).filter((source) => {
+      const last = source.split("/").filter((part) => part.length > 0).pop();
+      return last !== "." && last !== "..";
+    });
+  }
+  if (basename === "chmod") {
+    if (!recursive("R")) return [];
+    // The mode is the first operand unless `--reference` gives it.
+    return hasFlag(args, ["--reference"]) ? [...positionals] : positionals.slice(1);
+  }
+  return [];
+}
+
+/** The most directories on one parent's chain that are listed before the parent is judged strict. */
+const ORGAN_PARENT_CHAIN_CAP = 8;
+
+/**
+ * Is `operand` the working directory, an ancestor of it, the home or an
+ * ancestor of the home (`.`, `./`, `sub/..`, `..`, `$PWD`, `"$PWD"`, `$(pwd)`,
+ * `~`, `~/`, `$HOME`, `/`)? `null` when it is not such a word, or not one the
+ * text can tell (any other variable or substitution, a glob: their own rules
+ * answer). Otherwise the absolute directories whose listings decide (the
+ * operand and every directory from it down to the working directory or home
+ * it holds), or `"unplaced"` when the caller cannot place or list them.
+ */
+function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | undefined): string[] | "unplaced" | null {
+  let base: "cwd" | "home" | "root";
+  let rest: string;
+  const home = /^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/u.exec(operand);
+  const pwd = /^(?:\$PWD|\$\{PWD\})(?=\/|$)/u.exec(operand);
+  if (home !== null) [base, rest] = ["home", operand.slice(home[0].length)];
+  else if (pwd !== null) [base, rest] = ["cwd", operand.slice(pwd[0].length)];
+  else if (pwdWord && operand.startsWith(SUBSTITUTION_SENTINEL)) [base, rest] = ["cwd", operand.slice(SUBSTITUTION_SENTINEL.length)];
+  else if (operand.startsWith("/")) [base, rest] = ["root", operand];
+  else [base, rest] = ["cwd", operand];
+  if (/[$*?[\]{}~`]/u.test(rest) || rest.includes(SUBSTITUTION_SENTINEL) || rest.includes(PARAMETER_MARK)) return null;
+  const stack: string[] = [];
+  for (const segment of rest.split("/")) {
+    if (segment.length === 0 || segment === ".") continue;
+    if (segment === ".." && stack.length > 0 && stack[stack.length - 1] !== "..") stack.pop();
+    else if (segment === ".." && base === "root") continue;
+    else stack.push(segment);
+  }
+  const ups = stack.length;
+  if (base !== "root" && stack.some((segment) => segment !== "..")) return null;
+  // Without the caller's disk: the working directory, the home, their
+  // ancestors and `/` are parents of an organ directory the text cannot rule
+  // out; any other absolute path is not judged here.
+  if (disk === undefined) return base === "root" && stack.length > 0 ? null : "unplaced";
+  let target: string;
+  if (base === "root") {
+    target = `/${stack.join("/")}`;
+  } else {
+    const from = base === "home" ? (disk.homeOk === false ? null : disk.home) : disk.relativeOk === false ? null : disk.cwd;
+    if (from === null || !from.startsWith("/")) return "unplaced";
+    const parts = from.split("/").filter((part) => part.length > 0);
+    if (ups > parts.length) target = "/";
+    else target = `/${parts.slice(0, parts.length - ups).join("/")}`;
+  }
+  const holds = (dir: string | null): dir is string => dir !== null && dir.startsWith("/") && (dir === target || target === "/" || dir.startsWith(`${target}/`));
+  const places = [disk.relativeOk === false ? null : disk.cwd, disk.homeOk === false ? null : disk.home].filter(holds);
+  if (base === "root" && places.length === 0) {
+    // An absolute path that holds neither the working directory nor the home
+    // is not a parent this rule knows; one that may hold them unplaced is.
+    return disk.relativeOk === false || disk.homeOk === false ? "unplaced" : null;
+  }
+  if (disk.listingsOk === false) return "unplaced";
+  const dirs = new Set<string>([target]);
+  for (const place of places) {
+    const below = place.slice(target === "/" ? 1 : target.length + 1).split("/").filter((part) => part.length > 0);
+    let at = target === "/" ? "" : target;
+    for (const part of below) {
+      at = `${at}/${part}`;
+      dirs.add(at);
+    }
+  }
+  return dirs.size > ORGAN_PARENT_CHAIN_CAP ? "unplaced" : [...dirs];
+}
+
+/**
+ * The class a listed name gives the directory that holds it: an organ
+ * directory ({@link ORGAN_DIRECTORIES}), a guarded name the path rule knows
+ * (`.approval`, `.codex`, `.hermes`, `APPROVAL.md`, `CLAUDE.md`, ...), or `.git`
+ * (`vcs.history.rewrite`, the git-dir rule's). The table is read directly, so
+ * the parent rule does not depend on how the bare-directory rule is scoped.
+ */
+function guardedEntryClass(name: string, protectedPaths: readonly ProtectedPathEntry[]): { protectedClass: string | null; git: boolean } {
+  let best: string | null = Object.hasOwn(ORGAN_DIRECTORIES, name) ? (ORGAN_DIRECTORIES[name] as string) : null;
+  const named = protectedPathClass(name, protectedPaths);
+  if (named !== null && (best === null || protectedRank(named) < protectedRank(best))) best = named;
+  return { protectedClass: best, git: foldGuardedName(name) === ".git" };
+}
+
+/**
+ * The parent rule for one segment: the strictest protected class among the
+ * operands that are parents of an organ directory (`path` the operand), and
+ * the operands whose directories hold only `.git` (judged by the git-dir rule).
+ * A parent the caller cannot place or list is `policy.core`, fail closed; one
+ * whose listings hold no guarded name keeps the segment's own class.
+ */
+function organParentClass(
+  operands: readonly string[],
+  words: readonly LexWord[],
+  protectedPaths: readonly ProtectedPathEntry[],
+  disk: GlobDisk | undefined,
+): { named: { surface: string; path: string } | null; git: Set<string> } {
+  let named: { surface: string; path: string } | null = null;
+  const git = new Set<string>();
+  const offer = (surface: string, path: string): void => {
+    if (named === null || protectedRank(surface) < protectedRank(named.surface)) named = { surface, path };
+  };
+  for (const operand of operands) {
+    const pwdWord = words.some((word) => word.text === operand && word.substitutions.length === 1 && word.substitutions[0]?.trim() === "pwd");
+    const dirs = organParentDirs(operand, pwdWord, disk);
+    if (dirs === null) continue;
+    if (dirs === "unplaced" || disk === undefined) {
+      offer("policy.core", operand);
+      continue;
+    }
+    for (const dir of dirs) {
+      disk.collect?.add(dir);
+      const listing = diskListing(disk, dir, false);
+      if (listing === undefined) {
+        offer("policy.core", operand);
+        continue;
+      }
+      for (const name of listing) {
+        const entry = guardedEntryClass(name, protectedPaths);
+        if (entry.protectedClass !== null) offer(entry.protectedClass, operand);
+        if (entry.git) git.add(operand);
+      }
+    }
+  }
+  return { named, git };
+}
+
+/**
  * How one copy, move, link or sync tool reads its argv (review of 039b840a,
  * finding 2): which short letters and long options it knows, and which take a
  * value. A letter one platform reads as a flag and another as taking a value
@@ -10967,6 +11118,10 @@ function classifySegment(
   // Review of 039b840a (finding 2): a copy tool's argv read by its option
   // table, so an option's value is never taken for the destination.
   const plan = copyPlan(basename, args);
+  // Lead ruling L61587: a recursive delete, move or chmod of a PARENT of an
+  // organ directory (`rm -rf .`, `mv "$PWD" ../x`, `chmod -R 000 ~`), decided
+  // by the hook's listing of it ({@link organParentClass}).
+  const organParent = organParentClass(organParentOperands(basename, args, positionals, plan), segment.words, protectedPaths, glob.disk);
   // Review of e6b7bf97 (1): with no destination read, or an implied one,
   // every positional is judged, as main judged them.
   const writtenOperands =
@@ -11124,10 +11279,15 @@ function classifySegment(
             });
             return plainHit === null || (patternHit !== null && protectedRank(patternHit.surface) < protectedRank(plainHit.surface)) ? patternHit : plainHit;
           })();
-    const named =
+    const namedOperand =
       landedNamed !== null && (operandNamed === null || protectedRank(landedNamed.surface) < protectedRank(operandNamed.surface))
         ? landedNamed
         : operandNamed;
+    const parentNamed = organParent.named;
+    const named =
+      parentNamed !== null && (namedOperand === null || protectedRank(parentNamed.surface) < protectedRank(namedOperand.surface))
+        ? parentNamed
+        : namedOperand;
     const fed = strictestProtected(readTargets, protectedPaths);
     const touched =
       fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))
@@ -11209,7 +11369,8 @@ function classifySegment(
           : [...positionals, ...flagValues, ...attached, ...operandValues];
     const gitWrite =
       gitWriteRefinement(writeTargets, named, context.shellDir, true, context.lineNamesGit === true, (word) =>
-        dotGlobNamesGit(word, inexact, glob),
+        // Lead ruling L61587: a parent whose listing holds `.git`.
+        organParent.git.has(word) || dotGlobNamesGit(word, inexact, glob),
       ) ??
       (sedLiteral
         ? (sedLiteralGitWrite(readOutputs, context.shellDir, context.lineNamesGit === true) ??

@@ -212,3 +212,16 @@ test("lead ruling L61587 through the hook: `rm -rf *` where an organ directory i
     assert.deepEqual(await hookClasses(command, plain), ["files.write.workspace"], command);
   }
 });
+
+test("lead ruling L61587, parents, through the hook: `rm -rf .` where the directory holds an organ directory takes its class; elsewhere main's", async () => {
+  const organ = project({ ".claude": ["settings.json"], src: ["a.ts"], sub: ["b.ts"] });
+  for (const command of ["rm -rf .", "rm -rf ./", 'rm -rf "$PWD"', "rm -rf $(pwd)", "rm -rf sub/..", "chmod -R u+w .", 'mv "$PWD" ../moved']) {
+    assert.ok((await hookClasses(command, organ)).includes("policy.core"), command);
+  }
+  const plain = project({ src: ["a.ts"], dist: ["a.js"], ".cache": ["x"] });
+  assert.deepEqual(await hookClasses("rm -rf .", plain), ["files.delete.out_of_scope"]);
+  assert.deepEqual(await hookClasses("chmod -R u+w .", plain), ["files.write.workspace"]);
+  assert.deepEqual(await hookClasses("rm -rf ./dist", plain), ["files.write.workspace"]);
+  const checkout = project({ ".git": ["config"], src: ["a.ts"] });
+  assert.ok((await hookClasses("rm -rf .", checkout)).includes("vcs.history.rewrite"));
+});

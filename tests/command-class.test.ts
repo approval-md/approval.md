@@ -378,7 +378,17 @@ const FIXTURES: readonly Fixture[] = [
   { command: "rm dist/stale.js", class: "files.write.workspace", rule: "rm-workspace", row: "rm" },
   { command: "rm -rf /etc/hosts", class: "files.delete.out_of_scope", rule: "rm-absolute", row: "rm" },
   { command: "rm ../sibling/file", class: "files.delete.out_of_scope", rule: "rm-parent", row: "rm" },
-  { command: "rm -rf .", class: "files.delete.out_of_scope", rule: "rm-recursive-root", row: "rm" },
+  // Lead ruling L61587 (organ parents): the working directory may hold an
+  // organ directory; with no listing that is the strict answer, and with one
+  // that shows none it is main's.
+  { command: "rm -rf .", class: "policy.core", rule: "protected-path", row: "rm" },
+  {
+    command: "rm -rf .",
+    class: "files.delete.out_of_scope",
+    rule: "rm-recursive-root",
+    row: "rm",
+    context: { globDisk: { cwd: "/w", home: "/h", listings: new Map([["/w", ["src", "dist"]]]) } },
+  },
   { command: "rm -rf $TARGET", class: "files.delete.out_of_scope", rule: "rm-unreadable-path", row: "rm" },
   { command: "rm -rf node_modules", class: "files.write.workspace", rule: "rm-workspace", row: "rm" },
 

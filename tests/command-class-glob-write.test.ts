@@ -1237,6 +1237,70 @@ test("lead ruling L61587 (review-b A686-FOLD3 M1): a delete, move or chmod of an
   ] as const) {
     assert.deepEqual(classesOf(command), [main], command);
   }
-  // Not covered (the follow-up): a parent of an organ directory keeps main's class.
-  assert.deepEqual(classesOf("rm -rf ."), ["files.delete.out_of_scope"]);
+  // A parent of an organ directory is the parent rule's (below): with no listing, strict.
+  assert.deepEqual(classesOf("rm -rf ."), ["policy.core"]);
+});
+
+test("lead ruling L61587, parents: a recursive delete, move or chmod of a directory that holds an organ directory takes its class", () => {
+  // Without the caller's listing the working directory, the home, their
+  // ancestors and `/` may hold one: strict (main: files.delete.out_of_scope or
+  // an ordinary write).
+  for (const command of [
+    "rm -rf .",
+    "rm -rf ./",
+    "rm -r ./",
+    'rm -rf "$PWD"',
+    "rm -rf ${PWD}/",
+    "rm -rf $(pwd)",
+    "rm -rf sub/..",
+    "rm -rf .claude/..",
+    "rm -rf ..",
+    "rm -rf ../..",
+    "rm -rf ~",
+    "rm -rf ~/",
+    "rm -rf $HOME",
+    "rm -rf /",
+    "chmod -R u+w .",
+    "chmod -R 000 ~",
+    "chmod -R --reference=x .",
+    'mv "$PWD" ../x',
+  ]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // With a listing, by what the directory holds: the strictest guarded name.
+  assert.deepEqual(withListing("rm -rf .", { "/w": [".claude", "src"] }), ["policy.core"]);
+  assert.deepEqual(withListing("rm -rf .", { "/w": [".github", "src"] }), ["policy.edit"]);
+  assert.deepEqual(withListing("rm -rf .", { "/w": ["APPROVAL.md", "src"] }), ["policy.core"]);
+  assert.deepEqual(withListing("chmod -R u+w .", { "/w": [".git", "src"] }), ["vcs.history.rewrite"]);
+  assert.deepEqual(withListing("rm -rf ~", { "/h": [".claude"] }), ["policy.core"]);
+  // An ancestor: the directories from it down to the working directory.
+  assert.deepEqual(withListing("rm -rf ..", { "/": ["w", "x"], "/w": [".cursor"] }), ["policy.core"]);
+  assert.deepEqual(withListing("rm -rf ..", { "/": ["w", ".grok"], "/w": ["src"] }), ["policy.core"]);
+  // None held: the segment's own class, unchanged from main.
+  assert.deepEqual(withListing("rm -rf .", { "/w": ["src", "dist", ".cache"] }), ["files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("chmod -R u+w .", { "/w": ["src", ".cache"] }), ["files.write.workspace"]);
+  // (`/` holds the home too, so its listing is read as well.)
+  assert.deepEqual(withListing("rm -rf ..", { "/": ["w", "h"], "/w": ["src"], "/h": ["notes.txt"] }), ["files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("rm -rf ~/", { "/h": ["notes.txt"] }), ["files.delete.out_of_scope"]);
+  // Not listed (over the cap, unreadable, not asked for): strict.
+  assert.deepEqual(withListing("rm -rf .", { "/w": "unreadable" }), ["policy.core"]);
+  assert.deepEqual(withListing("rm -rf ..", { "/w": ["src"] }), ["policy.core"]);
+  // Not a parent, or not one the text can tell: the segment's own class.
+  for (const [command, main] of [
+    ["rm -rf ./dist", "files.write.workspace"],
+    ["rm -rf dist", "files.write.workspace"],
+    ["rm -rf ../other-project", "files.delete.out_of_scope"],
+    ['rm -rf "$TMPDIR"/x', "files.delete.out_of_scope"],
+    ["rm -rf $(echo x)", "files.delete.out_of_scope"],
+    ["rm -rf /tmp/x", "files.delete.out_of_scope"],
+    ["rm .", "files.write.workspace"],
+    ["rmdir .", "files.write.workspace"],
+    ["chmod 000 .", "files.write.workspace"],
+    ["touch .", "files.write.workspace"],
+    // rename(2) refuses `.` and `..` as a source: nothing moves.
+    ["mv . x", "files.write.workspace"],
+  ] as const) {
+    assert.deepEqual(classesOf(command), [main], command);
+  }
+  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": ["x.js"] }), ["files.delete.out_of_scope"]);
 });

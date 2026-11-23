@@ -163,6 +163,34 @@ by it, so `mkdir .claude`, `cp -r .claude backup/` and
 `find . -name .claude -exec rm …` stays refused (opaque); case variants
 (`rm -rf .Claude`) as for every guarded path.
 
+**Deleting, moving or locking a PARENT of an organ directory is that
+directory's class (lead ruling L61587).** `rm -rf "$PWD"`, `rm -rf ~`,
+`chmod -R 000 .` and `mv "$PWD" ../x` remove or lock every organ directory
+under them, and were `files.delete.out_of_scope` or an ordinary write. A
+recursive `rm`, a `mv` source, or a recursive `chmod` whose operand is the
+working directory (`.`, `./`, `$PWD`, `"$PWD"`, `${PWD}`, `$(pwd)`,
+`sub/..`), an ancestor of it (`..`, `../..`, `/`), the home (`~`, `~/`,
+`$HOME`) or an ancestor of the home now takes the strictest class among the
+guarded names the hook's listing shows there: an organ directory
+(`.claude`, `.cursor`, `.grok`, `.muse`: `policy.core`; `.github`:
+`policy.edit`), `.approval`, `.codex`, `.hermes`, `APPROVAL.md` and the other
+guarded files, or `.git` (`vcs.history.rewrite`). An ancestor is read
+together with every directory from it down to the working directory and the
+home. A directory that holds none keeps its class, unchanged from main
+(`rm -rf .` in a tree of sources is `files.delete.out_of_scope`). Fail
+closed, `policy.core`: no listing (every caller but the hook), a directory
+over the listing's 2,000-entry cap or unreadable, a line that may change
+directory or names `HOME`, a line with a substitution (`$(pwd)`), and a chain
+of more than 8 directories to list. Not a parent, and unchanged:
+`rm -rf ./dist`, `rm -rf ../other-project`, `rm -rf "$TMPDIR"/x`. `mv .`,
+`mv ./` and `mv sub/..` move nothing (rename(2) refuses them) and keep their
+class. Not covered (follow-up): `chmod` of a parent without `-R`, `rmdir .`,
+`find . -delete`, `chown`/`chgrp` (refused), and organ directories in a
+SIBLING tree under an ancestor (`rm -rf ..` lists only the chain to the
+working directory and the home). On macOS (and GNU) `rm -rf .`, `./`, `..`
+and `sub/..` refuse to run; they are judged by the rule anyway, as the
+ruling says.
+
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),
 and the `git push m` after it read as an implicit `vcs.push.main` while it was
