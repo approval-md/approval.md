@@ -91,7 +91,9 @@ test("lister: names, a missing directory, the entry cap and the timeout", async 
   const names = await listGlobDirectory(join(cwd, "dist"));
   assert.ok(Array.isArray(names));
   assert.deepEqual([...(names as string[])].sort(), ["a", "b", "c"]);
-  assert.equal(await listGlobDirectory(join(cwd, "missing")), "unreadable");
+  // A directory that is not there, or a file, holds no name.
+  assert.deepEqual(await listGlobDirectory(join(cwd, "missing")), []);
+  assert.deepEqual(await listGlobDirectory(join(cwd, "dist", "a")), []);
   assert.equal(await listGlobDirectory(join(cwd, "dist"), { entryCap: 2 }), "unreadable");
   // A directory that never answers: the deadline wins and the handle is closed.
   let closed = false;
@@ -107,8 +109,10 @@ test("lister: names, a missing directory, the entry cap and the timeout", async 
   assert.equal(await listGlobDirectory(join(cwd, "dist"), { opendir: slow, timeoutMs: 200 }), "unreadable");
   assert.ok(Date.now() - started < 2_000);
   assert.equal(closed, true);
-  // An opener that throws.
+  // An opener that throws anything else.
   assert.equal(await listGlobDirectory(join(cwd, "dist"), { opendir: () => Promise.reject(new Error("EIO")) }), "unreadable");
+  const denied = Object.assign(new Error("EACCES"), { code: "EACCES" });
+  assert.equal(await listGlobDirectory(join(cwd, "dist"), { opendir: () => Promise.reject(denied) }), "unreadable");
 });
 
 test("an unlistable directory keeps the strict answer through the hook", async () => {
@@ -147,4 +151,19 @@ test("review of 6e3cbc9e: a relative pattern is placed only when the cwd is know
   const sure = classifyForHook("rm -rf dist/*", [], cwd, [], false, [], false, listings).result;
   assert.ok(sure.ok);
   assert.deepEqual(sure.segments.map((segment) => segment.class), ["files.delete.out_of_scope"]);
+});
+
+test("review of 039b840a, finding 1, through the hook: a contents copy or extraction by what the directory holds", async () => {
+  const organ = project({ ".claude": ["settings.json"], src: ["a.js"] });
+  const plain = project({ src: ["a.js"], docs: ["README.md"] });
+  for (const command of ["tar -xf a.tar", "cp -r src/ .", "rsync -a src/ ."]) {
+    assert.ok((await hookClasses(command, organ)).includes("policy.core"), `${command} where .claude is`);
+    const classes = await hookClasses(command, plain);
+    assert.ok(!classes.includes("policy.core"), `${command} where nothing guarded is: ${classes.join(",")}`);
+  }
+  // A destination that is not there yet holds no organ directory.
+  assert.ok(!(await hookClasses("cp -r src/ build/", plain)).includes("policy.core"));
+  // One holding the policy file is the policy write.
+  const policy = project({ out: ["APPROVAL.md"], src: ["a.js"] });
+  assert.ok((await hookClasses("cp -r src/ out", policy)).includes("policy.core"));
 });

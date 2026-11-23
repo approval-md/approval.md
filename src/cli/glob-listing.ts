@@ -10,7 +10,9 @@
  * listing happens here, BEFORE classification, and is handed in as
  * `ClassifierContext.globDisk`.
  *
- * FAIL CLOSED. A directory that cannot be listed in full (an error, a symlink
+ * A directory that is not there (`ENOENT`, `ENOTDIR`) is listed as empty.
+ *
+ * FAIL CLOSED. A directory that cannot be listed in full (any other error, a symlink
  * loop, more than {@link GLOB_LISTING_ENTRY_CAP} entries, the
  * {@link GLOB_LISTING_TIMEOUT_MS} timeout) is `"unreadable"`, and a directory
  * past {@link GLOB_LISTING_DIR_CAP} is not listed: both keep the strict
@@ -76,7 +78,12 @@ export async function listGlobDirectory(path: string, options: GlobListingOption
       if (names.length > cap) return "unreadable";
     }
     return names;
-  })().catch((): GlobListing => "unreadable");
+  })().catch((error: unknown): GlobListing => {
+    // A directory that is not there (or a file) holds no name: a pattern in it
+    // matches nothing, and a copy into it lands beside no guarded directory.
+    const code = (error as { code?: unknown } | null)?.code;
+    return code === "ENOENT" || code === "ENOTDIR" ? [] : "unreadable";
+  });
   const deadline = new Promise<GlobListing>((settle) => {
     timer = setTimeout(() => {
       timedOut = true;

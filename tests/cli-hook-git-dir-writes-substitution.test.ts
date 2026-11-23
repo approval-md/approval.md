@@ -592,7 +592,11 @@ test("gate M3: zsh subscripts and modifiers count", () => {
     "f=x.git; echo x > ${f[2]}${f[3]}${f[4]}${f[5]}/config",
     "f=x.git; echo x > $f[2]$f[3]$f[4]$f[5]/config",
   ]) {
-    assert.deepEqual(pure(line), [ASSIGNMENT, DIR_WRITE], line);
+    // GLOB-WRITE: bash reads an UNQUOTED `[...]` after a parameter as a glob
+    // beside an unknown value, which may name a guarded path, so that pattern
+    // rides beside the git-dir write; in double quotes it is text.
+    const globbed = /\$\w+\[/u.test(line) && !line.includes('"');
+    assert.deepEqual(pure(line), globbed ? [ASSIGNMENT, "log.mutate redirect-protected", DIR_WRITE] : [ASSIGNMENT, DIR_WRITE], line);
   }
   // The coarse rule: after an unbraced parameter, any `[` or `:` and a
   // letter or `&` counts, on any parameter, special ones too.

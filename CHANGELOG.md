@@ -85,6 +85,44 @@ option, case folded), and takes the strictest class among them.
   `dist/*/x.txt` without dot matching) keeps its class. More than 4,096
   candidate paths, 32 segments or two million matcher steps is `log.mutate`;
   the worst words measured cost about 0.05 CPU s.
+- **One budget, never lower (review-b M1, S1):** the two million matcher
+  steps are one budget for the whole command line, shared by every segment,
+  word and reading. A raised class never takes a segment's plain class away:
+  a plain class that is not an ordinary one rides beside it.
+- **Quoting (review of 3230ecb6):** only an UNQUOTED glob character, or an
+  unquoted `$` whose value or `${…}` default the shell may still glob, makes a
+  word a pattern (`"exit-$?.txt"`, `"$f[1,4]/out"` are their text), and the
+  character after `$` in `$?`, `$#`, `$*`, `$@`, `$!`, `$$`, `$-` and `$0`-`$9`
+  is a parameter's name. zsh's `^` and `#` count where the line may set
+  options.
+- **zsh's clobbering redirects (lead ruling L61195 (a)):** `>!`, `>>!`, `>|`,
+  `>>|`, `>&!`, `>&|`, `>>&!`, `>>&|`, `&>!` and `&>>!` write the next word, as
+  `>` does.
+- **Copies, moves, links, syncs and extractions (L61195 (b); reviews of
+  b402adec and 039b840a):** a copy into a directory is judged by the file it
+  lands (`cp evil/settings.json .claude/` is `.claude/settings.json`), and a
+  source landing AS an organ directory is one (`cp -r evil/.claude .`). A
+  destination any name may land in (`cp -r`, `-T`, a source ending `/`, `.` or
+  `..`, every `mv`, `ln`, `rsync`, `scp`, and `tar -x`'s directory) is judged
+  as the organ directory it is (`.claude`, `.cursor`, `.grok`, `.muse`,
+  `.github`), normalised lexically first (`.claude/x/..`, `./.claude/.`). A
+  CONTENTS copy (`cp -r src/ .`, `rsync -a src/ .`, `cp -T`, `mv -T`, `tar -x`)
+  into an ANCESTOR of one is the organ write: the home, `/`, `..` above the
+  working directory by the text, and any other directory by the hook's listing
+  of it (an organ directory, a bare-guarded directory or the policy file
+  there; a directory that is not there holds none; unlistable is strict).
+  `cp`, `mv`, `ln`, `install`, `rsync` and `scp` are read by per-tool option
+  tables, so an option's value is never the destination (`rsync -a src/
+  .claude/ --exclude x`), and an option a table does not know makes every
+  operand a possible destination. tar's directory is read in every spelling
+  (`-C X`, `-CX`, a cluster, `--directory`/`--cd` by any prefix, the dashless
+  bundle `tar xCf .claude a.tar`), and `-P`/`--absolute-names` may write
+  anywhere. `unzip`, `ditto`, `cpio`, `pax`, `bsdtar`, `gtar` and `7z` have no
+  rule and stay refused; an archive or copy tool with no table whose operand
+  names an organ directory is the organ write. Stricter than main through the
+  hook: `tar -xf a.tar`, `cp -r src/ .` and `rsync -a src/ .` in a directory
+  holding `.claude` (or `APPROVAL.md`, `.approval`, `.github`); `cp -r .claude
+  backup/`.
 
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),

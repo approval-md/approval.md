@@ -1572,6 +1572,12 @@ interface LexWord {
    */
   expands: boolean;
   /**
+   * An UNQUOTED `#`, `^` or `~` is part of the word: zsh's extendedglob forms
+   * (GLOB-WRITE), a pattern only where the line may set options. Absent on a
+   * word this lexer did not read, which counts as possibly so.
+   */
+  zshGlob?: boolean;
+  /**
    * Is `text` exactly the bytes the shell would hand the command for this
    * word? (APRV-510.) `false` when the shell would still change it: a `$`
    * outside single quotes (a parameter expansion), an unquoted glob or brace
@@ -1743,6 +1749,7 @@ function lex(command: string): LexResult {
     let quoted = false;
     let splits = false;
     let expands = false;
+    let zshGlob = false;
     let exact = true;
     const substitutions: string[] = [];
     const start = index;
@@ -1824,6 +1831,7 @@ function lex(command: string): LexResult {
 
       if (ch === "$") splits = true;
       else if (ch === "{" || ch === "*" || ch === "?" || ch === "[") expands = true;
+      else if (ch === "#" || ch === "^" || ch === "~") zshGlob = true;
       // APRV-510: what the shell would still expand in an unquoted run. The
       // text is kept as it always was; only the `exact` flag records it.
       if (ch === "$" || ch === "*" || ch === "?" || ch === "[" || ch === "{") exact = false;
@@ -1838,7 +1846,7 @@ function lex(command: string): LexResult {
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
     const assignment = ASSIGNMENT.test(command.slice(start, index));
-    return { text, quoted, substitutions, splits, expands, exact, assignment };
+    return { text, quoted, substitutions, splits, expands, zshGlob, exact, assignment };
   };
 
   while (index < command.length) {
@@ -8642,7 +8650,7 @@ function strictestProtectedWrite(
       if (reading !== word) offer(protectedPathClass(reading, protectedPaths), word);
       // ONE matcher budget for the whole command line (review-b M1), shared
       // through the classifier context by every segment, word and reading.
-      if (hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, glob.budget, glob.options, glob.disk), word);
+      if (globLive(glob, word) && hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, glob.budget, glob.options, glob.disk), word);
     }
   }
   if (best !== text && glob.tracker !== undefined) glob.tracker.raised = true;
@@ -8657,11 +8665,21 @@ function strictestProtectedWrite(
  * (text-only) pass, and the tracker that records a raise.
  */
 interface GlobReading {
+  /**
+   * May the shell still glob this word? `false` when every glob character in
+   * it was quoted or escaped (the lexer's `splits`, `expands` and, where the
+   * line may set options, `zshGlob`).
+   */
+  live?: (word: string) => boolean;
   options: boolean;
   disk?: GlobDisk;
   budget: { left: number };
   off: boolean;
   tracker?: { raised: boolean };
+}
+/** Unknown liveness is live: fail closed. */
+function globLive(glob: GlobReading, word: string): boolean {
+  return glob.live === undefined || glob.live(word);
 }
 function defaultGlobReading(): GlobReading {
   return { options: false, budget: { left: GLOB_GUARD_STEP_CAP }, off: false };
@@ -8712,13 +8730,14 @@ const ORGAN_DIRECTORIES: Readonly<Record<string, string>> = {
  * the shell may still glob, could match one (dot-names by the line's rule).
  */
 function organDestination(dest: string, inexact: (word: string) => boolean, glob: GlobReading): { surface: string; path: string } | null {
-  const parts = dest.split("/").filter((part) => part.length > 0 && part !== ".");
-  const last = parts[parts.length - 1];
-  if (last === undefined) return null;
+  // Normalised lexically (review of 039b840a, finding 1): `.claude/x/..`,
+  // `./.claude/.` and `.claude//` are `.claude`.
+  const last = lexicalParts(dest).parts.at(-1);
+  if (last === undefined || last === "..") return null;
   let best: string | null = null;
   for (const [name, cls] of Object.entries(ORGAN_DIRECTORIES)) {
     let hit = last.toLowerCase() === name;
-    if (!hit && inexact(dest) && hasGlobConstruct(last) && (glob.options || last.startsWith(".") || /^[(]/u.test(last))) {
+    if (!hit && inexact(dest) && globLive(glob, dest) && hasGlobConstruct(last) && (glob.options || last.startsWith(".") || /^[(]/u.test(last))) {
       hit = globTokensMatch(globSegmentTokens(last, glob.options), name, false, glob.budget) !== false;
     }
     if (hit && (best === null || protectedRank(cls) < protectedRank(best))) best = cls;
@@ -8727,43 +8746,455 @@ function organDestination(dest: string, inexact: (word: string) => boolean, glob
 }
 
 /**
- * The directories a command may fill with names its text does not show
- * (review of b402adec, M2): a copy, move or link's destination (each `-t`
- * directory, else the last operand), rsync's last operand, and tar's `-C` /
- * `--directory`. Any source may be a directory whose contents land there
- * (`cp -r src/ .claude/`, `cp -r src/. .claude/`, `cp -T`, `mv src .claude`,
- * `rsync -a src/ .claude/`, `tar -x -C .claude`).
+ * How one copy, move, link or sync tool reads its argv (review of 039b840a,
+ * finding 2): which short letters and long options it knows, and which take a
+ * value. A letter one platform reads as a flag and another as taking a value
+ * is `ambiguous`. GNU accepts a unique prefix of a long option.
  */
-function contentDestinations(basename: string, args: readonly string[], positionals: readonly string[], targetDirectories: readonly string[]): string[] {
-  if (["cp", "mv", "ln"].includes(basename)) {
-    const dests = targetDirectories.length > 0 ? [...targetDirectories] : positionals.length >= 2 ? [positionals[positionals.length - 1] as string] : [];
-    const sources = targetDirectories.length > 0 ? positionals : positionals.slice(0, -1);
-    // A plain `cp` of files lands each file by its basename ({@link copyLandings});
-    // a recursive copy, `-T`, a source ending in `/`, `.` or `..`, and every
-    // `mv` and `ln` (a directory source, or a destination that does not exist
-    // yet and becomes the source) may land the source's CONTENTS.
-    const contents =
-      basename !== "cp" ||
-      args.some((arg) => /^-[A-Za-z]*[rRaT]/u.test(arg) && !arg.startsWith("--")) ||
-      args.some((arg) => ["--recursive", "--archive", "--no-target-directory"].includes(arg)) ||
-      sources.some((source) => source.endsWith("/") || /(?:^|\/)\.\.?$/u.test(source));
-    return contents ? dests : [];
-  }
-  if (basename === "rsync") return positionals.length >= 2 ? [positionals[positionals.length - 1] as string] : [];
-  if (basename === "tar") {
-    const out: string[] = [];
-    for (let at = 0; at < args.length; at += 1) {
-      const arg = args[at] as string;
-      if (arg === "-C" || arg === "--directory") {
-        const next = args[at + 1];
-        if (next !== undefined) out.push(next);
-      } else if (arg.startsWith("--directory=")) out.push(arg.slice("--directory=".length));
-      else if (/^-[A-Za-z]*C./u.test(arg)) out.push(arg.slice(arg.indexOf("C") + 1));
-      else if (/^-[A-Za-z]*C$/u.test(arg) && args[at + 1] !== undefined) out.push(args[at + 1] as string);
+interface CopyOptionTable {
+  short: string;
+  shortValue: string;
+  ambiguous: string;
+  long: Readonly<Record<string, "none" | "req" | "opt">>;
+  /** rsync: `--no-OPTION` for any option it knows. */
+  negates?: boolean;
+}
+
+const COPY_LONG_COMMON: Readonly<Record<string, "none" | "req" | "opt">> = {
+  backup: "opt",
+  force: "none",
+  interactive: "none",
+  suffix: "req",
+  "target-directory": "req",
+  "no-target-directory": "none",
+  verbose: "none",
+  help: "none",
+  version: "none",
+  debug: "none",
+};
+
+const COPY_OPTION_TABLES: Readonly<Record<string, CopyOptionTable>> = {
+  // GNU and BSD cp; `-S` is GNU's suffix and not every BSD's.
+  cp: {
+    short: "abcdfHiLlNnPpRrsTuvXxZ",
+    shortValue: "t",
+    ambiguous: "S",
+    long: {
+      ...COPY_LONG_COMMON,
+      archive: "none",
+      "attributes-only": "none",
+      "copy-contents": "none",
+      dereference: "none",
+      link: "none",
+      "no-dereference": "none",
+      "no-clobber": "none",
+      "no-preserve": "req",
+      parents: "none",
+      preserve: "opt",
+      recursive: "none",
+      reflink: "opt",
+      "remove-destination": "none",
+      sparse: "req",
+      "strip-trailing-slashes": "none",
+      "symbolic-link": "none",
+      update: "opt",
+      "one-file-system": "none",
+      context: "opt",
+      "keep-directory-symlink": "none",
+    },
+  },
+  mv: {
+    short: "bfhinTuvZ",
+    shortValue: "St",
+    ambiguous: "",
+    long: {
+      ...COPY_LONG_COMMON,
+      "no-clobber": "none",
+      "no-copy": "none",
+      "strip-trailing-slashes": "none",
+      update: "opt",
+      context: "none",
+      exchange: "none",
+    },
+  },
+  ln: {
+    short: "bdFfhiLnPrsTvw",
+    shortValue: "St",
+    ambiguous: "",
+    long: {
+      ...COPY_LONG_COMMON,
+      directory: "none",
+      logical: "none",
+      "no-dereference": "none",
+      physical: "none",
+      relative: "none",
+      symbolic: "none",
+    },
+  },
+  // GNU and BSD install: `-S` and `-T` take a value on one and not the other.
+  install: {
+    short: "bcCdDMpsUvZ",
+    shortValue: "BfglmNot",
+    ambiguous: "ST",
+    long: {
+      ...COPY_LONG_COMMON,
+      compare: "none",
+      directory: "none",
+      group: "req",
+      mode: "req",
+      owner: "req",
+      "preserve-timestamps": "none",
+      strip: "none",
+      "strip-program": "req",
+      "preserve-context": "none",
+      context: "opt",
+    },
+  },
+  rsync: {
+    short: "vqcarRbulLkKHpEAXogDtUNOJmnWxCySzPhi8s0Fd46I",
+    shortValue: "efTBM@",
+    ambiguous: "",
+    negates: true,
+    long: {
+      ...Object.fromEntries(
+        [
+          "verbose", "quiet", "no-motd", "checksum", "archive", "recursive", "relative", "no-implied-dirs", "backup",
+          "update", "inplace", "append", "append-verify", "dirs", "mkpath", "links", "copy-links", "copy-unsafe-links",
+          "safe-links", "munge-links", "copy-dirlinks", "keep-dirlinks", "hard-links", "perms", "executability", "acls",
+          "xattrs", "owner", "group", "devices", "copy-devices", "write-devices", "specials", "times", "atimes",
+          "open-noatime", "crtimes", "omit-dir-times", "omit-link-times", "super", "fake-super", "sparse", "preallocate",
+          "dry-run", "whole-file", "one-file-system", "existing", "ignore-existing", "remove-source-files", "delete",
+          "delete-before", "delete-during", "delete-delay", "delete-after", "delete-excluded", "ignore-missing-args",
+          "delete-missing-args", "ignore-errors", "force", "partial", "progress", "delay-updates", "prune-empty-dirs",
+          "numeric-ids", "ignore-times", "size-only", "compress", "cvs-exclude", "from0", "protect-args",
+          "secluded-args", "trust-sender", "stats", "8-bit-output", "human-readable", "itemize-changes", "list-only",
+          "blocking-io", "fuzzy", "old-args", "old-dirs", "ipv4", "ipv6", "help", "version", "fsync", "copy-as",
+        ].map((name) => [name, "none" as const]),
+      ),
+      ...Object.fromEntries(
+        [
+          "rsh", "rsync-path", "filter", "exclude", "include", "exclude-from", "include-from", "files-from", "temp-dir",
+          "partial-dir", "backup-dir", "suffix", "compare-dest", "copy-dest", "link-dest", "block-size", "max-size",
+          "min-size", "max-delete", "timeout", "contimeout", "port", "sockopts", "chmod", "chown", "usermap", "groupmap",
+          "log-file", "log-file-format", "out-format", "password-file", "bwlimit", "write-batch", "only-write-batch",
+          "read-batch", "protocol", "iconv", "checksum-choice", "compress-choice", "compress-level", "skip-compress",
+          "remote-option", "info", "debug", "stop-after", "stop-at", "modify-window", "address", "outbuf",
+          "max-alloc", "checksum-seed", "early-input",
+        ].map((name) => [name, "req" as const]),
+      ),
+      "copy-as": "req",
+    },
+  },
+  scp: { short: "346ABCOpqRrTv", shortValue: "cDFiJlmoPSX", ambiguous: "", long: {} },
+};
+
+/** What {@link parseCopyArgv} read: the operands, the options seen by name, their values, and the first option it does not know. */
+interface CopyArgv {
+  operands: string[];
+  seen: Set<string>;
+  values: { name: string; value: string }[];
+  unknown: string | null;
+}
+
+/**
+ * A copy tool's argv read by its {@link CopyOptionTable} (review of 039b840a,
+ * finding 2): an option's value is never an operand (`rsync -a src/ .claude/
+ * --exclude x` writes `.claude/`, not `x`). An option the table does not know,
+ * an ambiguous long prefix and an ambiguous letter are `unknown`: the caller
+ * then takes every operand as a possible destination.
+ */
+function parseCopyArgv(args: readonly string[], table: CopyOptionTable): CopyArgv {
+  const operands: string[] = [];
+  const seen = new Set<string>();
+  const values: { name: string; value: string }[] = [];
+  let unknown: string | null = null;
+  const flag = (word: string): void => {
+    if (unknown === null) unknown = word;
+  };
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") {
+      operands.push(...args.slice(at + 1));
+      break;
     }
-    return out;
+    if (!arg.startsWith("-") || arg === "-") {
+      operands.push(arg);
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      let name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+      if (table.negates === true && name.startsWith("no-") && table.long[name] === undefined && table.long[name.slice(3)] !== undefined) {
+        seen.add(name);
+        if (eq !== -1) flag(arg);
+        continue;
+      }
+      const names = Object.keys(table.long);
+      const matches = table.long[name] !== undefined ? [name] : names.filter((candidate) => candidate.startsWith(name));
+      if (name.length === 0 || matches.length !== 1) {
+        flag(arg);
+        continue;
+      }
+      name = matches[0] as string;
+      const kind = table.long[name] as "none" | "req" | "opt";
+      seen.add(name);
+      if (eq !== -1) {
+        if (kind === "none") flag(arg);
+        values.push({ name, value: arg.slice(eq + 1) });
+      } else if (kind === "req") {
+        const value = args[at + 1];
+        if (value !== undefined) values.push({ name, value });
+        at += 1;
+      }
+      continue;
+    }
+    for (let k = 1; k < arg.length; k += 1) {
+      const letter = arg[k] as string;
+      if (table.shortValue.includes(letter)) {
+        seen.add(letter);
+        const rest = arg.slice(k + 1);
+        if (rest.length > 0) values.push({ name: letter, value: rest });
+        else {
+          const value = args[at + 1];
+          if (value !== undefined) values.push({ name: letter, value });
+          at += 1;
+        }
+        break;
+      }
+      if (table.short.includes(letter)) seen.add(letter);
+      else flag(arg);
+    }
   }
-  return [];
+  return { operands, seen, values, unknown };
+}
+
+/**
+ * Where a copy, move, link, sync or extraction may put names its text does not
+ * show (review of b402adec M2; review of 039b840a findings 1 to 3):
+ *
+ * - `dests`, `sources`: each source lands as `<dest>/<basename>` ({@link copyLandings});
+ * - `anyName`: a directory any name may land in, an organ directory itself;
+ * - `contents`: a directory a source's CONTENTS land in, whose organ
+ *   subdirectories they may fill (`cp -r src/ .`, `tar -x`), the ancestor rule;
+ * - `files`: files an option writes (`rsync --log-file`);
+ * - `anywhere`: an extraction that may write any absolute path (`tar -P`).
+ *
+ * An option a tool's table does not know makes every operand each of these.
+ * `null` for a command that is none of these tools.
+ */
+interface CopyPlan {
+  dests: string[];
+  sources: string[];
+  anyName: string[];
+  contents: string[];
+  files: string[];
+  anywhere: string | null;
+  unknown: string | null;
+  operands: string[];
+}
+
+/**
+ * Archive and copy tools this classifier has no argv table for (most have no
+ * rule and are refused): every operand and option value is a possible
+ * destination of any name (finding 3, the backstop).
+ */
+const UNTABLED_COPY_TOOLS: ReadonlySet<string> = new Set([
+  "unzip", "ditto", "cpio", "pax", "bsdtar", "gtar", "star", "7z", "7za", "7zr", "7zz", "unar", "unrar", "xar", "jar",
+  "ar", "rclone", "gcp", "gmv", "gln", "ginstall", "sftp", "lftp", "unxz", "bsdcpio", "rpm2cpio", "dpkg-deb", "lha",
+]);
+
+/** A `host:path` rsync or scp operand names a remote path, never a local one. */
+function remoteOperand(word: string): boolean {
+  return /^[^/]*:/u.test(word);
+}
+
+function copyPlan(basename: string, args: readonly string[]): CopyPlan | null {
+  const empty = (operands: string[]): CopyPlan => ({ dests: [], sources: [], anyName: [], contents: [], files: [], anywhere: null, unknown: null, operands });
+  if (basename === "tar") return tarPlan(args);
+  if (UNTABLED_COPY_TOOLS.has(basename)) {
+    const words = args.flatMap((arg) => {
+      if (!arg.startsWith("-")) return [arg];
+      const eq = arg.indexOf("=");
+      if (eq !== -1) return [arg.slice(eq + 1)];
+      // An attached short value (`-o.claude`, `-d.claude`): every tail counts.
+      return arg.startsWith("--") ? [] : Array.from({ length: arg.length - 2 }, (_, k) => arg.slice(k + 2));
+    });
+    return { ...empty(words), anyName: [...words], unknown: basename };
+  }
+  const table = COPY_OPTION_TABLES[basename];
+  if (table === undefined) return null;
+  const parsed = parseCopyArgv(args, table);
+  const remote = basename === "rsync" || basename === "scp";
+  const operands = parsed.operands;
+  const local = (words: readonly string[]): string[] => (remote ? words.filter((word) => !remoteOperand(word)) : [...words]);
+  if (basename === "install" && (parsed.seen.has("d") || parsed.seen.has("directory"))) return empty(operands);
+  const targets = parsed.values.filter((entry) => entry.name === "t" || entry.name === "target-directory").map((entry) => entry.value);
+  if (parsed.unknown !== null) {
+    const all = local([...operands, ...targets]);
+    return { dests: all, sources: [...operands], anyName: [...all], contents: [...all], files: [], anywhere: null, unknown: parsed.unknown, operands };
+  }
+  // rsync with one operand lists it; every tool needs a source and a destination.
+  const dests = local(targets.length > 0 ? targets : operands.length >= 2 ? operands.slice(-1) : []);
+  const sources = targets.length > 0 ? [...operands] : operands.slice(0, -1);
+  const has = (...names: string[]): boolean => names.some((name) => parsed.seen.has(name));
+  const slashSource = sources.some((source) => source.endsWith("/") || /(?:^|\/)\.\.?$/u.test(source));
+  const plan: CopyPlan = { ...empty(operands), dests, sources };
+  if (basename === "cp") {
+    const recursive = has("r", "R", "a", "recursive", "archive");
+    const noTarget = has("T", "no-target-directory");
+    if (recursive || noTarget || slashSource) plan.anyName = [...dests];
+    if ((recursive && slashSource) || noTarget) plan.contents = [...dests];
+  } else if (basename === "mv" || basename === "ln") {
+    plan.anyName = [...dests];
+    if (basename === "mv" && has("T", "no-target-directory")) plan.contents = [...dests];
+  } else if (basename === "rsync" || basename === "scp") {
+    plan.anyName = [...dests];
+    const globbedRemote = sources.some((source) => remoteOperand(source) && /[*?[]/u.test(source));
+    if (slashSource || globbedRemote) plan.contents = [...dests];
+    if (basename === "rsync") {
+      // Directories rsync writes any name into; relative ones are relative to the destination.
+      for (const entry of parsed.values) {
+        if (!["T", "temp-dir", "partial-dir", "backup-dir"].includes(entry.name)) continue;
+        plan.anyName.push(entry.value);
+        if (!entry.value.startsWith("/")) for (const dest of dests) plan.anyName.push(`${dest.replace(/\/+$/u, "")}/${entry.value}`);
+      }
+      plan.files = parsed.values.filter((entry) => ["log-file", "write-batch", "only-write-batch"].includes(entry.name)).map((entry) => entry.value);
+    }
+  }
+  return plan;
+}
+
+/**
+ * tar's extraction destinations in every spelling GNU tar and bsdtar accept
+ * (finding 3): `-C DIR`, `-CDIR`, a cluster ending in `C` or carrying it with
+ * its value attached, `--directory`/`--cd` by any prefix with or without `=`,
+ * and the dashless first-word bundle (`tar xCf .claude a.tar`), whose letters
+ * take the following words in order: a bundle carrying `C` and other value
+ * letters offers each of those words. An extraction with no `-C` writes into
+ * the working directory. `-P` / `--absolute-names` may write any path.
+ */
+const TAR_ALL_VALUE_LETTERS = "bfgCFHIKLNTVX";
+function tarPlan(args: readonly string[]): CopyPlan {
+  const letters = tarModeLetters(args);
+  const extracting = letters.includes("x") || args.some((arg) => /^--(?:ex|ext|extr|extra|extrac|extract|get?)$/u.test(arg));
+  const plan: CopyPlan = { dests: [], sources: [], anyName: [], contents: [], files: [], anywhere: null, unknown: null, operands: [] };
+  if (!extracting) return plan;
+  const dirs: string[] = [];
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") break;
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+      if (name === "cd" || (name.length >= 2 && "directory".startsWith(name))) {
+        const value = eq === -1 ? args[at + 1] : arg.slice(eq + 1);
+        if (value !== undefined) dirs.push(value);
+      }
+      if (name.length >= 2 && "absolute-names".startsWith(name)) plan.anywhere = arg;
+      continue;
+    }
+    const bundle = arg.startsWith("-") ? arg.slice(1) : at === 0 && /^[A-Za-z]+$/u.test(arg) ? arg : null;
+    if (bundle === null || bundle.length === 0) continue;
+    const c = bundle.indexOf("C");
+    if (bundle.slice(0, c === -1 ? bundle.length : c).includes("P")) plan.anywhere = arg;
+    if (c === -1) continue;
+    if (arg.startsWith("-") && c + 1 < bundle.length && !/^[A-Za-z]*$/u.test(bundle.slice(c + 1))) {
+      dirs.push(bundle.slice(c + 1));
+      continue;
+    }
+    // Attached letters may be a value (`-C.claude` is above; `-xCclaude`) or more
+    // letters; every reading counts.
+    if (arg.startsWith("-") && c + 1 < bundle.length) dirs.push(bundle.slice(c + 1));
+    const takers = [...bundle].filter((letter) => TAR_ALL_VALUE_LETTERS.includes(letter)).length;
+    for (let k = 1; k <= takers; k += 1) {
+      const next = args[at + k];
+      if (next !== undefined) dirs.push(next);
+    }
+  }
+  const into = dirs.length > 0 ? dirs : ["."];
+  plan.anyName = [...into];
+  plan.contents = [...into];
+  return plan;
+}
+
+/**
+ * A path normalised lexically (finding 1): empty and `.` components dropped,
+ * `name/..` collapsed. `null` for a word that does not name one path (a
+ * variable, a substitution, a pattern the shell may still glob).
+ */
+function lexicalParts(path: string): { absolute: boolean; parts: string[] } {
+  const absolute = path.startsWith("/");
+  const parts: string[] = [];
+  for (const part of path.split("/")) {
+    if (part.length === 0 || part === ".") continue;
+    if (part === ".." && parts.length > 0 && parts[parts.length - 1] !== ".." && parts[parts.length - 1] !== "~") {
+      parts.pop();
+      continue;
+    }
+    if (part === ".." && absolute) continue;
+    parts.push(part);
+  }
+  return { absolute, parts };
+}
+
+/**
+ * The class a CONTENTS copy into `dest` earns because `dest` holds, or may
+ * hold, a guarded directory (finding 1, the ancestor rule): the home and every
+ * ancestor of the home or of the working directory (`..`, `/`) hold the
+ * harness directories by construction; any other directory is judged by the
+ * caller's listing of it (an organ directory or a bare-guarded one listed
+ * there), and with no listing it may: `policy.core`. A destination the shell
+ * may still change (a variable, a substitution, a pattern) is unknown: strict.
+ * A caller with no disk at all (the pure classifier's other callers) gets the
+ * text-only part; the hook always passes one.
+ */
+function organAncestor(dest: string, protectedPaths: readonly ProtectedPathEntry[], glob: GlobReading): { surface: string; path: string } | null {
+  const strict = { surface: "policy.core", path: dest };
+  const { absolute, parts } = lexicalParts(dest);
+  // By the text alone: the home (`~`, `~user`) and `/`, and `..` above the
+  // working directory, are ancestors of organ directories.
+  if (!absolute && parts[0] !== undefined && parts[0].startsWith("~")) {
+    if (parts[0] !== "~" || parts.length === 1) return strict;
+  }
+  if (absolute && parts.length === 0) return strict;
+  if (!absolute && parts.length > 0 && parts.every((part) => part === "..")) return strict;
+  // Anything else is a disk question, the hook's (as the git-dir and write-
+  // scope passes are): a caller with no disk keeps the text's answer.
+  const disk = glob.disk;
+  if (disk === undefined) return null;
+  if (dest.includes("$") || dest.includes(SUBSTITUTION_SENTINEL) || (globLive(glob, dest) && hasGlobConstruct(dest))) return strict;
+  {
+    const placed = (absolute ? "/" : "") + parts.join("/");
+    // The destination as an absolute path, where the text places it.
+    const cwd = disk.cwd.replace(/\/+$/u, "");
+    const whole =
+      absolute ? placed : parts[0] === "~" || disk.relativeOk === false || !cwd.startsWith("/") ? null : [cwd, ...parts].join("/") || "/";
+    const home = disk.home?.replace(/\/+$/u, "") ?? null;
+    if (whole !== null) {
+      if (home !== null && home.startsWith("/") && (home === whole || home.startsWith(`${whole}/`))) return strict;
+      if (cwd.startsWith("/") && cwd.startsWith(`${whole === "/" ? "" : whole}/`)) return strict;
+    }
+    if (disk.listingsOk !== false) {
+      const prefix = absolute ? ["", ...parts] : parts.length === 0 ? [] : parts;
+      const dir = globListingDir(prefix, disk);
+      if (dir !== null) {
+        disk.collect?.add(dir);
+        const listing = disk.listings.get(dir);
+        if (Array.isArray(listing)) {
+          let best: string | null = null;
+          for (const name of listing) {
+            const organ = ORGAN_DIRECTORIES[name.toLowerCase()];
+            const bare = protectedPathClass(`${placed.length === 0 ? "." : placed}/${name}`, protectedPaths);
+            for (const surface of [organ, bare]) {
+              if (surface !== undefined && surface !== null && (best === null || protectedRank(surface) < protectedRank(best))) best = surface;
+            }
+          }
+          return best === null ? null : { surface: best, path: dest };
+        }
+      }
+    }
+  }
+  return strict;
 }
 
 /**
@@ -8778,29 +9209,25 @@ function contentDestinations(basename: string, args: readonly string[], position
  * asked; a file destination makes a path that names nothing new.
  */
 function copyLandings(
-  basename: string,
-  args: readonly string[],
-  positionals: readonly string[],
-  targetDirectories: readonly string[],
+  plan: CopyPlan,
   inexact: (word: string) => boolean,
   glob: GlobReading,
 ): { plain: string[]; patterns: string[] } | null {
-  if (basename === "install" && args.some((arg) => arg === "-d" || arg === "--directory" || /^-[A-Za-z]*d/u.test(arg))) return null;
-  const dests = targetDirectories.length > 0 ? [...targetDirectories] : positionals.length >= 2 ? [positionals[positionals.length - 1] as string] : [];
-  const sources = targetDirectories.length > 0 ? [...positionals] : positionals.slice(0, -1);
+  const { dests, sources } = plan;
   if (dests.length === 0 || sources.length === 0) return null;
   const plain: string[] = [];
   const patterns: string[] = [];
   for (const source of sources) {
-    const parts = source.split("/").filter((part) => part.length > 0);
+    // rsync and scp: `host:path` lands by the path's basename.
+    const parts = source.replace(/^[^/]*:/u, "").split("/").filter((part) => part.length > 0);
     const base = parts[parts.length - 1];
     if (base === undefined || base === "." || base === "..") continue;
-    const globbed = inexact(source) && hasGlobConstruct(base);
+    const globbed = inexact(source) && globLive(glob, source) && hasGlobConstruct(base);
     const listed = globbed ? listedMatches(source, base, glob) : null;
     for (const dest of dests) {
       const into = dest.replace(/\/+$/u, "");
       // A destination the shell may still glob is a pattern too.
-      if (inexact(dest) && hasGlobConstruct(into)) patterns.push(`${into}/${base}`);
+      if (inexact(dest) && globLive(glob, dest) && hasGlobConstruct(into)) patterns.push(`${into}/${base}`);
       if (!globbed) plain.push(`${into}/${base}`);
       else if (listed !== null) for (const name of listed) plain.push(`${into}/${name}`);
       else patterns.push(`${into}/${base}`);
@@ -8852,8 +9279,17 @@ const PARAMETER_MARK = "";
  */
 function hasGlobConstruct(word: string): boolean {
   if (word.includes(PARAMETER_MARK)) return true;
-  const outside = maskParameters(word).text;
+  const outside = maskSpecialParameters(maskParameters(word).text);
   return /[*?[\]{}()#^<>|]/u.test(outside) || outside.slice(1).includes("~");
+}
+
+/**
+ * `$?`, `$#`, `$*`, `$@`, `$!`, `$$`, `$-` and `$0`..`$9` name a parameter:
+ * the character after the `$` is its name, never a glob (`exit-$?.txt`). Each
+ * is read as `$0`, an unknown value like any other. `${…}` is masked first.
+ */
+function maskSpecialParameters(text: string): string {
+  return text.replace(/\$[?#*@!$\-0-9]/gu, "$$0");
 }
 
 /**
@@ -9900,11 +10336,22 @@ function classifySegment(
   // the shell hands over (`exact`) is never a pattern or a `${…}` default; any
   // other word may be, and a text only contained in one (an option's attached
   // value) counts with it.
+  // zsh's `#` and `^` leave a word `exact` to the lexer; where the line may set
+  // options they are pattern characters, so such a word is not exact here.
+  const lineOptions = context.lineSetsDotglob === true;
   const inexactWords = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)]
-    .filter((word) => !word.exact)
+    .filter((word) => !word.exact || (lineOptions && word.zshGlob !== false))
     .map((word) => word.text);
   const inexact = (text: string): boolean => inexactWords.some((word) => word.includes(text));
+  // Only an UNQUOTED glob character, or an unquoted `$` whose value or `${…}`
+  // default the shell may still glob, makes a word a pattern: `"exit-$?.txt"`
+  // and `'a*'` are their text (the #683 gate M3 spellings in double quotes).
+  // zsh's `#`, `^` and `~` count only where the line may set options.
+  const liveWords = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)]
+    .filter((word) => word.splits || word.expands || (lineOptions && word.zshGlob !== false))
+    .map((word) => word.text);
   const glob: GlobReading = {
+    live: (text: string): boolean => liveWords.some((word) => word.includes(text)),
     options: context.lineSetsDotglob === true,
     ...(context.globDisk === undefined ? {} : { disk: context.globDisk }),
     budget: context.globBudget ?? { left: GLOB_GUARD_STEP_CAP },
@@ -10320,7 +10767,15 @@ function classifySegment(
   const copyFamily = ["cp", "mv", "ln", "install"].includes(basename);
   // GLOB-WRITE: the words this command writes through, read as the shell may
   // still read them ({@link globWriteOperands}).
-  const writtenOperands = globWriteOperands(basename, positionals);
+  // Review of 039b840a (finding 2): a copy tool's argv read by its option
+  // table, so an option's value is never taken for the destination.
+  const plan = copyPlan(basename, args);
+  const writtenOperands =
+    plan !== null && ["cp", "ln", "install"].includes(basename)
+      ? plan.unknown !== null
+        ? [...plan.operands, ...plan.dests]
+        : plan.dests
+      : globWriteOperands(basename, positionals);
   const writtenInexact = (text: string): boolean => writtenOperands.includes(text) && inexact(text);
   const targetDirectories = copyFamily ? copyTargetDirectories(args) : [];
   // Fix round 3 (S(open)): what the shell may still do to each argv word
@@ -10421,11 +10876,18 @@ function classifySegment(
     // Lead ruling L61195 (b): a copy, move, link or install into a DIRECTORY
     // writes `<dir>/<basename of each source>`, so that file is judged too
     // (`cp evil/settings.json .claude/` is `.claude/settings.json`).
-    const landed = copyFamily ? copyLandings(basename, args, positionals, targetDirectories, inexact, glob) : null;
-    // Review of b402adec (M2): a destination any name may land in, that is an organ directory.
-    const organDest = contentDestinations(basename, args, positionals, targetDirectories)
-      .map((dest) => organDestination(dest, inexact, glob))
-      .reduce<{ surface: string; path: string } | null>(
+    const landed = plan === null ? null : copyLandings(plan, inexact, glob);
+    // Review of b402adec (M2): a destination any name may land in, that is an
+    // organ directory, and a source landing AS one (`cp -r evil/.claude .`).
+    // Review of 039b840a (finding 1): a destination a source's CONTENTS land
+    // in, that holds or may hold one; an extraction that may write any path.
+    const organDest = [
+      ...(plan?.anyName ?? []).map((dest) => organDestination(dest, inexact, glob)),
+      ...(landed?.plain ?? []).map((path) => organDestination(path, () => false, glob)),
+      ...(plan?.contents ?? []).map((dest) => organAncestor(dest, protectedPaths, glob)),
+      ...(plan?.files.length ? [strictestProtectedWrite(plan.files, protectedPaths, inexact, false, glob)] : []),
+      ...(plan?.anywhere == null ? [] : [{ surface: "policy.core", path: plan.anywhere }]),
+    ].reduce<{ surface: string; path: string } | null>(
         (best, hit) => (hit !== null && (best === null || protectedRank(hit.surface) < protectedRank(best.surface)) ? hit : best),
         null,
       );
