@@ -713,23 +713,42 @@ export function protectedPathClass(
   candidate: string,
   extra: readonly ProtectedPathEntry[] = [],
 ): string | null {
-  if (candidate.length === 0) return null;
+  return protectedPathClasses(candidate, extra)[0] ?? null;
+}
+
+/**
+ * Every protected class this path's readings name, strictest first by
+ * {@link PROTECTED_PRECEDENCE}: each brace expansion, as written and as each
+ * glob reading of it ({@link protectedGlobReadings}). A word whose readings
+ * name more than one class carries each, and the policy judges each (review-b
+ * N1 at bcb1be08: `.approval/*` names the approval home and its log, and a
+ * policy that holds `log.mutate` looser than `policy.core` must still see
+ * `policy.core`). Past a glob reading's caps `policy.core` is added beside
+ * the word's own classes, never in place of them (codex's M1 at bcb1be08:
+ * `.approval/log/*\/*` keeps `log.mutate`).
+ */
+export function protectedPathClasses(candidate: string, extra: readonly ProtectedPathEntry[] = []): string[] {
+  if (candidate.length === 0) return [];
   // APRV-511 refuter M2: bash expands an unquoted brace group before the
   // command sees the word, so `~/.hermes/plugin{s,s}/x` IS the plugin
-  // directory. Each expansion is judged and the strictest answers; a group too
-  // large to expand is the stricter class.
+  // directory. Each expansion is judged; a group too large to expand is the
+  // stricter class.
   const expansions = braceCandidates(candidate);
-  if (expansions === null) return "policy.core";
-  let strictest: string | null = null;
+  if (expansions === null) return ["policy.core"];
+  const found = new Set<string>();
+  const keep = (cls: string | null): void => {
+    if (cls !== null) found.add(cls);
+  };
   for (const expansion of expansions) {
+    keep(protectedPathClassOfWord(expansion, extra));
     const readings = protectedGlobReadings(expansion, extra);
-    if (readings === null) return "policy.core";
-    for (const reading of readings) {
-      const cls = protectedPathClassOfWord(reading, extra);
-      if (cls !== null && (strictest === null || protectedRank(cls) < protectedRank(strictest))) strictest = cls;
+    if (readings === null) {
+      keep("policy.core");
+      continue;
     }
+    for (const reading of readings) keep(protectedPathClassOfWord(reading, extra));
   }
-  return strictest;
+  return [...found].sort((left, right) => protectedRank(left) - protectedRank(right));
 }
 
 /**
@@ -8504,17 +8523,34 @@ function strictestProtected(
   words: readonly string[],
   protectedPaths: readonly ProtectedPathEntry[],
   skipProse = false,
-): { surface: string; path: string } | null {
+): StrictestProtected | null {
   let best: { surface: string; path: string } | null = null;
+  // The other classes a word's own readings name (review-b N1 at bcb1be08):
+  // each is reported beside the segment's class, so the policy judges each.
+  const others = new Set<string>();
   for (const word of words) {
-    const surface = protectedPathClass(word, protectedPaths);
-    if (surface === null) continue;
+    const classes = protectedPathClasses(word, protectedPaths);
+    const surface = classes[0];
+    if (surface === undefined) continue;
     if (skipProse && proseNamingProtectedPath(word, surface, protectedPaths)) continue;
-    if (best === null || protectedRank(surface) < protectedRank(best.surface)) {
-      best = { surface, path: word };
-    }
+    for (const cls of classes.slice(1)) others.add(cls);
+    if (best === null || protectedRank(surface) < protectedRank(best.surface)) best = { surface, path: word };
   }
-  return best;
+  if (best === null) return null;
+  const chosen = best.surface;
+  return { ...best, others: [...others].filter((cls) => cls !== chosen) };
+}
+
+/** {@link strictestProtected}'s answer: the class, the word, and the other classes its readings name. */
+interface StrictestProtected {
+  surface: string;
+  path: string;
+  others: string[];
+}
+
+/** The outcome field that carries {@link StrictestProtected.others}, when there are any. */
+function alsoProtected(found: StrictestProtected): { alsoClasses?: string[] } {
+  return found.others.length === 0 ? {} : { alsoClasses: found.others };
 }
 
 /**
@@ -8889,6 +8925,13 @@ type SegmentOutcome =
        * sees it: the hook refuses when ANY class is human-only.
        */
       also?: CredentialOutcome;
+      /**
+       * The other protected classes the readings of the protected word name
+       * (review-b N1 at bcb1be08), each reported as its own classified
+       * segment over the same text with the same rule, so the policy judges
+       * each class and the strictest decision answers.
+       */
+      alsoClasses?: string[];
       /** The program an `exec.code` answer runs (APRV-510). */
       execCode?: ExecCodeSource;
     }
@@ -9060,6 +9103,7 @@ function classifySegment(
       class: redirected.surface,
       rule: "redirect-protected",
       path: redirected.path,
+      ...alsoProtected(redirected),
       ...(touched === null ? {} : { also: touched }),
     };
   }
@@ -9459,7 +9503,7 @@ function classifySegment(
     protectedPaths,
   );
   if (fetchedProtected !== null) {
-    return { ok: true, class: fetchedProtected.surface, rule: "protected-path", path: fetchedProtected.path };
+    return { ok: true, class: fetchedProtected.surface, rule: "protected-path", path: fetchedProtected.path, ...alsoProtected(fetchedProtected) };
   }
   // APRV-511 review: a download whose output this table cannot know (an
   // option it does not know, an ambiguous prefix, a config file or string) is
@@ -9475,7 +9519,7 @@ function classifySegment(
   if (copyUnknown !== null) {
     const named = strictestProtected([...positionals, ...readTargets], protectedPaths);
     if (named !== null && protectedRank(named.surface) <= protectedRank("policy.core")) {
-      return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
+      return { ok: true, class: named.surface, rule: "protected-path", path: named.path, ...alsoProtected(named) };
     }
     return { ok: true, class: "policy.core", rule: "copy-target-unknown", path: copyUnknown };
   }
@@ -9535,7 +9579,7 @@ function classifySegment(
         ? named
         : fed;
     if (touched !== null) {
-      return { ok: true, class: touched.surface, rule: "protected-path", path: touched.path };
+      return { ok: true, class: touched.surface, rule: "protected-path", path: touched.path, ...alsoProtected(touched) };
     }
   }
 
@@ -9985,6 +10029,15 @@ export function classifyCommand(
       ...(outcome.execCode === undefined ? {} : { execCode: outcome.execCode }),
     });
     if (!classes.includes(outcome.class)) classes.push(outcome.class);
+    for (const cls of outcome.alsoClasses ?? []) {
+      segments.push({
+        text: segment.text,
+        class: cls,
+        rule: outcome.rule,
+        ...(outcome.path === undefined ? {} : { path: outcome.path }),
+      });
+      if (!classes.includes(cls)) classes.push(cls);
+    }
     // APRV-503 recheck: the credential touch a protected answer outranked, as
     // its own entry over the same segment text. The shape a pipeline already
     // has (one entry per class-bearing part), so every reader of `segments`

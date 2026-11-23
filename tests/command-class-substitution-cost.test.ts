@@ -165,10 +165,11 @@ test("cost: past 1,024 glob characters one pattern segment is judged to name .gi
   assert.equal(globSegmentMatches(`.${"*".repeat(1025)}x`, ".git"), true);
   // `y`, since `.*x` names `.codex`, a gate directory, under the bound (build-2's
   // sweep v3 on 83f30bdc); past it the pattern may name any directory, the
-  // gate's own among them, so the strictest class answers.
+  // gate's own among them and `.npmrc`, so each class it may name is reported
+  // (review-b N1 at bcb1be08).
   assert.deepEqual(pure(`echo x > .${"*".repeat(1023)}y`), ["files.write.workspace redirect-write"]);
-  assert.deepEqual(pure(`echo x > .${"*".repeat(1025)}y`), ["policy.core redirect-protected"]);
-  assert.deepEqual(bounded(`echo x > .${"*".repeat(100000)}y`, "100,000 *"), ["policy.core redirect-protected"]);
+  assert.deepEqual(pure(`echo x > .${"*".repeat(1025)}y`), ["policy.core redirect-protected", "policy.edit redirect-protected"]);
+  assert.deepEqual(bounded(`echo x > .${"*".repeat(100000)}y`, "100,000 *"), ["policy.core redirect-protected", "policy.edit redirect-protected"]);
   // Under the bound the walk answers as the expression did.
   assert.equal(globSegmentMatches(`.${"*".repeat(1000)}t`, ".git"), true);
   assert.equal(globSegmentMatches(`.${"?*".repeat(500)}`, ".git"), false);
@@ -378,4 +379,22 @@ test("cost: a word of many glob segments is read in one pass (security review of
   // Past 64 pattern segments a word is judged policy.core; at 64 it is read.
   assert.deepEqual(pure(`echo x > ${"b*/".repeat(64)}f`), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure(`echo x > ${"b*/".repeat(65)}f`), ["policy.core redirect-protected"]);
+});
+
+test("cost: a word past either glob cap keeps the stricter class it has on its own (codex on bcb1be08)", () => {
+  // Past 256 readings (`*` names 19 organ names, so two give 400) and past 64
+  // pattern segments: an explicit log path stays log.mutate, which outranks
+  // policy.core; at bcb1be08 each was demoted to policy.core.
+  const LOG = "log.mutate redirect-protected";
+  const CORE = "policy.core redirect-protected";
+  // Each class is reported, so the policy judges each (review-b N1 at bcb1be08).
+  assert.deepEqual(pure("echo x > .approval/log/*/*"), [LOG, CORE]);
+  assert.deepEqual(pure(`echo x > .approval/log/${"b*/".repeat(65)}x`), [LOG, CORE]);
+  assert.deepEqual(pure("echo x > {.approval/log,build}/*/*"), [LOG, CORE]);
+  // A plain path past either cap is policy.core, the strict side.
+  assert.deepEqual(pure("echo x > build/*/*"), [CORE]);
+  assert.deepEqual(pure(`echo x > build/${"b*/".repeat(65)}x`), [CORE]);
+  // Under both caps the glob readings answer as before.
+  assert.deepEqual(pure(`echo x > build/${"b*/".repeat(64)}x`), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(pure("echo x > build/b*/*"), ["files.write.workspace redirect-write"]);
 });

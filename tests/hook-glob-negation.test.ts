@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { classifyForHook } from "../src/cli/hook.js";
+import { classifyForHook, joinContinuations } from "../src/cli/hook.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-glob-negation-")));
@@ -93,6 +93,17 @@ const abstainLab = ((): { dir: string; home: string } => {
   const dir = join(scratch, "proj-abstain");
   mkdirSync(join(dir, ".approval"), { recursive: true });
   writeFileSync(join(dir, "APPROVAL.md"), POLICY.replace('  on_expiry: reject\n', '  on_expiry: reject\n  unclassified_command: abstain\n'), "utf8");
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir, lab.home);
+  assert.equal(attested.code, 0, attested.stderr);
+  writeFileSync(join(dir, ".approval", "env"), "SYNTHETIC=1\n", "utf8");
+  return { dir, home: lab.home };
+})();
+
+/** The same gate under a policy that holds `log.mutate` human-only, beside `lab`, whose policy leaves it at the autonomous default. */
+const logLab = ((): { dir: string; home: string } => {
+  const dir = join(scratch, "proj-log");
+  mkdirSync(join(dir, ".approval"), { recursive: true });
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY.replace("classes:\n", "classes:\n  log.mutate:\n    autonomy: human-only\n"), "utf8");
   const attested = runCli(["policy", "attest", "--as", "human:alice"], dir, lab.home);
   assert.equal(attested.code, 0, attested.stderr);
   writeFileSync(join(dir, ".approval", "env"), "SYNTHETIC=1\n", "utf8");
@@ -450,5 +461,69 @@ test("security review of 54624872: an ANSI-C or locale quoted setter, or one fro
       const decision = claude(command, at);
       assert.match(decision, /^deny: /u, `${command}: ${decision}`);
     }
+  }
+});
+
+test("review-b's M-C at bcb1be08: a line continuation before or inside a group is removed before any reader, as the shell removes it", () => {
+  // zsh -f opens the credential for each. Under the abstain policy the hook
+  // abstained on each at bcb1be08 (and on main 21fc5fdc): the group reader
+  // took the newline of `\`+newline for a separator.
+  for (const command of [
+    "cat ~/.hermes/a\\\n(u)th.json",
+    "cat ~/.hermes/a\\\n((u))th.json",
+    "cat ~/.hermes/au\\\n(t)h.json",
+    "cat .approval/e\\\n(n)v",
+    "cat ~/.hermes/(a\\\nu)th.json",
+    "cat ~/.hermes/a(\\\nu)th.json",
+    "cat ~/.hermes/a(u\\\n)th.json",
+  ]) {
+    for (const at of [lab, abstainLab]) {
+      const decision = claude(command, at);
+      assert.match(decision, /^deny: /u, `${JSON.stringify(command)}: ${decision}`);
+    }
+  }
+  // The shell's own rules: kept inside single and ANSI-C quotes and in a
+  // comment, removed outside quotes and inside double quotes, and `\\` then a
+  // newline is an escaped backslash and a newline.
+  assert.equal(joinContinuations("a\\\nb \"c\\\nd\""), "ab \"cd\"");
+  assert.equal(joinContinuations("a '\\\n' $'\\\n'"), "a '\\\n' $'\\\n'");
+  assert.equal(joinContinuations("x # c \\\ny"), "x # c \\\ny");
+  assert.equal(joinContinuations("x#\\\ny"), "x#y");
+  assert.equal(joinContinuations("a\\\\\nb"), "a\\\\\nb");
+  assert.equal(joinContinuations("plain line"), "plain line");
+  // A comment's last `\` does not hide the next line from the readers.
+  assert.match(claude("echo hi # x \\\ncat ~/.hermes/a(u)th.json", abstainLab), /^deny: /u);
+});
+
+test("review-b's N1 and codex's M1 at bcb1be08: each class a word's readings name is judged by the policy, the cap's too", () => {
+  // `.approval/*` names the approval home (policy.core) and its log
+  // (log.mutate); past a glob cap the word's own class and policy.core both
+  // stand. `lab`'s policy leaves log.mutate at the autonomous default, where
+  // picking log.mutate by precedence alone allowed `rm -rf .approval/*` at
+  // bcb1be08 (main denied it as policy.core); `logLab` holds it human-only.
+  for (const command of [
+    "rm -rf .approval/*",
+    "cp README.md .approval/*",
+    "echo x > .approval/log/*/*",
+    `echo x > .approval/log/${"b*/".repeat(65)}x`,
+  ]) {
+    for (const at of [lab, logLab]) {
+      const decision = claude(command, at);
+      assert.match(decision, /^deny: .*(policy\.core|log\.mutate)/u, `${command}: ${decision}`);
+    }
+    const judged = classes(command);
+    assert.ok(judged.includes("policy.core") && judged.includes("log.mutate"), `${command}: ${judged.join(", ")}`);
+  }
+  // An explicit log path with no glob keeps its one class.
+  assert.deepEqual(classes("echo x > .approval/log/x"), ["log.mutate"]);
+});
+
+test("review-b's N3 at bcb1be08: a group nested in an attached group is read through its parent", () => {
+  // zsh -f opens auth.json for each; the parent is written whole, so the
+  // nested group needs no attachment of its own (the clause f3 turned off is
+  // gone).
+  for (const command of ["cat ~/.hermes/a((u))th.json", "cat ~/.hermes/((a))uth.json", "cat ~/.hermes/a(((u)))th.json", "cat .approval/e((n))v"]) {
+    assert.ok(classes(command, true).includes("account.credential"), command);
+    assert.match(claude(command, abstainLab), /^deny: /u, command);
   }
 });

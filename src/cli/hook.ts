@@ -4097,28 +4097,93 @@ export function classifyForHook(
   credentialCwds: readonly string[] = [],
   noRuleSegments = false,
 ): RefinedClassification {
+  // The shell removes each `\`+newline before it reads anything else, so every
+  // reader below reads the text with them removed too (the lead's ruling on
+  // review-b's M-C at bcb1be08: `a\<newline>(u)th.json` is `a(u)th.json`),
+  // with that reading's refusal standing; and the text with every
+  // `\`+newline removed, quoted or in a comment, where
+  // {@link joinContinuations} keeps one (a refusal of that reading adds
+  // nothing). The text as written stays the answer's base, so its segments
+  // are the ones bound and recorded; a reading adds only the classes it has
+  // that the answer lacks, so a reader that disagrees with the shell can only
+  // add a class.
+  const joined = joinContinuations(command);
+  const bases = [...new Set([command, joined, command.replaceAll("\\\n", "")])];
   const outer = shellOptionsSet;
-  shellOptionsSet = outer || setsShellOption(command);
+  shellOptionsSet = outer || bases.some(setsShellOption);
   try {
-    let judged = classifyForHookOnce(command, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments);
-    // Other readings of the same text, the stricter together: zsh's numeric
-    // glob where bash reads a redirect (a refusal of that reading stands), and
-    // a group a word carries, which zsh globs with no option set (`a(u)th.json`
-    // opens auth.json; security review of d0288514) and bash's extglob or
-    // zsh's extended glob read under an option (a refusal of that reading
-    // alone adds nothing, so `f() { …; }` keeps its verdict).
-    // The two compose (`p<->/a(u)th.json`; codex on 83f30bdc): the group
-    // reading is taken of the numeric reading too.
-    const zsh = zshNumericGlobReading(command);
-    if (zsh !== null) judged = together(judged, classifyForHookOnce(zsh, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments), true);
-    for (const reading of new Set([optionGroupReading(command), zsh === null ? null : optionGroupReading(zsh)])) {
-      if (reading === null) continue;
-      judged = together(judged, classifyForHookOnce(reading, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments), false);
+    const once = (text: string): RefinedClassification =>
+      classifyForHookOnce(text, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments);
+    let judged = once(command);
+    for (const base of bases) {
+      if (base !== command) judged = togetherIfNew(judged, once(base), base === joined);
+      // Other readings of the same text, the stricter together: zsh's numeric
+      // glob where bash reads a redirect (a refusal of that reading stands),
+      // and a group a word carries, which zsh globs with no option set
+      // (`a(u)th.json` opens auth.json; security review of d0288514) and
+      // bash's extglob or zsh's extended glob read under an option (a refusal
+      // of that reading alone adds nothing, so `f() { …; }` keeps its
+      // verdict). The two compose (`p<->/a(u)th.json`; codex on 83f30bdc): the
+      // group reading is taken of the numeric reading too.
+      const zsh = zshNumericGlobReading(base);
+      if (zsh !== null) judged = together(judged, once(zsh), true);
+      for (const reading of new Set([optionGroupReading(base), zsh === null ? null : optionGroupReading(zsh)])) {
+        if (reading === null) continue;
+        judged = together(judged, once(reading), false);
+      }
     }
     return judged;
   } finally {
     shellOptionsSet = outer;
   }
+}
+
+/**
+ * The command with each line continuation (`\` and a newline) removed, as the
+ * shell removes it before it reads the line: outside quotes and inside double
+ * quotes, never inside single quotes, ANSI-C quotes (`$'…'`) or a comment. An
+ * escaped backslash (`\\`) is not a continuation. One pass over the text.
+ */
+export function joinContinuations(text: string): string {
+  if (!text.includes("\\\n")) return text;
+  let out = "";
+  let quote: "'" | '"' | "$'" | null = null;
+  let comment = false;
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at] as string;
+    if (comment) {
+      out += char;
+      if (char === "\n") comment = false;
+      continue;
+    }
+    if (quote === "'") {
+      out += char;
+      if (char === "'") quote = null;
+      continue;
+    }
+    if (char === "\\") {
+      if (quote !== "$'" && text[at + 1] === "\n") {
+        at += 1;
+        continue;
+      }
+      out += text.slice(at, at + 2);
+      at += 1;
+      continue;
+    }
+    out += char;
+    if (quote === "$'") {
+      if (char === "'") quote = null;
+    } else if (quote === '"') {
+      if (char === '"') quote = null;
+    } else if (char === "'") {
+      quote = out.length >= 2 && out[out.length - 2] === "$" ? "$'" : "'";
+    } else if (char === '"') {
+      quote = '"';
+    } else if (char === "#" && (out.length === 1 || /[\s;&|()<>]/u.test(out[out.length - 2] as string))) {
+      comment = true;
+    }
+  }
+  return out;
 }
 
 /**
@@ -4137,6 +4202,19 @@ function together(first: RefinedClassification, second: RefinedClassification, r
     },
     notes: [...first.notes, ...second.notes],
   };
+}
+
+/**
+ * {@link together}, except that a reading which adds no class leaves the
+ * answer as it was, so a command whose continuations change nothing keeps its
+ * one set of segments.
+ */
+function togetherIfNew(first: RefinedClassification, second: RefinedClassification, refusalStands: boolean): RefinedClassification {
+  if (first.result.ok && second.result.ok) {
+    const known = new Set(first.result.classes);
+    if (second.result.classes.every((cls) => known.has(cls))) return first;
+  }
+  return together(first, second, refusalStands);
 }
 
 /** {@link classifyForHook} for one reading of the command. */
@@ -8399,11 +8477,14 @@ function zshNumericGlobReading(command: string): string | null {
  *
  * A group is word-attached when the character before its `(` is not a
  * separator, `$`, `<`, `>`, `=` or `(` (so a substitution, a process
- * substitution, an array and a subshell are left alone), or when that
- * character is the `(` of a word-attached group (nesting), or when `#`
- * follows it. Only a group holding no whitespace is rewritten, and the
- * outermost such group is written whole. One pass with a stack, so a long
- * line costs its length.
+ * substitution, an array and a subshell are left alone), or when `#` follows
+ * it. Only a group holding no whitespace is rewritten, and the outermost such
+ * group is written whole, so a group nested in an attached one needs no
+ * attachment of its own: its parent is written over it, or (holding
+ * whitespace) keeps a `(` the lexer refuses, and a refused reading adds
+ * nothing. (review-b's planted fault f3 at bcb1be08 found that clause
+ * changed no decision; it is gone.) One pass with a stack, so a long line
+ * costs its length.
  */
 function optionGroupReading(command: string): string | null {
   const open: Array<{ at: number; attached: boolean; clean: boolean }> = [];
@@ -8412,11 +8493,7 @@ function optionGroupReading(command: string): string | null {
     const char = command[at] as string;
     if (char === "(") {
       const before = command[at - 1];
-      const parent = open[open.length - 1];
-      const attached =
-        command[at + 1] === "#" ||
-        (before !== undefined && !/[\s;&|<>$=(]/u.test(before)) ||
-        (before === "(" && parent !== undefined && parent.at === at - 1 && parent.attached);
+      const attached = command[at + 1] === "#" || (before !== undefined && !/[\s;&|<>$=(]/u.test(before));
       open.push({ at, attached, clean: true });
     } else if (char === ")") {
       const group = open.pop();
