@@ -722,10 +722,54 @@ export function protectedPathClass(
   if (expansions === null) return "policy.core";
   let strictest: string | null = null;
   for (const expansion of expansions) {
-    const cls = protectedPathClassOfWord(expansion, extra);
-    if (cls !== null && (strictest === null || protectedRank(cls) < protectedRank(strictest))) strictest = cls;
+    const readings = protectedGlobReadings(expansion, extra);
+    if (readings === null) return "policy.core";
+    for (const reading of readings) {
+      const cls = protectedPathClassOfWord(reading, extra);
+      if (cls !== null && (strictest === null || protectedRank(cls) < protectedRank(strictest))) strictest = cls;
+    }
   }
   return strictest;
+}
+
+/**
+ * The names the protected rows below compare a segment with: the gate's
+ * directories and the organs under them. The top-level file names
+ * (`APPROVAL.md`, `CLAUDE.md`) are left out, so `*.md` stays the workspace
+ * write it was.
+ */
+const PROTECTED_SEGMENT_NAMES: readonly string[] = [
+  ".approval", "log", ".claude", "settings.json", "settings.local.json", ".cursor", "hooks.json", "hooks",
+  "agents", ".grok", ".muse", ".hermes", "profiles", "config.yaml", "config.yml", "agent-hooks", "approval",
+  ".env", ".env.local", "auth.json", "shell-hooks-allowlist.json", "shell-hooks-allowlist.json.lock",
+  "hermes-agent", "plugins", ".op.env", "scripts", ".codex", "config.toml", ".github", "workflows",
+];
+
+/** Past this many readings of one word, it is judged `policy.core`. */
+const PROTECTED_GLOB_READINGS = 256;
+
+/**
+ * The word as written, and with each segment that holds a glob replaced by
+ * each protected name it matches as the shell would expand it (build-2's
+ * sweep v3 on 83f30bdc: `echo x > ~/.[!Z]ermes/auth.json` wrote the Hermes
+ * credential file as a workspace write under a harness with no per-call
+ * directory, where the hook's disk pass does not run). `null` past
+ * {@link PROTECTED_GLOB_READINGS}.
+ */
+function protectedGlobReadings(word: string, extra: readonly ProtectedPathEntry[]): string[] | null {
+  const segments = pathSegments(word);
+  if (!segments.some(isPatternSegment)) return [word];
+  const names = new Set(PROTECTED_SEGMENT_NAMES);
+  for (const raw of extra) for (const segment of parseProtectedEntry(raw)?.segments ?? []) names.add(segment);
+  let readings: string[][] = [[]];
+  for (const segment of segments) {
+    const options = isPatternSegment(segment)
+      ? [segment, ...[...names].filter((name) => globSegmentMatches(segment, name))]
+      : [segment];
+    if (readings.length * options.length > PROTECTED_GLOB_READINGS) return null;
+    readings = readings.flatMap((reading) => options.map((option) => [...reading, option]));
+  }
+  return readings.map((reading) => reading.join("/"));
 }
 
 /** {@link protectedPathClass} for one word that brace expansion has already made. */
@@ -4197,9 +4241,10 @@ function globElements(pattern: string): GlobElement[] | null {
         one("\\[");
         continue;
       }
-      // A bracket expression: a leading `!` negates it (a leading `^` is
-      // any one character, below) and a leading `]` is a member; a POSIX class, equivalence class or collating
-      // element (`[:alpha:]`, `[=g=]`, `[.g.]`) is skipped to its own close
+      // A bracket expression: a leading `!` or `^` makes it any one
+      // character (below) and a leading `]` is a member; a POSIX class,
+      // equivalence class or collating element (`[:alpha:]`, `[=g=]`,
+      // `[.g.]`) is skipped to its own close
       // and makes the expression match ANY one character, the strict side
       // (review of the second fold). Unclosed, the `[` is a literal.
       let close = at + 1;
@@ -4237,13 +4282,25 @@ function globElements(pattern: string): GlobElement[] | null {
         at = close;
         continue;
       }
-      let body = pattern.slice(at + 1, close);
-      if (body.startsWith("^")) {
-        // bash and zsh negate `[^...]`, dash reads `^` as a member (`.gi[^t]`
-        // names `.git` under dash): between them any one character. After
-        // `[^]` the shells close the class in different places: the strict
-        // side (review-b's FINDING on #682).
-        if (body.startsWith("^]")) {
+      const body = pattern.slice(at + 1, close);
+      if (body.startsWith("^") || body.startsWith("!")) {
+        // `[!...]` and `[^...]` are any one character, as in the hook's own
+        // reader (src/core/glob-match.ts): bash and zsh negate both, dash
+        // reads `^` as a member (`.gi[^t]` names `.git` under dash), and a
+        // `!` the command escaped or quoted (`[\!t]`, `["!"t]`) is a member
+        // to every shell, which the lexer's text no longer shows, so
+        // `.gi[\!t]/config` is `.git/config` (review-b's M-A on 83f30bdc).
+        // After `[!]` or `[^]` the readings close the class in different
+        // places, and a class the old expression could not build (a
+        // reversed range, `[^z-a]`) stays the strict unknown, as it was
+        // before the widening (codex on 83f30bdc).
+        let builds = true;
+        try {
+          new RegExp(`[^${body.slice(1).replace(/[\\\]^]/gu, "\\$&")}]`, "iu");
+        } catch {
+          builds = false;
+        }
+        if (body[1] === "]" || !builds) {
           globElementsCache = { pattern, elements: null };
           return null;
         }
@@ -4251,9 +4308,7 @@ function globElements(pattern: string): GlobElement[] | null {
         at = close;
         continue;
       }
-      const negated = body.startsWith("!");
-      if (negated) body = body.slice(1);
-      one(`[${negated ? "^" : ""}${body.replace(/[\\\]^]/gu, "\\$&")}]`);
+      one(`[${body.replace(/[\\\]^]/gu, "\\$&")}]`);
       at = close;
     } else {
       one(char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"));

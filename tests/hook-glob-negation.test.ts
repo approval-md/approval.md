@@ -44,6 +44,8 @@ const POLICY = [
   "classes:",
   "  policy.core:",
   "    autonomy: human-only",
+  "  vcs.history.rewrite:",
+  "    autonomy: human-only",
   "  account.credential:",
   "    autonomy: human-only",
   "```",
@@ -318,5 +320,96 @@ test("security review of d0288514: ordinary lines with parentheses keep their ve
   ] as const) {
     const decision = claude(command, abstainLab);
     assert.match(decision, expected, `${command}: ${decision}`);
+  }
+});
+
+test("codex on 83f30bdc: quoted setters, nested groups and composed readings are judged as zsh reads them", () => {
+  // zsh opens the credential for each (made-up files). Under the abstain
+  // policy the hook abstained on the first five at 83f30bdc, and the class of
+  // the last lacked account.credential.
+  for (const command of [
+    'set "-o" extendedglob; cat ~/.hermes/.Z#env',
+    "s'et' -o extendedglob; cat ~/.hermes/.Z#env",
+    "set -'o' extendedglob; cat ~/.hermes/.Z#env",
+    "cat ~/.hermes/a((u))th.json",
+    "cat ~/.hermes/a(((u)))th.json",
+    "cat ~/.hermes/profiles/p<->/a(u)th.json",
+    // review-b's M-B on 83f30bdc: more quoted setters, and nested groups.
+    "'set' -o extendedglob; cat ~/.hermes/.Z#env",
+    "set \\-o extendedglob; cat ~/.hermes/.Z#env",
+    "se\\t -o extendedglob; cat ~/.hermes/au#th.json",
+    'builtin set "-o" extendedglob; cat ~/.hermes/.Z#env',
+    'set "-o" braceccl; cat ~/.hermes/{a-b}uth.json',
+    "cat ~/.hermes/(a(u))th.json",
+    "cat .approval/(e(n))v",
+    "cat .approval/e((n))v",
+  ]) {
+    assert.ok(classes(command, true).includes("account.credential"), `${command}: ${JSON.stringify(classes(command, true))}`);
+  }
+  for (const command of ['set "-o" extendedglob; cat ~/.hermes/.Z#env', "cat ~/.hermes/a((u))th.json", "cat .approval/(e(n))v"]) {
+    const decision = claude(command, abstainLab);
+    assert.match(decision, /^deny: /u, `${command}: ${decision}`);
+  }
+  // A reversed range was the old fallback (any name): through the real hook,
+  // as the plain read of the directory's credential is.
+  for (const command of ["cat ~/.hermes/[!z-a]", "cat ~/.hermes/[^z-a]"]) {
+    const decision = claude(command);
+    assert.match(decision, /^deny: .*account\.credential/u, `${command}: ${decision}`);
+  }
+});
+
+test("review-b's M-A on 83f30bdc: a write through an escaped, quoted or plain negated class into .git is the .git write it is", () => {
+  // bash 3.2, zsh -f and dash all expand each of these to .git/config (or
+  // .git): the lexer hands the .git reader `[!t]` for `[\\!t]`, which every
+  // shell reads as the members `!` and `t`. At 83f30bdc each was allowed as
+  // files.write.workspace, while `echo x > .git/config` was denied.
+  const plain = claude("echo x > .git/config");
+  assert.match(plain, /^deny: .*vcs\.history\.rewrite/u, plain);
+  for (const command of [
+    "echo x > .gi[\\!t]/config",
+    'echo x > .gi["!"t]/config',
+    "echo x > .gi[!t]/config",
+    "echo x > .gi[^t]/config",
+    "echo x > .g[\\!i]t/config",
+    "touch .gi[\\!t]/hooks/pre-commit",
+  ]) {
+    const decision = claude(command);
+    assert.match(decision, /^deny: .*vcs\.history\.rewrite/u, `${command}: ${decision}`);
+  }
+});
+
+test("build-2's sweep v3 on 83f30bdc: a write through a glob that names the Hermes home or one of its organs is the organ write", () => {
+  // bash 3.2 and zsh -f write ~/.hermes/auth.json for each (dash for the
+  // copies). Claude Code states no per-call directory, so the hook's disk
+  // pass does not run and the classifier's protected rows answer; at 83f30bdc
+  // (and on main) each was allowed as files.write.workspace under both
+  // policies, while `echo x > ~/.hermes/auth.json` was denied as policy.core.
+  for (const at of [lab, abstainLab]) {
+    const plain = claude("echo x > ~/.hermes/auth.json", at);
+    assert.match(plain, /^deny: .*policy\.core/u, plain);
+    for (const command of [
+      "echo x > ~/.[\\!h]ermes/auth.json",
+      'echo x > ~/.herme["!"s]/auth.json',
+      "echo x > ~/.[!Z]ermes/auth.json",
+      "echo x > ~/.h?rmes/auth.json",
+      "echo x > ~/.hermes/a*h.json",
+      "cp README.md ~/.herme[\\!s]/auth.json",
+      "cp README.md ~/.[!Z]ermes/auth.json",
+    ]) {
+      const decision = claude(command, at);
+      assert.match(decision, /^deny: .*policy\.core/u, `${command}: ${decision}`);
+    }
+  }
+  // ksh reads `@(e)` with no option set, so each opens the credential; under
+  // the abstain policy the hook abstained on each at 83f30bdc, the group
+  // reading keeping the `@` (`.@*nv`).
+  for (const command of ["ksh -c 'cat ~/.hermes/.@(e)nv'", "ksh -c 'cat ~/.hermes/.@(o)p.env'", "ksh -c 'cat ~/.hermes/.!(x)nv'"]) {
+    const decision = claude(command, abstainLab);
+    assert.match(decision, /^deny: /u, `${command}: ${decision}`);
+    assert.ok(classes(command, true).includes("account.credential"), command);
+  }
+  // A glob that can name no organ stays the workspace write it was.
+  for (const command of ["echo x > *.md", "echo x > build/*.json", "cp README.md docs/?.md"]) {
+    assert.deepEqual(classes(command), ["files.write.workspace"], command);
   }
 });

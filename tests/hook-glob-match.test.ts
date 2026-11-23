@@ -69,13 +69,39 @@ function oracleHolds(pattern: string): "negated" | "equal" | "wider" {
   return "equal";
 }
 
-/** Assert the reader against the oracle as {@link oracleHolds} says; true when it was compared for equality. */
+/** Did the old expression fail to build for `pattern`, and fall back to `^.*$` (the strict side)? */
+function oracleFellBack(pattern: string): boolean {
+  return pattern !== "*" && oracleGlobRegex(pattern).source === "^.*$";
+}
+
+/**
+ * {@link oracleHolds} for one name: a letter now matches either case
+ * (nocaseglob, case-insensitive volumes), and a pattern the old expression
+ * could not build now matches a name with a line terminator too (codex on
+ * 83f30bdc), so either makes an `"equal"` pattern `"wider"` for that name.
+ */
+function holdsFor(pattern: string, name: string): "negated" | "equal" | "wider" {
+  const holds = oracleHolds(pattern);
+  if (holds !== "equal") return holds;
+  if (/[A-Z]/u.test(pattern + name)) return "wider";
+  if (oracleFellBack(pattern) && /[\n\r\u2028\u2029]/u.test(name)) return "wider";
+  return "equal";
+}
+
+/**
+ * Assert the reader against the oracle as {@link holdsFor} says; true when it
+ * was compared for equality. A negated pattern is held to the old expression
+ * where that was strict (it fell back to any name: `[!z-a]`), and to the
+ * shells everywhere else (the negation tests below).
+ */
 function againstOracle(pattern: string, name: string, label: string): boolean {
-  // An ASCII letter now matches either case (nocaseglob, case-insensitive volumes).
-  const holds = /[A-Z]/u.test(pattern + name) && oracleHolds(pattern) === "equal" ? "wider" : oracleHolds(pattern);
-  if (holds === "negated") return false;
+  const holds = holdsFor(pattern, name);
   const expected = oracleGlobRegex(pattern).test(name);
   const actual = globPattern(pattern).test(name);
+  if (holds === "negated") {
+    if (oracleFellBack(pattern) && expected) assert.equal(actual, true, `${label} (negated: the old expression fell back to any name)`);
+    return false;
+  }
   if (holds === "equal") {
     assert.equal(actual, expected, label);
     return true;
@@ -149,7 +175,7 @@ test("equivalence: globPattern answers as the old expression on seeded random ca
     const pattern = draw(patternAlphabet, 9);
     const name = draw(nameAlphabet, 8);
     const oracle = oracleGlobRegex(pattern);
-    if (oracleHolds(pattern) !== "equal" || /[A-Z]/u.test(pattern + name)) {
+    if (holdsFor(pattern, name) !== "equal") {
       againstOracle(pattern, name, `case ${String(index)}: pattern ${JSON.stringify(pattern)} name ${JSON.stringify(name)}`);
       continue;
     }
@@ -398,8 +424,9 @@ test("negation: every `[!...]` and `[^...]` matches at least what bash, zsh and 
       }
       // Each class is still one character: a pattern with no `*` matches
       // only names of its own length (the class not read as a run).
-      // (`[!]`, `[^]`, and a `?` or `[` inside a class, make any name.)
-      if (!pattern.includes("*") && !/\[[!^]\]/u.test(pattern) && !/\[[^\]]*[?[]/u.test(pattern)) {
+      // (`[!]`, `[^]`, a `?` or `[` inside a class, and a class the old
+      // expression could not build, such as `[^-1]`, make any name.)
+      if (!pattern.includes("*") && !/\[[!^]\]/u.test(pattern) && !/\[[^\]]*[?[]/u.test(pattern) && !oracleFellBack(pattern)) {
         const length = Array.from(pattern.replace(/\[[!^]\]?[^\]]*\]/gu, "c")).length;
         for (const name of ours) assert.equal(Array.from(name).length, length, `${JSON.stringify(pattern)} matched ${JSON.stringify(name)}`);
         lengthChecked += 1;
@@ -410,6 +437,24 @@ test("negation: every `[!...]` and `[^...]` matches at least what bash, zsh and 
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+test("codex on 83f30bdc: a reversed range is the old fallback, negated or not, and the fallback matches every name", () => {
+  // The old expression could not build these and matched every name; a
+  // negated class must not narrow that to one character.
+  for (const pattern of ["[!z-a]", "[^z-a]", "[z-a]", "[!b-a]x", "[^-!]", "*[!z-a]"]) {
+    for (const name of ["auth.json", ".env", ".env.local", "vault.enc", "keys", "hermes-agent", "a", "a\nb"]) {
+      assert.equal(globPattern(pattern).test(name), true, `${pattern} ${JSON.stringify(name)}`);
+    }
+  }
+  // An undecided form matches a name with a line terminator, as the old
+  // expression did for these two (a class holding the newline, a `?`).
+  assert.equal(globPattern("[~\n]").test("\n"), true);
+  assert.equal(globPattern("p#\n?").test("p#\n1"), true);
+  assert.equal(globPattern("p#\n?").test("p#\n"), true);
+  // A valid negated class is still one character.
+  assert.equal(globPattern("[!a-z]").test("auth.json"), false);
+  assert.equal(globPattern("[!a-z]uth.json").test("auth.json"), true);
 });
 
 test("negation: the forms the shells read apart, or this reader does not model, match any name", () => {

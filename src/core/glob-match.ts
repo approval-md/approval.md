@@ -44,8 +44,9 @@
  *   of letters also holds the other case (bash 3.2 under en_US.UTF-8 reads
  *   `[A-H]` as holding `h`), and any other range not within the digits
  *   (`[_-a]` holds `.` there) makes the class any one character;
- * - the component matches any name (`^.*$`, as the old expression did when
- *   the engine refused it) when it holds a form the shells read apart: a lone
+ * - the component matches any name (every code point, a superset of the
+ *   `^.*$` the old expression fell back to when the engine refused it) when
+ *   it holds a form the shells read apart: a lone
  *   `]`, an unclosed `[`, `[]`, `[!]` or `[^]`, a `[` or `?` inside a class
  *   (POSIX classes included), a reversed range, a backslash, `(`, `)`, `|`,
  *   `<`, `>`, `#`, `~`, or a `^` outside a class (bash's extglob, zsh's
@@ -136,8 +137,14 @@ const CARET = 0x5e;
  */
 const UNDECIDED: ReadonlySet<number> = new Set([0x5c, 0x28, 0x29, 0x7c, 0x3c, 0x3e, 0x23, 0x7e]);
 
-/** What `^.*$` matched: everything without a line terminator. */
-const MATCH_ALL: readonly GlobToken[] = [ANY_RUN];
+/**
+ * Any name: every code point, line terminators too. `^.*$`, which the old
+ * expression fell back to, refused a name with a line terminator, but a
+ * component read as any name must match every name the old expression
+ * matched, and an undecided form such as `[~` + newline + `]` matched one
+ * (codex on 83f30bdc).
+ */
+const MATCH_ALL: readonly GlobToken[] = [{ run: true, matches: () => true }];
 
 /** The component's code points, read once. */
 function codesOf(component: string): number[] {
@@ -290,12 +297,17 @@ function compile(component: string): readonly GlobToken[] {
       }
       if (at >= codes.length) return MATCH_ALL;
       index = at + 1;
+      // A reversed range, in the members as the shells read them or as the
+      // old expression read them (the `!` or `^` a member), is the old
+      // expression's error: any name, checked before a negated class widens
+      // to one character (codex on 83f30bdc: `[!z-a]` is not one character).
+      const ranges = plainClassRanges(atoms);
+      if (ranges === null) return MATCH_ALL;
       if (negated) {
+        if (plainClassRanges([lead as number, ...atoms]) === null) return MATCH_ALL;
         tokens.push(ANY_CHARACTER);
         continue;
       }
-      const ranges = plainClassRanges(atoms);
-      if (ranges === null) return MATCH_ALL;
       tokens.push(ranges === "any" ? ANY_CHARACTER : classToken(ranges));
     } else {
       let token = literals.get(code);
@@ -322,7 +334,7 @@ const compiled = new Map<string, GlobPattern>();
 let compiledCharacters = 0;
 const COMPILED_CHARACTERS_CAP = 4_000_000;
 
-/** Any name without a line terminator: what the hook reads a pattern as once the command sets a shell option. */
+/** Any name: what the hook reads a pattern as once the command sets a shell option. */
 export const ANY_NAME: GlobPattern = { test: (name: string): boolean => matchGlobTokens(MATCH_ALL, 0, name) };
 
 /** The hook's glob component as a whole-name matcher (see the module header). */

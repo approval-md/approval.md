@@ -31,6 +31,12 @@ test("an option word after set or a shell's name, its value attached or not, or 
     "shopt -s nocaseglob",
     "setopt extendedglob",
     "emulate ksh",
+    // Quoted or escaped, as the shell reads them after quote removal (codex on 83f30bdc).
+    'set "-o" extendedglob; cat x',
+    "s'et' -o extendedglob; cat x",
+    "set -'o' extendedglob; cat x",
+    "set \\-o extendedglob; cat x",
+    "'shopt' -s nocaseglob",
   ]) {
     assert.equal(setsShellOption(command), true, command);
   }

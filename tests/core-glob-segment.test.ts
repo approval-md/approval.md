@@ -88,15 +88,16 @@ function oracleSegmentMatches(pattern: string, name: string): boolean {
 
 /**
  * Hold the reader to the oracle: equal, except that a pattern holding `[^`
- * may match more (review-b's FINDING on #682: dash reads `^` as a member, so
- * `.gi[^t]` names `.git` there, while bash and zsh negate; the reader now
- * reads `[^...]` as any one character, and `[^]` as any name). It still
- * matches every name the oracle matched.
+ * or `[!` may match more (review-b's FINDING on #682: dash reads `^` as a
+ * member, so `.gi[^t]` names `.git` there; review-b's M-A on 83f30bdc: an
+ * escaped `!` reaches the reader as `[!t]`, a member to every shell; the
+ * reader now reads both as any one character, and `[^]`, `[!]` as any
+ * name). It still matches every name the oracle matched.
  */
 function assertAsOracle(pattern: string, name: string, label: string): boolean {
   const expected = oracleSegmentMatches(pattern, name);
   const actual = globSegmentMatches(pattern, name);
-  if (pattern.includes("[^")) {
+  if (pattern.includes("[^") || pattern.includes("[!")) {
     if (expected) assert.equal(actual, true, `${label} (wider)`);
   } else {
     assert.equal(actual, expected, label);
@@ -233,9 +234,15 @@ test("negation: `[^...]` names `.git` wherever dash would open it (review-b's FI
   for (const word of [".gi[^t]", ".gi[^a]", ".g[^]i]t", ".gi[^t]/config", "x/.g[^x]t/HEAD"]) {
     assert.equal(mayNameGitDirectory(word), true, word);
   }
-  // `[!...]` negates in every one of those shells: as before.
-  assert.equal(globSegmentMatches(".gi[!t]", ".git"), false);
-  assert.equal(globSegmentMatches(".gi[!a]", ".git"), true);
+  // A class the old expression could not build stays the strict unknown
+  // (codex on 83f30bdc): `[^z-a]` names `.git`, as it did before.
+  assert.equal(globSegmentMatches("[^z-a]", ".git"), true);
+  assert.equal(mayNameGitDirectory("[^z-a]"), true);
+  assert.equal(mayNameGitDirectory("x/[^z-a]/HEAD"), true);
+  // `[!...]` too: `.gi[\\!t]` reaches the reader as `.gi[!t]` (review-b's
+  // M-A on 83f30bdc), and every shell opens `.git` for it.
+  for (const word of [".gi[!t]", ".gi[!a]", ".g[!i]t/config", "[!z-a]git"]) assert.equal(mayNameGitDirectory(word), true, word);
+  assert.equal(globSegmentMatches(".gi[!t]x", ".git"), false);
 });
 
 test("cost: a long `*` run is matched in bounded CPU time", () => {

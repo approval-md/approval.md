@@ -163,9 +163,12 @@ test("cost: a run of glob characters in a target is bounded", () => {
 test("cost: past 1,024 glob characters one pattern segment is judged to name .git", () => {
   assert.equal(globSegmentMatches(`.${"*".repeat(1024)}x`, ".git"), false);
   assert.equal(globSegmentMatches(`.${"*".repeat(1025)}x`, ".git"), true);
-  assert.deepEqual(pure(`echo x > .${"*".repeat(1023)}x`), ["files.write.workspace redirect-write"]);
-  assert.deepEqual(pure(`echo x > .${"*".repeat(1025)}x`), [DIR_WRITE]);
-  assert.deepEqual(bounded(`echo x > .${"*".repeat(100000)}x`, "100,000 *"), [DIR_WRITE]);
+  // `y`, since `.*x` names `.codex`, a gate directory, under the bound (build-2's
+  // sweep v3 on 83f30bdc); past it the pattern may name any directory, the
+  // gate's own among them, so the strictest class answers.
+  assert.deepEqual(pure(`echo x > .${"*".repeat(1023)}y`), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(pure(`echo x > .${"*".repeat(1025)}y`), ["policy.core redirect-protected"]);
+  assert.deepEqual(bounded(`echo x > .${"*".repeat(100000)}y`, "100,000 *"), ["policy.core redirect-protected"]);
   // Under the bound the walk answers as the expression did.
   assert.equal(globSegmentMatches(`.${"*".repeat(1000)}t`, ".git"), true);
   assert.equal(globSegmentMatches(`.${"?*".repeat(500)}`, ".git"), false);

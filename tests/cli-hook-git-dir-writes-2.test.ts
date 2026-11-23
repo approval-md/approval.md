@@ -100,9 +100,12 @@ test("S1: a glob or brace target that .git matches is git-dir-write, any letter 
   assert.deepEqual(pure("echo x >> .[g]it/config"), [DIR_WRITE]);
   assert.deepEqual(pure("echo x >> .g{i,}t/config"), [DIR_WRITE]);
   assert.deepEqual(pure("cd .gi? && echo x >> config"), [READ_SHELL, DIR_WRITE]);
-  for (const command of ["echo x > .{f..h}it/config", "echo x > .G[I]T/config", "cd .GI? && echo x > config", "tee -a sub/.g*/hooks/pre-push", "echo x > {a,.git}/config"]) {
+  for (const command of ["echo x > .{f..h}it/config", "echo x > .G[I]T/config", "cd .GI? && echo x > config", "echo x > {a,.git}/config"]) {
     assert.ok(pure(command).includes(DIR_WRITE), command);
   }
+  // `.g*` names `.grok` too, whose `hooks/` is Grok's hook organ: the stricter
+  // class answers (build-2's sweep v3 on 83f30bdc).
+  assert.deepEqual(pure("tee -a sub/.g*/hooks/pre-push"), ["policy.core protected-path"]);
 });
 
 test("S1: ordinary glob and brace lines do not move", () => {
@@ -195,10 +198,12 @@ test("S1 review: a bracket expression with a POSIX class, an equivalence class o
     "echo x > .[.g.]it/config",
     "echo x > .[]g]it/config",
     "echo x > .[!x]it/config",
-    "echo x > .[[:alpha:]/config",
   ]) {
     assert.deepEqual(pure(command), [DIR_WRITE], command);
   }
+  // An undecided pattern may name any directory, the gate's own among them,
+  // so the strictest class answers (build-2's sweep v3 on 83f30bdc).
+  assert.deepEqual(pure("echo x > .[[:alpha:]/config"), ["policy.core redirect-protected"]);
   assert.deepEqual(pure("echo x > out[1].txt"), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure("echo x > [[:alpha:]]*.txt"), ["files.write.workspace redirect-write"]);
 });

@@ -4107,10 +4107,14 @@ export function classifyForHook(
     // opens auth.json; security review of d0288514) and bash's extglob or
     // zsh's extended glob read under an option (a refusal of that reading
     // alone adds nothing, so `f() { …; }` keeps its verdict).
+    // The two compose (`p<->/a(u)th.json`; codex on 83f30bdc): the group
+    // reading is taken of the numeric reading too.
     const zsh = zshNumericGlobReading(command);
     if (zsh !== null) judged = together(judged, classifyForHookOnce(zsh, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments), true);
-    const grouped = optionGroupReading(command);
-    if (grouped !== null) judged = together(judged, classifyForHookOnce(grouped, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments), false);
+    for (const reading of new Set([optionGroupReading(command), zsh === null ? null : optionGroupReading(zsh)])) {
+      if (reading === null) continue;
+      judged = together(judged, classifyForHookOnce(reading, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments), false);
+    }
     return judged;
   } finally {
     shellOptionsSet = outer;
@@ -8343,7 +8347,11 @@ function hasGlobChars(text: string): boolean {
  * option set by an EARLIER call, in a shell that persists between calls, is
  * not in this text and is not seen here.
  */
-export function setsShellOption(command: string): boolean {
+export function setsShellOption(written: string): boolean {
+  // Quotes and backslashes removed first, as the shell removes them before
+  // it runs the word (`set "-o" x`, `s'et' -o x`, `set -'o' x`; codex on
+  // 83f30bdc). Removing them everywhere can only find more.
+  const command = written.replace(/['"\\]/gu, "");
   if (/(?:^|[^A-Za-z0-9_.-])(?:shopt|setopt|unsetopt|emulate)(?![A-Za-z0-9_.-])/u.test(command)) return true;
   // One pass over the words (no regular expression that backtracks over a
   // long line): after `set` or a shell's name in a segment, an option word
@@ -8383,17 +8391,58 @@ function zshNumericGlobReading(command: string): string | null {
 
 /**
  * The command with each group a word carries (`~/(#i).HERMES`, `@(a|b)`,
- * `x(#a1)`) and each zsh glob flag group (`(#i)`, at a word's start too)
- * written as `*`: zsh globs a group with no option set, and bash's extglob
- * and zsh's extended glob read more under one, while the lexer reads a `(`
- * inside a word as the start of a subshell or a syntax error, and `#` after
- * it as a comment. `null` when there is none. A `(` after `$`, `<`, `>` or
- * `=` (a substitution, a process substitution, an array) is left alone.
+ * `x(#a1)`, nested `a((u))th.json`) and each zsh glob flag group (`(#i)`, at
+ * a word's start too) written as `*`: zsh globs a group with no option set,
+ * and bash's extglob and zsh's extended glob read more under one, while the
+ * lexer reads a `(` inside a word as the start of a subshell or a syntax
+ * error, and `#` after it as a comment. `null` when there is none.
+ *
+ * A group is word-attached when the character before its `(` is not a
+ * separator, `$`, `<`, `>`, `=` or `(` (so a substitution, a process
+ * substitution, an array and a subshell are left alone), or when that
+ * character is the `(` of a word-attached group (nesting), or when `#`
+ * follows it. Only a group holding no whitespace is rewritten, and the
+ * outermost such group is written whole. One pass with a stack, so a long
+ * line costs its length.
  */
 function optionGroupReading(command: string): string | null {
-  const group = /(?<=[^\s;&|<>$=(])\([^()\s]*\)|\(#[^()\s]*\)/gu;
-  if (!group.test(command)) return null;
-  return command.replace(group, "*");
+  const open: Array<{ at: number; attached: boolean; clean: boolean }> = [];
+  const spans: Array<[number, number]> = [];
+  for (let at = 0; at < command.length; at += 1) {
+    const char = command[at] as string;
+    if (char === "(") {
+      const before = command[at - 1];
+      const parent = open[open.length - 1];
+      const attached =
+        command[at + 1] === "#" ||
+        (before !== undefined && !/[\s;&|<>$=(]/u.test(before)) ||
+        (before === "(" && parent !== undefined && parent.at === at - 1 && parent.attached);
+      open.push({ at, attached, clean: true });
+    } else if (char === ")") {
+      const group = open.pop();
+      if (group === undefined) continue;
+      if (group.attached && group.clean) spans.push([group.at, at + 1]);
+      const parent = open[open.length - 1];
+      if (!group.clean && parent !== undefined) parent.clean = false;
+    } else if (/\s/u.test(char)) {
+      const top = open[open.length - 1];
+      if (top !== undefined) top.clean = false;
+    }
+  }
+  if (spans.length === 0) return null;
+  spans.sort((left, right) => left[0] - right[0]);
+  let text = "";
+  let from = 0;
+  for (const [start, end] of spans) {
+    if (start < from) continue; // inside a group already written
+    // The extglob prefix goes with its group: ksh reads `.@(e)nv` as `.env`
+    // with no option set, and `.@*nv` would need the `@` (build-2's sweep v3
+    // on 83f30bdc, under the abstain policy).
+    const prefixed = start > from && /[@!+?*]/u.test(command[start - 1] as string) ? start - 1 : start;
+    text += `${command.slice(from, prefixed)}*`;
+    from = end;
+  }
+  return text + command.slice(from);
 }
 
 /** Names a credential file goes by, for a pattern to be tested against. */
