@@ -86,6 +86,26 @@ const POLICY = [
   "",
 ].join("\n");
 
+// Design v4 (writes outside the workspace): a permissive policy written
+// before files.write.guarded existed. It must load, and the class's built-in
+// minimum must still resolve it manual.
+const POLICY_WRITE_PERMISSIVE = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: autonomous",
+  "classes:",
+  "  files.*:",
+  "    autonomy: autonomous",
+  "    allow_irreversible: true",
+  "  files.write.out_of_scope:",
+  "    autonomy: supervised-retro",
+  "```",
+  "",
+].join("\n");
+
 const POLICY_IRREVERSIBLE = [
   "# Policy",
   "",
@@ -652,6 +672,46 @@ const policyVectors = [
         classes: ["  harness.tool.unmapped:", "    autonomy: autonomous"],
         tools: ["tools:", "  - match: mcp__zzz__post", "    class: harness.tool.unmapped"],
       }),
+      class: "read.file",
+    },
+  },
+  // --- design v4: the guarded write class's built-in minimum -----------------
+  {
+    id: "write-guarded-minimum-clamps-a-wildcard",
+    description:
+      "`files.write.guarded` has a built-in minimum of manual. A `files.*` row at autonomous with allow_irreversible, under an autonomous default, still resolves it manual, with provenance floor; the policy written before the class existed loads exactly as it did",
+    input: { policy: POLICY_WRITE_PERMISSIVE, class: "files.write.guarded" },
+  },
+  {
+    id: "write-guarded-minimum-irreversible",
+    description: "the same with reversible: false: allow_irreversible does not lift the minimum either",
+    input: { policy: POLICY_WRITE_PERMISSIVE, class: "files.write.guarded", reversible: false },
+  },
+  {
+    id: "write-guarded-minimum-clamps-the-default",
+    description: "with no rule matching it, an autonomous `defaults.autonomy` is clamped to manual too",
+    input: { policy: POLICY_TOOLS_RECORD.replace("autonomy: manual", "autonomy: autonomous"), class: "files.write.guarded" },
+  },
+  {
+    id: "write-guarded-human-only-stands",
+    description: "a stricter answer stands: a row naming the class human-only resolves human-only",
+    input: {
+      policy: POLICY_WRITE_PERMISSIVE.replace("classes:\n", "classes:\n  files.write.guarded:\n    autonomy: human-only\n"),
+      class: "files.write.guarded",
+    },
+  },
+  {
+    id: "write-out-of-scope-resolves-by-its-row",
+    description: "`files.write.out_of_scope` has no minimum: its own row (the shipped supervised-retro) decides it",
+    input: { policy: POLICY_WRITE_PERMISSIVE, class: "files.write.out_of_scope" },
+  },
+  {
+    id: "fail-closed-write-guarded-row-below-minimum",
+    description:
+      "a row naming `files.write.guarded` itself below manual is refused at load with `class-minimum`, so every class resolves manual with no matched rule. Only the class's own key is refused: a wildcard is clamped at resolution instead",
+    control: true,
+    input: {
+      policy: POLICY_WRITE_PERMISSIVE.replace("classes:\n", "classes:\n  files.write.guarded:\n    autonomy: supervised-retro\n"),
       class: "read.file",
     },
   },
