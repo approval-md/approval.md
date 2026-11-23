@@ -26,11 +26,12 @@
  * check-then-act window is the reviewers' call (noted on the PR).
  */
 
-import { opendir as fsOpendir } from "node:fs/promises";
+import { opendir as fsOpendir, realpath as fsRealpath } from "node:fs/promises";
 import type { Dir } from "node:fs";
 import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
 
-import { globWriteListingDirs, type GlobDisk } from "../core/command-class.js";
+import { globWriteListingDirs, realpathKey, type GlobDisk } from "../core/command-class.js";
 
 /** Most entries one directory is read for before it is judged unreadable. */
 export const GLOB_LISTING_ENTRY_CAP = 2_000;
@@ -121,7 +122,54 @@ export async function listGlobWriteDirs(
   const chosen = dirs.slice(0, options.dirCap ?? GLOB_LISTING_DIR_CAP);
   const results = await Promise.all(chosen.map((dir) => listGlobDirectory(dir, options)));
   chosen.forEach((dir, index) => listings.set(dir, results[index] as GlobListing));
+  // The canonical form of each listed path and of the working directory and
+  // the home (lead ruling L61587, security review 6): the classifier compares
+  // these to see whether an absolute path reaches either by another spelling
+  // (a symlink, another letter case). One it lacks fails closed.
+  if (chosen.length > 0) {
+    const paths = [...new Set([...chosen, cwd, ...(home === null ? [] : [home])])].filter((path) => path.startsWith("/"));
+    const canonical = await Promise.all(paths.map((path) => canonicalPath(path, options.timeoutMs ?? GLOB_LISTING_TIMEOUT_MS)));
+    paths.forEach((path, index) => {
+      const resolved = canonical[index];
+      if (resolved !== null && resolved !== undefined) listings.set(realpathKey(path), [resolved]);
+    });
+  }
   return listings;
+}
+
+/** Most path components dropped while looking for the part of a path that exists. */
+const CANONICAL_MISSING_CAP = 32;
+
+/**
+ * `path` with symlinks resolved and letter case as on disk: the realpath of
+ * the longest prefix that exists, with the rest appended. `null` on any other
+ * error or the deadline: the classifier then fails closed.
+ */
+export async function canonicalPath(path: string, timeoutMs: number = GLOB_LISTING_TIMEOUT_MS): Promise<string | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const resolving = (async (): Promise<string | null> => {
+    const rest: string[] = [];
+    let at = path;
+    for (let dropped = 0; dropped <= CANONICAL_MISSING_CAP; dropped += 1) {
+      try {
+        return join(await fsRealpath(at), ...rest.reverse());
+      } catch (error: unknown) {
+        const code = (error as { code?: unknown } | null)?.code;
+        if ((code !== "ENOENT" && code !== "ENOTDIR") || at === "/") return null;
+        rest.push(basename(at));
+        at = dirname(at);
+      }
+    }
+    return null;
+  })();
+  const deadline = new Promise<null>((settle) => {
+    timer = setTimeout(() => settle(null), timeoutMs);
+  });
+  try {
+    return await Promise.race([resolving, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /**

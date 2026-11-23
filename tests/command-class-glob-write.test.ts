@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyCommand, containedInAny, globWriteListingDirs } from "../src/core/command-class.js";
+import { classifyCommand, containedInAny, globWriteListingDirs, realpathKey } from "../src/core/command-class.js";
 
 const HUMAN_ONLY = new Set(["policy.core", "log.mutate", "account.credential"]);
 
@@ -505,6 +505,11 @@ test("dot-names: the relaxed reading is an allowlist of plain lines (lead ruling
 // Decided by what is THERE (lead ruling L61167): the hook lists the directory a
 // pattern's first globbed component sits in and passes the names in.
 // ---------------------------------------------------------------------------
+
+/** The hook's canonical paths for `paths`, each its own (no symlink, letter case as written). */
+function realpaths(...paths: readonly string[]): Record<string, string[]> {
+  return Object.fromEntries(paths.map((path) => [realpathKey(path), [path]]));
+}
 
 function withListing(command: string, listings: Record<string, readonly string[] | "unreadable" | "missing">): string[] {
   const result = classifyCommand(command, [], {
@@ -1305,7 +1310,7 @@ test("lead ruling L61587, parents: a recursive delete, move or chmod of a direct
   ] as const) {
     assert.deepEqual(classesOf(command), [main], command);
   }
-  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": ["x.js"] }), ["files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": ["x.js"], ...realpaths("/other-project", "/w", "/h") }), ["files.delete.out_of_scope"]);
 });
 
 test("security review of the parents rule (L61587), 1: a chmod mode that starts with '-', and chmod without -R", () => {
@@ -1326,11 +1331,16 @@ test("security review of the parents rule (L61587), 2: `..` after a name", () =>
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
   assert.deepEqual(withListing("rm -rf ../w", { "/": ["w", "h"], "/w": [".claude"], "/h": [] }), ["policy.core"]);
-  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": [".claude"] }), ["policy.core"]);
-  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": ["x.js"] }), ["files.delete.out_of_scope"]);
-  // A sibling that cannot be listed (missing, unreadable): strict.
-  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": "missing" }), ["policy.core"]);
-  assert.deepEqual(withListing("rm -rf ~/../other", { "/other": ["notes"] }), ["files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": [".claude"], ...realpaths("/other-project", "/w", "/h") }), ["policy.core"]);
+  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": ["x.js"], ...realpaths("/other-project", "/w", "/h") }), ["files.delete.out_of_scope"]);
+  // A sibling that is not there holds nothing on a one-segment line; where an
+  // earlier segment may make it, or it cannot be read: strict.
+  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": "missing", ...realpaths("/other-project", "/w", "/h") }), ["files.delete.out_of_scope"]);
+  assert.ok(withListing("true && rm -rf ../other-project", { "/other-project": "missing", ...realpaths("/other-project", "/w", "/h") }).includes("policy.core"));
+  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": "unreadable", ...realpaths("/other-project", "/w", "/h") }), ["policy.core"]);
+  // No canonical path for it (every caller but the hook): it cannot be shown to be elsewhere.
+  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": ["x.js"] }), ["policy.core"]);
+  assert.deepEqual(withListing("rm -rf ~/../other", { "/other": ["notes"], ...realpaths("/other", "/w", "/h") }), ["files.delete.out_of_scope"]);
 });
 
 test("security review of the parents rule (L61587), 3: a listed name in another letter case", () => {
@@ -1390,4 +1400,45 @@ test("security review of the parents rule (L61587), 5: a tail after an unreadabl
   // Main refuses a substitution it cannot classify; that stays a refusal.
   assert.equal(classifyCommand("rm -rf $(cmd)/build/out").ok, false);
   assert.equal(classifyCommand("rm -rf $(cmd)/a/../..").ok, false);
+});
+
+// An absolute operand, judged against the caller's disk: listings and, keyed
+// `realpath:<path>`, the canonical path the hook resolved for each one.
+function withDisk(
+  command: string,
+  cwd: string,
+  listings: Record<string, readonly string[] | "unreadable" | "missing">,
+  extra: { singleSegment?: boolean } = {},
+): string[] {
+  const result = classifyCommand(command, [], { globDisk: { cwd, home: "/h", listings: new Map(Object.entries(listings)), ...extra } });
+  assert.ok(result.ok, `${command}: ${result.ok ? "" : result.detail}`);
+  return result.classes;
+}
+
+test("security review of the parents rule (L61587), 6: an absolute operand that reaches the working directory by another spelling", () => {
+  const real = (paths: readonly string[], to: (path: string) => string = (path) => path): Record<string, string[]> =>
+    Object.fromEntries(paths.map((path) => [realpathKey(path), [to(path)]]));
+  // Another letter case (a case-insensitive volume): strict.
+  assert.deepEqual(withDisk("rm -rf /W", "/w/proj", { "/W": ["proj"] }), ["policy.core"]);
+  assert.deepEqual(withDisk("chmod -R 000 /W/Proj", "/w/proj", { "/W/Proj": [".claude"] }), ["policy.core"]);
+  // Even where the volume's realpath keeps the letter case as written.
+  assert.deepEqual(withDisk("rm -rf /W", "/w/proj", { "/W": ["proj"], ...real(["/W", "/w/proj", "/h"]) }), ["policy.core"]);
+  // A symlink to an ancestor (/tmp is /private/tmp on macOS): strict.
+  const alias = { "/tmp/x": ["proj"], ...real(["/tmp/x"], () => "/private/tmp/x"), ...real(["/private/tmp/x/proj", "/h"]) };
+  assert.deepEqual(withDisk("rm -rf /tmp/x/", "/private/tmp/x/proj", alias), ["policy.core"]);
+  assert.deepEqual(
+    withDisk("chmod -R 000 /tmp/x/proj", "/private/tmp/x/proj", { "/tmp/x/proj": ["src"], ...real(["/tmp/x/proj"], () => "/private/tmp/x/proj"), ...real(["/private/tmp/x/proj", "/h"]) }),
+    ["policy.core"],
+  );
+  // No canonical path for it: it cannot be shown to be elsewhere: strict.
+  assert.deepEqual(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": ["a.o"] }), ["policy.core"]);
+  // Provably elsewhere: judged by its own listing.
+  const elsewhere = real(["/tmp/build-xyz", "/w", "/h"], (path) => (path.startsWith("/tmp") ? `/private${path}` : path));
+  assert.deepEqual(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": ["a.o"], ...elsewhere }), ["files.delete.out_of_scope"]);
+  assert.deepEqual(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": [".claude"], ...elsewhere }), ["policy.core"]);
+  assert.deepEqual(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": "missing", ...elsewhere }, { singleSegment: true }), [
+    "files.delete.out_of_scope",
+  ]);
+  // Without a disk (every caller but the hook) an absolute path is not judged here, as before.
+  assert.deepEqual(classesOf("rm -rf /tmp/x"), ["files.delete.out_of_scope"]);
 });

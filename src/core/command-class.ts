@@ -8556,6 +8556,7 @@ function lineMaySetDotglob(command: string): boolean {
 export interface GlobDisk {
   cwd: string;
   home: string | null;
+  /** Directory listings by absolute path, and canonical paths keyed by {@link realpathKey}. */
   listings: ReadonlyMap<string, readonly string[] | "unreadable" | "missing">;
   /**
    * `false`: the line has more than one segment, so a directory that was not
@@ -8570,6 +8571,15 @@ export interface GlobDisk {
   /** `false`: no listing is used (something else on the line may create, move, link or extract a file). */
   listingsOk?: boolean;
   collect?: Set<string>;
+}
+
+/**
+ * The key under which the hook passes a path's canonical form (symlinks
+ * resolved, letter case as on disk) in {@link GlobDisk.listings}: a
+ * one-element listing. Directory keys are absolute, so the two never meet.
+ */
+export function realpathKey(path: string): string {
+  return `realpath:${path}`;
 }
 
 /**
@@ -9045,15 +9055,33 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
     const parts = from.split("/").filter((part) => part.length > 0);
     target = `/${[...parts.slice(0, Math.max(0, parts.length - ups)), ...names].join("/")}`;
   }
-  const holds = (dir: string | null): dir is string => dir !== null && dir.startsWith("/") && (dir === target || target === "/" || dir.startsWith(`${target}/`));
-  const places = [disk.relativeOk === false ? null : disk.cwd, disk.homeOk === false ? null : disk.home].filter(holds);
+  const under = (dir: string, top: string): boolean => dir === top || top === "/" || dir.startsWith(`${top}/`);
+  const fold = (path: string): string => path.toLowerCase();
+  const sides = [disk.relativeOk === false ? null : disk.cwd, disk.homeOk === false ? null : disk.home].filter(
+    (dir): dir is string => dir !== null && dir.startsWith("/"),
+  );
+  const places = sides.filter((dir) => under(dir, target));
   if (places.length === 0) {
-    // A path reached through `..` that holds neither the working directory
-    // nor the home (a sibling: `../other-project`) is judged by its own
-    // listing. An absolute path that holds neither is not a parent this rule
-    // knows; one that may hold them unplaced is.
-    if (base !== "root") return disk.listingsOk === false ? "unplaced" : [target];
-    return disk.relativeOk === false || disk.homeOk === false ? "unplaced" : null;
+    // A path that holds neither the working directory nor the home as
+    // written may still hold one by another spelling (security review, 6):
+    // another letter case on a case-insensitive volume (`/Users/Me/Proj`
+    // for /Users/me/proj), or a symlink on the way (`/tmp/x` for
+    // /private/tmp/x). The chain cannot be named then: fail closed. It is
+    // elsewhere only when the canonical paths the hook resolved (keyed by
+    // {@link realpathKey}) show it, compared with letter case folded too;
+    // then it is judged by its own listing (a sibling, `../other-project`;
+    // `/tmp/build`). Without them nothing shows it: fail closed.
+    if (base === "root" && (disk.relativeOk === false || disk.homeOk === false)) return "unplaced";
+    disk.collect?.add(target);
+    const canonical = (path: string): string | null => {
+      const resolved = disk.listings.get(realpathKey(path));
+      return Array.isArray(resolved) && typeof resolved[0] === "string" && resolved[0].startsWith("/") ? resolved[0] : null;
+    };
+    const canonicalTarget = canonical(target);
+    const canonicalSides = sides.map(canonical);
+    if (canonicalTarget === null || canonicalSides.some((dir) => dir === null)) return "unplaced";
+    if (canonicalSides.some((dir) => dir !== null && under(fold(dir), fold(canonicalTarget)))) return "unplaced";
+    return disk.listingsOk === false ? "unplaced" : [target];
   }
   if (disk.listingsOk === false) return "unplaced";
   const dirs = new Set<string>([target]);
@@ -9134,7 +9162,8 @@ function organParentClass(
     }
     for (const dir of dirs) {
       disk.collect?.add(dir);
-      const listing = diskListing(disk, dir, false);
+      // A directory that is not there holds nothing, on a line where nothing before it may make it.
+      const listing = diskListing(disk, dir, true);
       if (listing === undefined) {
         offer("policy.core", operand);
         continue;

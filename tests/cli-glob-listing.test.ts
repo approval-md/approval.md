@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import type { Dir } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -224,4 +224,43 @@ test("lead ruling L61587, parents, through the hook: `rm -rf .` where the direct
   assert.deepEqual(await hookClasses("rm -rf ./dist", plain), ["files.write.workspace"]);
   const checkout = project({ ".git": ["config"], src: ["a.ts"] });
   assert.ok((await hookClasses("rm -rf .", checkout)).includes("vcs.history.rewrite"));
+});
+
+test("security review of the parents rule (L61587), 6, through the hook: an absolute path that reaches the working directory through a symlink or another letter case", async (t) => {
+  const savedHome = process.env["HOME"];
+  const home = join(scratch, "home6");
+  mkdirSync(home, { recursive: true });
+  process.env["HOME"] = home;
+  try {
+    const parent = join(scratch, "real6");
+    const proj = join(parent, "proj");
+    for (const [dir, file] of [[join(proj, ".claude"), "settings.json"], [join(proj, "src"), "a.ts"]] as const) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, file), "made-up\n");
+    }
+    const alias = join(scratch, "alias6");
+    symlinkSync(parent, alias);
+    for (const command of [`rm -rf ${alias}/`, `chmod -R 000 ${alias}/proj`, `rm -rf ${alias}/proj/`]) {
+      assert.ok((await hookClasses(command, proj)).includes("policy.core"), command);
+    }
+    // The temp root's own alias on macOS (/var is /private/var).
+    if (proj.startsWith("/private/var/")) {
+      assert.ok((await hookClasses(`chmod -R 000 ${proj.slice("/private".length)}`, proj)).includes("policy.core"));
+    }
+    // Provably elsewhere, holding no guarded name: main's class.
+    const build = join(scratch, "elsewhere6", "build");
+    mkdirSync(build, { recursive: true });
+    writeFileSync(join(build, "a.o"), "made-up\n");
+    assert.deepEqual(await hookClasses(`rm -rf ${build}`, proj), ["files.delete.out_of_scope"]);
+    writeFileSync(join(scratch, "CaseProbe6"), "made-up\n");
+    if (!existsSync(join(scratch, "caseprobe6"))) {
+      t.diagnostic("case-sensitive volume: the letter-case half is skipped");
+      return;
+    }
+    assert.ok((await hookClasses(`rm -rf ${join(scratch, "REAL6")}/`, proj)).includes("policy.core"));
+    assert.ok((await hookClasses(`chmod -R 000 ${join(parent, "PROJ")}`, proj)).includes("policy.core"));
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
 });

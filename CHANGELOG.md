@@ -164,40 +164,47 @@ by it, so `mkdir .claude`, `cp -r .claude backup/` and
 (`rm -rf .Claude`) as for every guarded path.
 
 **Deleting, moving or locking a PARENT of an organ directory is that
-directory's class (lead ruling L61587).** `rm -rf "$PWD"`, `rm -rf ~`,
-`chmod -R 000 .` and `mv "$PWD" ../x` remove or lock every organ directory
-under them, and were `files.delete.out_of_scope` or an ordinary write. A
-recursive `rm`, a `mv` source, or a `chmod` (with or without `-R`: `chmod 000
-.` locks every organ directory below too) whose operand is the working
-directory (`.`, `./`, `$PWD`, `"$PWD"`, `${PWD}`, `"$PWD/"`, `$(pwd)`, `$(pwd
--P)`, `sub/..`, `../<this directory>`), an ancestor of it (`..`, `../..`,
-`sub/../..`, `/`), the home (`~`, `~/`, `$HOME`) or an ancestor of the home now
-takes the strictest class among the guarded names the hook's listing shows
-there: an organ directory (`.claude`, `.cursor`, `.grok`, `.muse`:
-`policy.core`; `.github`: `policy.edit`), `.approval`, `.codex`, `.hermes`,
-`APPROVAL.md` and the other guarded files, or `.git` (`vcs.history.rewrite`),
-in any case (`.Claude` is `.claude` on a case-insensitive volume). An ancestor
-is read together with every directory from it down to the working directory
-and the home. A path through `..` that names another directory
-(`../other-project`) is read by its own listing. A directory that holds none
-keeps its class, unchanged from main (`rm -rf .` in a tree of sources is
-`files.delete.out_of_scope`). A chmod mode that starts with `-` (`chmod -R -w
-.`) is the mode, not an option. Fail closed, `policy.core`: no listing (every
-caller but the hook), a directory over the listing's 2,000-entry cap,
-unreadable or missing, a line that may change directory or names `HOME`, an
-operand with a word the text cannot read (`$X`, `"$X"`, `$OLDPWD`, `$(pwd)`,
-any other `$(...)`, `~user`) last in the path (`$X`, `./$X`, `sub/$X`,
-`/tmp/$X`), followed by a glob, or removed again by a later `..`
-(`$(echo sub)/..`, `$X/a/../..`), since such a word may itself hold `..`;
-and a chain of more than 8 directories to list. Not a parent, and unchanged:
-`rm -rf ./dist`, `rm -rf "$TMPDIR"/x`, `rm -rf $TARGET/x`, `rm -rf $X/dist`. `mv .`, `mv ./` and `mv sub/..` move nothing
-(rename(2) refuses them) and keep their class; `rm -rf $(builtin pwd)` and
-`$(command pwd)` stay refused, as on main. Not covered (follow-up): `rmdir .`,
-`find . -delete`, `chown`/`chgrp` (refused), organ directories below the top
-of a sibling tree, and organ directories in a sibling tree under an ancestor
-(`rm -rf ..` lists only the chain to the working directory and the home). On
-macOS (and GNU) `rm -rf .`, `./`, `..` and `sub/..` refuse to run; they are
-judged by the rule anyway, as the ruling says.
+directory's class (lead ruling L61587).** `rm -rf "$PWD"`, `rm -rf ~`, `chmod
+-R 000 .` and `mv "$PWD" ../x` remove or lock every organ directory under
+them, and were `files.delete.out_of_scope` or an ordinary write. A recursive
+`rm`, a `mv` source, or a `chmod` (with or without `-R`: `chmod 000 .` locks
+every organ directory below too) whose operand is the working directory (`.`,
+`./`, `$PWD`, `"$PWD"`, `${PWD}`, `"$PWD/"`, `$(pwd)`, `$(pwd -P)`, `sub/..`,
+`../<this directory>`), an ancestor of it (`..`, `../..`, `sub/../..`, `/`),
+the home (`~`, `~/`, `$HOME`) or an ancestor of the home now takes the
+strictest class among the guarded names the hook's listing shows there: an
+organ directory (`.claude`, `.cursor`, `.grok`, `.muse`: `policy.core`;
+`.github`: `policy.edit`), `.approval`, `.codex`, `.hermes`, `APPROVAL.md` and
+the other guarded files, or `.git` (`vcs.history.rewrite`), in any case
+(`.Claude` is `.claude` on a case-insensitive volume). An ancestor is read
+together with every directory from it down to the working directory and the
+home. A path that holds neither as written, through `..` (`../other-project`)
+or absolute (`/tmp/build`), is compared with them by the canonical paths the
+hook resolves (symlinks followed, letter case as on disk): one that reaches
+either by another spelling (`/tmp/x` for /private/tmp/x, `/Users/Me/Proj` for
+/Users/me/proj) is `policy.core`, one that is provably elsewhere is read by
+its own listing, and one the hook could not resolve fails closed. A directory
+that holds none keeps its class, unchanged from main (`rm -rf .` in a tree of
+sources is `files.delete.out_of_scope`). A chmod mode that starts with `-`
+(`chmod -R -w .`) is the mode, not an option. Fail closed, `policy.core`: no
+listing (every caller but the hook), a directory over the listing's
+2,000-entry cap, unreadable, or missing where an earlier segment of the line
+may make it, a line that may change directory or names `HOME`, an operand with
+a word the text cannot read (`$X`, `"$X"`, `$OLDPWD`, `$(pwd)`, any other
+`$(...)`, `~user`) last in the path (`$X`, `./$X`, `sub/$X`, `/tmp/$X`),
+followed by a glob, or removed again by a later `..` (`$(echo sub)/..`,
+`$X/a/../..`), since such a word may itself hold `..`; and a chain of more
+than 8 directories to list. Not a parent, and unchanged: `rm -rf ./dist`, `rm
+-rf "$TMPDIR"/x`, `rm -rf $TARGET/x`, `rm -rf $X/dist`. `mv .`, `mv ./` and
+`mv sub/..` move nothing (rename(2) refuses them) and keep their class; `rm
+-rf $(builtin pwd)` and `$(command pwd)` stay refused, as on main. Not covered
+(follow-up): an absolute path for a caller with no listing (every caller but
+the hook: it has no working directory to compare), `rmdir .`, `find .
+-delete`, `chown`/`chgrp` (refused), organ directories below the top of a
+sibling tree, and organ directories in a sibling tree under an ancestor (`rm
+-rf ..` lists only the chain to the working directory and the home). On macOS
+(and GNU) `rm -rf .`, `./`, `..` and `sub/..` refuse to run; they are judged
+by the rule anyway, as the ruling says.
 
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),
