@@ -84,11 +84,13 @@ test("lead ruling L61492/L61497 through the hook: `rm -f *` and `chmod 644 *` wh
   for (const command of ["rm -f *", "chmod 644 *", "rm -rf ./*"]) {
     assert.ok((await hookClasses(command, checkout)).includes("vcs.history.rewrite"), command);
   }
-  // `rm -f *` where `.claude` is takes what `rm -f .claude` takes: the organ
-  // directory's class since lead ruling L61587.
+  // `rm -rf *` and `chmod 644 *` where `.claude` is take what `rm -rf .claude`
+  // takes: the organ directory's class since lead ruling L61587. `rm -f *`
+  // cannot remove a directory: main's class (lead ruling L62013, S2).
   const claude = project({ ".claude": ["settings.json"], src: ["a.ts"] });
   const plain = project({ ".cache": ["x"], src: ["a.ts"] });
-  for (const command of ["rm -f *", "chmod 644 *"]) {
+  assert.deepEqual(await hookClasses("rm -f *", claude), ["files.delete.out_of_scope"]);
+  for (const command of ["rm -rf *", "chmod 644 *"]) {
     assert.ok((await hookClasses(command, claude)).includes("policy.core"), command);
     assert.ok(!(await hookClasses(command, plain)).some((cls) => ["policy.core", "log.mutate", "vcs.history.rewrite"].includes(cls)), command);
   }
@@ -107,12 +109,14 @@ test("a guarded name under a home organ is reached by what is there", async () =
   assert.deepEqual(await hookClasses("echo x > .hermes/n*.txt", cwd), ["files.write.workspace"]);
 });
 
+// Unlisted, `dist/*` may be `dist/.approval` itself, and a recursive delete of
+// it takes its log's class too (lead ruling L62013, S1).
 test("without listings (every synchronous caller) the strict answer stands", () => {
   const cwd = project({ dist: ["a.js"] });
   const result = classifyForHook("rm -rf dist/*", [], cwd, []).result;
   assert.ok(result.ok);
   // Main's class rides beside (lead ruling L61926).
-  assert.deepEqual(result.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope"]);
+  assert.deepEqual(result.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope", "log.mutate"]);
 });
 
 test("lister: names, a missing directory, the entry cap and the timeout", async () => {
@@ -150,7 +154,7 @@ test("an unlistable directory keeps the strict answer through the hook", async (
   assert.equal(listings.get(join(cwd, "dist")), "unreadable");
   const result = classifyForHook("rm -rf dist/*", [], cwd, [], false, [], false, listings).result;
   assert.ok(result.ok);
-  assert.deepEqual(result.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope"]);
+  assert.deepEqual(result.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope", "log.mutate"]);
 });
 
 test("the CLI route lists before it classifies (hook classify)", () => {
@@ -178,7 +182,7 @@ test("review of 6e3cbc9e: a relative pattern is placed only when the cwd is know
   // Another directory the command may start in (Claude Code's envelope cwd differing from the hook's).
   const unsure = classifyForHook("rm -rf dist/*", [], cwd, [], false, [join(scratch, "elsewhere")], false, listings).result;
   assert.ok(unsure.ok);
-  assert.deepEqual(unsure.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope"]);
+  assert.deepEqual(unsure.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope", "log.mutate"]);
   const sure = classifyForHook("rm -rf dist/*", [], cwd, [], false, [], false, listings).result;
   assert.ok(sure.ok);
   assert.deepEqual(sure.segments.map((segment) => segment.class), ["files.delete.out_of_scope"]);
@@ -370,5 +374,64 @@ test("lead ruling L61926, through the real hook under the default policy and W: 
     const prose = decide('cp a.txt ".github/workflows/pages.yml deploys the site on push to main"');
     assert.equal(prose.permission, "deny", `${name}: ${prose.reason}`);
     assert.match(prose.reason, name === "W" ? /^hook-class-human-only: class files\.write\.workspace /u : /^hook-timeout: .*policy\.edit/u, name);
+  }
+});
+
+const POLICY_ROUTED = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: manual",
+  '  approval_ttl: "1h"',
+  "  on_expiry: reject",
+  "protected_paths:",
+  "  - { path: .github/workflows/, class: policy.edit.ci }",
+  "classes:",
+  "  read.*:",
+  "    autonomy: autonomous",
+  "  files.write.workspace:",
+  "    autonomy: autonomous",
+  "  policy.edit:",
+  "    autonomy: autonomous",
+  "  policy.edit.ci:",
+  "    autonomy: manual",
+  "```",
+  "",
+].join("\n");
+
+test("lead ruling L62013, through the real hook: a folder takes its routed contents' class (S1); only the verbs that remove, move or change access are held (S2)", () => {
+  // policy.edit autonomous, policy.edit.ci manual, ordinary writes autonomous.
+  // Main 324d87dc allows every line here (files.write.workspace).
+  const lab = join(scratch, "l62013");
+  const home = join(lab, "home");
+  const dir = join(lab, "proj");
+  mkdirSync(home, { recursive: true });
+  for (const [sub, file] of [["src", "a.ts"], [".github/workflows", "ci.yml"]] as const) {
+    mkdirSync(join(dir, sub), { recursive: true });
+    writeFileSync(join(dir, sub, file), "made-up\n");
+  }
+  writeFileSync(join(dir, "x"), "made-up\n");
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY_ROUTED);
+  const attested = runCliIn(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  // S1: `rm -rf .github` removes the routed workflows: policy.edit.ci, manual
+  // (7aa0c26f answered policy.edit, autonomous here, beside main's class).
+  for (const command of ["rm -rf .github", "rmdir .github", "mv .github gone"]) {
+    const held = decideIn(dir, home, command);
+    assert.equal(held.permission, "deny", `${command}: ${held.reason}`);
+    assert.match(held.reason, /^hook-timeout: .*policy\.edit\.ci/u, command);
+  }
+  // S2: creating the folder keeps main's decision.
+  for (const command of ["mkdir .claude", "touch .claude", "mkdir -p .github"]) {
+    const kept = decideIn(dir, home, command);
+    assert.equal(kept.permission, "allow", `${command}: ${kept.reason}`);
+  }
+  // S2: removing, moving, re-linking or locking it is held (policy.core, manual).
+  for (const command of ["rm -rf .claude", "chmod -R 000 .claude", "mv .claude x", "ln -sf x .claude"]) {
+    const held = decideIn(dir, home, command);
+    assert.equal(held.permission, "deny", `${command}: ${held.reason}`);
+    assert.match(held.reason, /^hook-timeout: .*policy\.core/u, command);
   }
 });

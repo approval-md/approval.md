@@ -889,20 +889,143 @@ function withMainRules<T>(run: () => T): T {
 }
 
 /**
+ * Does the segment being classified remove, move or change access to what it
+ * names (lead ruling L62013, S2)? Only then does the organ-directory rule
+ * ({@link bareOrganDirectory}) and its contents rule ({@link folderContentClaims})
+ * apply; `mkdir .claude`, `touch .claude` and every other command naming the
+ * bare folder keep main's class. Set per segment by {@link classifySegment}.
+ */
+let organVerbs = false;
+
+/** A short option cluster (`-rf`) holding any of `letters`, or a long option `--name` (a unique prefix of three or more letters too). */
+function hasOption(args: readonly string[], letters: string, longNames: readonly string[]): boolean {
+  for (const arg of args) {
+    if (arg === "--") return false;
+    if (/^-[A-Za-z]+$/u.test(arg) && [...arg.slice(1)].some((letter) => letters.includes(letter))) return true;
+    const long = /^--([a-z-]+)(?:=.*)?$/u.exec(arg)?.[1];
+    if (long !== undefined && long.length >= 1 && longNames.some((name) => name === long || (long.length >= 3 && name.startsWith(long)))) return true;
+  }
+  return false;
+}
+
+/**
+ * The verbs of lead ruling L62013 (S2): `rm` recursive or `-d`, `rmdir`, `mv`,
+ * `chmod`, `chown` and `chgrp` (refused today: the rule covers them if they are
+ * ever classified), `ln` with `-f`, `find … -delete`, `git rm -r` and `git mv`.
+ */
+function organVerbFor(basename: string, sub: string | null, args: readonly string[]): boolean {
+  switch (basename) {
+    case "rm":
+      return hasOption(args, "rRd", ["recursive", "dir"]);
+    case "rmdir":
+    case "mv":
+    case "chmod":
+    case "chown":
+    case "chgrp":
+      return true;
+    case "ln":
+      return hasOption(args, "f", ["force"]);
+    case "find":
+      return args.includes("-delete");
+    case "git":
+      return sub === "mv" || (sub === "rm" && hasOption(args, "r", []));
+    default:
+      return false;
+  }
+}
+
+/**
  * Is `segments[index]` the organ directory ITSELF: the last segment, or one
  * whose tail comes back to it (`.claude/x/..`)? A tail that leaves it first
  * (`.claude/..`) names its parent, which this rule does not judge.
  */
 function bareOrganDirectory(segments: readonly string[], index: number): boolean {
-  if (mainRulesOnly) return false;
+  if (mainRulesOnly || !organVerbs) return false;
+  const bare = tailReturnsTo(segments, index);
+  if (bare) markGlobWriteFired();
+  return bare;
+}
+
+/** Does the tail after `segments[index]` come back to it (`x/..`, `.`), never leaving it first? */
+function tailReturnsTo(segments: readonly string[], index: number): boolean {
   let depth = 0;
   for (const segment of segments.slice(index + 1)) {
     if (segment === "..") depth -= 1;
     else if (segment !== "." && segment.length > 0) depth += 1;
     if (depth < 0) return false;
   }
-  if (depth === 0) markGlobWriteFired();
   return depth === 0;
+}
+
+/**
+ * Paths under each organ folder whose built-in class may differ from the
+ * folder's own (lead ruling L62013, S1): the folder's contents go with it.
+ */
+const FOLDER_CONTENTS: Readonly<Record<string, readonly string[]>> = {
+  ".approval": ["log/x", "env"],
+  ".claude": ["settings.json", "hooks/x"],
+  ".cursor": ["hooks.json", "hooks/x", "agents/x"],
+  ".grok": ["hooks.json", "hooks/x"],
+  ".muse": ["hooks.json", "settings.json"],
+  ".codex": ["config.toml", "hooks.json", "hooks/x"],
+  ".github": ["workflows/x.yml"],
+  ".hermes": [
+    "config.yaml", "agent-hooks/x", "shell-hooks-allowlist.json", ".env", "auth.json", "approval/x", "scripts/x", "plugins/x",
+    "hermes-agent/x", ".op.env",
+  ],
+};
+
+/**
+ * Lead ruling L62013 (S1): a command that removes, moves or changes access to
+ * an organ folder ITSELF takes the class of every guarded path inside it, the
+ * policy's routed entries included (`rm -rf .github` is `policy.edit.ci`
+ * where `.github/workflows/` is routed there). The pure classifier has the
+ * policy's entries but not their autonomy, so it cannot rank them: each class
+ * is a claim of equal standing ({@link takeAmongEqual}), and the gate judges
+ * every one, so the strictest decides under the policy in force. Each path
+ * inside is classified as a file under the folder would be: a built-in
+ * representative per organ ({@link FOLDER_CONTENTS}) and one per policy entry
+ * that names a path under the folder.
+ */
+function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): string | null {
+  const own = protectedPathClassOfWordAlone(candidate, extra);
+  if (own === null || !organVerbs || mainRulesOnly) return own;
+  const claims = folderContentClaims(candidate, own, extra);
+  if (claims.length <= 1) return own;
+  markGlobWriteFired();
+  return takeAmongEqual(claims);
+}
+
+/** `own`, then each distinct class of a path inside the organ folder `candidate` names bare (S1). */
+function folderContentClaims(candidate: string, own: string, extra: readonly ProtectedPathEntry[]): string[] {
+  const segments = pathSegments(collapseBracedVariables(candidate)).map(foldNameExact);
+  let at = -1;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    if (Object.hasOwn(FOLDER_CONTENTS, segments[index] as string) && tailReturnsTo(segments, index)) {
+      at = index;
+      break;
+    }
+  }
+  if (at === -1) return [own];
+  const name = segments[at] as string;
+  const prefix = (candidate.startsWith("/") ? "/" : "") + segments.slice(0, at + 1).join("/");
+  const inside = (FOLDER_CONTENTS[name] ?? []).map((tail) => `${prefix}/${tail}`);
+  for (const raw of extra) {
+    const entry = parseProtectedEntry(raw);
+    if (entry === null) continue;
+    const wanted = entry.segments.map(foldNameExact);
+    for (let position = 0; position < wanted.length - 1; position += 1) {
+      if (wanted[position] !== name || position > at) continue;
+      if (!wanted.slice(0, position).every((segment, offset) => segment === segments[at - position + offset])) continue;
+      inside.push(`${prefix}/${wanted.slice(position + 1).join("/")}${entry.directory ? "/x" : ""}`);
+    }
+  }
+  const claims = [own];
+  for (const path of inside) {
+    const cls = protectedPathClassOfWordAlone(path, extra);
+    if (cls !== null && !claims.includes(cls)) claims.push(cls);
+  }
+  return claims;
 }
 
 /**
@@ -938,7 +1061,7 @@ function distinctClasses(readings: readonly (string | null)[]): string[] {
 }
 
 /** {@link protectedPathClass} for one word that brace expansion has already made. */
-function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): string | null {
+function protectedPathClassOfWordAlone(candidate: string, extra: readonly ProtectedPathEntry[]): string | null {
   // Every guarded name below is compared with the candidate's FOLDED segments
   // ({@link foldFileName}), on every platform: APFS opens `Approval.MD`,
   // `.Claude/Settings.json` and `.APPROVAL/env` as the guarded files, and a
@@ -10709,6 +10832,21 @@ function classifySegment(
   protectedPaths: readonly ProtectedPathEntry[],
   context: ClassifierContext,
 ): SegmentOutcome {
+  // The verb of this segment, not of one around it (a substitution is a segment too).
+  const outerVerbs = organVerbs;
+  organVerbs = false;
+  try {
+    return classifySegmentWithVerb(segment, protectedPaths, context);
+  } finally {
+    organVerbs = outerVerbs;
+  }
+}
+
+function classifySegmentWithVerb(
+  segment: LexSegment,
+  protectedPaths: readonly ProtectedPathEntry[],
+  context: ClassifierContext,
+): SegmentOutcome {
   if (segment.opaque !== null) {
     return { ok: false, code: "opaque", detail: segment.opaque };
   }
@@ -11037,6 +11175,9 @@ function classifySegment(
   }
 
   const positionals = args.filter((arg) => !isFlag(arg));
+  // Lead ruling L62013 (S2): the organ-directory rule is for the verbs that
+  // remove, move or change access; redirects above were judged without it.
+  organVerbs = organVerbFor(basename, positionals[0] ?? null, args);
 
   // APRV-520: a git global option that takes a value, or one this table does
   // not know, leaves the segment unclassified ({@link gitGlobalRefusal}). It is

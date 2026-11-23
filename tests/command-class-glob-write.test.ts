@@ -411,8 +411,10 @@ test("dot-names: the ruling's workflow lines, with and without dot matching on t
   // `*` can be APPROVAL.md (a guarded name at any depth, and matched with no
   // option: on APFS, case folded, `*.md` and `*` reach it as bash does), so a
   // write through `*` straight into a directory stays policy.core either way.
+  // Lead ruling L62013 (S1): a recursive delete or a chmod through `*` may
+  // reach `.approval` itself, and its log goes with it: `log.mutate` too.
   for (const command of ["rm -rf dist/*", "chmod +x scripts/*", "git add src/*", "npx prettier --write src/*", "git add *"]) {
-    assert.equal(strictest(command), "policy.core", command);
+    assert.equal(strictest(command), command.startsWith("rm") || command.startsWith("chmod") ? "log.mutate" : "policy.core", command);
     assert.ok(lineClasses(`GLOBIGNORE=x; ${command}`).includes("policy.core"), command);
   }
   // A pattern for a DIRECTORY reaches only dot-directories, which dotglob or
@@ -515,7 +517,8 @@ test("dot-names: the relaxed reading is an allowlist of plain lines (lead ruling
   // `rm -rf assets/*` is NOT main's class, and not because of dots: `*` can be
   // `APPROVAL.md`, which protectedPathClass guards at any depth (`rm
   // assets/APPROVAL.md` is policy.core on main).
-  assert.equal(strictest("rm -rf assets/*"), "policy.core");
+  // With `*` reaching `.approval` itself, its log goes with it (L62013, S1).
+  assert.equal(strictest("rm -rf assets/*"), "log.mutate");
 });
 
 // ---------------------------------------------------------------------------
@@ -550,8 +553,11 @@ test("listings: the four workflow lines by what the directory holds", () => {
     assert.deepEqual(withListing(command, { [dir]: ["APPROVAL.md"] }), raised, `${command} APPROVAL.md`);
     // Another spelling: guarded in the folded reading; main's class beside, as for any raise.
     assert.deepEqual(withListing(command, { [dir]: ["apprOVAL.MD"] }), raised, `${command} apprOVAL.MD`);
-    assert.deepEqual(withListing(command, { [dir]: "unreadable" }), raised, `${command} unreadable`);
-    assert.deepEqual(withListing(command, {}), raised, `${command} not listed`);
+    // Unlisted, `*` may be `.approval` itself: a delete or chmod of it takes
+    // the class of its log too (lead ruling L62013, S1).
+    const unlisted = /^(?:rm|chmod) /u.test(command) ? [...raised, "log.mutate"] : raised;
+    assert.deepEqual(withListing(command, { [dir]: "unreadable" }), unlisted, `${command} unreadable`);
+    assert.deepEqual(withListing(command, {}), unlisted, `${command} not listed`);
   }
   // A dot-name counts on a line that may turn dot matching on.
   const classes = withListing("GLOBIGNORE=x; echo x > dist/*/env", { "/w/dist": [".approval"] });
@@ -909,11 +915,11 @@ test("finding 3: tar's extraction directory in every spelling; other archive too
   for (const command of ["tar -xPf a.tar -C .claude", "tar -xf a.tar --strip-components=1 -C .cursor/x", "tar -x -f a.tar -C .github"]) {
     assert.ok(!ORDINARY(classesOf(command)), command);
   }
-  // Creating an archive from an organ directory names the directory itself,
-  // which is judged direction-blind as `tar -czf out.tgz -C .approval .` and
-  // `tar -czf out.tgz .claude/settings.json` are (lead ruling L61587); from an
-  // ordinary one it reads it.
-  assert.ok(classesOf("tar -czf out.tgz -C .claude .").includes("policy.core"));
+  // Creating an archive from an organ directory reads it: main's class (lead
+  // ruling L62013, S2: the organ-directory rule is for the verbs that remove,
+  // move or change access). `.approval` is guarded bare on main, any verb.
+  assert.deepEqual(classesOf("tar -czf out.tgz -C .claude ."), ["files.write.workspace"]);
+  assert.ok(classesOf("tar -czf out.tgz -C .approval .").includes("policy.core"));
   assert.ok(ORDINARY(classesOf("tar -czf out.tgz -C src .")));
   // No rule on either build: refused, so fail closed already.
   for (const command of ["unzip a.zip -d .claude", "unzip a.zip", "ditto src .claude", "ditto -x -k a.zip .claude", "cpio -i -D .claude", "pax -r -f a.pax", "bsdtar -xf a.tar -C .claude", "gtar -xf a.tar", "7z x a.7z -o.claude"]) {
@@ -1240,7 +1246,8 @@ test("lead ruling (CLAIMS L61492, L61497): a write's * or ? that would match a g
   // A pattern reading never takes a class away (review-b S1): the plain
   // class rides beside the one a destination pattern raised; the plain pass
   // reads destinations as before the ruling, so `.cl*/` carries nothing new.
-  assert.deepEqual(classesOf("mv a .git/*"), andMain(["policy.core", "vcs.history.rewrite"], "mv a .git/*"));
+  // `.git/*` may be `.git/.approval`, a folder a move replaces: its log's class too (L62013, S1).
+  assert.deepEqual(classesOf("mv a .git/*"), ["policy.core", "vcs.history.rewrite", "log.mutate"]);
   assert.deepEqual(classesOf("rsync -a evil/ .cl*/"), andMain(["policy.core"], "rsync -a evil/ .cl*/"));
 });
 
@@ -1332,5 +1339,75 @@ test("review-b A686-FOLD5 M1: the as-spelled reading compares exactly, so a case
   ] as const) {
     const classes = withListing(command, listing);
     for (const cls of both) assert.ok(classes.includes(cls), `${command} ${JSON.stringify(listing)} -> ${classes.join(",")}`);
+  }
+});
+
+test("lead ruling L62013 (S1): an organ folder itself takes the class of every guarded path inside it, routed ones included", () => {
+  const routed = [{ path: ".github/workflows/", class: "policy.edit.ci" }] as const;
+  const classes = (command: string): string[] => {
+    const result = classifyCommand(command, [...routed]);
+    assert.ok(result.ok, command);
+    return result.classes;
+  };
+  for (const command of ["rm -rf .github", "rm -rf ./.github/", "rmdir .github", "mv .github gone", "chmod -R 000 .github", "find .github -delete", "git rm -r .github"]) {
+    const got = classes(command);
+    assert.ok(got.includes("policy.edit") && got.includes("policy.edit.ci"), `${command} -> ${got.join(",")}`);
+  }
+  // A route on a path inside another organ folder is reached the same way.
+  const cursorRouted = classifyCommand("rm -rf .cursor", [{ path: ".cursor/rules/", class: "policy.edit.rules" }]);
+  assert.ok(cursorRouted.ok && cursorRouted.classes.includes("policy.core") && cursorRouted.classes.includes("policy.edit.rules"));
+  // Built-in contents: the approval home's log, the Hermes home's scheduled scripts.
+  assert.deepEqual(classesOf("rm -rf .approval"), ["policy.core", "log.mutate"]);
+  assert.ok(classesOf("rm -rf ~/.hermes").includes("cron.manage"));
+  // A path under the folder, not the folder itself: its own class only.
+  assert.deepEqual(classes("rm -rf .github/workflows/ci.yml"), ["policy.edit.ci"]);
+  // Creating the folder is not a command on its contents (S2): main's class.
+  assert.deepEqual(classes("mkdir .github"), ["files.write.workspace"]);
+  assert.deepEqual(classesOf("mkdir .approval"), ["policy.core"]);
+});
+
+test("lead ruling L62013 (S2): the organ-directory rule is for the verbs that remove, move or change access", () => {
+  // Held: the folder's own class beside main's.
+  for (const command of [
+    "rm -rf .claude",
+    "rm -r .claude",
+    "rm -d .claude",
+    "rm --recursive .claude",
+    "rmdir .claude",
+    "mv .claude x",
+    "mv x .claude",
+    "chmod -R 000 .claude",
+    "chmod 000 .claude",
+    "ln -sf x .claude",
+    "ln -f x .claude",
+    "find .claude -delete",
+    "git rm -r .claude",
+    "git mv .claude x",
+  ]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // chown and chgrp have no rule: refused, on main and here (stricter than any class).
+  for (const command of ["chown -R x .claude", "chgrp x .claude", "install -d .claude"]) {
+    assert.equal(classifyCommand(command).ok, false, command);
+    assert.equal(classifyCommandWithMainRules(command).ok, false, command);
+  }
+  // Released to main's class: creating, touching or naming the bare folder.
+  for (const [command, main] of [
+    ["mkdir .claude", "files.write.workspace"],
+    ["mkdir -p .cursor/", "files.write.workspace"],
+    ["touch .claude", "files.write.workspace"],
+    ["tee .claude", "files.write.workspace"],
+    ["echo x > .claude", "files.write.workspace"],
+    ["truncate -s 0 .claude", "files.write.workspace"],
+    ["rm .claude", "files.write.workspace"],
+    ["rm -f .grok", "files.write.workspace"],
+    ["tar -czf out.tgz -C .claude .", "files.write.workspace"],
+  ] as const) {
+    assert.deepEqual(classesOf(command), [main], command);
+  }
+  // Kept by #686's destination rule, not this one: a write INTO the folder, or
+  // a copy that lands one (`backup/.claude/settings.json` is policy.core on main).
+  for (const command of ["cp -r evil/ .claude", "rsync -a x/ .claude/", "ln -s x .claude", "cp -r .claude backup/", "cp -r evil/.claude .", "tar -xf a.tar -C .claude"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
 });
