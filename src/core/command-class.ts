@@ -8778,7 +8778,9 @@ function dotGlobNamesGit(word: string, inexact: (word: string) => boolean, glob:
             disk.collect?.add(dir);
             const listing = diskListing(disk, dir, true);
             if (listing !== undefined) {
-              if (listing.some((name) => name.toLowerCase() === ".git")) return true;
+              // One fold for every guarded name (review-b A686-FOLD3 N2): the swap to
+              // the shared helper reaches this comparison too.
+              if (listing.some((name) => foldGuardedName(name) === ".git")) return true;
               continue;
             }
           }
