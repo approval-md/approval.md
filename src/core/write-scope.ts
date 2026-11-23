@@ -56,6 +56,15 @@ export const WRITE_OUT_OF_SCOPE_SHIPPED_AUTONOMY = "supervised-retro" as const;
  */
 
 /**
+ * The tree rule's one trade (coordinator, third review of d3bd1c1b, point 3):
+ * a tree written AT a directory that holds a checkout (`.git` there on the
+ * disk) can lay down its hooks folder, so the write is guarded. Strict as
+ * built; `false` drops only this disk check (the always-listed places under a
+ * landing still count). The corpus cost is in the hand-back.
+ */
+export const TREE_AT_A_CHECKOUT_IS_GUARDED: boolean = true;
+
+/**
  * Decision B: a target still unreadable after resolution takes this class.
  * The other ruling would name {@link WRITE_OUT_OF_SCOPE_CLASS} here (which only
  * applies to a policy that opts in).

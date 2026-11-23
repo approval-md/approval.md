@@ -584,6 +584,97 @@ test("a tree written where a guarded entry can sit under it is guarded; one writ
   }
 });
 
+test("a tar extract is read through an allowlist of flags; anything else is unreadable (review of d3bd1c1b, point 1)", () => {
+  for (const command of [
+    "tar -x --abs -f a.tar",
+    "tar -x --absolute-paths -f a.tar",
+    "tar --insecure -xf a.tar",
+    "TAR_OPTIONS=-P tar -xf a.tar",
+    "tar -xf a.tar --weird",
+    "tar -xPf a.tar",
+    "tar xPf a.tar",
+    "tar -x --extr -f a.tar",
+    "tar -xf a.tar -s ,^,../,",
+    "tar -xf",
+  ]) {
+    for (const scope of [WRITE_SCOPE_OFF, optedIn()]) {
+      const seen = see(command, scope);
+      if (!seen.ok) continue; // refused upstream: stricter still
+      assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+    }
+  }
+  for (const command of ["tar -xzvf a.tgz -C sub", "tar xzf a.tgz -C sub", "tar --extract --file=a.tar --directory sub", "tar -x -f a.tar -C sub --no-same-owner", "tar -xf a.tar"]) {
+    assert.ok(!see(command).classes.includes(GUARDED), `${command}: ${JSON.stringify(see(command).segments)}`);
+  }
+  // Flags the environment adds are not on the line: unreadable.
+  process.env["TAR_OPTIONS"] = "-P";
+  try {
+    assert.ok(see("tar -xf a.tar -C sub").classes.includes(GUARDED));
+  } finally {
+    delete process.env["TAR_OPTIONS"];
+  }
+  process.env["TAR_READER_OPTIONS"] = "x";
+  try {
+    assert.ok(see("tar -xf a.tar -C sub").classes.includes(GUARDED));
+  } finally {
+    delete process.env["TAR_READER_OPTIONS"];
+  }
+});
+
+test("a tree written at a checkout, at home, or above a listed place is guarded; the snapshot rule counts every change under it (review of d3bd1c1b, points 2 and 3)", () => {
+  mkdirSync(join(ws, "repo", ".git"), { recursive: true });
+  mkdirSync(join(ws, "repo2"), { recursive: true });
+  writeFileSync(join(ws, "repo2", ".git"), "gitdir: /nowhere\n", "utf8");
+  mkdirSync(join(ws, "dotfiles"), { recursive: true });
+  for (const command of [
+    "tar -xf a.tar -C repo",
+    "tar -xf a.tar -C repo2",
+    "cd repo && tar -xf a.tar",
+    "cp -r dotfiles/. repo/",
+    "cp -R dotfiles/ repo",
+    "rsync -a dotfiles/ repo/",
+    "npx prettier --write repo",
+    "scp -r h:x/ ~/.config",
+    "scp h:key ~/.ssh/",
+    "git worktree add ~/.config",
+    "mkdir -p nd/.git && tar -xf a.tar -C nd",
+    "touch nd2/.git && cp -r dotfiles/. nd2",
+    "ln -s repo nd3 && tar -xf a.tar -C nd3",
+  ]) {
+    for (const scope of [WRITE_SCOPE_OFF, optedIn()]) {
+      const seen = see(command, scope);
+      assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+    }
+  }
+  for (const command of [
+    "tar -xf a.tar -C newdir",
+    "cp -r dotfiles repo/",
+    "mkdir -p out && cp -r dotfiles/. out",
+    "npx prettier --write sub",
+    "scp -r h:x ~/",
+    "scp -P 22 a h:/tmp",
+  ]) {
+    const seen = see(command);
+    assert.ok(!seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+});
+
+test("each give-up of the cwd and of a resolved word is guarded (mutant survivors of d3bd1c1b)", () => {
+  // A cd the hook cannot follow: `cd -`, `popd`.
+  for (const command of ["cd - && echo x > y", "popd && echo x > y", "pushd sub && popd && echo x > y"]) {
+    const seen = see(command);
+    if (!seen.ok) continue;
+    assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+  // A resolved word that is no write target, after a cd the hook cannot follow.
+  assert.ok(see('x=; cd "$D" && cat .appro${x}val/env').classes.includes(GUARDED));
+  // A word of the binary's own argv takes the class its plain spelling takes.
+  assert.ok(see("x=; touch A${x}PPROVAL.md").classes.includes("policy.core"), JSON.stringify(see("x=; touch A${x}PPROVAL.md").segments));
+  // A cd pattern over a prefix an earlier segment changed, matching nothing yet.
+  mkdirSync(join(ws, "gl.d"), { recursive: true });
+  assert.ok(see("ln -s ~/.ssh gl.d/new; cd gl.d/n* && echo x > authorized_keys").classes.includes(GUARDED));
+});
+
 test("what the pass cannot read at all fails to guarded, never to nothing", () => {
   // The classifier refuses these lines upstream; called on its own, the pass
   // still adds the guarded class rather than nothing.

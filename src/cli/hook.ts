@@ -206,6 +206,7 @@ import {
   DECISION_D_OVERWRITE_IS_GUARDED,
   DECISION_E_WINDOW,
   effectiveWriteRoots,
+  TREE_AT_A_CHECKOUT_IS_GUARDED,
   guardedEntryBelow,
   guardedEntryOf,
   isInWriteScope,
@@ -3967,6 +3968,20 @@ export function judgeWriteLanding(
         return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can hold ${entry}, which is on the guarded list` };
       }
     }
+    // A directory holding `.git` (a folder, or a worktree's file) holds a
+    // hooks folder: a tree written there can lay one down. A landing that does
+    // not exist yet holds none today (what the tree itself carries is not
+    // read: see the hand-back).
+    if (TREE_AT_A_CHECKOUT_IS_GUARDED) {
+      for (const form of [...new Set([...landing.paths, ...forms])]) {
+        try {
+          lstatSync(join(form, ".git"));
+        } catch {
+          continue;
+        }
+        return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can reach ${join(form, ".git", "hooks")}, a git hooks folder on the guarded list` };
+      }
+    }
   }
   if (landing.unknown) {
     return {
@@ -4226,6 +4241,89 @@ interface IntoDir {
   contents: boolean;
 }
 
+/**
+ * The tar flags this hook reads for an EXTRACT, an allowlist (coordinator,
+ * review of d3bd1c1b, point 1): `-x`, `-v`, `-z`, `-j`, `-J`, `-k`, `-m`, `-o`,
+ * `-p`, `-O`, and `-f FILE` / `-C DIR`; the same long options spelled in full
+ * (no prefix of one). Any other flag (`-P`, `--abs`, `--absolute-paths`,
+ * `--insecure`, `-s`, `-U`, `-h` ...), any long option not spelled exactly, an
+ * assignment on the segment, or `TAR_OPTIONS` / `TAR_READER_OPTIONS` in the
+ * environment: where its members land is not read, so the extract is
+ * unreadable (guarded).
+ */
+const TAR_EXTRACT_SHORT = "xvzjJkmopO";
+const TAR_EXTRACT_SHORT_VALUE = "fC";
+const TAR_EXTRACT_LONG: readonly string[] = [
+  "--extract", "--get", "--verbose", "--gzip", "--gunzip", "--ungzip", "--bzip2", "--xz",
+  "--keep-old-files", "--touch", "--no-same-owner", "--preserve-permissions", "--same-permissions", "--to-stdout",
+];
+const TAR_EXTRACT_LONG_VALUE: readonly string[] = ["--file", "--directory"];
+/** The tar names read as tar (the two others are refused upstream today: no rule). */
+const TAR_BINS: ReadonlySet<string> = new Set(["tar", "gtar", "bsdtar"]);
+
+/** An extract's `-C` directories, or why its landing cannot be read. */
+function readTarExtract(
+  args: readonly string[],
+  assignments: readonly string[],
+  env: NodeJS.ProcessEnv,
+): { dirs: string[] } | { unreadable: string } {
+  if (assignments.length > 0) return { unreadable: `an assignment on the tar segment (${assignments[0] as string}) may set its options` };
+  for (const name of ["TAR_OPTIONS", "TAR_READER_OPTIONS"]) {
+    const value = env[name];
+    if (value !== undefined && value.length > 0) return { unreadable: `${name} is set in the environment, adding flags the line does not show` };
+  }
+  const dirs: string[] = [];
+  const take = (letter: string, value: string | undefined): string | null => {
+    if (value === undefined) return `-${letter} has no value`;
+    if (letter === "C") dirs.push(value);
+    return null;
+  };
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (arg === "--") break;
+    if (at === 0 && /^[A-Za-z]+$/u.test(arg)) {
+      // The old bundled form (`tar xzf a.tar -C d`): each value letter takes the next word.
+      let next = at + 1;
+      for (const letter of arg) {
+        if (TAR_EXTRACT_SHORT_VALUE.includes(letter)) {
+          const failed = take(letter, args[next]);
+          next += 1;
+          if (failed !== null) return { unreadable: failed };
+        } else if (!TAR_EXTRACT_SHORT.includes(letter)) {
+          return { unreadable: `the bundled flag ${letter} is not one this hook reads for an extract` };
+        }
+      }
+      at = next - 1;
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      const name = equals === -1 ? arg : arg.slice(0, equals);
+      if (TAR_EXTRACT_LONG_VALUE.includes(name)) {
+        const value = equals === -1 ? args[(at += 1)] : arg.slice(equals + 1);
+        if (value === undefined) return { unreadable: `${name} has no value` };
+        if (name === "--directory") dirs.push(value);
+        continue;
+      }
+      if (equals === -1 && TAR_EXTRACT_LONG.includes(name)) continue;
+      return { unreadable: `${arg} is not an option this hook reads for an extract (an exact spelling only)` };
+    }
+    if (arg.startsWith("-") && arg.length > 1) {
+      for (let index = 1; index < arg.length; index += 1) {
+        const letter = arg[index] as string;
+        if (TAR_EXTRACT_SHORT_VALUE.includes(letter)) {
+          const rest = arg.slice(index + 1);
+          const failed = take(letter, rest.length > 0 ? rest : args[(at += 1)]);
+          if (failed !== null) return { unreadable: failed };
+          break;
+        }
+        if (!TAR_EXTRACT_SHORT.includes(letter)) return { unreadable: `-${letter} is not a flag this hook reads for an extract` };
+      }
+    }
+  }
+  return { dirs };
+}
+
 /** Does this `tar` argv extract (`-x`, `--extract`, `--get`, or a bundled first word holding `x`)? */
 function tarExtracts(args: readonly string[]): boolean {
   return args.some(
@@ -4336,6 +4434,29 @@ export function refineWriteLandings(
     if (key !== "/" && !changedFolded.has(key)) changedFolded.set(key, path);
   };
   let changedUnknown: string | null = null;
+  /**
+   * Every change an earlier segment makes, whatever SNAPSHOT_CHANGERS says
+   * (a write and a mkdir included), folded: a TREE landing with any of them
+   * under it, or a move, link or remove AT it, is not read from the disk
+   * (`mkdir -p d/.git; tar -xf a -C d`). A write or mkdir AT the landing puts
+   * nothing inside it (`mkdir -p out && cp -r src/. out` is read as usual).
+   */
+  const treeChanged = new Map<string, { raw: string; at: boolean }>();
+  let treeChangedUnknown: string | null = null;
+  const foldedKey = (path: string): string => `/${path.split("/").filter((part) => part.length > 0).map(foldFileName).join("/")}`;
+  const treeTouched = (spelled: string): string | null => {
+    if (treeChangedUnknown !== null) return treeChangedUnknown;
+    if (treeChanged.size === 0) return null;
+    for (const form of [resolvePathSegments(spelled), ...landingPaths(spelled).paths]) {
+      const key = foldedKey(form);
+      for (const [changedKey, { raw, at }] of treeChanged) {
+        if ((at && changedKey === key) || changedKey.startsWith(key === "/" ? "/" : `${key}/`)) {
+          return `a tree written at ${spelled} lands where an earlier segment of this line changes ${raw}, so what is there is not read from the disk`;
+        }
+      }
+    }
+    return null;
+  };
 
   const findings: Array<WriteFinding & { unit: number }> = [];
 
@@ -4525,7 +4646,7 @@ export function refineWriteLandings(
     let verdict: WriteLanding = { kind: "in" };
     for (const each of spelled) {
       if (each.length > MAX_LANDING_BYTES) return judgeWriteLanding(each, scope, homes, tree);
-      const moved = volatileOf(each);
+      const moved = volatileOf(each) ?? (tree ? treeTouched(staticPrefix(each)) : null);
       if (moved !== null) return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: moved };
       if (/[*?[]/u.test(each)) {
         // Point 6: a glob is read from the disk, bounded by entries and time;
@@ -4658,13 +4779,34 @@ export function refineWriteLandings(
       writes.push(...candidates);
       for (const word of candidates) changes.push({ word, kind: "link" });
       // An archive extracted is a tree at its directory (the working one when
-      // no `-C` names another); with `-P` a member may land anywhere.
-      if (bin === "tar" && tarExtracts(shape.args)) {
-        trees.push(...candidates);
-        if (!shape.args.some((arg) => arg === "-C" || arg.startsWith("--directory") || /^-[A-Za-z]*C/u.test(arg))) trees.push(".");
-        if (shape.args.some((arg) => arg === "--absolute-names" || /^-[A-Za-z]*P/u.test(arg) || (/^[A-Za-z]+$/u.test(arg) && arg === shape.args[0] && arg.includes("P")))) {
-          unreadable = `\`${shape.text}\` extracts with absolute names, so a member may land anywhere`;
+      // no `-C` names another), read through an allowlist of flags.
+      if (TAR_BINS.has(bin) && tarExtracts(shape.args)) {
+        const read = readTarExtract(shape.args, shape.assignments, env);
+        if ("unreadable" in read) {
+          unreadable = `\`${shape.text}\` extracts an archive, and ${read.unreadable}, so where its members land is not read`;
+        } else {
+          trees.push(...(read.dirs.length > 0 ? read.dirs : ["."]));
         }
+      }
+    } else if (bin === "scp") {
+      // `scp [-r] SRC... DEST`: a local destination is written (a tree with
+      // `-r`); a remote one (`host:path`) writes nothing here.
+      const operands: string[] = [];
+      for (let at = 0; at < shape.args.length; at += 1) {
+        const arg = shape.args[at] as string;
+        if (/^-[A-Za-z0-9]*[cFiJloPS]$/u.test(arg)) {
+          at += 1;
+          continue;
+        }
+        if (arg.startsWith("-") && arg.length > 1) continue;
+        operands.push(arg);
+      }
+      const destination = operands[operands.length - 1];
+      if (operands.length >= 2 && destination !== undefined && !/^[^/]*:/u.test(destination)) {
+        const recursive = shape.args.some((arg) => /^-[A-Za-z0-9]*r/u.test(arg));
+        writes.push(destination);
+        changes.push({ word: destination, kind: "link" });
+        intoDirs.push({ dir: destination, sources: operands.slice(0, -1).map((source) => source.replace(/^[^/]*:/u, "")), tree: recursive, contents: false });
       }
     } else if (bin === "find") {
       // `-fprint FILE`, `-fprint0 FILE`, `-fprintf FILE FORMAT`, `-fls FILE`.
@@ -4796,7 +4938,7 @@ export function refineWriteLandings(
     // A program's word is not a known target: only a word ON the list counts
     // (an unreadable one names no write this hook knows of).
     for (const word of verdict?.kind === "guarded" ? [] : guardOnly) {
-      const judged = judgeWord(word, index);
+      const judged = judgeWord(word, index, true);
       if (judged.kind === "guarded" && judged.rule === WRITE_GUARDED_RULE) verdict = judged;
       if (verdict?.kind === "guarded") break;
     }
@@ -4853,24 +4995,34 @@ export function refineWriteLandings(
 
     // What this segment changes is in place before the next one runs.
     for (const change of changes) {
-      if (!SNAPSHOT_CHANGERS[change.kind]) continue;
+      // Every change counts for a tree landing; only SNAPSHOT_CHANGERS' kinds
+      // for any other.
+      const counted = SNAPSHOT_CHANGERS[change.kind];
+      const unknown = (why: string): void => {
+        treeChangedUnknown ??= why;
+        if (counted) changedUnknown ??= why;
+      };
       const resolved = resolveWriteWord(change.word, index, line);
       if ("unreadable" in resolved) {
-        changedUnknown ??= `an earlier segment (\`${shape.text}\`) changes ${change.word}, which cannot be read, so no later landing on the disk is trusted`;
+        unknown(`an earlier segment (\`${shape.text}\`) changes ${change.word}, which cannot be read, so no later landing on the disk is trusted`);
         continue;
       }
       const spelled = spellingsOf({ spellings: resolved.spellings.map(staticPrefix) });
       if (spelled === null) {
-        changedUnknown ??= `an earlier segment (\`${shape.text}\`) changes ${change.word} after a cd this hook cannot follow, so no later landing on the disk is trusted`;
+        unknown(`an earlier segment (\`${shape.text}\`) changes ${change.word} after a cd this hook cannot follow, so no later landing on the disk is trusted`);
         continue;
       }
       for (const each of spelled) {
         if (each.length > MAX_LANDING_BYTES) {
-          changedUnknown ??= `an earlier segment (\`${shape.text}\`) changes a path longer than any the kernel opens, so no later landing on the disk is trusted`;
+          unknown(`an earlier segment (\`${shape.text}\`) changes a path longer than any the kernel opens, so no later landing on the disk is trusted`);
           continue;
         }
-        noteChanged(resolvePathSegments(each));
-        for (const path of landingPaths(each).paths) noteChanged(path);
+        for (const path of [resolvePathSegments(each), ...landingPaths(each).paths]) {
+          const key = foldedKey(path);
+          const at = change.kind === "move" || change.kind === "link" || change.kind === "remove";
+          if (key !== "/" && !(treeChanged.get(key)?.at ?? false)) treeChanged.set(key, { raw: path, at });
+          if (counted) noteChanged(path);
+        }
       }
     }
   }

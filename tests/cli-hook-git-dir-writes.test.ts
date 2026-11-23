@@ -252,7 +252,8 @@ test("S2 hook: every tail of an option cluster is a candidate, a bare name inclu
   symlinkSync(".git/hooks", join(repo, "hooks"));
   // `-vthooks`: the value of -t is the bare name `hooks`, the link into .git/hooks.
   assert.deepEqual(hook("cp /tmp/x -vthooks", repo), [DIR_WRITE, LISTED]);
-  assert.deepEqual(hook("tar -xf a.tar -Chooks", repo), [DIR_WRITE]);
+  // Design v4: the extract is a tree laid down AT the link into .git/hooks, a listed place.
+  assert.deepEqual(hook("tar -xf a.tar -Chooks", repo), [DIR_WRITE, LISTED]);
   // Inside .git, a bare tail lands there too.
   assert.deepEqual(pure("cd .git && cp /tmp/x -vthooks"), ["read.shell read-shell", DIR_WRITE]);
   assert.ok(hook("cd .git && cp /tmp/x -vthooks", repo).includes(DIR_WRITE));
