@@ -902,22 +902,41 @@ let organVerbs = true;
 
 /**
  * Lead ruling L62013 (S2): `mkdir` and `touch` keep main's class, so creating
- * a folder asks nothing new, and so does `tar` creating an archive from it.
- * Released only when EVERY option is one listed here, spelled in full: an
- * unknown option, or a long one abbreviated (getopt_long accepts any unique
- * prefix, which this list does not resolve), keeps the folder's class.
- * `mkdir -m`/`--mode` is not released: on a folder that is not there yet it
- * creates the folder with that mode (`mkdir -m 000 .claude` locks it); on one
- * that is, macOS and GNU leave the mode alone.
+ * a folder (or touching one) asks nothing new. Nothing else is released
+ * (security reviews of e9956c84 and 8fe15089: a read such as `tar -c` was
+ * released and could be made to delete by an option from the environment).
+ *
+ * Released only in the PLAIN form, each condition failing closed:
+ * - the command word is the bare name `mkdir` or `touch`, first in the
+ *   segment: no assignment before it (`PATH=/tmp mkdir`), no wrapper
+ *   (`command`, `nice`, a sandbox), no path (`./mkdir`, `/bin/mkdir`);
+ * - every word is exactly its text: no parameter, substitution, glob, brace,
+ *   tilde or zsh pattern the shell may still expand into an option or another
+ *   operand (`mkdir $X .claude`, `touch .cl*`, `mkdir -p {.claude,x}`);
+ * - every option is one listed here, spelled in full (getopt_long would take
+ *   a unique prefix; this list resolves none, so an abbreviation is held), and
+ *   a valued option's value is consumed as its value, never as an operand.
+ * `mkdir -m`/`--mode` is held: it leaves an existing folder's mode alone
+ * (checked on macOS; GNU's manual says it sets the mode of created
+ * directories), but it creates a missing one with that mode
+ * (`mkdir -m 000 .claude` makes a locked folder).
+ * A line that defines a function or alias, or sets `PATH`, is refused by main
+ * already, and a refusal in main's pass refuses the line.
  */
-function releasedFromOrganRule(basename: string, args: readonly string[]): boolean {
-  switch (basename) {
+function releasedFromOrganRule(segment: LexSegment, cursor: number): boolean {
+  if (cursor !== 0) return false;
+  const words = segment.words;
+  const bin = words[0];
+  if (bin === undefined || bin.text.includes("/")) return false;
+  for (const word of words) {
+    if (!word.exact || word.splits || word.expands || word.zshGlob !== false || word.substitutions.length > 0 || word.assignment) return false;
+  }
+  const args = words.slice(1).map((word) => word.text);
+  switch (bin.text) {
     case "mkdir":
       return onlyKnownOptions(args, { flags: "pv", valued: "", long: ["parents", "verbose"], longValued: [] });
     case "touch":
       return onlyKnownOptions(args, { flags: "acfhm", valued: "tdrA", long: ["no-create", "no-dereference"], longValued: ["date", "reference", "time"] });
-    case "tar":
-      return tarCreatesOnly(args);
     default:
       return false;
   }
@@ -934,7 +953,12 @@ interface KnownOptions {
   longValued: readonly string[];
 }
 
-/** Is every option before `--` one of `known`, each long one spelled in full? */
+/**
+ * Is every option before `--` one of `known`, each long one spelled in full,
+ * and does every valued option have its value? A value is consumed as the
+ * value (`touch -r ref .claude`: `ref` is the reference, `.claude` the
+ * operand); a valued option with nothing after it is not released.
+ */
 function onlyKnownOptions(args: readonly string[], known: KnownOptions): boolean {
   for (let at = 0; at < args.length; at += 1) {
     const arg = args[at] as string;
@@ -944,7 +968,10 @@ function onlyKnownOptions(args: readonly string[], known: KnownOptions): boolean
       const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
       if (known.long.includes(name) && eq === -1) continue;
       if (known.longValued.includes(name)) {
-        if (eq === -1) at += 1;
+        if (eq === -1) {
+          if (at + 1 >= args.length) return false;
+          at += 1;
+        }
         continue;
       }
       return false;
@@ -954,36 +981,16 @@ function onlyKnownOptions(args: readonly string[], known: KnownOptions): boolean
       const letter = arg[index] as string;
       if (known.flags.includes(letter)) continue;
       if (known.valued.includes(letter)) {
-        if (index === arg.length - 1) at += 1;
+        if (index === arg.length - 1) {
+          if (at + 1 >= args.length) return false;
+          at += 1;
+        }
         break;
       }
       return false;
     }
   }
   return true;
-}
-
-/**
- * Does this `tar` only create an archive (`-c`, `--create`), with every option
- * known and none that removes what it reads (`--remove-files`) or extracts?
- * The first word may be a bundle without its dash (`tar czf out.tgz .`).
- */
-function tarCreatesOnly(args: readonly string[]): boolean {
-  const [first, ...rest] = args;
-  if (first === undefined) return false;
-  const bundled = !first.startsWith("-") && /^[A-Za-z]+$/u.test(first);
-  const words = bundled ? [`-${first}`, ...rest] : [...args];
-  // With a dashless bundle, its value letters take the next words in order.
-  const known: KnownOptions = { flags: "czjJvh", valued: "fC", long: ["create", "gzip", "bzip2", "xz", "verbose", "dereference"], longValued: ["file", "directory", "exclude"] };
-  if (bundled) {
-    const takers = [...first].filter((letter) => known.valued.includes(letter)).length;
-    if (![...first].every((letter) => known.flags.includes(letter) || known.valued.includes(letter))) return false;
-    if (!onlyKnownOptions(rest.slice(takers), known)) return false;
-  } else if (!onlyKnownOptions(words, known)) {
-    return false;
-  }
-  const creates = words.some((word) => word === "--create" || (/^-[A-Za-z]+$/u.test(word) && word.includes("c")));
-  return creates;
 }
 
 /**
@@ -11537,7 +11544,7 @@ function classifySegmentWithVerb(
   const positionals = args.filter((arg) => !isFlag(arg));
   // Lead ruling L62013 (S2), fail closed: the organ-directory rule holds for
   // every command but the release list (redirects above were judged with it).
-  organVerbs = !releasedFromOrganRule(basename, args);
+  organVerbs = !releasedFromOrganRule(segment, cursor);
 
   // APRV-520: a git global option that takes a value, or one this table does
   // not know, leaves the segment unclassified ({@link gitGlobalRefusal}). It is
