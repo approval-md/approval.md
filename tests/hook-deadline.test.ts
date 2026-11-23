@@ -474,7 +474,7 @@ test("through the real hook, the two worst patterns found so far are answered in
     // is the `hook-deadline` refusal. A matcher that does not backtrack reads
     // both lines in milliseconds, and then each has its own answer: the push
     // waits for a human here and times out, the read is allowed.
-    if (/^hook-deadline: /u.test(output.permissionDecisionReason)) {
+    if (output.permissionDecisionReason.startsWith("hook-deadline: ")) {
       assert.equal(output.permissionDecision, "deny", label);
     } else if (command === stars) {
       assert.equal(output.permissionDecision, "deny", `${label}: ${output.permissionDecisionReason}`);
