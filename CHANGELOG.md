@@ -223,6 +223,15 @@ on the change above.
   are each read once (each took 64 to 174 s through the hook before). A
   word with outputs in it is brace-expanded to 16 alternatives, and past
   that counts (`{a,b}$(pwd)` to 1 MB took 39 s at 1,024).
+- **A word of unclosed `${` cannot make the path readers slow.** The reader
+  that collapses `${NAME:-…}` to `${NAME}` before a path is split, and the
+  hook's two copies of it in its credential pass, scanned to the word's end
+  from every `${` with no `}` after it: a 1 MB redirect target took 105 s
+  through the hook, and the same word as a read took longer. curl's
+  `%output{` reader had the same shape. Each now stops at the last `}` of
+  its text, where a closed form must end, and reads the text once (under
+  0.3 s at 1 MB). No answer changes: 17,402 lines classify as before, with
+  and without the hook.
 - **Looser than the change above, by design.** A read whose only write is its
   redirection writes nothing through its own words: `cat .git/HEAD > /tmp/x`,
   `ls .git/hooks > list.txt` and the like are the workspace write 0.4.8 called
