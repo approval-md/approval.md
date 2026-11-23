@@ -132,6 +132,10 @@ test("every write verb onto the list adds files.write.guarded and keeps its own 
     "cp a /usr/local/bin/tool",
     "echo x > /Users/someone-else/x",
     "echo x > .git/hooks/pre-push",
+    "echo x > .claude/hooks/pre-tool.sh",
+    "tee .claude/hooks/pre-tool.sh < a",
+    "sed -i s/a/b/ .Claude/Hooks/pre-tool.sh",
+    "cp a .claude/hooks/",
   ]) {
     const seen = see(command);
     assert.equal(seen.ok, true, command);
@@ -711,6 +715,7 @@ test("a tree written where a guarded entry can sit under it is guarded; one writ
     "tar --extract --absolute-names -f a.tar -C sub",
     "git clone https://example.invalid/r.git ~/.config",
     "cp -R dotfiles .git",
+    "cp -R dotfiles .claude",
     "find . -name x -fprint ~/.zshrc",
     "npx prettier --write ~/.zshrc",
     "make -C ~/.ssh",

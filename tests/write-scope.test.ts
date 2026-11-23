@@ -23,6 +23,7 @@ import {
   DECISION_B_UNREADABLE_CLASS,
   DECISION_D_OVERWRITE_IS_GUARDED,
   DECISION_E_WINDOW,
+  guardedEntryBelow,
   guardedEntryOf,
   WRITE_GUARDED_CLASS,
   WRITE_GUARDED_MINIMUM,
@@ -75,6 +76,9 @@ test("every family on the guarded list is guarded, at the place and under it", (
     ["/var/root/x", "another user's home"],
     ["/root/.bashrc", "another user's home"],
     ["/work/repo/.git/hooks/pre-push", "a git hooks folder"],
+    ["/work/repo/.claude/hooks/pre-tool.sh", "a Claude Code hooks folder"],
+    ["/work/repo/.claude/hooks", "a Claude Code hooks folder"],
+    [`${HOME}/.claude/hooks/x.sh`, "a Claude Code hooks folder"],
     [`${HOME}/.gitconfig`, "~/.gitconfig"],
     [`${HOME}/.config/git/config`, "~/.config/git"],
     [`${HOME}/bin/tool`, "~/bin"],
@@ -125,6 +129,7 @@ test("guarded names compare through the fold: case and the APFS code points", ()
     [`${HOME}/library/launchagents/x`, "~/Library/LaunchAgents"],
     [`${HOME}/.ſsh/k`, "~/.ssh"],
     ["/work/repo/.GIT/HOOKS/pre-commit", "a git hooks folder"],
+    ["/work/repo/.Claude/Hooks/x.sh", "a Claude Code hooks folder"],
     ["/USERS/someone/x", "another user's home"],
   ] as const) {
     assert.equal(guardedEntryOf(path, HOMES), entry, path);
@@ -264,4 +269,13 @@ test("a write_scope block loads, and an unexpandable root is refused by the sche
   writeFileSync(bad, ["```yaml approval-policy", 'version: "0.1"', "write_scope:", "  roots: [~/x]", "```", ""].join("\n"), "utf8");
   const refused = loadPolicy({ file: bad });
   assert.equal(refused.ok, false);
+});
+
+test("a Claude Code hooks folder is the pair of segments, nothing beside it; a tree written at .claude can hold it", () => {
+  for (const path of ["/work/repo/.claude/notes.md", "/work/repo/.claude/hooks-notes/x", "/work/repo/claude/hooks/x", "/work/repo/.claude-old/hooks/x", "/work/repo/hooks/.claude/x"]) {
+    assert.equal(guardedEntryOf(path, HOMES), null, path);
+  }
+  assert.equal(guardedEntryBelow("/work/repo/.claude", HOMES), "a Claude Code hooks folder");
+  assert.equal(guardedEntryBelow("/work/repo/.CLAUDE", HOMES), "a Claude Code hooks folder");
+  assert.equal(guardedEntryBelow("/work/repo/.claude/notes", HOMES), null);
 });

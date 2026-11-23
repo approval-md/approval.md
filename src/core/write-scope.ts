@@ -226,7 +226,9 @@ function startsWithFolded(have: readonly string[], want: readonly string[]): boo
  * given and resolved): a path under one of them is tested against the home
  * entries; a path under ANOTHER child of `/Users` or `/home` (not `Shared`) is
  * another user's home. A git hooks folder is a `.git/hooks` pair of segments
- * anywhere. Every name compares through {@link foldFileName}, so `~/.SSH` and
+ * anywhere, and a Claude Code hooks folder a `.claude/hooks` pair anywhere: a
+ * write into either lays down code that runs without being asked for again
+ * (lead, CLAIMS L62013: `.claude/hooks` was unguarded, as on main). Every name compares through {@link foldFileName}, so `~/.SSH` and
  * `/ETC/hosts` are the guarded places on a volume that folds case.
  */
 export function guardedEntryOf(path: string, homes: readonly string[]): string | null {
@@ -236,6 +238,7 @@ export function guardedEntryOf(path: string, homes: readonly string[]): string |
 
   for (let index = 0; index + 1 < folded.length; index += 1) {
     if (folded[index] === ".git" && folded[index + 1] === "hooks") return "a git hooks folder";
+    if (folded[index] === ".claude" && folded[index + 1] === "hooks") return "a Claude Code hooks folder";
   }
   for (const entry of GUARDED_ABSOLUTE_ENTRIES) {
     if (startsWithFolded(have, entry.segments)) return entry.name;
@@ -270,7 +273,8 @@ export function guardedEntryOf(path: string, homes: readonly string[]): string |
  * A guarded entry strictly UNDER an absolute, `..`-free path, or `null`: what a
  * tree written AT that path (a recursive copy, a move, a link, an archive
  * extracted there, a clone) may put onto the list without naming it. `/` holds
- * every entry; a `.git` folder holds its `hooks`; `/Users` and `/var` hold
+ * every entry; a `.git` folder holds its `hooks`, and a `.claude` folder its
+ * own; `/Users` and `/var` hold
  * other users' homes. Compared through {@link foldFileName}.
  */
 export function guardedEntryBelow(path: string, homes: readonly string[]): string | null {
@@ -280,6 +284,7 @@ export function guardedEntryBelow(path: string, homes: readonly string[]): strin
     entry.length > have.length && (have.length === 0 || startsWithFolded(entry, have));
   const last = have[have.length - 1];
   if (last !== undefined && foldFileName(last) === ".git") return "a git hooks folder";
+  if (last !== undefined && foldFileName(last) === ".claude") return "a Claude Code hooks folder";
   for (const entry of GUARDED_ABSOLUTE_ENTRIES) {
     if (strictlyUnder(entry.segments)) return entry.name;
   }
