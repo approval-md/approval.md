@@ -58,7 +58,20 @@ option, case folded), and takes the strictest class among them.
   is a known limit. Case folding stays:
   `*` and `*.md` reach `APPROVAL.md` as bash does on a case-insensitive APFS
   volume.
-- **Stricter than before:** a write pattern that COULD name a guarded file is
+- **Decided by what is there (lead ruling L61167):** before it classifies, the
+  hook lists the directory each write-target pattern's first globbed component
+  sits in (`src/cli/glob-listing.ts`: `fs.promises.opendir`, 2,000 entries, a
+  2 s deadline per directory, 16 directories, all at once) and the classifier
+  matches the pattern against those names (case folded, dot-names by the rule
+  above). `rm -rf dist/*`, `chmod +x scripts/*`, `git add src/*` and
+  `npx prettier --write src/*` keep main's class in a directory holding no
+  guarded name, and are `policy.core` in one holding `APPROVAL.md` (any case).
+  A directory that cannot be listed in full, a prefix the text cannot place
+  (`..`, a variable, `~user`, a line that changes directory), a deeper globbed
+  component, and every caller without listings (the core itself, `approval
+  serve`, the codex bridge) keep the strict answer. A file created between
+  the listing and the run is not seen.
+- **Stricter than before, without a listing:** a write pattern that COULD name a guarded file is
   human-only even when no such file exists. `APPROVAL.md` is guarded at any
   depth, so a pattern for a file straight inside a directory stays strict:
   `rm -rf dist/*`, `chmod +x scripts/*`, `git add *`, `git add src/*`,

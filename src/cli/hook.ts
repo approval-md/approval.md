@@ -231,6 +231,7 @@ import {
   readCodexReportedOutcome,
 } from "./hook-codex.js";
 import { bindExecCodeCommand, bindExecuteCode, describeProgram } from "./hook-exec-code.js";
+import { globDiskFor, listGlobWriteDirsFor, type GlobListing } from "./glob-listing.js";
 
 /** Identity accepted for the proposing side: a person or an agent. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -4105,9 +4106,17 @@ export function classifyForHook(
   credentialCwds: readonly string[] = [],
   /** A no-rule segment becomes a {@link NO_RULE_CLASS} stand-in (`defaults.unclassified_command: abstain`). */
   noRuleSegments = false,
+  /**
+   * GLOB-WRITE (lead ruling L61167): the directories a write-target pattern
+   * globs in, listed BEFORE classification ({@link listGlobWriteDirsFor}).
+   * `null` (every synchronous caller) keeps the strict, over-approximated
+   * answer; with it a pattern is matched against what is there.
+   */
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): RefinedClassification {
   const roots = resolveScratchRoots(cwd);
   const classified = classifyCommand(command, protectedPaths, {
+    ...(globListings === null ? {} : { globDisk: globDiskFor(cwd, globListings) }),
     scratchRoots: roots,
     ...(readRoots.length === 0 ? {} : { readRoots }),
     ...(execCode ? { execCode: true } : {}),
@@ -4202,7 +4211,23 @@ export function renderClassification(
  * refusal here: it classifies against the built-ins and says on stderr that the
  * answer is the narrow one.
  */
-function commandClassify(argv: string[], streams: Streams, cwd: string): number {
+/** The command text `hook classify` classifies, or `null` when the argv names none. */
+function classifyArgvCommand(argv: string[]): string | null {
+  const separator = argv.indexOf("--");
+  const head = separator === -1 ? argv : argv.slice(0, separator);
+  const tail = separator === -1 ? [] : argv.slice(separator + 1);
+  const parsed = parseFlags(head, { ...COMMON_FLAGS, ...POLICY_FLAGS, "--json": "boolean" });
+  if (!parsed.ok) return null;
+  const command = [...parsed.positionals, ...tail].join(" ").trim();
+  return command.length === 0 ? null : command;
+}
+
+function commandClassify(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
+): number {
   const separator = argv.indexOf("--");
   const head = separator === -1 ? argv : argv.slice(0, separator);
   const tail = separator === -1 ? [] : argv.slice(separator + 1);
@@ -4257,6 +4282,10 @@ function commandClassify(argv: string[], streams: Streams, cwd: string): number 
         readRoots,
         // APRV-510: the class the policy opens is the class the hook decides.
         execCodeGate(load.ok ? load.policy : null).shell,
+        [],
+        false,
+        // GLOB-WRITE (L61167): the same listings the harness route takes.
+        globListings,
       ).result,
       boolFlag(parsed.flags, "--json"),
     ),
@@ -7253,6 +7282,8 @@ function describeToolCall(
    * suspends the policy.
    */
   execGate: ExecCodeGate = closedExecCodeGate("silent"),
+  /** GLOB-WRITE (L61167): the hook's directory listings, or `null` (strict). */
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): ToolDescription {
   // APRV-510. A Hermes `execute_code` call, first, because it is claimed by the
   // rule table below and must never be described by it: the rule table binds
@@ -7401,6 +7432,7 @@ function describeToolCall(
       callGate.shell,
       credentialCwds,
       adapter.kind === "claude-code" && toolPolicy?.defaults?.unclassified_command === "abstain",
+      globListings,
     );
     const classified = refined.result;
     if (!classified.ok) {
@@ -7409,7 +7441,7 @@ function describeToolCall(
       // `exec.code` segment with it. Every other policy keeps today's refusal,
       // byte for byte.
       if (callGate.closed === "unattested" && classified.code !== "unparseable") {
-        const opened = classifyForHook(raw, protectedPaths, shellCwd ?? cwd, readRoots, true, credentialCwds).result;
+        const opened = classifyForHook(raw, protectedPaths, shellCwd ?? cwd, readRoots, true, credentialCwds, false, globListings).result;
         const program = opened.ok
           ? opened.segments.find((segment) => segment.execCode !== undefined)
           : undefined;
@@ -9432,6 +9464,8 @@ function* runHarnessHook(
   readStdin: () => string,
   adapter: HarnessAdapter,
   waitSeam: HookWaitSeam | null,
+  /** GLOB-WRITE (L61167): listings made before the steps ran, or `null` (strict). */
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): GateSteps<number> {
   // Codex and (APRV-445) Hermes answer a misconfigured entry with a verdict:
   // on both a usage error's empty stdout is a harness that runs the call, and
@@ -9865,6 +9899,7 @@ function* runHarnessHook(
       codexCommand,
       windowRecords: looked.records,
       waitSeam,
+      globListings,
     }),
   );
 }
@@ -9878,6 +9913,8 @@ function* runHarnessHook(
  * is the harness's own event and is treated as such throughout.
  */
 export interface DecideInput {
+  /** GLOB-WRITE (L61167): directory listings made before classification, or `null`/absent (strict). */
+  globListings?: ReadonlyMap<string, GlobListing> | null;
   streams: Streams;
   input: HookInput;
   adapter: HarnessAdapter;
@@ -10009,6 +10046,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     load.policy,
     true,
     execGateOf(adapter, load.policy),
+    decide.globListings ?? null,
   );
   if (described.kind === "deny") {
     return { permission: "deny", code: described.code, detail: described.detail };
@@ -10353,12 +10391,13 @@ function* commandHarnessHook(
   readStdin: () => string,
   adapter: HarnessAdapter,
   waitSeam: HookWaitSeam | null,
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): GateSteps<number> {
   if (adapter.kind === "hermes") {
-    return yield* hermesFailClosed(argv, streams, cwd, readStdin, adapter, waitSeam);
+    return yield* hermesFailClosed(argv, streams, cwd, readStdin, adapter, waitSeam, globListings);
   }
   try {
-    return yield* runHarnessHook(argv, streams, cwd, readStdin, adapter, waitSeam);
+    return yield* runHarnessHook(argv, streams, cwd, readStdin, adapter, waitSeam, globListings);
   } catch (cause) {
     // A hook that throws is a hook the harness treats as a non-blocking error,
     // which would let the command through. Every unexpected failure becomes an
@@ -10402,6 +10441,7 @@ function* hermesFailClosed(
   adapter: HarnessAdapter,
   /** APRV-427: serve's wait seam, passed through untouched (null on the CLI). */
   waitSeam: HookWaitSeam | null,
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): GateSteps<number> {
   let stdout = "";
   const tracked: Streams = {
@@ -10471,7 +10511,7 @@ function* hermesFailClosed(
   function* hermesVerdict(): GateSteps<number> {
     let code: number;
     try {
-      code = yield* runHarnessHook(argv, tracked, cwd, reading, adapter, waitSeam);
+      code = yield* runHarnessHook(argv, tracked, cwd, reading, adapter, waitSeam, globListings);
     } catch (cause) {
       // A post-event never blocks: the call already ran (see the post path).
       if (raw !== null && isHermesPostEvent(raw)) return EXIT_OK;
@@ -10571,7 +10611,37 @@ export function commandHookYielding(
   // without withdrawing. Stderr carries progress lines and never the verdict,
   // so its failure is swallowed (APRV-473 refuter).
   process.stderr.on("error", () => undefined);
-  return driveYielding(hookSteps(argv, streams, cwd, readStdin, null));
+  return (async () => {
+    // GLOB-WRITE (lead ruling L61167): the directories a write-target pattern
+    // globs in are listed HERE, before the steps classify, on the event loop
+    // with their own deadline ({@link listGlobWriteDirsFor}); the classifier
+    // stays pure and takes the result. Any failure lists nothing: the strict
+    // answer. stdin is read once and handed to the steps as read.
+    const sub = argv[0];
+    let readOnce = readStdin;
+    let globListings: ReadonlyMap<string, GlobListing> | null = null;
+    try {
+      if (sub !== undefined && isHarnessKind(sub)) {
+        const raw = readStdin();
+        readOnce = () => raw;
+        const adapter = HARNESS_ADAPTERS[sub];
+        const parsedInput = parseHookInput(raw, adapter.camelCaseEnvelope === true);
+        if (parsedInput.ok && parsedInput.input.toolName === adapter.shellTool) {
+          const command = readString(parsedInput.input.toolInput, "command");
+          const perCall =
+            adapter.shellCwdKey === undefined ? null : readString(parsedInput.input.toolInput, adapter.shellCwdKey);
+          const cwds = [cwd, ...(perCall !== null && isAbsolute(perCall) ? [perCall] : [])];
+          if (command !== null) globListings = await listGlobWriteDirsFor(command, cwds);
+        }
+      } else if (sub === "classify") {
+        const command = classifyArgvCommand(argv.slice(1));
+        if (command !== null) globListings = await listGlobWriteDirsFor(command, [cwd]);
+      }
+    } catch {
+      globListings = null;
+    }
+    return driveYielding(hookSteps(argv, streams, cwd, readOnce, null, globListings));
+  })();
 }
 
 /**
@@ -10603,6 +10673,7 @@ function* hookSteps(
   cwd: string,
   readStdin: () => string,
   waitSeam: HookWaitSeam | null,
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): GateSteps<number> {
   const sub = argv[0];
   const rest = argv.slice(1);
@@ -10619,8 +10690,8 @@ function* hookSteps(
   // boundary and doctor use, so a kind that can be recorded is a kind that can
   // be invoked, and neither can be added without the other.
   if (isHarnessKind(sub)) {
-    return yield* commandHarnessHook(rest, streams, cwd, readStdin, HARNESS_ADAPTERS[sub], waitSeam);
+    return yield* commandHarnessHook(rest, streams, cwd, readStdin, HARNESS_ADAPTERS[sub], waitSeam, globListings);
   }
-  if (sub === "classify") return commandClassify(rest, streams, cwd);
+  if (sub === "classify") return commandClassify(rest, streams, cwd, globListings);
   return usageError(streams, `unknown subcommand ${JSON.stringify(sub)} for \`approval hook\``);
 }

@@ -2352,6 +2352,15 @@ export interface ClassifierContext {
    */
   lineSetsDotglob?: boolean;
   /**
+   * What the caller read of the disk for a write-target pattern (GLOB-WRITE,
+   * lead ruling L61167): the names in the directory a pattern's first globbed
+   * component matches in. The core never reads the disk; the hook lists the
+   * directories {@link globWriteListingDirs} names and passes the result here.
+   * Without it, or for a directory it does not hold, a pattern keeps the
+   * over-approximated answer.
+   */
+  globDisk?: GlobDisk;
+  /**
    * The segments whose words, targets and substitution bodies the line's own
    * reading for {@link lineNamesGit} already went through (review of the
    * substitution fold, M1). Set by {@link classifyCommand}; a caller leaves
@@ -8318,6 +8327,66 @@ function lineMaySetDotglob(command: string): boolean {
 }
 
 /**
+ * What the caller read of the disk for write-target patterns (GLOB-WRITE, lead
+ * ruling L61167). `listings` maps an absolute directory to the names it holds,
+ * or `"unreadable"` when the caller could not list it in full (an error, the
+ * entry cap, the timeout): that directory keeps the over-approximated answer.
+ * `cwd` and `home` place a relative or `~` prefix; `relativeOk` is set false by
+ * {@link classifyCommand} on a line that may change directory first. `collect`,
+ * when present, receives every directory a pattern asked for
+ * ({@link globWriteListingDirs}).
+ */
+export interface GlobDisk {
+  cwd: string;
+  home: string | null;
+  listings: ReadonlyMap<string, readonly string[] | "unreadable">;
+  relativeOk?: boolean;
+  collect?: Set<string>;
+}
+
+/**
+ * The absolute directory a pattern's literal prefix names, or `null` when the
+ * text cannot place it: a variable or a `..` in the prefix (a symlinked parent
+ * makes `..` a disk question), `~user`, `~+`, `~-`, or a relative prefix on a
+ * line that may change directory. Lexical, like everything in this file.
+ */
+function globListingDir(prefix: readonly string[], disk: GlobDisk): string | null {
+  if (prefix.some((segment) => segment.includes("$") || segment.includes(PARAMETER_MARK) || segment === "..")) return null;
+  const strip = (path: string): string => path.replace(/\/+$/u, "");
+  const rest = (from: number): string[] => prefix.slice(from).filter((segment) => segment.length > 0 && segment !== ".");
+  let base: string;
+  let parts: string[];
+  if (prefix.length > 0 && prefix[0] === "") {
+    base = "";
+    parts = rest(1);
+  } else if (prefix[0] === "~") {
+    if (disk.home === null || !disk.home.startsWith("/")) return null;
+    base = strip(disk.home);
+    parts = rest(1);
+  } else if (prefix[0]?.startsWith("~") === true) {
+    return null;
+  } else {
+    if (disk.relativeOk === false || !disk.cwd.startsWith("/")) return null;
+    base = strip(disk.cwd);
+    parts = rest(0);
+  }
+  const dir = [base, ...parts].join("/");
+  return dir.length === 0 ? "/" : dir;
+}
+
+/**
+ * The directories the hook lists before it classifies `command` (GLOB-WRITE,
+ * lead ruling L61167): the directory of the first globbed component of every
+ * write-target pattern the classifier reads, placed against `cwd` and `home`.
+ * Pure; the listing itself is the caller's (`src/cli/glob-listing.ts`).
+ */
+export function globWriteListingDirs(command: string, cwd: string, home: string | null): string[] {
+  const collect = new Set<string>();
+  classifyCommand(command, [], { globDisk: { cwd, home, listings: new Map(), collect } });
+  return [...collect];
+}
+
+/**
  * {@link strictestProtected} for words a command WRITES through, read the way
  * the shell may still read them. Nothing here may be looser than the shell.
  *
@@ -8342,6 +8411,7 @@ function strictestProtectedWrite(
   inexact: (word: string) => boolean,
   skipProse = false,
   dots = false,
+  disk?: GlobDisk,
 ): { surface: string; path: string } | null {
   let best = strictestProtected(words, protectedPaths, skipProse);
   const offer = (surface: string | null, word: string): void => {
@@ -8358,7 +8428,7 @@ function strictestProtectedWrite(
     const budget = { left: GLOB_GUARD_STEP_CAP };
     for (const reading of readings) {
       if (reading !== word) offer(protectedPathClass(reading, protectedPaths), word);
-      if (hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, budget, dots), word);
+      if (hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, budget, dots, disk), word);
     }
   }
   return best;
@@ -8765,6 +8835,7 @@ function globGuardClass(
   protectedPaths: readonly ProtectedPathEntry[],
   budget: { left: number } = { left: GLOB_GUARD_STEP_CAP },
   dots = false,
+  disk?: GlobDisk,
 ): string | null {
   if (word.includes(PARAMETER_MARK)) return "log.mutate";
   const extraNames = protectedPaths.flatMap((entry) => parseProtectedEntry(entry)?.segments ?? []);
@@ -8793,6 +8864,15 @@ function globGuardClass(
         });
       const segments = masked.text.split("/");
       if (segments.length > GLOB_GUARD_SEGMENTS_CAP) return "log.mutate";
+      // The caller's listing of the directory a prefix names, or `undefined`.
+      const listingFor = (prefix: readonly string[]): readonly string[] | undefined => {
+        if (disk === undefined) return undefined;
+        const dir = globListingDir(prefix, disk);
+        if (dir === null) return undefined;
+        disk.collect?.add(dir);
+        const listed = disk.listings.get(dir);
+        return Array.isArray(listed) ? listed : undefined;
+      };
       // A dot-name (`.approval`, `.hermes`, `..`) is reached only by an
       // explicit leading `.`, unless the line turns dot matching on (`dots`).
       const nonDot = names.filter((name) => !name.startsWith("."));
@@ -8806,7 +8886,12 @@ function globGuardClass(
         return out;
       };
       let exhausted = false;
-      const choices: string[][][] = segments.map((segment) => {
+      // GLOB-WRITE (L61167): the first component holding a construct is matched
+      // against what is THERE when the caller listed its directory.
+      let firstGlobSeen = false;
+      const choices: string[][][] = segments.map((segment, index) => {
+        const listing = firstGlobSeen || !hasGlobConstruct(segment) ? undefined : listingFor(segments.slice(0, index));
+        if (hasGlobConstruct(segment)) firstGlobSeen = true;
         if (segment.length === 0) return [[segment]];
         // globstar and zsh's `**/` descend into dot-directories only with dot
         // matching on; a variable's value and a braceccl range are literal text,
@@ -8824,12 +8909,26 @@ function globGuardClass(
           dots ||
           /^[.(]|^[!@?*+]\(/u.test(segment) ||
           (first?.kind === "set" && first.chars.includes("."));
-        const out: string[][] = [[segment]];
         const test = (name: string, prefix: boolean): boolean => {
           const hit = globTokensMatch(pattern, name, prefix, budget);
           if (hit === null) exhausted = true;
           return hit !== false;
         };
+        if (listing !== undefined) {
+          // The names the directory holds that the pattern could match, each
+          // also under any guarded spelling equal to it with case folded
+          // (`apprOVAL.MD` is the policy file on a case-insensitive volume).
+          // No match: the pattern names no file there, so no candidate.
+          const listed: string[][] = [];
+          const present = dotted ? [...listing, ".", ".."] : listing.filter((name) => !name.startsWith("."));
+          for (const name of present) {
+            if (!test(name, false)) continue;
+            listed.push([name]);
+            for (const guard of names) if (guard !== name && guard.toLowerCase() === name.toLowerCase()) listed.push([guard]);
+          }
+          return listed;
+        }
+        const out: string[][] = [[segment]];
         for (const name of dotted ? names : nonDot) if (name !== segment && test(name, false)) out.push([name]);
         for (const name of GLOB_GUARD_PREFIXES) if ((dotted || !name.startsWith(".")) && test(name, true)) out.push([name]);
         return out;
@@ -9392,7 +9491,8 @@ function classifySegment(
     .map((word) => word.text);
   const inexact = (text: string): boolean => inexactWords.some((word) => word.includes(text));
   const dots = context.lineSetsDotglob === true;
-  const redirected = strictestProtectedWrite(writeTargets, protectedPaths, inexact, false, dots);
+  const disk = context.globDisk;
+  const redirected = strictestProtectedWrite(writeTargets, protectedPaths, inexact, false, dots, disk);
   const bin = words[cursor];
   if (redirected !== null) {
     // APRV-503 recheck (SHOULD-FIX-R1): a segment that writes a protected path
@@ -9815,6 +9915,7 @@ function classifySegment(
     inexact,
     false,
     dots,
+    disk,
   );
   if (fetchedProtected !== null) {
     return { ok: true, class: fetchedProtected.surface, rule: "protected-path", path: fetchedProtected.path };
@@ -9831,7 +9932,7 @@ function classifySegment(
   // named path already earns a class at least as strict (the log).
   const copyUnknown = copyFamily ? copyArgvUnknown(args, argFlags) : null;
   if (copyUnknown !== null) {
-    const named = strictestProtectedWrite([...positionals, ...readTargets], protectedPaths, writtenInexact, false, dots);
+    const named = strictestProtectedWrite([...positionals, ...readTargets], protectedPaths, writtenInexact, false, dots, disk);
     if (named !== null && protectedRank(named.surface) <= protectedRank("policy.core")) {
       return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
     }
@@ -9843,7 +9944,7 @@ function classifySegment(
   // that file, so a protected one, spelled plainly, by a pattern or by a
   // `${…}` default, takes its class as a redirection onto it would.
   if (cls.startsWith("read.")) {
-    const written = strictestProtectedWrite(readWriteTargets(basename, args), protectedPaths, inexact, false, dots);
+    const written = strictestProtectedWrite(readWriteTargets(basename, args), protectedPaths, inexact, false, dots, disk);
     if (written !== null) return { ok: true, class: written.surface, rule: "protected-path", path: written.path };
   }
 
@@ -9898,7 +9999,7 @@ function classifySegment(
     // GLOB-WRITE: a word the command WRITES that the shell may still glob, or
     // fill from a `${…}` default, is judged by every guarded path it could name
     // ({@link globWriteOperands}).
-    const named = strictestProtectedWrite(judged, protectedPaths, writtenInexact, true, dots);
+    const named = strictestProtectedWrite(judged, protectedPaths, writtenInexact, true, dots, disk);
     const fed = strictestProtected(readTargets, protectedPaths);
     const touched =
       fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))
@@ -10297,8 +10398,15 @@ export function classifyCommand(
   // GLOB-WRITE (lead ruling L60846): an option an EARLIER call set is a known
   // limit; one this line (or a script inside it) may set is read.
   const lineSetsDotglob = context.lineSetsDotglob === true || lineMaySetDotglob(command);
-  context = { ...context, lineNamesGit, lineSetsDotglob, spelledSegments, bodyAlreadyRead: false };
-  execContext = { ...execContext, lineNamesGit, lineSetsDotglob, spelledSegments, bodyAlreadyRead: false };
+  // GLOB-WRITE (L61167): a relative pattern is placed by the caller's cwd only
+  // on a line that cannot move the shell first.
+  const globDisk =
+    context.globDisk === undefined
+      ? undefined
+      : { ...context.globDisk, relativeOk: context.globDisk.relativeOk !== false && !segmentsMayChangeDirectory(lexed.segments) };
+  const diskField = globDisk === undefined ? {} : { globDisk };
+  context = { ...context, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false };
+  execContext = { ...execContext, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false };
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };

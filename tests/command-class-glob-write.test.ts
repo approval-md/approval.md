@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyCommand } from "../src/core/command-class.js";
+import { classifyCommand, globWriteListingDirs } from "../src/core/command-class.js";
 
 const HUMAN_ONLY = new Set(["policy.core", "log.mutate", "account.credential"]);
 
@@ -483,4 +483,66 @@ test("dot-names: the relaxed reading is an allowlist of plain lines (lead ruling
   // `APPROVAL.md`, which protectedPathClass guards at any depth (`rm
   // assets/APPROVAL.md` is policy.core on main).
   assert.equal(strictest("rm -rf assets/*"), "policy.core");
+});
+
+// ---------------------------------------------------------------------------
+// Decided by what is THERE (lead ruling L61167): the hook lists the directory a
+// pattern's first globbed component sits in and passes the names in.
+// ---------------------------------------------------------------------------
+
+function withListing(command: string, listings: Record<string, readonly string[] | "unreadable">): string[] {
+  const result = classifyCommand(command, [], {
+    globDisk: { cwd: "/w", home: "/h", listings: new Map(Object.entries(listings)) },
+  });
+  assert.ok(result.ok, `${command}: ${result.ok ? "" : result.detail}`);
+  return result.classes;
+}
+
+test("listings: the four workflow lines by what the directory holds", () => {
+  const lines: readonly (readonly [string, string, string])[] = [
+    ["rm -rf dist/*", "/w/dist", "files.delete.out_of_scope"],
+    ["chmod +x scripts/*", "/w/scripts", "files.write.workspace"],
+    ["git add src/*", "/w/src", "vcs.commit.branch"],
+    ["npx prettier --write src/*", "/w/src", "files.write.workspace"],
+  ];
+  for (const [command, dir, main] of lines) {
+    assert.deepEqual(withListing(command, { [dir]: [] }), [main], `${command} empty`);
+    assert.deepEqual(withListing(command, { [dir]: ["a.ts", "README.md", "x.png"] }), [main], `${command} unrelated`);
+    assert.deepEqual(withListing(command, { [dir]: [".approval"] }), [main], `${command} dot-name, plain line`);
+    assert.deepEqual(withListing(command, { [dir]: ["APPROVAL.md"] }), ["policy.core"], `${command} APPROVAL.md`);
+    assert.deepEqual(withListing(command, { [dir]: ["apprOVAL.MD"] }), ["policy.core"], `${command} apprOVAL.MD`);
+    assert.deepEqual(withListing(command, { [dir]: "unreadable" }), ["policy.core"], `${command} unreadable`);
+    assert.deepEqual(withListing(command, {}), ["policy.core"], `${command} not listed`);
+  }
+  // A dot-name counts on a line that may turn dot matching on.
+  const classes = withListing("GLOBIGNORE=x; echo x > dist/*/env", { "/w/dist": [".approval"] });
+  assert.equal(classes[classes.length - 1], "policy.core");
+  // CLAUDE.md is policy.edit at any depth, as on main.
+  assert.ok(withListing("rm -rf dist/*", { "/w/dist": ["CLAUDE.md"] }).includes("policy.edit"));
+});
+
+test("listings: home organs, absolute and relative prefixes, the first globbed level only", () => {
+  assert.deepEqual(withListing("echo x > ~/.hermes/a*.json", { "/h/.hermes": ["auth.json"] }), ["policy.core"]);
+  assert.deepEqual(withListing("echo x > ~/.hermes/a*.json", { "/h/.hermes": ["apps.json"] }), ["files.write.workspace"]);
+  assert.deepEqual(withListing("echo x > /abs/out/*", { "/abs/out": ["a.log"] }), ["files.write.workspace"]);
+  assert.deepEqual(withListing("echo x > /abs/out/*", { "/abs/out": ["APPROVAL.md"] }), ["policy.core"]);
+  // A deeper globbed level keeps the over-approximated reading.
+  assert.deepEqual(withListing("echo x > src/*/*", { "/w/src": ["lib"] }), ["policy.core"]);
+  assert.deepEqual(withListing("echo x > src/*/*.ts", { "/w/src": ["lib"] }), ["files.write.workspace"]);
+});
+
+test("listings: which directories the hook lists, and none it cannot place", () => {
+  assert.deepEqual(globWriteListingDirs("rm -rf dist/*", "/w", "/h"), ["/w/dist"]);
+  assert.deepEqual(globWriteListingDirs("echo x > ~/.hermes/a*.json", "/w", "/h"), ["/h/.hermes"]);
+  assert.deepEqual(globWriteListingDirs("echo x > *", "/w", "/h"), ["/w"]);
+  assert.deepEqual(globWriteListingDirs("cp a /abs/*/x", "/w", "/h"), ["/abs"]);
+  // A line that may change directory, a `..`, a variable or `~user` places nothing: strict.
+  assert.deepEqual(globWriteListingDirs("cd x && rm -rf dist/*", "/w", "/h"), []);
+  assert.deepEqual(globWriteListingDirs("rm -rf ../dist/*", "/w", "/h"), []);
+  assert.deepEqual(globWriteListingDirs("rm -rf $D/*", "/w", "/h"), []);
+  assert.deepEqual(globWriteListingDirs("rm -rf ~root/*", "/w", "/h"), []);
+  // A read is not a write target: nothing is listed for it.
+  assert.deepEqual(globWriteListingDirs("cat dist/*", "/w", "/h"), []);
+  // Unplaceable stays strict even with a listing for the lexical directory.
+  assert.deepEqual(withListing("cd x && rm -rf dist/*", { "/w/dist": [] }).slice(-1), ["policy.core"]);
 });
