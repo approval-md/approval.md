@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 
 import { listGlobDirectory, listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
 import { classifyForHook } from "../src/cli/hook.js";
+import { CANONICAL_POLICY } from "../src/cli/scaffold.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "glob-listing-")));
@@ -68,9 +69,10 @@ test("an empty directory keeps main's class; a guarded dot-name counts, setter o
   assert.deepEqual(await hookClasses("rm -rf dist/*", empty), ["files.delete.out_of_scope"]);
   const dotted = project({ "dist/.approval": [] });
   // dotglob or globdots may be set in the user's profile (lead ruling, CLAIMS L61492 and L61497).
-  assert.deepEqual(await hookClasses("echo x > dist/*/env", dotted), ["policy.core"]);
+  // Main's class rides beside every raise (lead ruling L61926).
+  assert.deepEqual(await hookClasses("echo x > dist/*/env", dotted), ["policy.core", "files.write.workspace"]);
   const classes = await hookClasses("GLOBIGNORE=x; echo x > dist/*/env", dotted);
-  assert.equal(classes[classes.length - 1], "policy.core");
+  assert.ok(classes.includes("policy.core"), classes.join(","));
   // An unguarded dot-name does not.
   const cache = project({ "dist/.cache": [] });
   assert.deepEqual(await hookClasses("echo x > dist/*/env", cache), ["files.write.workspace"]);
@@ -95,13 +97,13 @@ test("lead ruling L61492/L61497 through the hook: `rm -f *` and `chmod 644 *` wh
   assert.deepEqual(await hookClasses("rm -rf dist/*", dist), ["files.delete.out_of_scope"]);
   // A guarded dot-name reached by `*` in a home-organ shape, by what is there.
   const hermes = project({ ".hermes": ["auth.json"] });
-  assert.deepEqual(await hookClasses("echo x > */auth.json", hermes), ["policy.core"]);
+  assert.deepEqual(await hookClasses("echo x > */auth.json", hermes), ["policy.core", "files.write.workspace"]);
   assert.deepEqual(await hookClasses("echo x > */auth.json", plain), ["files.write.workspace"]);
 });
 
 test("a guarded name under a home organ is reached by what is there", async () => {
   const cwd = project({ ".hermes": ["auth.json", "notes.txt"] });
-  assert.deepEqual(await hookClasses("echo x > .hermes/a*.json", cwd), ["policy.core"]);
+  assert.deepEqual(await hookClasses("echo x > .hermes/a*.json", cwd), ["policy.core", "files.write.workspace"]);
   assert.deepEqual(await hookClasses("echo x > .hermes/n*.txt", cwd), ["files.write.workspace"]);
 });
 
@@ -109,7 +111,8 @@ test("without listings (every synchronous caller) the strict answer stands", () 
   const cwd = project({ dist: ["a.js"] });
   const result = classifyForHook("rm -rf dist/*", [], cwd, []).result;
   assert.ok(result.ok);
-  assert.deepEqual(result.segments.map((segment) => segment.class), ["policy.core"]);
+  // Main's class rides beside (lead ruling L61926).
+  assert.deepEqual(result.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope"]);
 });
 
 test("lister: names, a missing directory, the entry cap and the timeout", async () => {
@@ -147,7 +150,7 @@ test("an unlistable directory keeps the strict answer through the hook", async (
   assert.equal(listings.get(join(cwd, "dist")), "unreadable");
   const result = classifyForHook("rm -rf dist/*", [], cwd, [], false, [], false, listings).result;
   assert.ok(result.ok);
-  assert.deepEqual(result.segments.map((segment) => segment.class), ["policy.core"]);
+  assert.deepEqual(result.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope"]);
 });
 
 test("the CLI route lists before it classifies (hook classify)", () => {
@@ -155,6 +158,8 @@ test("the CLI route lists before it classifies (hook classify)", () => {
     [["a.js"], "files.delete.out_of_scope"],
     [["APPROVAL.md"], "policy.core"],
   ] as const) {
+    // A raise carries main's class beside it (lead ruling L61926).
+    const expected = want === "policy.core" ? [want, "files.delete.out_of_scope"] : [want];
     const cwd = project({ dist: [...files] });
     const ran = spawnSync(process.execPath, [CLI_ENTRY, "hook", "classify", "--json", "--", "rm -rf dist/*"], {
       cwd,
@@ -163,7 +168,7 @@ test("the CLI route lists before it classifies (hook classify)", () => {
     });
     assert.equal(ran.status, 0, ran.stderr);
     const parsed = JSON.parse(ran.stdout) as { ok: boolean; segments: { class: string }[] };
-    assert.deepEqual(parsed.segments.map((segment) => segment.class), [want], files.join(","));
+    assert.deepEqual(parsed.segments.map((segment) => segment.class), expected, files.join(","));
   }
 });
 
@@ -173,7 +178,7 @@ test("review of 6e3cbc9e: a relative pattern is placed only when the cwd is know
   // Another directory the command may start in (Claude Code's envelope cwd differing from the hook's).
   const unsure = classifyForHook("rm -rf dist/*", [], cwd, [], false, [join(scratch, "elsewhere")], false, listings).result;
   assert.ok(unsure.ok);
-  assert.deepEqual(unsure.segments.map((segment) => segment.class), ["policy.core"]);
+  assert.deepEqual(unsure.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope"]);
   const sure = classifyForHook("rm -rf dist/*", [], cwd, [], false, [], false, listings).result;
   assert.ok(sure.ok);
   assert.deepEqual(sure.segments.map((segment) => segment.class), ["files.delete.out_of_scope"]);
@@ -294,11 +299,76 @@ test("review-b A686-FOLD5 M1, through the real hook with policy W: a case varian
   for (const command of ["rm -rf .GIT", "cp a.js .gIt*/x"]) {
     assert.notEqual(decideW(dir, command).permission, "allow", command);
   }
-  // Not pinned here: `cp a.js .github/workflowſ/ci.yml` and `mv a.js
-  // .github/WORKFLOWS/ci.yml`. `.github` is spelled exactly, so both readings
-  // take #686's organ-directory destination (policy.edit in place of the
-  // ordinary class), as `cp a.js .github/README` does: #686's canonical
-  // design since FOLD1, left to the lead (review-b A686-FOLD5, M1 last line).
+  // `.github` spelled exactly: #686's organ-directory destination raises to
+  // policy.edit, and main's class rides beside it (lead ruling L61926, which
+  // settled review-b A686-FOLD5 M1's last line), so main's deny stands.
+  for (const command of ["cp a.js .github/workflowſ/ci.yml", "mv a.js .github/WORKFLOWS/ci.yml", "cp a.js .github/README"]) {
+    const decision = decideW(dir, command);
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+    assert.match(decision.reason, /^hook-class-human-only: class files\.write\.workspace /u, command);
+  }
   // Controls: the canonical spelling keeps the policy's answer for policy.edit.
   assert.equal(decideW(dir, "cp a.js .github/workflows/ci.yml").permission, "allow");
+});
+
+/**
+ * The hook's decision for `command` in `dir`, with HOME a made-up directory.
+ * `--timeout 1s`: a class that waits for a human (manual) denies on timeout.
+ */
+let decidedIn = 0;
+function decideIn(dir: string, home: string, command: string): { permission: string; reason: string } {
+  decidedIn += 1;
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+  delete env["APPROVAL_HUMAN"];
+  const input = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "l61926", tool_use_id: `l61926-${decidedIn}`, cwd: dir, transcript_path: "/dev/null", tool_name: "Bash", tool_input: { command } });
+  const ran = spawnSync(process.execPath, [CLI_ENTRY, "hook", "claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "100ms"], { cwd: dir, encoding: "utf8", env, input });
+  assert.equal(ran.status, 0, ran.stderr);
+  const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+  return { permission: output.permissionDecision, reason: output.permissionDecisionReason };
+}
+
+test("lead ruling L61926, through the real hook under the default policy and W: one line from each of the five items keeps main's decision or a stricter one", () => {
+  // Main 324d87dc's decisions, read on its build in the same lab shape:
+  //   item                          | default                 | W
+  //   1 cp a.js .github/README      | allow (workspace)       | deny human-only (workspace)
+  //   2 echo x >>| ~/.hermes/auth.json | deny unparseable     | deny unparseable
+  //   3 echo x >>| ~/.hermes/.?nv.local | deny unparseable    | deny unparseable
+  //   4 mv a .gi*/config (no .git)  | waits, vcs.history.rewrite | waits, vcs.history.rewrite
+  //   5 cp a.txt "<.github path> deploys ..." | allow (workspace) | deny human-only (workspace)
+  // d610b2e9 allowed 1, 4 and 5 under W and 3 under the default policy.
+  for (const [name, policy] of [["default", CANONICAL_POLICY], ["W", POLICY_W]] as const) {
+    const lab = join(scratch, `l61926-${name}`);
+    const home = join(lab, "home");
+    const dir = join(lab, "proj");
+    mkdirSync(join(home, ".hermes"), { recursive: true });
+    writeFileSync(join(home, ".hermes", "notes.txt"), "made-up\n");
+    // `.github` and no `.git`: `.gi*` matches only `.github` on disk.
+    for (const [sub, file] of [["src", "a.ts"], [".github/workflows", "ci.yml"]] as const) {
+      mkdirSync(join(dir, sub), { recursive: true });
+      writeFileSync(join(dir, sub, file), "made-up\n");
+    }
+    for (const file of ["a", "a.js", "a.txt"]) writeFileSync(join(dir, file), "made-up\n");
+    writeFileSync(join(dir, "APPROVAL.md"), policy);
+    const attested = runCliIn(["policy", "attest", "--as", "human:alice"], dir);
+    assert.equal(attested.code, 0, attested.stderr);
+    const decide = (command: string): { permission: string; reason: string } => decideIn(dir, home, command);
+    // 1. A replace line: the raise (policy.edit) and main's class beside it.
+    const replaced = decide("cp a.js .github/README");
+    assert.equal(replaced.permission, "deny", `${name}: ${replaced.reason}`);
+    assert.match(replaced.reason, name === "W" ? /^hook-class-human-only: class files\.write\.workspace /u : /^hook-timeout: .*policy\.edit/u, name);
+    // 2 and 3. A line main refuses stays refused; the zsh clobber forms with it.
+    for (const command of ["echo x >>| ~/.hermes/auth.json", "echo x >>| ~/.hermes/.?nv.local"]) {
+      const refused = decide(command);
+      assert.equal(refused.permission, "deny", `${name}: ${command}`);
+      assert.match(refused.reason, /^hook-unparseable: /u, `${name}: ${command}`);
+    }
+    // 4. `.gi*/config`: main's vcs.history.rewrite is kept beside policy.edit.
+    const gitConfig = decide("mv a .gi*/config");
+    assert.notEqual(gitConfig.permission, "allow", `${name}: ${gitConfig.reason}`);
+    assert.match(gitConfig.reason, /vcs\.history\.rewrite/u, name);
+    // 5. The quoted-prose cp: policy.edit raised, main's class beside it.
+    const prose = decide('cp a.txt ".github/workflows/pages.yml deploys the site on push to main"');
+    assert.equal(prose.permission, "deny", `${name}: ${prose.reason}`);
+    assert.match(prose.reason, name === "W" ? /^hook-class-human-only: class files\.write\.workspace /u : /^hook-timeout: .*policy\.edit/u, name);
+  }
 });

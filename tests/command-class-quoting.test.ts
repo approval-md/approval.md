@@ -403,14 +403,19 @@ test("the same shape under the other effectful rows", () => {
   // GLOB-WRITE (#686, review of 8e1e84ae finding 4): a cp or mv DESTINATION is
   // a path by construction, whitespace and all; one under `.github` is the
   // guarded directory's write, decided by its name.
+  // Main's class rides beside the raise (lead ruling L61926): two segments.
   for (const command of [
     `cp a.txt ".github/workflows/pages.yml deploys the site on push to main"`,
     `mv a.txt ".github/workflows/pages.yml deploys the site on push to main"`,
   ]) {
-    const segment = onePathSegment(command, ROUTED_PATHS);
-    assert.equal(segment.rule, "protected-path", command);
+    const result = classifyCommand(command, ROUTED_PATHS);
+    assert.ok(result.ok, command);
+    const [raised, main, ...rest] = result.segments;
+    assert.equal(rest.length, 0, command);
+    assert.equal(raised?.rule, "protected-path", command);
     // The routed workflow class (`policy.edit.ci`) under this policy's paths.
-    assert.ok(segment.class.startsWith("policy.edit"), `${command} -> ${segment.class}`);
+    assert.ok(raised?.class.startsWith("policy.edit"), `${command} -> ${raised?.class ?? ""}`);
+    assert.equal(main?.class, "files.write.workspace", command);
   }
   for (const command of [
     `tee ".github/workflows/pages.yml deploys the site on push to main"`,

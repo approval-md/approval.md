@@ -2472,10 +2472,15 @@
             "class": "policy.edit",
             "rule": "protected-path",
             "path": ".github/workflows/pages.yml deploys the site on push/a.txt"
+          },
+          {
+            "class": "files.write.workspace",
+            "rule": "workspace-write"
           }
         ],
         "classes": [
-          "policy.edit"
+          "policy.edit",
+          "files.write.workspace"
         ]
       }
     },
@@ -7016,10 +7021,15 @@
             "class": "policy.core",
             "rule": "protected-path",
             "path": "docs/*.md"
+          },
+          {
+            "class": "files.write.workspace",
+            "rule": "workspace-write"
           }
         ],
         "classes": [
-          "policy.core"
+          "policy.core",
+          "files.write.workspace"
         ]
       }
     },

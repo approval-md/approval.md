@@ -118,7 +118,8 @@ test("S1: ordinary glob and brace lines do not move", () => {
   assert.deepEqual(pure("cd * && echo x > f"), [READ_SHELL, "files.write.workspace redirect-write"]);
   // A WRITE target's leading `?` may, under dotglob or globdots set in a
   // profile (lead ruling, CLAIMS L61492 and L61497): `.git/config`.
-  assert.deepEqual(pure("echo x > ?git/config"), [DIR_WRITE]);
+  // Main's class rides beside the raise (lead ruling L61926).
+  assert.deepEqual(pure("echo x > ?git/config"), [DIR_WRITE, "files.write.workspace redirect-write"]);
   assert.deepEqual(pure("rm -f .*.swp"), ["files.delete.out_of_scope rm-unreadable-path"]);
   // A `?` beside a `-` (a URL's query) is an ordinary pattern, never an error read as a match.
   assert.deepEqual(pure("echo x > out?a-b.txt"), ["files.write.workspace redirect-write"]);
@@ -146,7 +147,9 @@ test("S1 hook: a pattern is expanded on disk and each match walked; one it canno
   try {
     // A SURE target that cannot be expanded is judged the strict way; a
     // possible one (a header value) by its text, which names no .git.
-    assert.deepEqual(hook("echo x > locked/*/config", repo), [DIR_WRITE]);
+    // Main's write segment rides beside the raise (lead ruling L61926), and
+    // the disk pass's entry is shown in its place too: two entries.
+    assert.deepEqual(hook("echo x > locked/*/config", repo), [DIR_WRITE, DIR_WRITE]);
     assert.deepEqual(hook("echo x > locked/*/.g?t/config", repo), [DIR_WRITE]);
     assert.ok(!hook("wget --header=locked/*/x https://example.invalid/x", repo).includes(DIR_WRITE));
   } finally {
