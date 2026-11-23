@@ -34,7 +34,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { commandHook, TORN_TAIL_RETRIES, type HookWaitSeam } from "../src/cli/hook.js";
+import { commandHook, DESCRIBE_DEADLINE_ENV, TORN_TAIL_RETRIES, type HookWaitSeam } from "../src/cli/hook.js";
 import { main } from "../src/cli/main.js";
 import { appendEvent, type EventRecord } from "../src/core/log.js";
 import { readVerifiedRecords, type ReadRecordsResult } from "../src/core/state.js";
@@ -1093,4 +1093,29 @@ test("fourth pass 3: a torn deadline tick with no clean read names an expiry tha
   assert.match(verdict.reason, /expire at \S+, which comes before the .* retry grace would run out/u, verdict.reason);
   assert.doesNotMatch(verdict.reason, /stay open for the .* retry grace/u);
   assert.equal(records(logPath).filter((record) => record.event === "approval.withdrawn").length, 0);
+});
+
+test("a hook thread whose read hit the deadline is retired: the next call is read by a fresh thread", async () => {
+  const { dir } = await ready();
+  const server = await listener(dir);
+  try {
+    // 256 KB of path words against a one-millisecond deadline. The threads
+    // share the launch environment live, so the variable reaches the thread.
+    process.env[DESCRIBE_DEADLINE_ENV] = "1";
+    let stopped: Verdict;
+    try {
+      stopped = await hook(server, bash(dir, "tu-deadline-1", `cat ${"notes/a.txt ".repeat(21_000)}`));
+    } finally {
+      delete process.env[DESCRIBE_DEADLINE_ENV];
+    }
+    assert.equal(stopped.permission, "deny", stopped.reason);
+    assert.match(stopped.reason, /^hook-deadline: this hook could not read the Bash call/u);
+    // A warm thread is handed the next call. Kept, the stopped thread would
+    // refuse this one too ("an earlier call in this process..."), and every
+    // call after it until the listener was restarted.
+    const next = await hook(server, bash(dir, "tu-deadline-2", "echo hi > deadline-note.txt"));
+    assert.equal(next.permission, "allow", next.reason);
+  } finally {
+    await server.close();
+  }
 });

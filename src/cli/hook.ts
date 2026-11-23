@@ -7372,6 +7372,16 @@ export function describeDeadlineMs(harnessCapMs: number | null = null, env: Node
 let describeDeadlinePassed = false;
 
 /**
+ * Has a description hit its deadline in this process (or this thread: a
+ * worker has its own copy of this module)? A caller that answers many calls
+ * asks after each one, and stops handing calls to a thread that says yes
+ * (`serve/hook-worker.ts`).
+ */
+export function describeDeadlineHit(): boolean {
+  return describeDeadlinePassed;
+}
+
+/**
  * {@link describeToolCallNow} under this hook's own deadline: the description,
  * or a `hook-deadline` deny when it could not be made in `deadlineMs`.
  */

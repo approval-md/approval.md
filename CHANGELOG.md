@@ -288,8 +288,11 @@ else was on it.
   the hook's own work from outside it, so no input can outrun it; it does not
   interrupt a blocking system call. `APPROVAL_HOOK_DESCRIBE_DEADLINE_MS` can
   shorten it and can never lengthen it. A read that is stopped is stopped part
-  way, so a process that answers many calls (the Codex bridge) refuses every
-  later call the same way, and says so, until it is started again.
+  way, so a process that answers many calls on one thread (the Codex bridge)
+  refuses every later call the same way, and says so, until it is started
+  again. `approval serve` retires the thread that was stopped, and the next
+  call is read by a fresh one. `hook-deadline` joins the `hook_deny_codes`
+  union of the conformance vectors.
 - **The wait for a decision is measured from when the hook started,** not from
   when it finished reading the call, so a slow read shortens the wait instead
   of pushing the hook's last answer past the harness's timeout.
