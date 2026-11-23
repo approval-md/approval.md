@@ -99,39 +99,30 @@ option, case folded), and takes the strictest class among them.
 - **zsh's clobbering redirects (lead ruling L61195 (a)):** `>!`, `>>!`, `>|`,
   `>>|`, `>&!`, `>&|`, `>>&!`, `>>&|`, `&>!` and `&>>!` write the next word, as
   `>` does.
-- **Copies, moves, links, syncs and extractions (L61195 (b); reviews of
-  b402adec and 039b840a):** a copy into a directory is judged by the file it
-  lands (`cp evil/settings.json .claude/` is `.claude/settings.json`), and a
-  source landing AS an organ directory is one (`cp -r evil/.claude .`,
-  `ln -s ../evil/.claude`, which links into `.`). With no destination read,
-  every operand is judged, as before. A
-  destination any name may land in (`cp -r`, `-T`, a source ending `/`, `.` or
-  `..`, every `mv`, `ln`, `rsync`, `scp`, and `tar -x`'s directory) is judged
-  as the organ directory it is (`.claude`, `.cursor`, `.grok`, `.muse`,
-  `.github`), normalised lexically first (`.claude/x/..`, `./.claude/.`). A
-  CONTENTS copy or extraction (`cp -r src/ .`, `cp -R src/. .`, `cp -T`,
-  `mv -T`, `cp --parents`, `rsync -a src/ .`, `rsync -R`/`--relative`/
-  `--files-from`, a `/./` source, `tar -x`) creates names that come from its
-  source, so into the working directory, `..` above it, the home, `/`, or any
-  ancestor of the working directory or the home it is STRICT, and no listing
-  of the source or the destination relaxes it. Elsewhere it is strict where
-  the hook's listing of the destination holds an organ directory, `.git`,
-  `.approval` or the policy file, or the destination is not there or not
-  listable. tar's `--strip-components`, `--transform`/`--xform`,
-  `--one-top-level` and `-s` rename members: anywhere. A directory not there
-  is empty only to a glob on a one-segment line.
-  `cp`, `mv`, `ln`, `install`, `rsync` and `scp` are read by per-tool option
-  tables, so an option's value is never the destination (`rsync -a src/
-  .claude/ --exclude x`), and an option a table does not know makes every
-  operand a possible destination. tar's directory is read in every spelling
-  (`-C X`, `-CX`, a cluster, `--directory`/`--cd` by any prefix, the dashless
-  bundle `tar xCf .claude a.tar`), and `-P`/`--absolute-names` may write
-  anywhere. `unzip`, `ditto`, `cpio`, `pax`, `bsdtar`, `gtar` and `7z` have no
-  rule and stay refused; an archive or copy tool with no table whose operand
-  names an organ directory is the organ write. Stricter than main: `tar -xf
-  a.tar`, `tar -xzf a.tgz -C .`, `cp -r src/ .`, `cp -R src/. .` and `rsync -a
-  src/ .` in any directory; `tar -x … -C build` where `build` is not there yet;
-  `cp -r .claude backup/`; `ln -s ../evil/.claude`.
+- **Copies, moves, links, syncs and extractions INTO a guarded directory
+  (L61195 (b); reviews of b402adec, 039b840a and e6b7bf97; the split ruling,
+  L61320):** a `cp`, `mv`, `ln`, `install`, `rsync`, `scp` or `tar -x -C`
+  whose destination IS `.claude`, `.cursor`, `.grok`, `.muse` or `.github`,
+  or a path under one, takes that directory's class by its name alone, after
+  lexical normalisation (`.claude/x/..`, `./.claude/.`, `.claude/sub/`), with
+  no listing: `cp evil/settings.json .claude/`, `cp a.txt .claude/`, `cp -r
+  x/. .claude/`, `tar -xf a.tar -C .claude`, `rsync -a src/ .claude/hooks/`.
+  `.git` keeps #683's git-dir rule. A copy into another directory is judged by
+  the file it lands (`cp evil/* out/` with `evil/APPROVAL.md`), and a source
+  landing AS a guarded directory is one (`cp -r evil/.claude .`, `ln -s
+  ../evil/.claude`, which links into `.`). With no destination read, every
+  operand is judged, as before. `cp`, `mv`, `ln`, `install`, `rsync` and `scp`
+  are read by per-tool option tables, so an option's value is never the
+  destination (`rsync -a src/ .claude/ --exclude x`), and an option a table
+  does not know makes every operand a possible destination. tar's directory
+  is read in every spelling (`-C X`, `-CX`, a cluster, `--directory`/`--cd` by
+  any prefix, the dashless bundle `tar xCf .claude a.tar`). `unzip`, `ditto`,
+  `cpio`, `pax`, `bsdtar`, `gtar` and `7z` have no rule and stay refused; an
+  archive or copy tool with no table whose operand names a guarded directory
+  is that write. A contents copy or extraction into an ordinary directory or
+  an ancestor of a guarded one (`tar -xf a.tar`, `cp -r src/. .`) keeps its
+  class here; that is a follow-up. A directory the hook finds not there is
+  empty only to a glob on a one-segment line.
 
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),

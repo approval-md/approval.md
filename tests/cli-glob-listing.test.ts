@@ -153,19 +153,16 @@ test("review of 6e3cbc9e: a relative pattern is placed only when the cwd is know
   assert.deepEqual(sure.segments.map((segment) => segment.class), ["files.delete.out_of_scope"]);
 });
 
-test("reviews of 039b840a and e6b7bf97 through the hook: a contents copy into the working directory is strict; elsewhere by the destination", async () => {
-  const plain = project({ src: ["a.js"], docs: ["README.md"], out: ["b.js"] });
-  for (const command of ["tar -xf a.tar", "cp -r src/ .", "rsync -a src/ ."]) {
-    assert.ok((await hookClasses(command, plain)).includes("policy.core"), command);
+test("the split (L61320) through the hook: a copy into a guarded directory is strict; a contents copy into an ordinary place keeps main's class", async () => {
+  const organ = project({ ".claude": ["settings.json"], src: ["a.js"], "evil/.claude": ["settings.json"] });
+  for (const command of ["cp -r src/ .claude/", "tar -xf a.tar -C .claude", "rsync -a src/ .cursor/"]) {
+    assert.ok((await hookClasses(command, organ)).includes("policy.core"), command);
   }
-  // Into a directory holding nothing guarded: main's class.
-  assert.ok(!(await hookClasses("tar -xf a.tar -C out", plain)).includes("policy.core"));
-  assert.ok(!(await hookClasses("cp -r src/ out", plain)).includes("policy.core"));
-  // Into one holding the policy file or an organ directory, or not there yet: strict.
-  const held = project({ out: ["APPROVAL.md"], gen: [], "gen/.claude": ["settings.json"], src: ["a.js"] });
-  assert.ok((await hookClasses("cp -r src/ out", held)).includes("policy.core"));
-  assert.ok((await hookClasses("rsync -a src/ gen/", held)).includes("policy.core"));
-  assert.ok((await hookClasses("tar -xf a.tar -C build", held)).includes("policy.core"));
+  // Moved to a follow-up: these keep main's class even where .claude is.
+  for (const command of ["tar -xf a.tar", "cp -r src/ .", "cp -r evil/. .", "rsync -a src/ .", "tar -xf a.tar -C build"]) {
+    const classes = await hookClasses(command, organ);
+    assert.ok(!classes.some((cls) => ["policy.core", "policy.edit", "log.mutate"].includes(cls)), `${command}: ${classes.join(",")}`);
+  }
 });
 
 test("review of e6b7bf97 (4) through the hook: a missing directory is empty only on a one-segment line", async () => {

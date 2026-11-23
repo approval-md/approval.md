@@ -541,9 +541,7 @@ const FIXTURES: readonly Fixture[] = [
   { command: "tar tvf dist/pkg.tgz", class: "read.shell", rule: "tar-list", row: "tar" },
   { command: "tar --list --file dist/pkg.tgz", class: "read.shell", rule: "tar-list", row: "tar" },
   { command: "tar --version", class: "read.shell", rule: "tar-probe", row: "tar" },
-  // GLOB-WRITE: an extraction into the working directory may create its organ
-  // directories (`.claude/`), so it is strict whatever is there.
-  { command: "tar -xzf dist/pkg.tgz", class: "policy.core", rule: "protected-path", row: "tar" },
+  { command: "tar -xzf dist/pkg.tgz", class: "files.write.workspace", rule: "tar-extract", row: "tar" },
   { command: "tar -xzf dist/pkg.tgz -C build/unpack", class: "files.write.workspace", rule: "tar-extract", row: "tar" },
   { command: "tar -czf dist/out.tgz src", class: "files.write.workspace", rule: "tar-create", row: "tar" },
   {

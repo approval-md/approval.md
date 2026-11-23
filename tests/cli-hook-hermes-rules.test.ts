@@ -714,6 +714,8 @@ test("recheck 3: ordinary work under the home is allowed; the home's roots, glob
     ["terminal", { command: "rm -f *.tmp", workdir: workspace }],
     ["terminal", { command: 'echo hi > "out_$N.txt"', workdir: workspace }],
     ["terminal", { command: "cp /tmp/a.txt .", workdir: workspace }],
+    ["terminal", { command: "cp -r /tmp/stuff/. .", workdir: workspace }],
+    ["terminal", { command: "tar -xf /tmp/x.tar", workdir: workspace }],
     ["terminal", { command: "touch notes.txt", workdir: home }],
     ["search_files", { path: skills, pattern: "name" }],
     ["search_files", { path: workspace, pattern: "x" }],
@@ -737,11 +739,6 @@ test("recheck 3: ordinary work under the home is allowed; the home's roots, glob
     ["terminal", { command: 'mkdir -p "$OUT"', workdir: workspace }, "policy.core"],
     ["terminal", { command: 'echo x > "$OUT/notes.md"', workdir: workspace }, "policy.core"],
     ["terminal", { command: "cp -r /tmp/stuff/. .", workdir: home }, "policy.core"],
-    // GLOB-WRITE (review of e6b7bf97, finding 2): a contents copy or an
-    // extraction whose names the hook cannot list may create `.claude`,
-    // `.git` or `APPROVAL.md` in the directory it runs in, the workspace too.
-    ["terminal", { command: "cp -r /tmp/stuff/. .", workdir: workspace }, "policy.core"],
-    ["terminal", { command: "tar -xf /tmp/x.tar", workdir: workspace }, "policy.core"],
     ["terminal", { command: "tar -xf /tmp/x.tar", workdir: home }, "policy.core"],
     ["terminal", { command: `tar -xf /tmp/x.tar -C ${home}`, workdir: dir }, "policy.core"],
     // SF2: a cd this hook cannot resolve.

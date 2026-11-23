@@ -667,13 +667,15 @@ test("lead ruling L61195 (b): a copy, move or link into a directory is judged by
   }
   // install has no rule (refused on main and here).
   assert.equal(classifyCommand("install evil/hooks.json .cursor/").ok, false);
-  for (const command of ["cp evil/notes.txt .claude/", "cp a.txt out/", "mv a.txt b.txt"]) {
+  for (const command of ["cp a.txt out/", "mv a.txt b.txt"]) {
     assert.ok(!classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
+  // Into the guarded directory itself, any file (the split ruling, L61320).
+  assert.ok(classesOf("cp evil/notes.txt .claude/").includes("policy.core"));
   // A glob source is expanded from its own directory's listing, not the destination's.
-  const listed = (command: string, names: readonly string[]): string[] => withListing(command, { "/w/evil": names, "/w/.claude": [] });
-  assert.ok(listed("cp evil/* .claude/", ["settings.json"]).includes("policy.core"));
-  assert.ok(!listed("cp evil/* .claude/", ["notes.txt"]).includes("policy.core"));
+  const listed = (command: string, names: readonly string[]): string[] => withListing(command, { "/w/evil": names, "/w/out": [] });
+  assert.ok(listed("cp evil/* out/", ["APPROVAL.md"]).includes("policy.core"));
+  assert.ok(!listed("cp evil/* out/", ["notes.txt"]).includes("policy.core"));
   assert.ok(!withListing("cp -r src/* out/", { "/w/src": ["a.ts", "lib"], "/w/out": [] }).includes("policy.core"));
 });
 
@@ -713,16 +715,17 @@ test("review of b402adec (M2): a destination any name may land in is judged as t
   ] as const) {
     assert.ok(classesOf(command).includes(cls), `${command} -> ${classesOf(command).join(",")}`);
   }
-  // A plain file copy lands by its name; an ordinary destination stays
-  // ordinary (a contents copy by what the destination holds: review of
-  // 039b840a, finding 1, below).
-  for (const command of ["cp CONTRIBUTING.md .github/", "cp a.txt .claude/"]) {
-    const classes = classesOf(command);
-    assert.ok(!classes.includes("policy.core") && !classes.includes("policy.edit"), `${command} -> ${classes.join(",")}`);
-  }
-  for (const command of ["cp -r src/ out/", "rsync -a src/ out/", "tar -xf a.tar -C out"]) {
-    const classes = withListing(command, { "/w/out": ["a.js"] });
-    assert.ok(!classes.includes("policy.core") && !classes.includes("policy.edit"), `${command} -> ${classes.join(",")}`);
+  // Lead ruling on the split (L61320): a copy INTO a guarded directory is
+  // judged by the directory's name alone, whatever it copies.
+  assert.ok(classesOf("cp a.txt .claude/").includes("policy.core"));
+  assert.ok(classesOf("cp CONTRIBUTING.md .github/").includes("policy.edit"));
+  assert.ok(classesOf("cp -r src/ .claude/sub/").includes("policy.core"));
+  assert.ok(classesOf("mv notes.md ~/.cursor/rules/").includes("policy.core"));
+  // An ordinary destination stays ordinary, whatever is listed.
+  for (const command of ["cp -r src/ out/", "rsync -a src/ out/", "tar -xf a.tar -C out", "cp a.txt docs/"]) {
+    for (const classes of [classesOf(command), withListing(command, { "/w/out": [".claude"] })]) {
+      assert.ok(!classes.includes("policy.core") && !classes.includes("policy.edit"), `${command} -> ${classes.join(",")}`);
+    }
   }
 });
 
@@ -745,56 +748,46 @@ test("finding 1: a destination is normalised lexically before the organ test", (
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
   assert.ok(classesOf("cp -r src/ .github/w/..").includes("policy.edit"));
-  // `..` that leaves the organ lands in the working directory: strict as a contents copy there.
-  assert.ok(withListing("cp -r src/ .claude/..", { "/w": ["src", "a.js"], "/w/src": ["a.js"] }).includes("policy.core"));
-  assert.ok(ORDINARY(withListing("cp -r src/ out/.claude/..", { "/w/out": ["a.js"] })));
+  // `..` that leaves the guarded directory is not it.
+  assert.ok(ORDINARY(classesOf("cp -r src/ .claude/..")));
+  assert.ok(ORDINARY(classesOf("cp -r src/ out/.claude/..")));
 });
 
-test("finding 1: a CONTENTS copy into an ancestor of an organ directory is the organ write", () => {
-  const project = { "/w": ["src", ".claude", "a.js"] };
-  for (const command of [
-    "cp -r src/ .",
-    "cp -R src/. ./",
-    "cp -a src/ .",
-    "cp -rT src .",
-    "rsync -a src/ .",
-    "rsync -a src/. ./",
-    "tar -xf a.tar",
-    "tar -xzf a.tgz -C .",
-    "tar xf a.tar",
-    "mv -T src .",
-  ]) {
-    assert.ok(withListing(command, project).includes("policy.core"), `${command} -> ${withListing(command, project).join(",")}`);
+/**
+ * Moved to a follow-up (lead ruling on the #686 split, CLAIMS L61320): a
+ * contents copy or extraction into an ORDINARY directory or an ancestor of a
+ * guarded one keeps main 21fc5fdc's class here, recorded from its build. The
+ * follow-up changes these deliberately.
+ */
+const MOVED_TO_FOLLOW_UP: readonly (readonly [string, string])[] = [
+  ["tar -xf x.tar", "files.write.workspace"],
+  ["tar -xzf a.tgz -C .", "files.write.workspace"],
+  ["tar -x -C build -f a.tar", "files.write.workspace"],
+  ["cp -r src/. .", "files.write.workspace"],
+  ["cp -R src/ .", "files.write.workspace"],
+  ["rsync -a src/ .", "network.call"],
+  ["cp -r /tmp/stuff/. .", "files.write.workspace"],
+  ["tar -xzf dist/pkg.tgz", "files.write.workspace"],
+  ["tar -xzf dist/pkg.tgz -C build/unpack", "files.write.workspace"],
+  ["tar -xf /tmp/x.tar", "files.write.workspace"],
+  ["tar -xPf a.tar -C out", "files.write.workspace"],
+  ["tar -xf a.tar --strip-components=1 -C out", "files.write.workspace"],
+  ["tar -xf a.tar --transform s/a/b/ -C out", "files.write.workspace"],
+  ["cp -r src/ ..", "files.write.workspace"],
+  ["cp -r src/ ~", "files.write.workspace"],
+];
+
+test("moved to a follow-up: contents copies and extractions into an ordinary place keep main's class", () => {
+  const listings = { "/w": ["src", ".claude", "APPROVAL.md"], "/w/src": [".claude"], "/w/out": [], "/w/build": "missing" as const };
+  for (const [command, main] of MOVED_TO_FOLLOW_UP) {
+    assert.deepEqual(classesOf(command), [main], command);
+    assert.deepEqual(withListing(command, listings), [main], `${command} (listed)`);
   }
-  // The home, and every ancestor of the home or the working directory, hold
-  // organ directories by construction.
-  for (const command of ["cp -r src/ ~", "cp -r src/ ~/", "cp -r src/ /h", "cp -r src/ /", "cp -r src/ ..", "rsync -a src/ ../..", "tar -xf a.tar -C ~"]) {
-    assert.ok(withListing(command, { "/w": ["src"] }).includes("policy.core"), command);
-  }
-  // A directory holding the policy file, or a bare-guarded directory, too.
-  assert.ok(withListing("cp -r src/ out", { "/w/out": ["APPROVAL.md"] }).includes("policy.core"));
-  assert.ok(withListing("cp -r src/ out", { "/w/out": [".approval"] }).includes("policy.core"));
-  assert.ok(withListing("cp -r src/ out", { "/w/out": [".github"] }).includes("policy.edit"));
-  // Plain copies keep their class wherever they land.
-  for (const command of ["cp x .", "cp x.txt ..", "mv a.txt ..", "cp -r src .", "cp a b", "cp -r a b", "rsync -a src dst"]) {
-    assert.ok(ORDINARY(withListing(command, project)), `${command} -> ${withListing(command, project).join(",")}`);
-  }
-  // A contents copy whose names are unknown into a directory holding no guarded name keeps its class.
-  assert.ok(ORDINARY(withListing("cp -r src/ build/", { "/w/build": [] })));
-  assert.ok(ORDINARY(withListing("tar -xf a.tar -C out", { "/w/out": ["a.js"] })));
-  // The hook with no listing of it (unlistable, or a variable): it may hold one.
-  assert.ok(withListing("tar -xf a.tar", { "/w": "unreadable" }).includes("policy.core"));
-  assert.ok(withListing("tar -xf a.tar -C out", {}).includes("policy.core"));
-  assert.ok(withListing('tar -xf a.tar -C "$OUT"', { "/w": [] }).includes("policy.core"));
-  assert.ok(classesOf('cp -r src/ "$OUT"').includes("policy.core"));
-  // The working directory, the home and `..` by the text alone; other places are the hook's.
-  assert.ok(classesOf("tar -xf a.tar").includes("policy.core"));
-  assert.ok(classesOf("tar -xf a.tar -C ~").includes("policy.core"));
-  assert.deepEqual(classesOf("tar -xf a.tar -C out"), ["files.write.workspace"]);
-  // A source landing AS an organ directory is one.
+  // A source landing AS a guarded directory is still one (kept).
   assert.ok(classesOf("cp -r evil/.claude .").includes("policy.core"));
   assert.ok(classesOf("mv evil/.github .").includes("policy.edit"));
   assert.ok(classesOf("rsync -a h:.claude .").includes("policy.core"));
+  assert.ok(classesOf("cp -r .claude backup/").includes("policy.core"));
 });
 
 test("finding 2: option values are not operands; an unknown option makes every operand a destination", () => {
@@ -846,9 +839,9 @@ test("finding 3: tar's extraction directory in every spelling; other archive too
   ]) {
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
-  // Absolute member names may land anywhere.
-  for (const command of ["tar -xPf a.tar -C out", "tar -xf a.tar --absolute-names -C out", "tar -x -P -f a.tar -C out"]) {
-    assert.ok(withListing(command, { "/w/out": [] }).includes("policy.core"), command);
+  // Kept by name: an extraction INTO a guarded directory, whatever its options.
+  for (const command of ["tar -xPf a.tar -C .claude", "tar -xf a.tar --strip-components=1 -C .cursor/x", "tar -x -f a.tar -C .github"]) {
+    assert.ok(!ORDINARY(classesOf(command)), command);
   }
   // Creating an archive from a directory reads it.
   assert.ok(ORDINARY(classesOf("tar -czf out.tgz -C .claude .")));
@@ -906,59 +899,30 @@ test("e6b7bf97 (1): an implied destination (`ln -s TARGET`) and a single operand
   assert.ok(ORDINARY(classesOf("ln -s ../lib/util.js")));
 });
 
-test("e6b7bf97 (2) and the decision after it: a contents copy into the working directory or an ancestor is strict, whatever is listed", () => {
-  const root = { "/w": ["src", "a.js"] };
-  // No listing of the source or the destination relaxes it.
+test("lead ruling on the split (L61320): a copy INTO a guarded directory, or under one, by its name alone", () => {
   for (const command of [
-    "cp -r src/ .",
-    "cp -R src/. .",
-    "cp -a src/ ./",
-    "rsync -a src/ .",
-    "cp -rT src .",
-    "mv -T src .",
-    "tar -xf a.tar",
-    "tar -xzf a.tgz -C .",
-    "cp -r src/ /w",
-    "cp -r src/ ..",
-    "cp -r src/ ~",
-    "rsync -a src/ /",
-    // --parents, rsync -R / --relative / --files-from, and a /./ component.
-    "cp -r --parents a/b .",
-    "rsync -R a/b .",
-    "rsync -a --relative a/b .",
-    "rsync -a --files-from=list.txt src .",
-    "rsync -a src/./a/b .",
+    "cp evil/settings.json .claude/",
+    "cp -r x/. .claude/",
+    "tar -xf a.tar -C .claude",
+    "rsync -a src/ .claude/hooks/",
+    "cp -r src/ ./.claude/sub/../x",
+    "scp h:x .grok/",
+    "ln -sf ../evil .muse/link",
+    "cp --parents a/b .cursor",
+    "rsync -R a/b .claude",
+    "cp -r src/ ~/.claude/",
   ]) {
-    assert.ok(withListing(command, { ...root, "/w/src": ["a.js"], "/w/a": ["b"] }).includes("policy.core"), `${command} -> ${withListing(command, { ...root, "/w/src": ["a.js"] }).join(",")}`);
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
-  // The examples of the stale-source finding are strict too.
-  for (const command of ["touch src/.claude; cp -r src/. ./", "tar -xf a.tar -C src && cp -a src/ ."]) {
-    assert.ok(withListing(command, { ...root, "/w/src": ["a.js"] }).includes("policy.core"), command);
+  // .git is #683's git-dir rule, with its own rule id; the bare-guarded
+  // directories are the text rule's.
+  for (const command of ["rsync -a src/ .git/hooks/", "tar -xf a.tar -C .git"]) {
+    const result = classifyCommand(command, []);
+    assert.ok(result.ok && result.segments.some((segment) => segment.class === "vcs.history.rewrite" && segment.rule === "git-dir-write"), command);
   }
-  // Elsewhere, by the destination: holding a guarded name, not there, or unlistable is strict.
-  assert.ok(withListing("cp -r src/ out", { "/w/out": [".claude"] }).includes("policy.core"));
-  assert.ok(withListing("cp -r src/ out", { "/w/out": ["APPROVAL.md"] }).includes("policy.core"));
-  assert.ok(withListing("cp -r src/ out", { "/w/out": [".git"] }).includes("vcs.history.rewrite"));
-  assert.ok(withListing("tar -xf a.tar -C out", { "/w/out": "missing" }).includes("policy.core"));
-  assert.ok(withListing("tar -xf a.tar -C out", { "/w/out": "unreadable" }).includes("policy.core"));
-  assert.ok(ORDINARY(withListing("tar -xf a.tar -C out", { "/w/out": ["a.js"] })));
-  assert.ok(ORDINARY(withListing("rsync -a src/ out/", { "/w/out": [] })));
-  // Plain copies keep their class.
-  for (const command of ["cp x .", "cp -r src .", "mv a.txt ..", "rsync -a src dst", "cp -p a b"]) {
-    assert.ok(ORDINARY(withListing(command, root)), command);
-  }
-  // tar options that rename members may land them anywhere.
-  for (const command of [
-    "tar -xf a.tar --strip-components=1 -C out",
-    "tar -xf a.tar --strip 1 -C out",
-    "tar -xf a.tar --transform s/a/b/ -C out",
-    "tar -xf a.tar --xform=s/a/b/ -C out",
-    "tar -xf a.tar --one-top-level -C out",
-    "tar -xsf a.tar -C out",
-    "tar -x -s /a/b/ -f a.tar -C out",
-  ]) {
-    assert.ok(withListing(command, { "/w/out": [] }).includes("policy.core"), command);
-  }
+  assert.ok(classesOf("cp -r src/ .approval/").includes("policy.core"));
+  // No listing relaxes it.
+  assert.ok(withListing("cp -r src/ .claude/", { "/w/.claude": [], "/w/src": ["a.js"] }).includes("policy.core"));
 });
 
 test("e6b7bf97 (3): only a real `$` names a special parameter; a quoted or escaped one leaves the glob", () => {
