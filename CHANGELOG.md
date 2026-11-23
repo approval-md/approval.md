@@ -331,17 +331,32 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   it was not on main.
 - **The route floor reads a policy entry as spelled, as main did:** no policy
   that loads on main fails to load here. A routed entry spelled like a
-  built-in guarded path in another case (`.APPROVAL/x`, `Approval.md`) still
-  matches commands folded, and the built-in class answers that path first;
-  `approval policy check` names such an entry in a `note:` line.
+  built-in guarded path in another case (`.APPROVAL/x`, `Approval.md`,
+  `.GitHub/workflows/`) still matches commands folded, and the built-in
+  class is always judged for that path: the organ rows answer before any
+  route, and beside a route that names a built-in `policy.edit` path only in
+  another case the path is reported as `policy.edit` too. On main such a
+  route answered alone, the floor having never judged it, so a policy that
+  routed `.GitHub/workflows/` to a class it runs unattended let
+  `echo x > .GitHub/workflows/ci.yml` through, onto the workflow file on
+  APFS. `approval policy check` names such an entry in a `note:` line.
+- **Routes of the same depth are all judged.** Two routed entries that both
+  match a path at the same depth (`SPEC/` beside `spec/`, once names fold;
+  or two folders both on one path) used to be settled by declaration order.
+  The classifier cannot say which class a policy holds stricter, so it now
+  reports every such class, the first declared first, and the hook's
+  strictest decision answers, for every spelling of the path. The most
+  specific route still wins over a shallower one. One more classification
+  pass per tied entry, on lines that name such a path.
 - **The Hermes-home walk is linear.** It sliced and re-walked the rest of
   the path at every home segment, so a 1 MiB path of `.hermes/x/` segments
   took about a minute of CPU on main (and through the fold, `.herme<U+017F>/x/`
   as well). Each tail's answer now comes from one pass over the path, with the
   same answers (held against the old walk by a fuzz in the tests).
 - **Evidence.** Against main's build, pure and through the hook, over the
-  differential lines and nine policy entry lists (none, bare, routed, two
-  colliding orders, nested depths, case variants of built-in paths): the
+  differential lines and thirteen policy entry lists (none, bare, routed, two
+  colliding orders, three colliding spellings, nested depths, case variants
+  of built-in paths, routed and tied with the canonical entry): the
   as-spelled reading equals main's answer on every line, and the head's
   classes contain main's on every line, with no refusal lost. The 382
   conformance vectors and the 63 overlay recipes are unmoved. Run for real in

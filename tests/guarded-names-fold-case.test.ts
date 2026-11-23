@@ -52,7 +52,7 @@ import {
   protectedPathClasses,
   type ProtectedPathEntry,
 } from "../src/core/command-class.js";
-import { eachNameReading, foldFileName, foldNameExact, namesReadAsSpelled, withNamesAsSpelled } from "../src/core/name-fold.js";
+import { eachNameReading, foldFileName, foldNameExact, namesReadAsSpelled, takeAmongEqual, withNamesAsSpelled } from "../src/core/name-fold.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-fold-case-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -393,8 +393,8 @@ const CLOSED_FIRST: ProtectedPathEntry[] = [
 
 test("routed entries that collide by case: each line keeps the class main gives it, in both declaration orders", () => {
   // Main: `spec/x` is `closed` and `SPEC/x` is `open` in either order (each
-  // matches one entry). Folded, both entries match and declaration order
-  // picks one; the as-spelled class is reported beside it.
+  // matches one entry). Folded, both entries match with the same depth, and
+  // both classes are reported, the first declared first (review S2 on #688).
   for (const extra of [OPEN_FIRST, CLOSED_FIRST]) {
     assert.deepEqual(spelledPure("echo x > spec/x", extra), ["policy.edit.closed redirect-protected"]);
     assert.deepEqual(spelledPure("echo x > SPEC/x", extra), ["policy.edit.open redirect-protected"]);
@@ -403,9 +403,18 @@ test("routed entries that collide by case: each line keeps the class main gives 
     assert.ok(protectedPathClasses("spec/x", extra).includes("policy.edit.closed"));
     assert.ok(protectedPathClasses("SPEC/x", extra).includes("policy.edit.open"));
   }
-  assert.deepEqual(pure("echo x > spec/x", OPEN_FIRST), ["policy.edit.open redirect-protected", "policy.edit.closed redirect-protected"]);
-  assert.deepEqual(pure("echo x > spec/x", CLOSED_FIRST), ["policy.edit.closed redirect-protected"]);
-  assert.deepEqual(pure("echo x > SPEC/x", CLOSED_FIRST), ["policy.edit.closed redirect-protected", "policy.edit.open redirect-protected"]);
+  const OPEN_THEN_CLOSED = ["policy.edit.open redirect-protected", "policy.edit.closed redirect-protected"];
+  const CLOSED_THEN_OPEN = ["policy.edit.closed redirect-protected", "policy.edit.open redirect-protected"];
+  // A third spelling, which neither entry names as spelled, takes both too,
+  // beside the workspace write main called it.
+  const WORKSPACE = "files.write.workspace redirect-write";
+  for (const target of ["spec/x", "SPEC/x", "Spec/x", `${LONG_S}pec/x`]) {
+    const main = target === "spec/x" || target === "SPEC/x" ? [] : [WORKSPACE];
+    assert.deepEqual(pure(`echo x > ${target}`, OPEN_FIRST), [...OPEN_THEN_CLOSED, ...main], target);
+    assert.deepEqual(pure(`echo x > ${target}`, CLOSED_FIRST), [...CLOSED_THEN_OPEN, ...main], target);
+    assert.deepEqual(protectedPathClasses(target, OPEN_FIRST), ["policy.edit.open", "policy.edit.closed"], target);
+    assert.deepEqual(protectedPathClasses(target, CLOSED_FIRST), ["policy.edit.closed", "policy.edit.open"], target);
+  }
   // Nested depths: `Design/Frozen/` beside `design/`.
   const nested: ProtectedPathEntry[] = [
     { path: "Design/Frozen/", class: "policy.edit.frozen" },
@@ -413,6 +422,84 @@ test("routed entries that collide by case: each line keeps the class main gives 
   ];
   assert.deepEqual(pure("echo x > design/frozen/x", nested), ["policy.edit.frozen redirect-protected", "policy.edit.design redirect-protected"]);
   assert.deepEqual(pure("echo x > Design/Frozen/x", nested), ["policy.edit.frozen redirect-protected"]);
+});
+
+test("routes of the same depth that all match one path are all reported, however many and however spelled", () => {
+  // Three spellings of one folder.
+  const three: ProtectedPathEntry[] = [
+    { path: "SPEC/", class: "policy.edit.one" },
+    { path: "Spec/", class: "policy.edit.two" },
+    { path: "spec/", class: "policy.edit.three" },
+  ];
+  for (const target of ["spec/x", "SPEC/x", "Spec/x", "sPEC/x"]) {
+    assert.deepEqual(protectedPathClasses(target, three), ["policy.edit.one", "policy.edit.two", "policy.edit.three"], target);
+    assert.deepEqual(
+      pure(`echo x > ${target}`, three),
+      [
+        "policy.edit.one redirect-protected",
+        "policy.edit.two redirect-protected",
+        "policy.edit.three redirect-protected",
+        // The one spelling no entry names as spelled keeps main's class too.
+        ...(target === "sPEC/x" ? ["files.write.workspace redirect-write"] : []),
+      ],
+      target,
+    );
+  }
+  // As spelled, the one entry spelled like the path answers alone, as on main.
+  assert.deepEqual(spelledPure("echo x > Spec/x", three), ["policy.edit.two redirect-protected"]);
+  // Two entries can tie with no fold at all: both folders are on the path.
+  // Main took the first declared; both are reported, the first declared first.
+  const plain: ProtectedPathEntry[] = [
+    { path: "a/b/", class: "policy.edit.ab" },
+    { path: "c/d/", class: "policy.edit.cd" },
+  ];
+  assert.deepEqual(spelledPure("echo x > a/b/c/d/x", plain), ["policy.edit.ab redirect-protected"]);
+  assert.deepEqual(pure("echo x > a/b/c/d/x", plain), ["policy.edit.ab redirect-protected", "policy.edit.cd redirect-protected"]);
+  // Two tied entries of one class are one claim.
+  const same: ProtectedPathEntry[] = [
+    { path: "SPEC/", class: "policy.edit.one" },
+    { path: "spec/", class: "policy.edit.one" },
+  ];
+  assert.deepEqual(pure("echo x > spec/x", same), ["policy.edit.one redirect-protected"]);
+  // A deeper route still wins over a shallower tie.
+  const deeper: ProtectedPathEntry[] = [...three, { path: "spec/frozen/", class: "policy.edit.frozen" }];
+  assert.deepEqual(protectedPathClasses("spec/frozen/x", deeper), ["policy.edit.frozen"]);
+  // Two tied words on one line: each word's claims are all taken.
+  assert.deepEqual(pure("echo x > spec/x; echo y > a/b/c/d/y", [...OPEN_FIRST, ...plain]), [
+    "policy.edit.open redirect-protected",
+    "policy.edit.ab redirect-protected",
+    "policy.edit.closed redirect-protected",
+    "policy.edit.cd redirect-protected",
+  ]);
+});
+
+test("equal claims: the folded reading takes each in turn, the as-spelled one the first, and a throw restores the turn", () => {
+  const claims = ["a", "b", "c"];
+  assert.equal(takeAmongEqual(claims), "a", "outside a reading, the first");
+  assert.deepEqual(eachNameReading(() => takeAmongEqual(claims)), ["a", "b", "c"]);
+  assert.deepEqual(eachNameReading(() => `${takeAmongEqual(claims)}${takeAmongEqual(["x", "y"])}`), ["ax", "by", "cx"]);
+  assert.equal(withNamesAsSpelled(() => takeAmongEqual(claims)), "a");
+  assert.deepEqual(withNamesAsSpelled(() => eachNameReading(() => takeAmongEqual(claims))), ["a"]);
+  // With a diverging name the as-spelled answer comes last.
+  assert.deepEqual(eachNameReading(() => `${takeAmongEqual(claims)}${foldNameExact("K")}`), ["ak", "bk", "ck", "aK"]);
+  assert.throws(() =>
+    eachNameReading(() => {
+      if (takeAmongEqual(claims) === "b") throw new Error("second turn");
+      return 0;
+    }),
+  );
+  assert.equal(takeAmongEqual(claims), "a", "the turn is restored after a throw");
+  assert.throws(() => takeAmongEqual([]), TypeError);
+  // A nested reading takes every claim itself and leaves the outer turn alone.
+  assert.deepEqual(
+    eachNameReading(() => eachNameReading(() => takeAmongEqual(claims)).join("")),
+    ["abc", "abc", "abc"],
+  );
+  // Inside an outer turn the as-spelled reading still takes the first claim.
+  assert.deepEqual(
+    eachNameReading(() => eachNameReading(() => `${takeAmongEqual(claims)}${foldNameExact("K")}`).join("")),
+    ["akbkckaK", "akbkckaK", "akbkckaK", "aK"],
+  );
 });
 
 test("routed entries that collide by case, through the hook", { skip }, () => {
@@ -605,7 +692,8 @@ test("the second reading runs only where the two readings can differ", () => {
   assert.equal(eachNameReading(() => classifyCommand("echo x > Approval.MD")).length, 2);
   assert.equal(eachNameReading(() => classifyCommand("echo x > approval.md")).length, 2);
   assert.equal(eachNameReading(() => classifyCommand(`echo x > .claude/${LONG_S}ettings.json`)).length, 2);
-  assert.equal(eachNameReading(() => classifyCommand("echo x > spec/x", OPEN_FIRST)).length, 2);
+  // Two equal claims (both routes), then the as-spelled reading.
+  assert.equal(eachNameReading(() => classifyCommand("echo x > spec/x", OPEN_FIRST)).length, 3);
 });
 
 // ---------------------------------------------------------------------------
@@ -903,6 +991,78 @@ test("a routed entry spelled like a built-in path in another case loads, and its
   assert.deepEqual(spelledPure("echo x > .APPROVAL/x", extra), ["policy.edit.mine redirect-protected"]);
   assert.deepEqual(pure("echo x > .APPROVAL/x", extra), [WRITE_CORE, "policy.edit.mine redirect-protected"]);
   assert.deepEqual(pure("echo x > .approval/x", extra), [WRITE_CORE]);
+});
+
+test("a route that names a built-in policy.edit path only in another case never re-labels it (review S1 on #688)", () => {
+  // The load floor reads an entry as spelled, so it never judged this route;
+  // main let `.GitHub/workflows/ci.yml` through as the routed class alone,
+  // and APFS opens that as the workflow file.
+  const EDIT = "policy.edit redirect-protected";
+  const CI = "policy.edit.ci redirect-protected";
+  const ci: ProtectedPathEntry[] = [{ path: ".GitHub/workflows/", class: "policy.edit.ci" }];
+  assert.deepEqual(spelledPure("echo x > .GitHub/workflows/ci.yml", ci), [CI]);
+  for (const target of [".GitHub/workflows/ci.yml", ".github/workflows/ci.yml", "sub/.GitHub/workflows/a/b.yml"]) {
+    assert.deepEqual(pure(`echo x > ${target}`, ci), [EDIT, CI], target);
+    assert.deepEqual(protectedPathClasses(target, ci), ["policy.edit", "policy.edit.ci"], target);
+  }
+  // A third spelling was an ordinary write on main, and keeps that class too.
+  assert.deepEqual(pure("echo x > .GITHUB/Workflows/ci.yml", ci), [EDIT, CI, "files.write.workspace redirect-write"]);
+  // A protected file name in another case, and a deeper entry under the folder.
+  const prose: ProtectedPathEntry[] = [{ path: "Claude.md", class: "policy.edit.prose" }];
+  for (const target of ["Claude.md", "CLAUDE.md", "docs/claude.md"]) {
+    assert.deepEqual(protectedPathClasses(target, prose), ["policy.edit", "policy.edit.prose"], target);
+  }
+  const deep: ProtectedPathEntry[] = [{ path: ".GitHub/workflows/release/", class: "policy.edit.release" }];
+  assert.deepEqual(protectedPathClasses(".github/workflows/release/x.yml", deep), ["policy.edit", "policy.edit.release"]);
+  assert.deepEqual(protectedPathClasses(".github/workflows/ci.yml", deep), ["policy.edit"]);
+  // The canonical spelling is the floor's to judge at load, so its route
+  // answers alone, as on main.
+  const canonical: ProtectedPathEntry[] = [{ path: ".github/workflows/", class: "policy.edit.ci" }];
+  assert.deepEqual(protectedPathClasses(".github/workflows/ci.yml", canonical), ["policy.edit.ci"]);
+  assert.deepEqual(protectedPathClasses(".GitHub/workflows/ci.yml", canonical), ["policy.edit.ci"]);
+  // Tied with a judged route, the unjudged one still brings the built-in class.
+  assert.deepEqual(protectedPathClasses(".github/workflows/ci.yml", [...canonical, { path: ".GitHub/workflows/", class: "policy.edit.other" }]), [
+    "policy.edit",
+    "policy.edit.ci",
+    "policy.edit.other",
+  ]);
+  // A route on a path the runtime does not protect is not touched.
+  const design: ProtectedPathEntry[] = [{ path: "Design/", class: "policy.edit.design" }];
+  assert.deepEqual(protectedPathClasses("design/x.md", design), ["policy.edit.design"]);
+});
+
+/** `.GitHub/workflows/` routed to a class the policy runs unattended; `policy.edit` itself is manual (the default). */
+const POLICY_CI = [...POLICY_HEAD, "protected_paths:", "  - path: .GitHub/workflows/", "    class: policy.edit.ci", "classes:", ...POLICY_TAIL, "  policy.edit.ci:", "    autonomy: autonomous", "```", ""].join("\n");
+
+test("through the real hook, a workflow write still asks under a policy that routes .GitHub/workflows/ to an unattended class", { skip }, () => {
+  // The policy loads, as on main (the floor reads the entry as spelled).
+  const dir = attestedLab(POLICY_CI);
+  for (const target of [".GitHub/workflows/ci.yml", ".github/workflows/ci.yml"]) {
+    for (const tool of [bash(`echo x > ${target}`), write(target)]) {
+      const decision = decide(dir, tool);
+      assert.equal(strictness(decision), 1, `${JSON.stringify(tool)}: ${decision.permission} ${decision.reason}`);
+      assert.match(decision.reason, /:policy\.edit within /u, decision.reason);
+    }
+  }
+  const checked = runCli(["policy", "check", "files.write.workspace"], dir);
+  assert.equal(checked.code, 0, checked.stderr);
+  assert.match(
+    checked.stdout,
+    /note: protected_paths entry "\.GitHub\/workflows\/" names a built-in policy\.edit path in another spelling; the built-in class always applies to that path, and the route to "policy\.edit\.ci" is judged beside it and can only make the answer stricter\./u,
+  );
+});
+
+test("through the real hook, two routes that differ only by case give the stricter decision for every spelling, in both orders", { skip }, () => {
+  for (const entries of [OPEN_FIRST, CLOSED_FIRST]) {
+    const dir = attestedLab(policyB(entries));
+    for (const target of ["spec/x", "SPEC/x", "Spec/x"]) {
+      for (const tool of [bash(`echo x > ${target}`), write(target)]) {
+        const decision = decide(dir, tool);
+        assert.equal(strictness(decision), 1, `${JSON.stringify(entries)} ${JSON.stringify(tool)}: ${decision.permission} ${decision.reason}`);
+        assert.match(decision.reason, /policy\.edit\.closed/u);
+      }
+    }
+  }
 });
 
 test("under such a policy the real hook answers an ordinary write as main does, and policy check names the entry", { skip }, () => {

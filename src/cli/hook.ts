@@ -5474,15 +5474,20 @@ export function classifyForHook(
    */
   writeScope: WriteScopeContext = WRITE_SCOPE_OFF,
 ): RefinedClassification {
-  const [folded, spelled] = eachNameReading(() =>
+  const [folded, ...others] = eachNameReading(() =>
     classifyForHookAsRead(command, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments, writeScope),
   );
-  if (spelled === undefined) return folded;
-  const seen = new Set(folded.notes);
-  return {
-    result: unionNameReadings([folded.result, spelled.result]),
-    notes: [...folded.notes, ...spelled.notes.filter((note) => !seen.has(note))],
-  };
+  if (others.length === 0) return folded;
+  const notes = [...folded.notes];
+  const seen = new Set(notes);
+  for (const other of others) {
+    for (const note of other.notes) {
+      if (seen.has(note)) continue;
+      seen.add(note);
+      notes.push(note);
+    }
+  }
+  return { result: unionNameReadings([folded.result, ...others.map((other) => other.result)]), notes };
 }
 
 /** {@link classifyForHook} in the current name reading. */

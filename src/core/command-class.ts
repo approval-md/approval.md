@@ -65,7 +65,14 @@ import {
   readTargetVerdict,
   readTargetsOf,
 } from "./read-scope.js";
-import { eachNameReading, foldNameExact, foldNameLower, nameListIncludes } from "./name-fold.js";
+import {
+  eachNameReading,
+  foldNameExact,
+  foldNameLower,
+  nameListIncludes,
+  takeAmongEqual,
+  withNamesAsSpelled,
+} from "./name-fold.js";
 
 // ===========================================================================
 // Result shape
@@ -795,11 +802,14 @@ function hermesCredentialTail(fullTail: readonly string[]): boolean {
  *   judges no autonomy.
  *
  * Among several routed entries matching one path, the MOST SPECIFIC wins (most
- * segments), and declaration order breaks a tie. Most-specific is what a
- * carve-out means — `design/` routed one way and `design/frozen/` another — and
- * a tie is two entries of equal depth both claiming one path, which is the
- * author's own ambiguity and is resolved the only way a pure function can:
- * by the order they wrote them in.
+ * segments). Most-specific is what a carve-out means — `design/` routed one way
+ * and `design/frozen/` another. A tie is two entries of equal depth both
+ * claiming one path (on a volume that folds names, `SPEC/` beside `spec/`),
+ * which is the author's own ambiguity. A pure function cannot say which class
+ * the policy holds stricter, so it reports every tied class, one per name
+ * reading ({@link protectedPathClassReadings}), and the gate's strictest
+ * decision answers. As spelled, the first declared answers alone, as it did
+ * before names folded.
  *
  * A string-only `extra` cannot reach the routed tier at all, so a policy that
  * has not adopted the object form classifies byte for byte as it did before.
@@ -1025,26 +1035,51 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
     }
   }
 
+  // The prose and configuration about the gate (tier 4's test, also asked by
+  // tier 3).
+  const builtinEdit = (): boolean => {
+    if (last !== undefined && nameListIncludes(PROTECTED_FILENAMES, last)) return true;
+    for (let index = 0; index < segments.length; index += 1) {
+      // CI configuration.
+      if (segments[index] === ".github" && segments[index + 1] === "workflows") return true;
+    }
+    return false;
+  };
+
   // 3. The policy's own routed entries (APRV-266), above the built-in
   //    `policy.edit` set so a routing can re-label one of those paths, and
   //    below tiers 1 and 2 so it can never reach the log or the gate's organs.
-  //    Most segments win; declaration order breaks a tie.
-  let routed: { entry: ProtectedEntry; depth: number } | null = null;
+  //    Most segments win. Routes of the same depth that all match are EQUAL
+  //    claims: as spelled the first declared answers, as it always did, and
+  //    folded each answers in turn ({@link takeAmongEqual}), so the gate
+  //    judges every one and the strictest decides (#688 review S2).
+  let depth = 0;
+  const routes: { path: string; routed: string }[] = [];
   for (const raw of extra) {
     const entry = parseProtectedEntry(raw);
-    if (entry === null || entry.routed === null) continue;
+    if (entry === null || entry.routed === null || typeof raw === "string") continue;
     if (!matchesEntry(segments, entry)) continue;
-    const depth = entry.segments.length;
-    if (routed === null || depth > routed.depth) routed = { entry, depth };
+    if (entry.segments.length > depth) {
+      depth = entry.segments.length;
+      routes.length = 0;
+    }
+    if (entry.segments.length === depth) routes.push({ path: raw.path, routed: entry.routed });
   }
-  if (routed !== null) return routed.entry.routed;
+  if (routes.length > 0) {
+    const claims: string[] = [];
+    // A route may re-label a built-in `policy.edit` path because the load
+    // floor (`checkProtectedRouteFloor`) has judged it no weaker. The floor
+    // reads the entry as spelled, so an entry that names a built-in path only
+    // when folded (`.GitHub/workflows/`) was never judged: beside such a
+    // route the built-in class is a claim too, and comes first (#688 review
+    // S1). As spelled no entry is one, so that reading answers as before.
+    if (routes.some((route) => namesBuiltinOnlyFolded(route.path)) && builtinEdit()) claims.push("policy.edit");
+    for (const route of routes) if (!claims.includes(route.routed)) claims.push(route.routed);
+    return takeAmongEqual(claims);
+  }
 
   // 4. The prose and configuration about the gate.
-  if (last !== undefined && nameListIncludes(PROTECTED_FILENAMES, last)) return "policy.edit";
-  for (let index = 0; index < segments.length; index += 1) {
-    // CI configuration.
-    if (segments[index] === ".github" && segments[index + 1] === "workflows") return "policy.edit";
-  }
+  if (builtinEdit()) return "policy.edit";
 
   // 5. The policy's own bare-string entries, which mean `policy.edit` (APRV-107).
   for (const raw of extra) {
@@ -1054,6 +1089,17 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
     }
   }
   return null;
+}
+
+/**
+ * Does a routed entry's path name a built-in guarded path in the folded
+ * reading and not as spelled (`.GitHub/workflows/`, `Claude.md`)? The load
+ * floor reads entries as spelled, so it never judged such a route. Always
+ * false in the as-spelled reading.
+ */
+function namesBuiltinOnlyFolded(path: string): boolean {
+  if (builtinProtectedPathClass(path) === null) return false;
+  return withNamesAsSpelled(() => builtinProtectedPathClass(path)) === null;
 }
 
 /**
@@ -10019,29 +10065,34 @@ export function classifyCommandInThisReading(
 }
 
 /**
- * Join a classification's name readings (`[folded]` or `[folded, asSpelled]`)
- * as {@link classifyCommand} states: the folded answer, then each as-spelled
- * segment whose class the folded answer lacks for that segment text; a
- * refusal in either reading refuses, the folded one first.
+ * Join a classification's name readings (`[folded]`, `[folded, asSpelled]`,
+ * or the folded answer once per equal claim and then the as-spelled one) as
+ * {@link classifyCommand} states: the folded answer, then each later
+ * reading's segment whose class the answer so far lacks for that segment
+ * text; a refusal in any reading refuses, the folded one first.
  */
 export function unionNameReadings(readings: readonly CommandClassification[]): CommandClassification {
-  const [folded, spelled] = readings;
+  const [folded, ...others] = readings;
   if (folded === undefined) throw new TypeError("unionNameReadings needs the folded reading");
-  if (!folded.ok || spelled === undefined) return folded;
-  if (!spelled.ok) return spelled;
+  if (!folded.ok) return folded;
+  for (const other of others) if (!other.ok) return other;
+  if (others.length === 0) return folded;
   const segments = [...folded.segments];
   const classes = [...folded.classes];
   // Keyed, so a line of many segments joins in linear time.
   const key = (segment: ClassifiedSegment): string => `${segment.class}\u0000${segment.text}`;
   const have = new Set(segments.map(key));
   const known = new Set(classes);
-  for (const segment of spelled.segments) {
-    if (have.has(key(segment))) continue;
-    have.add(key(segment));
-    segments.push({ ...segment });
-    if (!known.has(segment.class)) {
-      known.add(segment.class);
-      classes.push(segment.class);
+  for (const other of others) {
+    if (!other.ok) continue;
+    for (const segment of other.segments) {
+      if (have.has(key(segment))) continue;
+      have.add(key(segment));
+      segments.push({ ...segment });
+      if (!known.has(segment.class)) {
+        known.add(segment.class);
+        classes.push(segment.class);
+      }
     }
   }
   return { ok: true, segments, classes };
