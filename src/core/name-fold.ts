@@ -108,6 +108,14 @@ let spelledReading = false;
  */
 let readingsDiverged = false;
 
+/**
+ * Which of several EQUAL claims the folded reading takes this turn, and the
+ * most claims any compare offered in the current run: see
+ * {@link takeAmongEqual}.
+ */
+let equalTurn = 0;
+let widestEqual = 1;
+
 /** Is the as-spelled reading on? For tests; nothing outside this file branches on it. */
 export function namesReadAsSpelled(): boolean {
   return spelledReading;
@@ -178,30 +186,64 @@ function refusePromise<T>(value: T): T {
 }
 
 /**
- * `run`'s answer in each reading: `[folded]`, or `[folded, asSpelled]`.
+ * One of several claims on a name that nothing in the text ranks: two routed
+ * policy entries of the same depth that both match a path (they can differ
+ * only by case, `SPEC/` beside `spec/`), or a built-in class beside a route
+ * the policy spelled in another case. A pure reader cannot say which is the
+ * stricter (that is the policy's to say), so the folded reading takes EACH in
+ * turn: {@link eachNameReading} runs once per claim and its callers judge
+ * every answer, as they judge the two name readings. The as-spelled reading
+ * takes the first, as the guards did before names folded.
+ *
+ * `claims` must not be empty.
+ */
+export function takeAmongEqual<T>(claims: readonly T[]): T {
+  const first = claims[0];
+  if (first === undefined) throw new TypeError("takeAmongEqual needs a claim");
+  if (spelledReading) return first;
+  if (claims.length > widestEqual) widestEqual = claims.length;
+  return claims[equalTurn % claims.length] as T;
+}
+
+/**
+ * `run`'s answer in each reading: `[folded]`, `[folded, asSpelled]`, or, where
+ * the folded reading met equal claims ({@link takeAmongEqual}), the folded
+ * answer once per claim and then the as-spelled one.
  *
  * Inside the as-spelled reading this is `[run()]`, already as spelled. In the
  * folded one, `run` runs folded first, and the as-spelled run is SKIPPED when
  * no name compare during the folded run met a name whose two readings differ
  * ({@link foldNameExact}, {@link foldNameLower} and {@link nameListIncludes}
- * record it). The skip is sound because those three helpers are the only
- * place the readings differ: when every call returned what it would have
- * returned as spelled, the as-spelled run takes the same branches over the
- * same values and returns the same answer. A divergence inside a nested
+ * record it). The skip is sound because those three helpers and
+ * {@link takeAmongEqual} are the only places the readings differ: when every
+ * name helper returned what it would have returned as spelled, the as-spelled
+ * run takes the same branches over the same values, and where it meets equal
+ * claims it takes the first, which is the folded run's first turn (the
+ * callers put the claim the as-spelled reading takes first, or report it
+ * with a divergence). A divergence or a set of equal claims inside a nested
  * reading counts for the outer one too.
+ *
+ * The folded turns are as many as the widest set of equal claims any compare
+ * offered: turn `k` takes claim `k mod n` of a set of `n`, so every claim of
+ * every set is taken in some turn. At most one turn per routed policy entry.
  */
-export function eachNameReading<T>(run: () => T): [T] | [T, T] {
+export function eachNameReading<T>(run: () => T): [T, ...T[]] {
   if (spelledReading) return [refusePromise(run())];
-  const outer = readingsDiverged;
+  const outer = { diverged: readingsDiverged, turn: equalTurn, widest: widestEqual };
   readingsDiverged = false;
-  let folded: T;
+  equalTurn = 0;
+  widestEqual = 1;
+  let answers: [T, ...T[]];
   let diverged = true;
   try {
-    folded = refusePromise(run());
+    answers = [refusePromise(run())];
+    for (equalTurn = 1; equalTurn < widestEqual; equalTurn += 1) answers.push(refusePromise(run()));
     diverged = readingsDiverged;
   } finally {
-    readingsDiverged = outer || readingsDiverged;
+    readingsDiverged = outer.diverged || readingsDiverged;
+    widestEqual = Math.max(outer.widest, widestEqual);
+    equalTurn = outer.turn;
   }
-  if (!diverged) return [folded];
-  return [folded, withNamesAsSpelled(run)];
+  if (diverged) answers.push(withNamesAsSpelled(run));
+  return answers;
 }

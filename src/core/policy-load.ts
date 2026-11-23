@@ -1077,8 +1077,8 @@ export function loadPolicyText(
  * The routed `protected_paths` entries that name a BUILT-IN guarded path in
  * another spelling (`.APPROVAL/x`, `Approval.md`, `.Claude/settings.json`):
  * the floor below reads an entry as spelled and loads such a policy, as it did
- * before names folded, while the classifier folds the entry and answers that
- * path from its built-in tier first. One sentence per entry, for
+ * before names folded, while the classifier folds the entry and judges that
+ * path's built-in class whatever the route says. One sentence per entry, for
  * `approval policy check` to print; empty when there are none.
  */
 export function protectedRouteSpellingNotes(load: PolicyLoadResult): string[] {
@@ -1092,7 +1092,7 @@ export function protectedRouteSpellingNotes(load: PolicyLoadResult): string[] {
     const folded = builtinProtectedPathClass(entry.path);
     if (folded === null) continue;
     notes.push(
-      `protected_paths entry ${JSON.stringify(entry.path)} names a built-in ${folded} path in another spelling; the built-in class answers that path, and the route to ${JSON.stringify(parsedEntry.routed)} does not apply to it.`,
+      `protected_paths entry ${JSON.stringify(entry.path)} names a built-in ${folded} path in another spelling; the built-in class always applies to that path, and the route to ${JSON.stringify(parsedEntry.routed)} is judged beside it and can only make the answer stricter.`,
     );
   }
   return notes;
@@ -1113,9 +1113,12 @@ export function checkProtectedRouteFloor(load: PolicyLoadResult): string | null 
     // Decided on the entry AS SPELLED (`name-fold.ts`), as before names
     // folded: no policy that loaded then is refused now. An entry spelled
     // like a built-in path in another case (`.APPROVAL/x`, `Approval.md`)
-    // still matches commands folded, and the built-in tiers still answer
-    // before it, so its route never makes that path lighter;
-    // {@link protectedRouteSpellingNotes} names it for the author.
+    // still matches commands folded, and the built-in class is still judged
+    // for that path (the organ tiers answer before any route; beside a route
+    // that names a built-in `policy.edit` path only when folded, the
+    // classifier reports `policy.edit` too), so its route never makes that
+    // path lighter; {@link protectedRouteSpellingNotes} names it for the
+    // author.
     const builtin = withNamesAsSpelled(() => builtinProtectedPathClass(entry.path));
     if (builtin === "log.mutate" || builtin === "policy.core") {
       return `protected_paths entry ${JSON.stringify(entry.path)} routes a built-in ${builtin} path to ${JSON.stringify(parsedEntry.routed)}. That route can never fire — the runtime answers a path by the strictest surface it names, and ${builtin} is decided before any policy entry is read — so the policy is refused rather than loaded with a rule its author believes is in force.`;
