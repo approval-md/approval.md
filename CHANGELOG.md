@@ -43,16 +43,28 @@ option, case folded), and takes the strictest class among them.
   eight such spans in one word, or a default nested three deep, is
   `log.mutate`. zsh's `braceccl` class (`{a-z}`) is read as a class of its
   characters, and a variable beside a glob construct may name anything.
+- **Dot-names (lead ruling L60846):** `*`, `?`, `[...]` and a whole `**`
+  reach `.approval`, `.hermes` and the other dot-names only through an
+  explicit leading `.` (`.appr*`, `.[!Z]ermes`), as every shell's default
+  does, or when the same command line holds ANY option-setting construct,
+  whatever its arguments (fail closed: a name can be built at run time):
+  `shopt`, `set` with an option, `setopt`, `unsetopt`, `emulate`, `eval`,
+  `source`, `.`, `autoload`, `options[…]=`, `GLOBIGNORE=`, `BASH_ENV=`,
+  `ENV=`, `ZDOTDIR=`, a shell started with any option (`-l` and `-i` read
+  start-up files), a command word the shell still expands, any substitution
+  or ANSI-C quoting, a `(D)` qualifier. Set by an earlier call, or by the
+  user's own start-up file, it is a known limit. Case folding stays:
+  `*` and `*.md` reach `APPROVAL.md` as bash does on a case-insensitive APFS
+  volume.
 - **Stricter than before:** a write pattern that COULD name a guarded file is
-  human-only even when no such file exists, `*` matching a dot-name as it does
-  under `dotglob`: `rm -rf dist/*` and `chmod +x scripts/*` (`*` may be
-  `.approval`), `git add *` and `echo x > dist/*.md` (`APPROVAL.md`),
-  `sed -i … *.md`, a whole
-  `**` component (`out/**/x.log` may be `out/.approval/log/x.log`:
-  `log.mutate`). A pattern that cannot reach one (`out/*.log`, `src/*.ts`)
-  keeps its class. More than 4,096 candidate paths, 32 segments or two
-  million matcher steps is `log.mutate`; the worst words measured cost about
-  0.1 CPU s.
+  human-only even when no such file exists. `APPROVAL.md` is guarded at any
+  depth, so a pattern for a file straight inside a directory stays strict:
+  `rm -rf dist/*`, `chmod +x scripts/*`, `git add *`, `git add src/*`,
+  `npx prettier --write src/*`, `echo x > dist/*.md`, `sed -i … *.md`. A
+  pattern that cannot reach a guarded name (`out/*.log`, `src/*.ts`,
+  `dist/*/x.txt` without dot matching) keeps its class. More than 4,096
+  candidate paths, 32 segments or two million matcher steps is `log.mutate`;
+  the worst words measured cost about 0.05 CPU s.
 
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),

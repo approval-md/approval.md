@@ -393,3 +393,46 @@ test("dot-names: the ruling's workflow lines, with and without dot matching on t
     assert.ok(!HUMAN_ONLY.has(lastClass(`GLOBIGNORE=x; ${command}`)), command);
   }
 });
+
+test("dot-names: ANY option-setting construct on the line turns the relaxed reading off (fail closed)", () => {
+  const target = "echo x > ~/*/auth.json";
+  // Run-time spellings of an option name, and every setter whatever its argument.
+  for (const setter of [
+    "shopt -s $'\\x64otglob'; ",
+    "shopt -s ${:-dotglob}; ",
+    "shopt -s $(printf dotglob); ",
+    "shopt -s `printf dotglob`; ",
+    "shopt -s {dot,x}glob; ",
+    "shopt -s x; ",
+    "eval x; ",
+    "source ./x; ",
+    ". ./x; ",
+    "set -4; ",
+    "set +o x; ",
+    "builtin set -o x; ",
+    "se\\t -o x; ",
+    "'set' -o x; ",
+    "{se,}t -4; ",
+    "$S -s x; ",
+    "setopt x; ",
+    "unsetopt x; ",
+    "emulate sh; ",
+    "options[x]=on; ",
+    "GLOBIGNORE=x; ",
+    "autoload -U x; ",
+    "zsh -4 -c x; ",
+    "env zsh -l -c x; ",
+    "bash -i -c x; ",
+    "sh -l -c x; ",
+    "BASH_ENV=./x bash -c x; ",
+    "ENV=./x sh -c x; ",
+    "ZDOTDIR=./x zsh -c x; ",
+  ]) {
+    const cls = lastClass(`${setter}${target}`);
+    assert.ok(HUMAN_ONLY.has(cls) || cls.startsWith("refused:"), `${setter}${target} -> ${cls}`);
+  }
+  // A line with none of them keeps the default reading.
+  for (const line of [target, `cd out && ${target}`, `ls -la; ${target}`, `true && ${target}`]) {
+    assert.equal(lastClass(line), "files.write.workspace", line);
+  }
+});
