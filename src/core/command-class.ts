@@ -8710,6 +8710,39 @@ interface GlobReading {
   off: boolean;
   tracker?: { raised: boolean };
 }
+/**
+ * `(text) => words.some((word) => word.includes(text))`, the segment's
+ * `inexact` and `glob.live` questions, answered once per text (review
+ * A686-FOLD2, M2): the copy readers ask them of every source and destination,
+ * so a scan of the segment's words per call made a line of many globbed
+ * sources quadratic. A text that IS one of the words is contained in it, so
+ * the set answers it at once. Any other text is looked for once, and
+ * remembered, in the words joined by NUL: a text with no NUL in it lies in
+ * that string exactly when it lies in one word, since an occurrence holds no
+ * NUL and so crosses no join; a text with a NUL keeps the scan. The answer is
+ * the scan's for every text (an empty text is in any word, and in none of no
+ * words).
+ */
+export function containedInAny(words: readonly string[]): (text: string) => boolean {
+  const whole = new Set(words);
+  const seen = new Map<string, boolean>();
+  let joined: string | null = null;
+  return (text: string): boolean => {
+    let hit = seen.get(text);
+    if (hit === undefined) {
+      if (whole.has(text)) hit = true;
+      else if (words.length === 0) hit = false;
+      else if (text.includes("\0")) hit = words.some((word) => word.includes(text));
+      else {
+        joined ??= words.join("\0");
+        hit = joined.includes(text);
+      }
+      seen.set(text, hit);
+    }
+    return hit;
+  };
+}
+
 /** Unknown liveness is live: fail closed. */
 function globLive(glob: GlobReading, word: string): boolean {
   return glob.live === undefined || glob.live(word);
@@ -8786,10 +8819,13 @@ function organDestination(dest: string, inexact: (word: string) => boolean, glob
   // `.git` component is spelled in its source word, which that rule reads.
   const guarded = Object.entries(ORGAN_DIRECTORIES);
   let best: string | null = null;
+  // Asked once for the whole word, not per component (review A686-FOLD2, M1:
+  // per component it was quadratic in the destination's length).
+  const liveDest = inexact(dest) && globLive(glob, dest);
   for (const part of parts) {
     if (part === "..") continue;
     const pattern =
-      inexact(dest) && globLive(glob, dest) && hasGlobConstruct(part) && (glob.options || part.startsWith(".") || /^[(]/u.test(part))
+      liveDest && hasGlobConstruct(part) && (glob.options || part.startsWith(".") || /^[(]/u.test(part))
         ? globSegmentTokens(part, glob.options)
         : null;
     for (const [name, cls] of guarded) {
@@ -10403,7 +10439,7 @@ function classifySegment(
   const inexactWords = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)]
     .filter((word) => !word.exact || (lineOptions && word.zshGlob !== false))
     .map((word) => word.text);
-  const inexact = (text: string): boolean => inexactWords.some((word) => word.includes(text));
+  const inexact = containedInAny(inexactWords);
   // Only an UNQUOTED glob character, or an unquoted `$` whose value or `${…}`
   // default the shell may still glob, makes a word a pattern: `"exit-$?.txt"`
   // and `'a*'` are their text (the #683 gate M3 spellings in double quotes).
@@ -10415,7 +10451,7 @@ function classifySegment(
     [...segment.words, ...segment.redirects.map((redirect) => redirect.target)].filter((word) => word.paramNames === true).map((word) => word.text),
   );
   const glob: GlobReading = {
-    live: (text: string): boolean => liveWords.some((word) => word.includes(text)),
+    live: containedInAny(liveWords),
     names: (text: string): boolean => namedWords.has(text),
     options: context.lineSetsDotglob === true,
     ...(context.globDisk === undefined ? {} : { disk: context.globDisk }),
@@ -10845,7 +10881,9 @@ function classifySegment(
           ? [...positionals, ...plan.dests]
           : plan.dests
       : globWriteOperands(basename, positionals);
-  const writtenInexact = (text: string): boolean => writtenOperands.includes(text) && inexact(text);
+  // A set, not a scan per word (review A686-FOLD2, M2): the same answer.
+  const writtenSet = new Set(writtenOperands);
+  const writtenInexact = (text: string): boolean => writtenSet.has(text) && inexact(text);
   const targetDirectories = copyFamily ? copyTargetDirectories(args) : [];
   // Fix round 3 (S(open)): what the shell may still do to each argv word
   // (`argFlags`, and `fetched` from it, are read above the credential tier).

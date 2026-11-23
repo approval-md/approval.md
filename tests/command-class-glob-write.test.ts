@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyCommand, globWriteListingDirs } from "../src/core/command-class.js";
+import { classifyCommand, containedInAny, globWriteListingDirs } from "../src/core/command-class.js";
 
 const HUMAN_ONLY = new Set(["policy.core", "log.mutate", "account.credential"]);
 
@@ -1012,4 +1012,116 @@ test("review of 4f0169ec: rsync's relative mode by option order, fail closed; a 
   assert.deepEqual(classesOf("rsync -a x/./y/notes.txt out/"), ["network.call"]);
   // The basename landing is always judged.
   assert.ok(classesOf("rsync -R a/.claude out/").includes("policy.core"));
+});
+
+/** CPU seconds (user and system) spent in `run`: this machine is shared, so not wall-clock time. */
+function cpuSeconds(run: () => void): number {
+  const start = process.cpuUsage();
+  run();
+  const used = process.cpuUsage(start);
+  return (used.user + used.system) / 1e6;
+}
+
+test("review A686-FOLD2 (M1, M2): a copy's destinations and sources are judged once per word, not per component or per call", () => {
+  // M1: organDestination asked `inexact(dest)` and `glob.live(dest)` for every
+  // component, each a scan of the segment's words, so one destination of many
+  // globbed components was quadratic (21.8 CPU s at 160 KB through the hook on
+  // 439e22ca; main 0.10). M2: the copy readers asked them of every source and
+  // destination (rsync -aR 24.8 s at 80 KB; main 4.3). Each text is now
+  // answered once per segment, with the same answer.
+  //
+  // Each line is timed against a control of the same length with no glob in
+  // it, so the matcher and the copy readers skip it and main's own passes over
+  // the words still run; the factor is generous for a CI runner. On 439e22ca
+  // every line below fails it (3 to 40 CPU s against controls under 0.3 here);
+  // at this head each takes under 1 CPU s here at 160 KB.
+  const BYTES = 160 * 1024;
+  const fill = (head: string, unit: string, tail: string): string =>
+    head + unit.repeat(Math.floor((BYTES - head.length - tail.length) / unit.length)) + tail;
+  const distinct = (head: string, unit: (i: number) => string, tail: string): string => {
+    let line = head;
+    for (let i = 0; line.length < BYTES - tail.length - 16; i += 1) line += unit(i);
+    return line + tail;
+  };
+  const shapes: readonly (readonly [string, string, string])[] = [
+    ["M1: one destination of many globbed components", fill("cp -r evil/. ", "a*/", ".cl*/"), fill("cp -r evil/. ", "ab/", ".clx/")],
+    ["M2: many relative-mode sources into a globbed destination", fill("rsync -aR", " a/./b*c", " .cl*/"), fill("rsync -aR", " a/./bxc", " .clx/")],
+    ["M2: many path-preserving sources", fill("cp --parents", " a/b/c?d", " .cla?de/"), fill("cp --parents", " a/b/cxd", " .claxde/")],
+    // Every source a different word: a remembered answer cannot help, the set lookup must.
+    [
+      "M2: many different relative-mode sources",
+      distinct("rsync -aR", (i) => ` a/./b*c${String(i)}`, " .cl*/"),
+      distinct("rsync -aR", (i) => ` a/./bxc${String(i)}`, " .clx/"),
+    ],
+    // Half the sources quoted, so not one of the words that may glob: each is
+    // looked for inside them (439e22ca: 114 CPU s at 320 KB through the hook).
+    [
+      "M2: many different sources, half of them quoted",
+      distinct("rsync -aR", (i) => (i % 2 ? ` 'q*${String(i)}'` : ` a/./b*${String(i)}`), " .cl*/"),
+      distinct("rsync -aR", (i) => (i % 2 ? ` 'qx${String(i)}'` : ` a/./bx${String(i)}`), " .clx/"),
+    ],
+  ];
+  const FACTOR = 8;
+  for (const [label, line, control] of shapes) {
+    let classes: string[] = [];
+    const base = cpuSeconds(() => {
+      assert.ok(classesOf(control).every((cls) => !HUMAN_ONLY.has(cls)), `${label}: the control is ordinary`);
+    });
+    const seconds = cpuSeconds(() => {
+      classes = classesOf(line);
+    });
+    // The class is unchanged: the step budget, then the guarded destination, answers.
+    assert.ok(classes.some((cls) => HUMAN_ONLY.has(cls)), `${label} -> ${classes.join(",")}`);
+    assert.ok(seconds < FACTOR * base + 1, `${label}: ${seconds.toFixed(2)} CPU s, the control ${base.toFixed(2)}, factor ${String(FACTOR)}`);
+  }
+  // The answer is still the substring scan's: a text only contained in a word
+  // (an option's attached value) counts with it.
+  assert.ok(classesOf("rsync -a evil/ --partial-dir=.cl* out/").includes("policy.core"));
+  assert.ok(classesOf("cp -r evil/. a*/'.cl*'/").includes("policy.core"));
+  assert.deepEqual(classesOf("cp -r evil/. 'a*/.cl*/'"), ["files.write.workspace"]);
+});
+
+test("review A686-FOLD2 (M2): containedInAny answers as the scan of the words does, for every text", () => {
+  const scan = (words: readonly string[], text: string): boolean => words.some((word) => word.includes(text));
+  // Edges: no words, the empty text, a text across two words' join, a NUL in a word or a text.
+  const cases: readonly (readonly [readonly string[], string])[] = [
+    [[], ""],
+    [[], "a"],
+    [[""], ""],
+    [[""], "a"],
+    [["a"], ""],
+    [["xa", "bx"], "ab"],
+    [["xa", "bx"], "a\0b"],
+    [["a\0b"], "a\0b"],
+    [["a\0b"], "\0"],
+    [["a\0b", "c"], "b"],
+    [["a\0b", "c"], "\0c"],
+    [["--partial-dir=.cl*", "out/"], ".cl*"],
+    [["a/./b*c", "a/./b*c"], "a/./b*c"],
+  ];
+  for (const [words, text] of cases) {
+    const ask = containedInAny(words);
+    assert.equal(ask(text), scan(words, text), `${JSON.stringify(words)} ${JSON.stringify(text)}`);
+    assert.equal(ask(text), scan(words, text), `${JSON.stringify(words)} ${JSON.stringify(text)}, asked again`);
+  }
+  // Random words and texts over a small alphabet with a NUL in it (seeded).
+  let seed = 4392;
+  const next = (n: number): number => {
+    seed ^= seed << 13;
+    seed >>>= 0;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;
+    seed >>>= 0;
+    return seed % n;
+  };
+  const ALPHABET = ["a", "b", "*", "/", "\0"];
+  const word = (): string => Array.from({ length: next(6) }, () => ALPHABET[next(ALPHABET.length)]).join("");
+  for (let round = 0; round < 2000; round += 1) {
+    const words = Array.from({ length: next(6) }, word);
+    const ask = containedInAny(words);
+    for (let i = 0; i < 12; i += 1) {
+      const text = next(3) === 0 && words.length > 0 ? words[next(words.length)]! : word();
+      assert.equal(ask(text), scan(words, text), `${JSON.stringify(words)} ${JSON.stringify(text)}`);
+    }
+  }
 });
