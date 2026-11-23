@@ -206,6 +206,25 @@ export function takeAmongEqual<T>(claims: readonly T[]): T {
 }
 
 /**
+ * The equal claims a compare offers the caller to gather (and hand on to
+ * {@link takeAmongEqual} once it has every one): all of them folded, the
+ * first alone as spelled.
+ */
+export function equalClaims<T>(claims: readonly T[]): readonly T[] {
+  return spelledReading ? claims.slice(0, 1) : claims;
+}
+
+/**
+ * Answers that only the folded reading reports, beside the one the guards
+ * gave before names folded (every OTHER guarded class a segment's targets
+ * take): `make()` folded, nothing as spelled, so the as-spelled reading stays
+ * exactly the old answer.
+ */
+export function foldedOnly<T>(make: () => readonly T[]): readonly T[] {
+  return spelledReading ? [] : make();
+}
+
+/**
  * `run`'s answer in each reading: `[folded]`, `[folded, asSpelled]`, or, where
  * the folded reading met equal claims ({@link takeAmongEqual}), the folded
  * answer once per claim and then the as-spelled one.
