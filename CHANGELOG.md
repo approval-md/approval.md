@@ -88,6 +88,11 @@ option, case folded), and takes the strictest class among them.
   the worst words measured cost about 0.05 CPU s.
 - **One budget (review-b M1):** the two million matcher steps are one budget
   for the whole command line, shared by every segment, word and reading.
+  A word judged once in a list is not walked again: `rsync -aR s0/*/./a*
+  s1/*/./a* …` lands every source as the last word's `<dest>/a*`, and at
+  7 KB the repeated walks took about 50 CPU s (now about 2). Each repeat
+  still draws the steps the first walk drew, so the budget runs out where
+  it did.
 - **Main's class is carried beside every raise (lead ruling L61926):** a line
   any GLOB-WRITE rule fires on is classified a second time with every
   GLOB-WRITE rule off (main's answer), and the two join: every class of each
@@ -601,6 +606,12 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   strictest decision answers, for every spelling of the path. The most
   specific route still wins over a shallower one. One more classification
   pass per tied entry, on lines that name such a path.
+- **The placeholder a `$(…)` leaves in a word is not folded.** It is spelled
+  in capitals, so folding it like a name made every word with a substitution
+  count as a name whose two readings differ, and the whole as-spelled reading
+  ran for it: about twice the cost on any line with a `$(…)` in a path word,
+  for an answer that could not differ. One reading runs for it now, with the
+  same answers; a name beside the substitution that does fold still runs both.
 - **The Hermes-home walk is linear.** It sliced and re-walked the rest of
   the path at every home segment, so a 1 MiB path of `.hermes/x/` segments
   took about a minute of CPU on main (and through the fold, `.herme<U+017F>/x/`

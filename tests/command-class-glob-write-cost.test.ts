@@ -10,8 +10,12 @@
  * - rsync -aR with many distinct sources: `rsync -aR s0/*\/./a* s1/*\/./a* …`;
  * - rm of dot-names: `rm -rf ./*; ` repeated.
  * Each runs the hook's path: the listing of the directories its patterns glob
- * in, then classifyForHook, in a made-up project. Each prints one line,
- * `COST686 <name> cpu_s=<n.nn> bound_s=<n.nn>`, for CI's figure to be read.
+ * in, then classifyForHook, in a made-up project. Each logs one line in #694's
+ * form (`tests/cost-runner.ts`, `command-class-substitution-cost.test.ts`),
+ * `# cost-line: COST686 <name>: <n.nn> CPU s (bound <n.nn>; node <v>)`, so
+ * CI's figure can be read again in any run. Like #694's "many command words",
+ * each bound is this line's own, set from a CI figure and not stretched by the
+ * runner's factor: it is CI that holds the line to it.
  *
  * CPU time, not wall-clock time: the machine is shared. Hermetic: HOME and
  * the project are fixture directories holding made-up files; no line is run.
@@ -25,6 +29,7 @@ import { after, test } from "node:test";
 
 import { listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
 import { classifyForHook } from "../src/cli/hook.js";
+import { cpuSeconds } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-glob-write-cost-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -40,8 +45,13 @@ for (const [dir, file] of [[".claude", "settings.json"], [".github/workflows", "
   writeFileSync(join(PROJECT, dir, file), "made-up\n");
 }
 
-// Each bound: 1.5 x CI's figure for this line on the runner; measured in run
-// <id> at <sha8>: <n.nn> s. One line each, to be replaced with CI's figure.
+// Each bound: 1.5 x CI's figure for this line, read from the full gate's node
+// 22 job (`# cost-line: COST686 <name>:` in its log), as #694 set "many
+// command words". Lead ruling L62051 asked for "1.5 times its CPU seconds on
+// CI's runner": for glob_sources and rm_dot_names that is THIS head's figure
+// (the coordinator's reading, not corrected by the lead; review-b to check).
+// rsync_relative awaits the lead (L62090 asks for 1.5 x MAIN's figure, which
+// the fixed head does not reach: see the PR body's floor table).
 // PROVISIONAL (local figure, replace with CI's): 1.5 x 1.28 s, the slowest of three local runs at ef8b0884.
 const BOUND_GLOB_SOURCES_S = 1.92;
 // PROVISIONAL (local figure, replace with CI's): 1.5 x 4.62 s, the slowest of three local runs at ef8b0884.
@@ -61,43 +71,45 @@ function distinct(head: string, format: (index: string) => string, bytes: number
 
 /** The hook's CPU seconds for `command` in the project: its listings, then its classification. */
 async function hookSeconds(command: string): Promise<{ seconds: number; classes: string[] }> {
-  const start = process.cpuUsage();
+  // The listing is the hook's own disk read, made before it classifies: timed
+  // as CPU like the rest, not as the wait for the disk.
+  const startListing = process.cpuUsage();
   const listings = await listGlobWriteDirsFor(command, [PROJECT]);
-  const result = classifyForHook(command, [], PROJECT, [], false, [], false, listings).result;
-  const used = process.cpuUsage(start);
-  return { seconds: (used.user + used.system) / 1e6, classes: result.ok ? result.classes : [`refused ${result.code}`] };
+  const listed = process.cpuUsage(startListing);
+  let classes: string[] = [];
+  const classified = cpuSeconds(() => {
+    const result = classifyForHook(command, [], PROJECT, [], false, [], false, listings).result;
+    classes = result.ok ? result.classes : [`refused ${result.code}`];
+  });
+  return { seconds: (listed.user + listed.system) / 1e6 + classified, classes };
 }
 
-async function pinned(
-  t: { diagnostic: (message: string) => void },
-  name: string,
-  command: string,
-  bound: number,
-): Promise<string[]> {
+async function pinned(name: string, command: string, bound: number): Promise<string[]> {
   const { seconds, classes } = await hookSeconds(command);
-  t.diagnostic(`COST686 ${name} cpu_s=${seconds.toFixed(2)} bound_s=${bound.toFixed(2)}`);
-  assert.ok(seconds < bound, `${name}: ${seconds.toFixed(2)} CPU s, bound ${bound.toFixed(2)}`);
+  console.log(`# cost-line: COST686 ${name}: ${seconds.toFixed(2)} CPU s (bound ${bound.toFixed(2)}; node ${process.version})`);
+  assert.ok(seconds < bound, `${name}: ${seconds.toFixed(2)} CPU s, bound ${bound.toFixed(2)} (this line's own bound, not stretched)`);
   return classes;
 }
 
-test("cost (L62051): distinct glob sources, `cp .c0*/x.json .c1*/x.json …` at 10 KB", async (t) => {
+test("cost (L62051): distinct glob sources, `cp .c0*/x.json .c1*/x.json …` at 10 KB", async () => {
   const command = distinct("cp", (index) => ` .c${index}*/x.json`, 10_000);
-  const classes = await pinned(t, "glob_sources", command, BOUND_GLOB_SOURCES_S);
+  const classes = await pinned("glob_sources", command, BOUND_GLOB_SOURCES_S);
   assert.ok(classes.length > 0);
 });
 
-test("cost (L62051): rsync -aR with many distinct sources, `rsync -aR s0/*/./a* …` at 500 bytes", async (t) => {
-  // 46 sources. This line's cost is not monotonic in its length: below the
-  // matcher's budget every source's preserved landing is walked against the
-  // guarded paths; above it the strict answer comes early.
+test("cost (L62051): rsync -aR with many distinct sources, `rsync -aR s0/*/./a* …` at 500 bytes", async () => {
+  // 46 sources. Each source's preserved landing is the last word's `<dest>/a*`:
+  // walked again for every source, the same shape took about 50 CPU s at 7 KB;
+  // it is judged once now. The lead (L62090) asks for an input near 7 KB bound at 1.5 x
+  // main's CI figure; this line and its bound wait on that ruling.
   const command = distinct("rsync -aR", (index) => ` s${index}/*/./a*`, 500);
-  const classes = await pinned(t, "rsync_relative", command, BOUND_RSYNC_RELATIVE_S);
+  const classes = await pinned("rsync_relative", command, BOUND_RSYNC_RELATIVE_S);
   assert.ok(classes.includes("network.call"), classes.join(","));
 });
 
-test("cost (L62051): rm of dot-names, `rm -rf ./*; ` repeated to 10 KB", async (t) => {
+test("cost (L62051): rm of dot-names, `rm -rf ./*; ` repeated to 10 KB", async () => {
   const command = "rm -rf ./*; ".repeat(Math.floor(10_000 / "rm -rf ./*; ".length));
-  const classes = await pinned(t, "rm_dot_names", command, BOUND_RM_DOT_NAMES_S);
+  const classes = await pinned("rm_dot_names", command, BOUND_RM_DOT_NAMES_S);
   // The listing shows `.claude`: the organ directory's class, main's beside it.
   assert.ok(classes.includes("policy.core") && classes.includes("files.delete.out_of_scope"), classes.join(","));
 });

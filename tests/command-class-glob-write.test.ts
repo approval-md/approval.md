@@ -1891,3 +1891,18 @@ test("security review of cfe27ea2: git rm's --cached is an option only before --
   assert.deepEqual(withListing("git rm -r -n .", organ), ["vcs.commit.branch"]);
   assert.deepEqual(withListing("git rm -r build/", plain), ["vcs.commit.branch"]);
 });
+
+test("cost (L62090): a word already judged on a line is not walked again, and still pays the matcher steps it took", () => {
+  // `rsync -aR s/*/./a* … d*/` lands every source as `d*/a*`; each was walked
+  // again (about 50 CPU s for `s0/*/./a* s1/*/./a* …` at 7 KB). The same word now offers
+  // what it offered the first time, so it is judged once, and every repeat
+  // still draws the steps it drew from the line's one matcher budget: past the
+  // budget the line answers `log.mutate`, exactly where the repeated walks did.
+  const rsync = (k: number): string => `rsync -aR ${"s/*/./a* ".repeat(k)}d*/`;
+  const cp = (k: number): string => `cp ${"s/*.json ".repeat(k)}d*/`;
+  assert.deepEqual(classesOf(rsync(1)).sort(), ["network.call", "policy.core"]);
+  assert.deepEqual(classesOf(rsync(1000)).sort(), ["network.call", "policy.core"]);
+  assert.deepEqual(classesOf(rsync(2000)).sort(), ["log.mutate", "network.call"]);
+  assert.deepEqual(classesOf(cp(1000)).sort(), ["files.write.workspace"]);
+  assert.deepEqual(classesOf(cp(2000)).sort(), ["files.write.workspace", "log.mutate"]);
+});

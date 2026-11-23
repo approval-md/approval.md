@@ -71,6 +71,7 @@ import {
   foldNameExact,
   foldNameLower,
   nameListIncludes,
+  SUBSTITUTION_SENTINEL,
   takeAmongEqual,
   withNamesAsSpelled,
 } from "./name-fold.js";
@@ -2615,8 +2616,9 @@ function readDoubleQuoted(
  * variable, which is exactly what the shell's substitution is to a classifier
  * that does not run it. The name cannot collide with a real expansion a
  * command would carry, and it is braced so no brace-expansion reading applies.
+ * Defined in `name-fold.ts`, which must leave it unfolded.
  */
-export const SUBSTITUTION_SENTINEL = "${__APPROVAL_SUBST__}";
+export { SUBSTITUTION_SENTINEL };
 
 /**
  * The characters a backslash escapes inside double quotes, in the shell's own
@@ -9183,11 +9185,26 @@ function strictestProtectedWrite(
       best = { surface, path: word };
     }
   };
+  // The matcher steps each word already judged here took. The same word again
+  // (`rsync -aR s0/*/./a* … s45/*/./a* d/` lands every source as `d/a*`, and
+  // 46 sources made 46 walks of one pattern) offers exactly what it offered
+  // the first time, none of it stricter than `best` now, so it is not walked
+  // again. It still pays the steps it took, so the shared budget runs out
+  // where it ran out before: a walk that would have exhausted it answers
+  // `log.mutate`, as that walk did.
+  const spent = new Map<string, number>();
   for (const word of words) {
     // Review-b M1: nothing is stricter than log.mutate, so stop there.
     if (best !== null && (best as { surface: string }).surface === "log.mutate") break;
     if (!inexact(word)) continue;
     if (skipProse && /\s/u.test(word)) continue;
+    const steps = spent.get(word);
+    if (steps !== undefined) {
+      glob.budget.left -= steps;
+      if (steps > 0 && glob.budget.left < 0) offer("log.mutate", word);
+      continue;
+    }
+    const budgetBefore = glob.budget.left;
     // A special parameter's name is not a glob, where the word's every `$` is real.
     const subject = glob.names?.(word) === true ? maskSpecialParameters(word) : word;
     const { readings, overflow } = writeWordReadings(subject);
@@ -9198,6 +9215,7 @@ function strictestProtectedWrite(
       // through the classifier context by every segment, word and reading.
       if (globLive(glob, word) && hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, glob.budget, glob.options, glob.disk), word);
     }
+    spent.set(word, budgetBefore - glob.budget.left);
   }
   if (best !== text) markGlobWriteFired();
   if (best !== text && glob.tracker !== undefined) glob.tracker.raised = true;
