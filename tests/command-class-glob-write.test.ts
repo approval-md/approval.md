@@ -1586,6 +1586,16 @@ test("review-b A686-FOLD5 M1: the as-spelled reading compares exactly, so a case
 });
 
 test("lead ruling L61587, parents: the rule adds its class and never takes the segment's own class away", () => {
+  // The main pass (lead ruling L61926) runs without the parents rule: main
+  // 324d87dc's answer, spelled out.
+  for (const [command, main] of [
+    ["rm -rf .", "files.delete.out_of_scope"],
+    ["chmod -R 000 .", "files.write.workspace"],
+  ] as const) {
+    const mainPass = classifyCommandWithMainRules(command);
+    assert.ok(mainPass.ok, command);
+    assert.deepEqual(mainPass.classes, [main], command);
+  }
   // Main's class rides beside the parent's (ordinary writes too), so a policy
   // that holds files.write.workspace stricter than policy.edit keeps main's answer.
   assert.deepEqual(withListing("chmod -R 000 .", { "/w": [".github", "src"] }), ["policy.edit", "files.write.workspace"]);
