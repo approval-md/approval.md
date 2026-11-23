@@ -995,3 +995,21 @@ test("review of 8e1e84ae (4): a destination is a path by construction, whitespac
   // An ordinary destination with whitespace stays ordinary.
   assert.ok(ORDINARY(classesOf('cp x "notes/a b.txt"')));
 });
+
+test("review of 4f0169ec: rsync's relative mode by option order, fail closed; a globbed destination of a path-preserving copy", () => {
+  // Relative mode possibly on (anywhere on the line): the path-preserving
+  // landing is judged beside the basename one, and the stricter answers.
+  for (const command of [
+    "rsync -R --no-relative .claude/x backup/",
+    "rsync --no-relative -R .claude/settings.json out/",
+    "rsync --no-R -R .claude/x backup/",
+    "rsync -R x/./.claude/s .cl*/",
+    "cp --parents a/b .cla?de/",
+  ]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // With no relative mode, a `/./` is only a path: the basename landing.
+  assert.deepEqual(classesOf("rsync -a x/./y/notes.txt out/"), ["network.call"]);
+  // The basename landing is always judged.
+  assert.ok(classesOf("rsync -R a/.claude out/").includes("policy.core"));
+});

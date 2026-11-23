@@ -110,10 +110,12 @@ option, case folded), and takes the strictest class among them.
   `.git` keeps #683's git-dir rule. A destination is a path by construction,
   whitespace and all (`cp x ".claude/my file"`). A copy into another
   directory is judged by the file it lands (`cp evil/* out/` with
-  `evil/APPROVAL.md`); a path-preserving copy (`cp --parents`, rsync
-  `-R`/`--relative`, an rsync source with `/./`) lands
-  `<dest>/<the source's path>` (`cp --parents .claude/settings.json .`,
-  `rsync -R .approval/env backup/..`), normalised lexically; and a source
+  `evil/APPROVAL.md`); a copy that may keep its source's path (`cp
+  --parents`, rsync `-R`/`--relative` anywhere on the line, a `/./` cutting
+  the kept path) is judged at `<dest>/<the source's path>` beside the
+  basename landing, the stricter answering (`cp --parents
+  .claude/settings.json .`, `rsync -R .approval/env backup/..`), normalised
+  lexically; and a source
   landing AS a guarded directory is one (`cp -r evil/.claude .`, `ln -s
   ../evil/.claude`, which links into `.`). With no destination read, every
   operand is judged, as before. `cp`, `mv`, `ln`, `install`, `rsync` and `scp`

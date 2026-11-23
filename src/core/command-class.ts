@@ -9031,9 +9031,10 @@ interface CopyPlan {
   /** The destination is implied (`ln -s target` links into `.`). */
   implicitDest?: boolean;
   /**
-   * The copy keeps each source's path under the destination (`cp --parents`,
-   * rsync's `-R`/`--relative`, an rsync source with a `/./` component): the
-   * landing is `<dest>/<the source's relative path>` (review of 8e1e84ae, 3).
+   * The copy may keep each source's path under the destination (`cp
+   * --parents`, rsync's `-R`/`--relative` anywhere on the line, with a `/./`
+   * cutting the kept path): `<dest>/<the source's relative path>` is judged
+   * beside the basename landing (reviews of 8e1e84ae (3) and 4f0169ec).
    */
   preserve?: boolean;
   files: string[];
@@ -9091,9 +9092,11 @@ function copyPlan(basename: string, args: readonly string[]): CopyPlan | null {
   // guarded directory is judged by the directory's name alone, whatever it
   // copies.
   const has = (...names: string[]): boolean => names.some((name) => parsed.seen.has(name));
-  const preserve =
-    (basename === "cp" && has("parents")) ||
-    (basename === "rsync" && (has("R", "relative") || sources.some((source) => source.includes("/./"))));
+  // Review of 4f0169ec (1, 2): rsync's relative mode follows option order
+  // (`--no-relative` after `-R` turns it off) and a `/./` matters only with it
+  // on. Wherever it may be on, the path-preserving landing is judged BESIDE
+  // the basename landing, which is always judged: the stricter answers.
+  const preserve = (basename === "cp" && has("parents")) || (basename === "rsync" && has("R", "relative"));
   const plan: CopyPlan = {
     ...empty(operands),
     dests,
@@ -9212,11 +9215,13 @@ function copyLandings(
       const cut = local.indexOf("/./");
       const kept = (cut === -1 ? local : local.slice(cut + 3)).replace(/^\/+/u, "");
       for (const dest of dests) {
-        const landing = `${dest.replace(/\/+$/u, "")}/${kept}`;
+        const into = dest.replace(/\/+$/u, "");
+        const landing = `${into}/${kept}`;
         if (inexact(source) && globLive(glob, source) && hasGlobConstruct(kept)) patterns.push(landing);
         else plain.push(landing);
+        // A destination the shell may still glob is a pattern too (review of 4f0169ec, 3).
+        if (inexact(dest) && globLive(glob, dest) && hasGlobConstruct(into)) patterns.push(landing);
       }
-      continue;
     }
     const parts = local.split("/").filter((part) => part.length > 0);
     const base = parts[parts.length - 1];
