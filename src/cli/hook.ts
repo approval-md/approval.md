@@ -4460,6 +4460,16 @@ export function refineWriteLandings(
   const units: Unit[] = primary.flatMap(({ shape, unreadable }, hostIndex) => withSubstitutions(shape, shape, hostIndex, 0, unreadable));
   const shapes = units.map((unit) => unit.shape);
   const homes = currentHomes(env);
+  // One disk reading per spelling per line (a cost bound: the disk does not
+  // change within the pass, and a line names the same target many times).
+  const landingMemo = new Map<string, { paths: string[]; unknown: boolean }>();
+  const landingPathsOnce = (spelled: string): { paths: string[]; unknown: boolean } => {
+    const known = landingMemo.get(spelled);
+    if (known !== undefined) return known;
+    const landing = landingPaths(spelled);
+    landingMemo.set(spelled, landing);
+    return landing;
+  };
   const hookCwd = cwds.find((each) => isAbsolute(each)) ?? "/";
 
   /**
@@ -4508,7 +4518,7 @@ export function refineWriteLandings(
   const treeTouched = (spelled: string): string | null => {
     if (treeChangedUnknown !== null) return treeChangedUnknown;
     if (treeChanged.size === 0) return null;
-    for (const form of [resolvePathSegments(spelled), ...landingPaths(spelled).paths]) {
+    for (const form of [resolvePathSegments(spelled), ...landingPathsOnce(spelled).paths]) {
       const key = foldedKey(form);
       for (const [changedKey, { raw, at }] of treeChanged) {
         if ((at && changedKey === key) || changedKey.startsWith(key === "/" ? "/" : `${key}/`)) {
@@ -4544,7 +4554,7 @@ export function refineWriteLandings(
   const volatileOf = (spelled: string): string | null => {
     if (changedUnknown !== null) return changedUnknown;
     if (changed.length === 0) return null;
-    const forms = [resolvePathSegments(spelled), ...landingPaths(spelled).paths];
+    const forms = [resolvePathSegments(spelled), ...landingPathsOnce(spelled).paths];
     // Each form folded once, and every prefix of it looked up in the set of
     // changed paths (folded once as they were recorded): linear in the
     // segments of the path, not in the number of earlier changes.
@@ -4739,7 +4749,7 @@ export function refineWriteLandings(
     if (spelled === null || spelled.length === 0) return false;
     return spelled.every((each) => {
       if (each.length > MAX_LANDING_BYTES || /[*?[]/u.test(each)) return false;
-      const landing = landingPaths(each);
+      const landing = landingPathsOnce(each);
       if (landing.unknown || landing.paths.length === 0) return false;
       return landing.paths.every((path) => {
         try {
@@ -4926,7 +4936,7 @@ export function refineWriteLandings(
           cwdUnknown = true;
           break;
         }
-        const landing = landingPaths(each);
+        const landing = landingPathsOnce(each);
         if (landing.unknown) cwdUnknown = true;
         next.add(resolvePathSegments(each));
         for (const path of landing.paths) next.add(path);
@@ -5055,7 +5065,7 @@ export function refineWriteLandings(
           unknown(`an earlier segment (\`${shape.text}\`) changes a path longer than any the kernel opens, so no later landing on the disk is trusted`);
           continue;
         }
-        for (const path of [resolvePathSegments(each), ...landingPaths(each).paths]) {
+        for (const path of [resolvePathSegments(each), ...landingPathsOnce(each).paths]) {
           const key = foldedKey(path);
           const at = change.kind === "move" || change.kind === "link" || change.kind === "remove";
           if (key !== "/" && !(treeChanged.get(key)?.at ?? false)) treeChanged.set(key, { raw: path, at });
