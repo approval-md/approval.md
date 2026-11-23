@@ -266,6 +266,105 @@ on the change above.
   and 10,000 levels of nesting each take under half a second of CPU through
   the hook.
 
+**Guarded names fold case on every platform.** The guards compared a path's
+names with the guarded names by exact letter case, while APFS, macOS's
+default volume, opens a name under full Unicode case folding. So `echo x >
+Approval.MD`, `rm -rf .APPROVAL`, `echo x > .APPROVAL/log/events.jsonl`,
+`echo x > .Claude/settings.json`, `echo x > .Cursor/hooks.json`, `echo x >
+claude.md`, `echo x > .GitHub/workflows/ci.yml` and `echo x >
+~/.Codex/config.toml` classified as ordinary workspace writes, ran
+unattended, and each landed on the guarded file. The few rows that already
+folded (the credential rows, the Hermes home, the `.git` segment, git's ref
+names) used `toLowerCase()`, which misses ten of the eleven code points APFS
+opens as ASCII letters: `.claude/<U+017F>ettings.json`,
+`.cursor/hoo<U+212A>s.json`, `.codex/con<U+FB01>g.toml` and
+`~/.herme<U+017F>/.env` were the same holes in a narrower form.
+
+- **One fold, `foldFileName` (`src/core/name-fold.ts`).** NFD, then lower,
+  upper and lower case: the Kelvin sign is `k`, the long s is `s`, `ß` and
+  `ẞ` are `ss`, and the ligatures `ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ ﬆ` are their letters, as APFS
+  opens them. It is stricter than APFS on one code point, the dotless i,
+  which it folds to `i`. It refines `toLowerCase()` (checked over every code
+  point), so no row that already folded matches less.
+- **Every guarded-name compare uses it, on every platform:** the policy file
+  names, the approval home and its log, the Claude, Cursor, Grok, Muse,
+  Codex and Hermes rows and their second segments, `CLAUDE.md`, `AGENTS.md`,
+  `.npmrc`, `.github/workflows`, a policy's own `protected_paths` entries
+  (bare and routed), the credential rows, the `.git` segment and git's
+  configuration files, git's trunk, tag and remote names, the no-rule
+  guard's name check, the hook's own credential and home passes, the
+  organ-attestation exclusions, and the Codex workspace plan's alias check.
+  On a case-sensitive volume a folded match costs an approval prompt.
+- **HFS+'s ignored code points are dropped too.** HFS+, the volume format
+  before APFS, ignores U+200C to U+200F, U+202A to U+202E, U+206A to U+206F
+  and U+FEFF inside a name (Apple TN1150; measured on an HFS+ image, every
+  code point from U+0080 tried: exactly these sixteen, and HFS+ folds ASCII
+  case but none of the APFS code points above). So on HFS+
+  `echo x > APPRO<U+200D>VAL.md` and `rm -rf .appro<U+200D>val` landed on
+  the guarded files; the fold drops them first. APFS ignores none of them,
+  so there such a name is another file and the fold costs an approval prompt.
+- **A spelling keeps the class main gave it beside its canonical class.**
+  Folding can change WHICH guarded class a path takes, not only whether it
+  takes one: `.approval/LOG/x` is `policy.core` as spelled (main) and
+  `log.mutate` folded, and with two routed entries `SPEC/` and `spec/`, both
+  now match `spec/x` and declaration order would pick one. A policy that
+  holds one class human-only and the other autonomous would have answered
+  such a spelling more lightly than main. So every guard is read twice:
+  folded, and as spelled (exactly as main compared it, exact or
+  `toLowerCase()`), and a line reports the folded answer plus every class the
+  as-spelled answer adds, as its own segment over the same text:
+  `echo x > .approval/LOG/x` is `log.mutate` and `policy.core`, and
+  `echo x > Approval.MD` is `policy.core` and `files.write.workspace`. The
+  hook judges each class and the strictest decision answers. The same holds
+  for the file tools (a Write to `.approval/LOG/x` carries both classes), the
+  hook's disk passes, the Codex file-change and `apply_patch` classes, the
+  Codex workspace plan's action legs, and the exec-code program check. A
+  refusal in either reading refuses. The second reading is skipped only when
+  no compared name differs between the readings, which cannot change the
+  answer.
+- **Grants hold in both readings.** A compare that makes a line lighter (the
+  Hermes skill-script shape, the install's `.env.example`, the protected-path
+  guard's evidence carve-out for `.approval/log/`) keeps its exact spelling,
+  and an answer that grants something (an attestable organ, a sign-off's
+  eligibility, a routed class or a granted command accepted as CI evidence)
+  must hold in both readings, so `.Claude/settings.json` is not an organ, as
+  it was not on main.
+- **The route floor reads a policy entry as spelled, as main did:** no policy
+  that loads on main fails to load here. A routed entry spelled like a
+  built-in guarded path in another case (`.APPROVAL/x`, `Approval.md`,
+  `.GitHub/workflows/`) still matches commands folded, and the built-in
+  class is always judged for that path: the organ rows answer before any
+  route, and beside a route that names a built-in `policy.edit` path only in
+  another case the path is reported as `policy.edit` too. On main such a
+  route answered alone, the floor having never judged it, so a policy that
+  routed `.GitHub/workflows/` to a class it runs unattended let
+  `echo x > .GitHub/workflows/ci.yml` through, onto the workflow file on
+  APFS. `approval policy check` names such an entry in a `note:` line.
+- **Routes of the same depth are all judged.** Two routed entries that both
+  match a path at the same depth (`SPEC/` beside `spec/`, once names fold;
+  or two folders both on one path) used to be settled by declaration order.
+  The classifier cannot say which class a policy holds stricter, so it now
+  reports every such class, the first declared first, and the hook's
+  strictest decision answers, for every spelling of the path. The most
+  specific route still wins over a shallower one. One more classification
+  pass per tied entry, on lines that name such a path.
+- **The Hermes-home walk is linear.** It sliced and re-walked the rest of
+  the path at every home segment, so a 1 MiB path of `.hermes/x/` segments
+  took about a minute of CPU on main (and through the fold, `.herme<U+017F>/x/`
+  as well). Each tail's answer now comes from one pass over the path, with the
+  same answers (held against the old walk by a fuzz in the tests).
+- **Evidence.** Against main's build, pure and through the hook, over the
+  differential lines and thirteen policy entry lists (none, bare, routed, two
+  colliding orders, three colliding spellings, nested depths, case variants
+  of built-in paths, routed and tied with the canonical entry): the
+  as-spelled reading equals main's answer on every line, and the head's
+  classes contain main's on every line, with no refusal lost. The 382
+  conformance vectors and the 63 overlay recipes are unmoved. Run for real in
+  bash and zsh on APFS in a scratch folder, each case and fold spelling tried
+  landed on the guarded file, and the dotless i and a fullwidth a did not.
+  Conformance: ten new `command-class` vectors; main's 382 are
+  byte-identical. The vectors version is bumped once, at the release cut.
+
 ### Added
 
 - **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536).**

@@ -65,7 +65,7 @@ import { basename, dirname, isAbsolute, join, resolve as resolvePathSegments } f
 import {
   commandSegmentWords,
   isCredentialPath,
-  protectedPathClass,
+  protectedPathClasses,
   type ClassifiedSegment,
   type ExecCodeSource,
   type ProtectedPathEntry,
@@ -196,8 +196,9 @@ function readProgramFile(
       detail: `the program file ${JSON.stringify(source)} resolves to ${real}, a credential path (account.credential); a program read from credential material is not run as exec.code`,
     };
   }
-  const protectedClass = protectedPathClass(real, protectedPaths);
-  if (protectedClass !== null) {
+  // Either name reading (`name-fold.ts`) refuses it.
+  const protectedClass = protectedPathClasses(real, protectedPaths)[0];
+  if (protectedClass !== undefined) {
     return {
       ok: false,
       code: "hook-unclassified",

@@ -65,6 +65,14 @@ import {
   readTargetVerdict,
   readTargetsOf,
 } from "./read-scope.js";
+import {
+  eachNameReading,
+  foldNameExact,
+  foldNameLower,
+  nameListIncludes,
+  takeAmongEqual,
+  withNamesAsSpelled,
+} from "./name-fold.js";
 
 // ===========================================================================
 // Result shape
@@ -277,6 +285,11 @@ const CORE_FILENAMES: readonly string[] = ["APPROVAL.md", "APPROVALS.md"];
  */
 const PROTECTED_FILENAMES: readonly string[] = ["CLAUDE.md", "AGENTS.md", ".npmrc"];
 
+// {@link CORE_FILENAMES} and {@link PROTECTED_FILENAMES} are compared through
+// {@link nameListIncludes}: folded (APFS opens `approval.md` and `Claude.MD` as
+// the policy file and the instructions) in the folded reading, exactly as
+// written in the as-spelled one (see `name-fold.ts`).
+
 /** Split a path into segments, dropping `./` noise. Never touches the disk. */
 function pathSegments(candidate: string): string[] {
   return candidate
@@ -334,15 +347,25 @@ export function parseProtectedEntry(entry: ProtectedPathEntry): ProtectedEntry |
   return { segments, directory, routed };
 }
 
-/** Does `segments` match one parsed entry? */
+/**
+ * Does `segments` match one parsed entry? Both sides are compared folded
+ * ({@link foldNameExact}), as the built-in names are: a policy that protects
+ * `design/` protects `Design/` on a volume that opens it as the same folder.
+ * `segments` must arrive through the same helper, as
+ * {@link protectedPathClassOfWord}, the only caller, passes them. In the
+ * as-spelled reading both sides are exact, as they were before names folded;
+ * the caller reports both readings, so a fold that makes a second entry match
+ * (`SPEC/` beside `spec/`) adds its class and never replaces the old one.
+ */
 function matchesEntry(segments: readonly string[], entry: ProtectedEntry): boolean {
-  const want = entry.segments;
-  if (want.length > segments.length) return false;
+  const want = entry.segments.map(foldNameExact);
+  const have = segments;
+  if (want.length > have.length) return false;
   if (entry.directory) {
     // A directory prefix matches wherever its segments appear as a contiguous
     // run, exactly as the built-in `.approval/` and `.github/workflows/` do.
-    for (let start = 0; start + want.length <= segments.length; start += 1) {
-      if (want.every((segment, offset) => segment === segments[start + offset])) return true;
+    for (let start = 0; start + want.length <= have.length; start += 1) {
+      if (want.every((segment, offset) => segment === have[start + offset])) return true;
     }
     return false;
   }
@@ -350,8 +373,8 @@ function matchesEntry(segments: readonly string[], entry: ProtectedEntry): boole
   // `/repo/docs/x.md` and `./docs/x.md`, and a bare filename (a one-segment
   // entry) matches that filename in any directory, which is how the built-in
   // filenames have always behaved.
-  const offset = segments.length - want.length;
-  return want.every((segment, index) => segment === segments[offset + index]);
+  const offset = have.length - want.length;
+  return want.every((segment, index) => segment === have[offset + index]);
 }
 
 /** The most words one brace-expanded path may stand for before it is judged unknown. */
@@ -544,69 +567,147 @@ function collapseBracedVariables(candidate: string): string {
  *   since `$OUT` alone or `$OUT/scripts/x.sh` is ordinary work far more often.
  */
 function hermesHomeKind(segment: string): "home" | "maybe" | null {
-  if (segment.toLowerCase() === ".hermes") return "home";
+  // Folded ({@link foldFileName}): `.HERMES` and `.herme<U+017F>` are the home on APFS.
+  if (foldNameLower(segment) === ".hermes") return "home";
   if (segment === "$HERMES_HOME" || segment === "${HERMES_HOME}") return "home";
   if (/\$(?:[A-Za-z_]|\{)/u.test(segment)) return "maybe";
   return null;
 }
 
 /**
- * Judge the part of a path below a Hermes home twice, as spelled and with its
- * `..` segments resolved, and return the strictest answer (APRV-511). A tail
- * whose `..` climbs out of the home has no resolved reading here; the segment
- * walk meets any later home on its own. The `.codex` row's rule, that a `..`
- * under the organ directory is itself the organ, is the precedent; resolving
- * instead keeps `~/.hermes/workspace/../workspace/x` ordinary.
- */
-function hermesTailClass(
-  tail: readonly string[],
-  judge: (tail: readonly string[]) => string | null,
-): string | null {
-  const answers = [judge(tail)];
-  const resolved: string[] = [];
-  let escaped = false;
-  for (const part of tail) {
-    if (part === "..") {
-      if (resolved.length === 0) {
-        escaped = true;
-        break;
-      }
-      resolved.pop();
-    } else {
-      resolved.push(part);
-    }
-  }
-  if (!escaped && tail.includes("..")) answers.push(judge(resolved));
-  for (const strictest of ["policy.core", HERMES_SCHEDULED_SCRIPT_CLASS, "credential"]) {
-    if (answers.includes(strictest)) return strictest;
-  }
-  return null;
-}
-
-/**
- * The tails a variable segment that MAY be the home can stand over (APRV-511
- * refuter M1): the tail as written, and the rest after each `..` in it, since
+ * What the Hermes rows ask of every tail of one segment list, each answer in
+ * constant time after one linear pass (the lead's S2 on #688: "the home tail
+ * sliced once, not per segment"). The answers are exactly the ones the walk
+ * below gave when it sliced and re-walked the tail at every home segment,
+ * which made a path of many home segments cost the square of its length.
+ *
+ * The rule each answer states (APRV-511): a tail below a home is judged twice,
+ * as spelled and with its `..` segments resolved, and the strictest answer is
+ * the tail's. A tail whose `..` climbs out of the home has no resolved
+ * reading; the segment walk meets any later home on its own. The `.codex`
+ * row's rule, that a `..` under the organ directory is itself the organ, is
+ * the precedent; resolving instead keeps `~/.hermes/workspace/../workspace/x`
+ * ordinary. A variable segment that MAY be the home (APRV-511 refuter M1)
+ * stands over the tail as written and the rest after each `..` in it, since
  * `$X/../plugins/x` is the plugin directory when `$X` is any directory one
  * level under the home (`$(pwd)/../plugins/x` from the workspace).
+ *
+ * Why each answer is constant time: a judge reads at most the first four
+ * segments of a tail (`profiles/<p>/` and then two names), so only the first
+ * four of the tail as spelled and of the tail resolved matter. With `P[k]` the
+ * count of names minus the count of `..` in `segments[0..k)`, the walk from
+ * `start` climbs out exactly when some later `P[m]` falls below `P[start]`,
+ * and a name at `j` is popped by a later `..` exactly when some `P[m]`, `m > j`,
+ * returns to `P[j]`. Neither depends on where the walk began, so the resolved
+ * tail is the run of never-popped names from `start` on, found by a
+ * next-survivor table. The `fuzz` of `tests/guarded-names-fold-case.test.ts`
+ * holds this against the per-segment walk.
  */
-function maybeHomeTails(tail: readonly string[]): (readonly string[])[] {
-  const tails: (readonly string[])[] = [tail];
-  for (const [at, part] of tail.entries()) if (part === "..") tails.push(tail.slice(at + 1));
-  return tails;
+export interface HermesTails {
+  /** Does `segments[start..]` hold a `..`? */
+  dotdotFrom(start: number): boolean;
+  /** The organ class of the tail `segments[start..]` below a home (`policy.core`, `cron.manage` or `null`). */
+  organClass(start: number): string | null;
+  /** Below a MAYBE home: does the tail, or the rest after any `..` in it, non-empty, take `policy.core`? */
+  maybeOrgan(start: number): boolean;
+  /** Is the tail `segments[start..]` below a home credential material? */
+  credential(start: number): boolean;
+  /** Below a MAYBE home: is the tail, or the rest after any `..` in it, credential material? */
+  maybeCredential(start: number): boolean;
+}
+
+/** The strictest of a tail's answers, in the order the walk has always ranked them. */
+const HERMES_TAIL_RANK: readonly string[] = ["policy.core", HERMES_SCHEDULED_SCRIPT_CLASS, "credential"];
+
+function credentialJudge(tail: readonly string[]): string | null {
+  return hermesCredentialTail(tail) ? "credential" : null;
+}
+
+/** Build the {@link HermesTails} of one segment list: linear time and space. Exported for its fuzz test. */
+export function hermesTails(segments: readonly string[]): HermesTails {
+  const n = segments.length;
+  const dot = segments.map((segment) => segment === "..");
+  const P = new Int32Array(n + 1);
+  for (let k = 0; k < n; k += 1) P[k + 1] = (P[k] as number) + (dot[k] === true ? -1 : 1);
+  // sufMin[k] = min P[m] over m in [k, n]; sufMin[n + 1] stands for "none".
+  const sufMin = new Int32Array(n + 2);
+  sufMin[n + 1] = 2147483647;
+  for (let k = n; k >= 0; k -= 1) sufMin[k] = Math.min(P[k] as number, sufMin[k + 1] as number);
+  const dotFrom = new Uint8Array(n + 1);
+  for (let k = n - 1; k >= 0; k -= 1) dotFrom[k] = dot[k] === true || dotFrom[k + 1] === 1 ? 1 : 0;
+  // nextSurvivor[k]: the first name at or after k that no later `..` pops, or n.
+  const nextSurvivor = new Int32Array(n + 1);
+  nextSurvivor[n] = n;
+  for (let k = n - 1; k >= 0; k -= 1) {
+    const survives = dot[k] !== true && (sufMin[k + 1] as number) > (P[k] as number);
+    nextSurvivor[k] = survives ? k : (nextSurvivor[k + 1] as number);
+  }
+  const escapes = (start: number): boolean => start < n && (sufMin[start + 1] as number) < (P[start] as number);
+  const resolvedHead = (start: number): string[] => {
+    const out: string[] = [];
+    for (let j = nextSurvivor[start] as number; j < n && out.length < 4; j = nextSurvivor[j + 1] as number) {
+      out.push(segments[j] as string);
+    }
+    return out;
+  };
+  const tailClass = (start: number, judge: (tail: readonly string[]) => string | null): string | null => {
+    const answers = [judge(segments.slice(start, start + 4))];
+    if (!escapes(start) && dotFrom[start] === 1) answers.push(judge(resolvedHead(start)));
+    for (const strictest of HERMES_TAIL_RANK) if (answers.includes(strictest)) return strictest;
+    return null;
+  };
+  const memo = (judge: (start: number) => boolean): ((start: number) => boolean) => {
+    const seen = new Map<number, boolean>();
+    return (start) => {
+      let answer = seen.get(start);
+      if (answer === undefined) {
+        answer = judge(start);
+        seen.set(start, answer);
+      }
+      return answer;
+    };
+  };
+  // Below a maybe home: the tail from `start`, or the rest after any `..` at
+  // or after `start`. `afterDot[k]`: some `..` at m >= k has a good rest m + 1.
+  const maybe = (good: (start: number) => boolean): ((start: number) => boolean) => {
+    let afterDot: Uint8Array | null = null;
+    return (start) => {
+      if (good(start)) return true;
+      if (afterDot === null) {
+        afterDot = new Uint8Array(n + 1);
+        for (let k = n - 1; k >= 0; k -= 1) afterDot[k] = (dot[k] === true && good(k + 1)) || afterDot[k + 1] === 1 ? 1 : 0;
+      }
+      return afterDot[start] === 1;
+    };
+  };
+  const organMemo = new Map<number, string | null>();
+  const organClass = (start: number): string | null => {
+    if (!organMemo.has(start)) organMemo.set(start, tailClass(start, hermesOrganClass));
+    return organMemo.get(start) ?? null;
+  };
+  const credential = memo((start) => tailClass(start, credentialJudge) !== null);
+  return {
+    dotdotFrom: (start) => dotFrom[start] === 1,
+    organClass,
+    maybeOrgan: maybe(memo((start) => start < n && organClass(start) === "policy.core")),
+    credential,
+    maybeCredential: maybe(credential),
+  };
 }
 
 /** The tail below a profile home (`profiles/<p>/...`), or the tail itself. */
 function hermesProfileTail(tail: readonly string[]): readonly string[] {
-  return tail[0]?.toLowerCase() === "profiles" && tail[1] !== undefined ? tail.slice(2) : tail;
+  const first = tail[0];
+  return first !== undefined && foldNameLower(first) === "profiles" && tail[1] !== undefined ? tail.slice(2) : tail;
 }
 
 /**
  * The class a write below a Hermes home takes, by the home's organ rows
- * (APRV-398, APRV-445, APRV-511). Names compare without case.
+ * (APRV-398, APRV-445, APRV-511). Names compare folded ({@link foldFileName}).
  */
 function hermesOrganClass(fullTail: readonly string[]): string | null {
   const tail = hermesProfileTail(fullTail);
-  const next = tail[0]?.toLowerCase();
+  const next = tail[0] === undefined ? undefined : foldNameLower(tail[0]);
   if (
     next === undefined ||
     next === "config.yaml" ||
@@ -636,17 +737,18 @@ function hermesOrganClass(fullTail: readonly string[]): string | null {
  * the 1Password bootstrap file Hermes loads into the gateway; and the source
  * install's `hermes-agent/.env` and `.env.*`, its PROJECT_ROOT dotenv, except
  * `.env.example`, the template the install ships. Reading the rest of the
- * runtime's source is not a credential read. Names compare without case.
+ * runtime's source is not a credential read. Names compare folded
+ * ({@link foldFileName}).
  */
 function hermesCredentialTail(fullTail: readonly string[]): boolean {
   const tail = hermesProfileTail(fullTail);
-  const next = tail[0]?.toLowerCase();
+  const next = tail[0] === undefined ? undefined : foldNameLower(tail[0]);
   if (next === undefined) return false;
   if (next === ".env" || next.startsWith(".env.")) return true;
   if (next === "auth.json") return true;
   if (next === ".op.env" || next.startsWith(".op.env.")) return true;
   if (next === "hermes-agent") {
-    const file = tail[1]?.toLowerCase();
+    const file = tail[1] === undefined ? undefined : foldNameLower(tail[1]);
     // `.env.example` exactly: on a case-sensitive filesystem `.env.EXAMPLE` is
     // another file, and only the template the install ships is exempt.
     return file !== undefined && (file === ".env" || (file.startsWith(".env.") && tail[1] !== ".env.example"));
@@ -700,24 +802,37 @@ function hermesCredentialTail(fullTail: readonly string[]): boolean {
  *   judges no autonomy.
  *
  * Among several routed entries matching one path, the MOST SPECIFIC wins (most
- * segments), and declaration order breaks a tie. Most-specific is what a
- * carve-out means — `design/` routed one way and `design/frozen/` another — and
- * a tie is two entries of equal depth both claiming one path, which is the
- * author's own ambiguity and is resolved the only way a pure function can:
- * by the order they wrote them in.
+ * segments). Most-specific is what a carve-out means — `design/` routed one way
+ * and `design/frozen/` another. A tie is two entries of equal depth both
+ * claiming one path (on a volume that folds names, `SPEC/` beside `spec/`),
+ * which is the author's own ambiguity. A pure function cannot say which class
+ * the policy holds stricter, so it reports every tied class, one per name
+ * reading ({@link protectedPathClassReadings}), and the gate's strictest
+ * decision answers. As spelled, the first declared answers alone, as it did
+ * before names folded.
  *
  * A string-only `extra` cannot reach the routed tier at all, so a policy that
  * has not adopted the object form classifies byte for byte as it did before.
+ *
+ * ## Name readings
+ *
+ * This answers in the CURRENT name reading only (folded, unless the caller is
+ * inside `withNamesAsSpelled`; see `name-fold.ts`). Folding can change which
+ * class a path takes (`.approval/LOG/x` is `policy.core` as spelled and
+ * `log.mutate` folded), so a caller that hands a class to a gate asks
+ * {@link protectedPathClasses}, and a caller that grants something on the
+ * answer asks {@link protectedPathClassReadings} and requires it of each.
  */
 export function protectedPathClass(
   candidate: string,
   extra: readonly ProtectedPathEntry[] = [],
 ): string | null {
-  return protectedPathClasses(candidate, extra)[0] ?? null;
+  return protectedPathClassesAsRead(candidate, extra)[0] ?? null;
 }
 
 /**
- * Every protected class this path's readings name, strictest first by
+ * Every protected class this path's readings name in the current name reading
+ * (`name-fold.ts`; {@link protectedPathClasses} joins both), strictest first by
  * {@link PROTECTED_PRECEDENCE}: each brace expansion, as written and as each
  * glob reading of it ({@link protectedGlobReadings}). A word whose readings
  * name more than one class carries each, and the policy judges each (review-b
@@ -727,7 +842,7 @@ export function protectedPathClass(
  * the word's own classes, never in place of them (codex's M1 at bcb1be08:
  * `.approval/log/*\/*` keeps `log.mutate`).
  */
-export function protectedPathClasses(candidate: string, extra: readonly ProtectedPathEntry[] = []): string[] {
+function protectedPathClassesAsRead(candidate: string, extra: readonly ProtectedPathEntry[] = []): string[] {
   if (candidate.length === 0) return [];
   // APRV-511 refuter M2: bash expands an unquoted brace group before the
   // command sees the word, so `~/.hermes/plugin{s,s}/x` IS the plugin
@@ -831,9 +946,56 @@ function protectedGlobReadings(word: string, extra: readonly ProtectedPathEntry[
   return readings;
 }
 
+/**
+ * {@link protectedPathClass} in each name reading: the folded answer, then the
+ * as-spelled one when the two readings can differ (`name-fold.ts`). For a
+ * caller that GRANTS something on the answer, which must hold in every reading.
+ */
+export function protectedPathClassReadings(
+  candidate: string,
+  extra: readonly ProtectedPathEntry[] = [],
+): (string | null)[] {
+  return eachNameReading(() => protectedPathClass(candidate, extra));
+}
+
+/**
+ * Every class this path takes in either name reading, the folded one's first
+ * (its strictest at the head), without repeats: the protected classes a gate
+ * judges together, so that the strictest decision answers under any policy.
+ * Each reading gives every class its brace and glob readings name
+ * ({@link protectedPathClassesAsRead}). Empty when neither reading protects it.
+ */
+export function protectedPathClasses(
+  candidate: string,
+  extra: readonly ProtectedPathEntry[] = [],
+): string[] {
+  const out: string[] = [];
+  for (const reading of eachNameReading(() => protectedPathClassesAsRead(candidate, extra))) {
+    for (const cls of reading) if (!out.includes(cls)) out.push(cls);
+  }
+  return out;
+}
+
+/** The non-null entries of `readings`, in order, without repeats. */
+function distinctClasses(readings: readonly (string | null)[]): string[] {
+  const out: string[] = [];
+  for (const cls of readings) if (cls !== null && !out.includes(cls)) out.push(cls);
+  return out;
+}
+
 /** {@link protectedPathClass} for one word that brace expansion has already made. */
 function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): string | null {
-  const segments = pathSegments(collapseBracedVariables(candidate));
+  // Every guarded name below is compared with the candidate's FOLDED segments
+  // ({@link foldFileName}), on every platform: APFS opens `Approval.MD`,
+  // `.Claude/Settings.json` and `.APPROVAL/env` as the guarded files, and a
+  // name compared by its exact case let those through as ordinary writes.
+  // `spelled` keeps the segments as written for the one row that reads a
+  // variable by its exact name (`$HERMES_HOME`).
+  const spelled = pathSegments(collapseBracedVariables(candidate));
+  const segments = spelled.map(foldNameExact);
+  // Every tail's Hermes answers, built once, on first use (linear; see {@link hermesTails}).
+  let built: HermesTails | null = null;
+  const tails = (): HermesTails => (built ??= hermesTails(segments));
 
   // 1. The log directory, before anything else that would call it a policy file.
   for (let index = 0; index < segments.length; index += 1) {
@@ -842,7 +1004,7 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
 
   // 2. The gate's own organs.
   const last = segments[segments.length - 1];
-  if (last !== undefined && CORE_FILENAMES.includes(last)) return "policy.core";
+  if (last !== undefined && nameListIncludes(CORE_FILENAMES, last)) return "policy.core";
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
     // The rest of the approval home: payload store, vault, keys, environment
@@ -960,15 +1122,14 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
     // other unexpanded variable (which MAY be the home, so only its organ rows
     // apply); the tail is judged as spelled and with its `..` resolved. See
     // {@link hermesHomeKind} and {@link hermesOrganClass}.
-    const home = segment === undefined ? null : hermesHomeKind(segment);
+    // The home's kind is read from the segment as spelled: a folded
+    // `$HERMES_HOME` would read as some other variable, a "maybe" home.
+    const spelledSegment = spelled[index];
+    const home = spelledSegment === undefined ? null : hermesHomeKind(spelledSegment);
     if (home !== null) {
-      const cls = hermesTailClass(segments.slice(index + 1), hermesOrganClass);
+      const cls = tails().organClass(index + 1);
       if (home === "home" && cls !== null) return cls;
-      if (home === "maybe" && maybeHomeTails(segments.slice(index + 1)).some(
-        (tail) => tail.length > 0 && hermesTailClass(tail, hermesOrganClass) === "policy.core",
-      )) {
-        return "policy.core";
-      }
+      if (home === "maybe" && tails().maybeOrgan(index + 1)) return "policy.core";
     }
     // Codex installs its hook through these configuration and script paths.
     if (segment === ".codex") {
@@ -978,31 +1139,56 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
         next === "config.toml" ||
         next === "hooks.json" ||
         next === "hooks" ||
-        segments.slice(index + 1).includes("..")
+        tails().dotdotFrom(index + 1)
       ) return "policy.core";
     }
   }
 
+  // The prose and configuration about the gate (tier 4's test, also asked by
+  // tier 3).
+  const builtinEdit = (): boolean => {
+    if (last !== undefined && nameListIncludes(PROTECTED_FILENAMES, last)) return true;
+    for (let index = 0; index < segments.length; index += 1) {
+      // CI configuration.
+      if (segments[index] === ".github" && segments[index + 1] === "workflows") return true;
+    }
+    return false;
+  };
+
   // 3. The policy's own routed entries (APRV-266), above the built-in
   //    `policy.edit` set so a routing can re-label one of those paths, and
   //    below tiers 1 and 2 so it can never reach the log or the gate's organs.
-  //    Most segments win; declaration order breaks a tie.
-  let routed: { entry: ProtectedEntry; depth: number } | null = null;
+  //    Most segments win. Routes of the same depth that all match are EQUAL
+  //    claims: as spelled the first declared answers, as it always did, and
+  //    folded each answers in turn ({@link takeAmongEqual}), so the gate
+  //    judges every one and the strictest decides (#688 review S2).
+  let depth = 0;
+  const routes: { path: string; routed: string }[] = [];
   for (const raw of extra) {
     const entry = parseProtectedEntry(raw);
-    if (entry === null || entry.routed === null) continue;
+    if (entry === null || entry.routed === null || typeof raw === "string") continue;
     if (!matchesEntry(segments, entry)) continue;
-    const depth = entry.segments.length;
-    if (routed === null || depth > routed.depth) routed = { entry, depth };
+    if (entry.segments.length > depth) {
+      depth = entry.segments.length;
+      routes.length = 0;
+    }
+    if (entry.segments.length === depth) routes.push({ path: raw.path, routed: entry.routed });
   }
-  if (routed !== null) return routed.entry.routed;
+  if (routes.length > 0) {
+    const claims: string[] = [];
+    // A route may re-label a built-in `policy.edit` path because the load
+    // floor (`checkProtectedRouteFloor`) has judged it no weaker. The floor
+    // reads the entry as spelled, so an entry that names a built-in path only
+    // when folded (`.GitHub/workflows/`) was never judged: beside such a
+    // route the built-in class is a claim too, and comes first (#688 review
+    // S1). As spelled no entry is one, so that reading answers as before.
+    if (routes.some((route) => namesBuiltinOnlyFolded(route.path)) && builtinEdit()) claims.push("policy.edit");
+    for (const route of routes) if (!claims.includes(route.routed)) claims.push(route.routed);
+    return takeAmongEqual(claims);
+  }
 
   // 4. The prose and configuration about the gate.
-  if (last !== undefined && PROTECTED_FILENAMES.includes(last)) return "policy.edit";
-  for (let index = 0; index < segments.length; index += 1) {
-    // CI configuration.
-    if (segments[index] === ".github" && segments[index + 1] === "workflows") return "policy.edit";
-  }
+  if (builtinEdit()) return "policy.edit";
 
   // 5. The policy's own bare-string entries, which mean `policy.edit` (APRV-107).
   for (const raw of extra) {
@@ -1012,6 +1198,17 @@ function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPa
     }
   }
   return null;
+}
+
+/**
+ * Does a routed entry's path name a built-in guarded path in the folded
+ * reading and not as spelled (`.GitHub/workflows/`, `Claude.md`)? The load
+ * floor reads entries as spelled, so it never judged such a route. Always
+ * false in the as-spelled reading.
+ */
+function namesBuiltinOnlyFolded(path: string): boolean {
+  if (builtinProtectedPathClass(path) === null) return false;
+  return withNamesAsSpelled(() => builtinProtectedPathClass(path)) === null;
 }
 
 /**
@@ -1028,17 +1225,26 @@ export function builtinProtectedPathClass(candidate: string): ProtectedPathClass
 }
 
 /**
+ * {@link builtinProtectedPathClass} in each name reading, folded first (see
+ * {@link protectedPathClassReadings}).
+ */
+export function builtinProtectedPathClassReadings(candidate: string): (ProtectedPathClass | null)[] {
+  return eachNameReading(() => builtinProtectedPathClass(candidate));
+}
+
+/**
  * Does this path name something only a human may write?
  *
  * The boolean face of {@link protectedPathClass}, kept because two callers
  * (`core/wysiwys.ts`'s protected-path view and the hook's file-tool gate) ask
  * whether a path is protected at all before they ask which surface it is.
+ * True when either name reading protects it (a guard: either reading adds).
  */
 export function isProtectedPath(
   candidate: string,
   extra: readonly ProtectedPathEntry[] = [],
 ): boolean {
-  return protectedPathClass(candidate, extra) !== null;
+  return protectedPathClasses(candidate, extra).length > 0;
 }
 
 /**
@@ -1085,12 +1291,25 @@ export function normalizePathSpelling(candidate: string): string {
  * close that), so consulting the policy's entries here could only ever widen
  * the set of files a human may attest by a routing the classifier already
  * refuses to honor.
+ *
+ * A GRANT (an organ is attestable by content, which a protected path is not),
+ * so it must hold in both name readings: `.Approval/x` is not an organ because
+ * folded it is the approval home, and `approval.md` because folded it is the
+ * policy file.
  */
 export function isGateOrganPath(candidate: string): boolean {
+  return eachNameReading(() => isGateOrganPathAsRead(candidate)).every((organ) => organ);
+}
+
+/** {@link isGateOrganPath} in the current name reading. */
+function isGateOrganPathAsRead(candidate: string): boolean {
   if (builtinProtectedPathClass(candidate) !== "policy.core") return false;
-  const segments = pathSegments(candidate);
+  // Folded, as the class above is: `approval.md` and `.APPROVAL/x` are
+  // `policy.core` now, and an exact exclusion would let an organ record stand
+  // in for the policy file or the approval home.
+  const segments = pathSegments(candidate).map(foldNameExact);
   const last = segments[segments.length - 1];
-  if (last !== undefined && CORE_FILENAMES.includes(last)) return false;
+  if (last !== undefined && nameListIncludes(CORE_FILENAMES, last)) return false;
   return !segments.includes(".approval");
 }
 
@@ -1118,8 +1337,18 @@ const CREDENTIAL_CLASS = "account.credential";
  * anything beside it), `keys/` (the subtree), and `env` (plus `env.local` and
  * kin), which is the environment map holding the Telegram token, the vault
  * passphrase and the sampling secret.
+ *
+ * True when either name reading names credential material (a guard: either
+ * reading adds the class; see `name-fold.ts`). Inside the classifier, which
+ * reports both readings itself, {@link isCredentialPathAsRead} asks the
+ * current one only.
  */
 export function isCredentialPath(candidate: string): boolean {
+  return eachNameReading(() => isCredentialPathAsRead(candidate)).some((credential) => credential);
+}
+
+/** {@link isCredentialPath} in the current name reading. */
+function isCredentialPathAsRead(candidate: string): boolean {
   if (candidate.length === 0) return false;
   // APRV-511 refuter M2: any brace expansion that names a credential is one.
   const expansions = braceCandidates(candidate);
@@ -1155,7 +1384,9 @@ function credentialWordReadings(candidate: string): boolean {
   // Case is folded on every platform. macOS and Windows volumes are case
   // insensitive by default, so an upper-case spelling opens the environment map
   // there; on a case-sensitive volume the fold names a different file as a
-  // credential, which costs an approval prompt and never an exposure.
+  // credential, which costs an approval prompt and never an exposure. The fold
+  // is {@link foldFileName}'s full one: APFS opens `.approval/<U+017F>ault.enc`
+  // as the vault, which `toLowerCase()` alone did not fold.
   //
   // APRV-522 fix round 2 (path-parser differential): a backslash separates
   // segments only on Windows. On macOS and Linux it is a character of a name,
@@ -1176,7 +1407,7 @@ function credentialWordReadings(candidate: string): boolean {
  * "maybe" home).
  */
 function credentialSegmentsAsWrittenOrResolved(segments: readonly string[]): boolean {
-  const folded = segments.map((segment) => segment.toLowerCase());
+  const folded = segments.map(foldNameLower);
   const spellings = folded.every((segment, index) => segment === segments[index]) ? [folded] : [folded, [...segments]];
   for (const written of spellings) {
     if (credentialSegments(written)) return true;
@@ -1193,6 +1424,8 @@ function credentialSegmentsAsWrittenOrResolved(segments: readonly string[]): boo
 
 /** The credential rows over already-split segments. */
 function credentialSegments(segments: readonly string[]): boolean {
+  // Every tail's Hermes answers, built once, on first use (linear; see {@link hermesTails}).
+  let built: HermesTails | null = null;
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
     // APRV-398. Hermes Agent's own home holds two files of credential material
@@ -1211,10 +1444,8 @@ function credentialSegments(segments: readonly string[]): boolean {
     // in the tail); see {@link hermesCredentialTail}.
     const home = segment === undefined ? null : hermesHomeKind(segment);
     if (home !== null) {
-      const credential = (tail: readonly string[]): boolean =>
-        hermesTailClass(tail, (t) => (hermesCredentialTail(t) ? "credential" : null)) !== null;
-      const tails = home === "maybe" ? maybeHomeTails(segments.slice(index + 1)) : [segments.slice(index + 1)];
-      if (tails.some(credential)) return true;
+      built ??= hermesTails(segments);
+      if (home === "maybe" ? built.maybeCredential(index + 1) : built.credential(index + 1)) return true;
       continue;
     }
     if (segment !== ".approval") continue;
@@ -1577,7 +1808,7 @@ export function credentialReadWords(basename: string, args: readonly string[]): 
 }
 
 function credentialTouch(basename: string, args: readonly string[]): CredentialOutcome | null {
-  const named = credentialReadWords(basename, args).find((word) => isCredentialPath(word));
+  const named = credentialReadWords(basename, args).find((word) => isCredentialPathAsRead(word));
   if (named !== undefined) {
     return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
   }
@@ -1597,7 +1828,7 @@ function credentialTouch(basename: string, args: readonly string[]): CredentialO
  * one. The rule id is the argument rule's own.
  */
 function uploadCredentialTouch(sources: readonly string[], unknown: string | null): CredentialOutcome | null {
-  const named = sources.find((path) => isCredentialPath(path));
+  const named = sources.find((path) => isCredentialPathAsRead(path));
   if (named !== undefined) return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
   if (unknown !== null) return { class: CREDENTIAL_CLASS, rule: "credential-path", path: unknown };
   return null;
@@ -1633,7 +1864,7 @@ function redirectCredentialTouch(
   readTargets: readonly string[],
   allTargets: readonly string[],
 ): CredentialOutcome | null {
-  const named = readTargets.find((target) => isCredentialPath(target));
+  const named = readTargets.find((target) => isCredentialPathAsRead(target));
   if (named !== undefined) {
     return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
   }
@@ -2623,7 +2854,7 @@ const V_PREFIXED_SEMVER = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[
  * there (tests/command-class-remote-config-case.test.ts).
  */
 function isTagRef(name: string): boolean {
-  const folded = name.toLowerCase();
+  const folded = foldNameLower(name);
   if (folded.startsWith("refs/tags/")) return true;
   if (folded.startsWith("refs/heads/")) return false;
   // APRV-518: git's ref DWIM tries `refs/<name>` first, so `tags/t1` is
@@ -2649,12 +2880,26 @@ function isTagRef(name: string): boolean {
  * created a branch `HEADS/MAIN` for the second, so this costs nothing there.
  */
 function destinationBranch(destination: string): string | null {
-  const folded = destination.toLowerCase();
-  if (folded.startsWith("refs/heads/")) return destination.slice("refs/heads/".length);
+  // Folded ({@link foldFileName}). The spelled word is sliced after as many
+  // `/` as the matched prefix holds: the fold never makes or removes a `/`,
+  // and it may drop a code point HFS+ ignores (`refs/<U+200D>heads/main`),
+  // so the prefix's own length is not the spelled word's.
+  const folded = foldNameLower(destination);
+  if (folded.startsWith("refs/heads/")) return afterSlashes(destination, 2);
   if (folded.startsWith("refs/")) return null;
-  if (folded.startsWith("heads/")) return destination.slice("heads/".length);
+  if (folded.startsWith("heads/")) return afterSlashes(destination, 1);
   if (folded.startsWith("tags/") || folded.startsWith("remotes/")) return null;
   return destination;
+}
+
+/** `word` after its first `count` slashes (the whole tail past the last of them). */
+function afterSlashes(word: string, count: number): string {
+  let at = -1;
+  for (let seen = 0; seen < count; seen += 1) {
+    at = word.indexOf("/", at + 1);
+    if (at < 0) return "";
+  }
+  return word.slice(at + 1);
 }
 
 /** The branch names every push reading treats as a trunk. */
@@ -2665,8 +2910,8 @@ const TRUNK_BRANCHES: readonly string[] = ["main", "master"];
  * filesystem a remote's loose `refs/heads/MAIN` is its `refs/heads/main`.
  */
 function isTrunkBranch(branch: string, trunks: readonly string[]): boolean {
-  const lower = branch.toLowerCase();
-  return trunks.some((trunk) => trunk.toLowerCase() === lower);
+  const folded = foldNameLower(branch);
+  return trunks.some((trunk) => foldNameLower(trunk) === folded);
 }
 
 /** Does either source or destination of this refspec explicitly name a tag? */
@@ -3058,7 +3303,7 @@ function gitPushClass(
   const legacy =
     remoteWord === undefined
       ? facts.legacyRemotes.length > 0
-      : facts.legacyRemotes.some((name) => name.toLowerCase() === remoteWord.toLowerCase());
+      : facts.legacyRemotes.some((name) => foldNameLower(name) === foldNameLower(remoteWord));
   if (legacy) return { class: "vcs.history.rewrite", rule: GIT_PUSH_CONFIG_UNREADABLE_RULE };
 
   const headAs = facts.head === null || facts.headIsDefault ? "main" : `refs/heads/${facts.head}`;
@@ -3093,7 +3338,7 @@ function gitPushClass(
   // filesystem a loose `refs/tags/v1` and `V1` may be one file. git 2.50.1 on
   // APFS refused `git push origin V1` beside a tag `v1`, so this costs nothing
   // there.
-  const foldedTags = new Set([...facts.tags].map((tag) => tag.toLowerCase()));
+  const foldedTags = new Set([...facts.tags].map(foldNameLower));
   // The words whose SOURCE decides what kind of ref the push writes: a
   // colon-less word, and the source of a `src:dst` whose destination does not
   // start with `refs/` (git gives such a destination the kind of its source:
@@ -3108,7 +3353,7 @@ function gitPushClass(
       .map((refspec) => refspec.slice(0, refspec.indexOf(":")))
       .filter((source) => source.length > 0 && !/^(?:head|@)(?:[~^].*)?$/iu.test(source) && !source.startsWith("refs/")),
   ];
-  const localTags = sourced.filter((name) => foldedTags.has(name.toLowerCase()));
+  const localTags = sourced.filter((name) => foldedTags.has(foldNameLower(name)));
   if (localTags.length > 0) {
     candidates.push({ class: "release.publish", rule: "git-push-local-tag", path: localTags.join(" ") });
   }
@@ -4405,7 +4650,7 @@ function globElements(pattern: string): GlobElement[] | null {
  * build past about ten thousand, and was then judged to match too).
  */
 export function globSegmentMatches(pattern: string, name: string): boolean {
-  if (!isPatternSegment(pattern)) return pattern.toLowerCase() === name.toLowerCase();
+  if (!isPatternSegment(pattern)) return foldNameLower(pattern) === foldNameLower(name);
   if (name.startsWith(".") && (pattern.startsWith("*") || pattern.startsWith("?"))) return false;
   const elements = globElements(pattern);
   if (elements === null) return true;
@@ -4473,7 +4718,7 @@ const GIT_CONFIG_FILE_WRITE_RULE = "git-config-file-write";
  * `.git/config` does.
  */
 function namesGitConfigFile(word: string): boolean {
-  const segments = pathSegments(word).map((segment) => segment.toLowerCase());
+  const segments = pathSegments(word).map(foldNameLower);
   const last = segments[segments.length - 1];
   if (last === ".gitconfig" || last === "gitconfig") return true;
   // The directory itself too: `cp -t ~/.config/git x` writes into it.
@@ -5294,11 +5539,11 @@ function printerCommand(segment: LexSegment): { lexed: LexWord[]; start: number;
   // (`/usr/bin/printf`, `/bin/echo`; #680's gate, M2), written plainly.
   const command = lexed[start]?.text ?? "";
   const byPath = command.includes("/") && isSystemBinWord(command, lexed[start]?.exact ?? false);
-  const name = (byPath ? (command.split("/").pop() ?? "") : command).toLowerCase();
+  const name = foldNameLower(byPath ? (command.split("/").pop() ?? "") : command);
   // Any other path whose last name is a printer (`/usr/bin//printf`,
   // `/bin/../usr/bin/printf`, `./printf`) may run the system's own: what it
   // prints is not read, and counts (review-b's read of #683, M1).
-  const otherPath = !byPath && command.includes("/") && /^(?:printf|echo|print)$/u.test((command.split("/").pop() ?? "").toLowerCase());
+  const otherPath = !byPath && command.includes("/") && /^(?:printf|echo|print)$/u.test(foldNameLower(command.split("/").pop() ?? ""));
   return { lexed, start, name, byPath, otherPath };
 }
 
@@ -5774,7 +6019,7 @@ function sedLiteralGitWrite(
   dir: ShellDir | null | undefined,
   lineNamesGit: boolean,
 ): { class: string; rule: string; path: string } | null {
-  const literalGit = (path: string): boolean => pathSegments(path).some((segment) => segment.toLowerCase() === ".git");
+  const literalGit = (path: string): boolean => pathSegments(path).some((segment) => foldNameLower(segment) === ".git");
   const hit = words.find(
     (word) =>
       literalGit(word) ||
@@ -7941,7 +8186,7 @@ function outrankingProtected(
   // rule, a `..` spelling can name the environment map while its spelling also
   // names the log directory; the stricter of the two must not be dropped.
   const isTheRead = (word: string): boolean =>
-    isCredentialPath(word) &&
+    isCredentialPathAsRead(word) &&
     protectedRank(protectedPathClass(word, protectedPaths) ?? "policy.core") >= protectedRank("policy.core");
   const named = strictestProtected(
     writesOnly ? positionals : positionals.filter((arg) => !isTheRead(arg)),
@@ -8541,7 +8786,7 @@ function strictestProtected(
   // each is reported beside the segment's class, so the policy judges each.
   const others = new Set<string>();
   for (const word of words) {
-    const classes = protectedPathClasses(word, protectedPaths);
+    const classes = protectedPathClassesAsRead(word, protectedPaths);
     const surface = classes[0];
     if (surface === undefined) continue;
     if (skipProse && proseNamingProtectedPath(word, surface, protectedPaths)) continue;
@@ -9009,7 +9254,7 @@ function classifySegment(
       }
       // A substitution keeps today's refusal: the no-rule stand-in is for the
       // command's own segments only.
-      const nested = classifyCommand(inner, protectedPaths, {
+      const nested = classifyCommandAsRead(inner, protectedPaths, {
         ...context,
         ...(context.noRuleSegments === true ? { noRuleSegments: false } : {}),
         bodyAlreadyRead,
@@ -9428,8 +9673,8 @@ function classifySegment(
       (dir) =>
         dir.split("/").some((part) => part.startsWith(".")) ||
         strictestProtected([dir, `${dir}/`], protectedPaths) !== null ||
-        isCredentialPath(dir) ||
-        isCredentialPath(`${dir}/`),
+        isCredentialPathAsRead(dir) ||
+        isCredentialPathAsRead(`${dir}/`),
     );
     const guarded =
       cwdRefused ||
@@ -9442,11 +9687,11 @@ function classifySegment(
       fetched.unknown !== null ||
       fetchedOutputProtected !== null ||
       strictestProtected([...lexWords.map((word) => word.text), ...resolvedWords], protectedPaths) !== null ||
-      [...lexWords.map((word) => word.text), ...resolvedWords].some((word) => isCredentialPath(word)) ||
+      [...lexWords.map((word) => word.text), ...resolvedWords].some((word) => isCredentialPathAsRead(word)) ||
       // F-12 fold (review-b N2): APFS and the default macOS volume are case-
       // insensitive, so `>> approval.md` is the policy file. Fail closed: a bare
       // word that names a protected file or a credential in ANY case refuses.
-      lexWords.some((word) => protectedNameFolded(word.text, protectedPaths) || isCredentialPath(word.text.toLowerCase())) ||
+      lexWords.some((word) => protectedNameFolded(word.text, protectedPaths) || isCredentialPathAsRead(foldNameLower(word.text))) ||
       // F-12 fold (review-b M1, laundering): a known command behind a word the
       // table does not know (`uv run npm publish`, `caffeinate -i npm publish`,
       // `su x -c 'npm publish'`) is not a no-rule segment. Last, so it runs
@@ -9886,8 +10131,8 @@ function innerPartRefused(part: LexSegment, protectedPaths: readonly ProtectedPa
         DIRECTORY_VERBS.has(word.text.split("/").pop() ?? "") ||
         protectedNameFolded(word.text, protectedPaths) ||
         strictestProtected([word.text], protectedPaths) !== null ||
-        isCredentialPath(word.text) ||
-        isCredentialPath(word.text.toLowerCase()),
+        isCredentialPathAsRead(word.text) ||
+        isCredentialPathAsRead(foldNameLower(word.text)),
     )
   );
 }
@@ -9899,14 +10144,14 @@ function innerPartRefused(part: LexSegment, protectedPaths: readonly ProtectedPa
  * with a `/` or a leading `.`, so a bare name is the whole question.
  */
 function protectedNameFolded(text: string, protectedPaths: readonly ProtectedPathEntry[]): boolean {
-  const folded = text.toLowerCase();
+  const folded = foldNameLower(text);
   if (folded.length === 0) return false;
   const names = [
     ...CORE_FILENAMES,
     ...PROTECTED_FILENAMES,
     ...protectedPaths.map((entry) => (typeof entry === "string" ? entry : entry.path)),
   ];
-  return names.some((name) => (name.split("/").filter((part) => part.length > 0).pop() ?? "").toLowerCase() === folded);
+  return names.some((name) => foldNameLower(name.split("/").filter((part) => part.length > 0).pop() ?? "") === folded);
 }
 
 /**
@@ -9938,10 +10183,81 @@ function segmentsMayChangeDirectory(segments: readonly LexSegment[], depth = 0):
   return false;
 }
 
+/**
+ * Classify a command line, in both name readings (`name-fold.ts`).
+ *
+ * The line is classified with guarded names folded (how APFS opens them), and
+ * again as spelled (how every guard read names before they folded) whenever
+ * the two readings can differ. The answer is the folded one, plus every class
+ * the as-spelled answer gives a segment that the folded answer for the same
+ * segment text lacks, as its own entry over that text (the shape a pipeline
+ * and APRV-503's `also` entry already have), so a reader of `segments` and
+ * `classes` judges both without learning a new field. A refusal in either
+ * reading refuses the line, the folded one first. So the classes this
+ * returns always contain the classes the as-spelled reading alone returns,
+ * and a policy that judges each class cannot answer a folded spelling more
+ * lightly than it answered that spelling before names folded.
+ */
 export function classifyCommand(
   command: string,
   protectedPaths: readonly ProtectedPathEntry[] = [],
   context: ClassifierContext = {},
+): CommandClassification {
+  return unionNameReadings(eachNameReading(() => classifyCommandAsRead(command, protectedPaths, context)));
+}
+
+/**
+ * {@link classifyCommand} in the CURRENT name reading only. For a caller that
+ * runs a larger chain in both readings and joins them with
+ * {@link unionNameReadings} itself (the hook's `classifyForHook`); anything
+ * else asks {@link classifyCommand}.
+ */
+export function classifyCommandInThisReading(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[] = [],
+  context: ClassifierContext = {},
+): CommandClassification {
+  return classifyCommandAsRead(command, protectedPaths, context);
+}
+
+/**
+ * Join a classification's name readings (`[folded]`, `[folded, asSpelled]`,
+ * or the folded answer once per equal claim and then the as-spelled one) as
+ * {@link classifyCommand} states: the folded answer, then each later
+ * reading's segment whose class the answer so far lacks for that segment
+ * text; a refusal in any reading refuses, the folded one first.
+ */
+export function unionNameReadings(readings: readonly CommandClassification[]): CommandClassification {
+  const [folded, ...others] = readings;
+  if (folded === undefined) throw new TypeError("unionNameReadings needs the folded reading");
+  if (!folded.ok) return folded;
+  for (const other of others) if (!other.ok) return other;
+  if (others.length === 0) return folded;
+  const segments = [...folded.segments];
+  const classes = [...folded.classes];
+  // Keyed, so a line of many segments joins in linear time.
+  const key = (segment: ClassifiedSegment): string => `${segment.class}\u0000${segment.text}`;
+  const have = new Set(segments.map(key));
+  const known = new Set(classes);
+  for (const other of others) {
+    if (!other.ok) continue;
+    for (const segment of other.segments) {
+      if (have.has(key(segment))) continue;
+      have.add(key(segment));
+      segments.push({ ...segment });
+      if (!known.has(segment.class)) {
+        known.add(segment.class);
+        classes.push(segment.class);
+      }
+    }
+  }
+  return { ok: true, segments, classes };
+}
+
+function classifyCommandAsRead(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  context: ClassifierContext,
 ): CommandClassification {
   const lexed = lex(command);
   if (!lexed.ok) {
@@ -10002,7 +10318,7 @@ export function classifyCommand(
       // F-12 fold (review-b M2a): the inner script runs in the directory the
       // OUTER command moved to, which the inner scan cannot see, so after an
       // outer cd/pushd/popd/chdir no inner segment stands in.
-      const inner = classifyCommand(script, protectedPaths, {
+      const inner = classifyCommandAsRead(script, protectedPaths, {
         ...context,
         shellDir: execContext.shellDir ?? null,
         unwrapShell: false,
