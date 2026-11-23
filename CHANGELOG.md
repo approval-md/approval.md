@@ -266,6 +266,44 @@ on the change above.
   and 10,000 levels of nesting each take under half a second of CPU through
   the hook.
 
+**The hook answers before the harness stops listening.** A hook the harness
+kills at its timeout is a tool call that proceeds, and reading one long word
+could take that long: `cat b/b/b/…/env`, a path of 100 KB that names nothing
+guarded, took 76 CPU seconds to classify, past Claude Code's default 60 second
+hook timeout. So a command line that long ran with no gate at all, whatever
+else was on it.
+
+- **The path walks are linear.** Two walks resolved the whole path once per
+  component: the search for a path's deepest existing ancestor
+  (`canonicalPath`) now halves after 32 climbs, and the kernel-order landing
+  (`physicalLanding`) keeps the components below the first missing one as a
+  list. Two more took each component from the front of an array, which moves
+  the rest every time; they pop from the end. Answers are unchanged, held
+  against the old walks on a fixture of links, loops and missing components.
+  That 100 KB word now takes 0.2 seconds, and a megabyte under two.
+- **Reading a call has its own deadline: 15 seconds**, or the harness ceiling
+  less two seconds where one is stated or assumed and that is shorter (Hermes's
+  30 second default leaves the whole 15; a ceiling too short to spare two
+  seconds gives a quarter of itself). With a gate window open the deadline is
+  the same one. A call
+  the hook cannot read in that time is refused `hook-deadline`, with nothing
+  registered or requested, while the hook can still say so. The deadline stops
+  the hook's own work from outside it, so no input can outrun it; it does not
+  interrupt a blocking system call. `APPROVAL_HOOK_DESCRIBE_DEADLINE_MS` can
+  shorten it and can never lengthen it. A read that is stopped is stopped part
+  way, so a process that answers many calls on one thread (the Codex bridge)
+  refuses every later call the same way, and says so, until it is started
+  again. `approval serve` retires the thread that was stopped, and the next
+  call is read by a fresh one. `hook-deadline` joins the `hook_deny_codes`
+  union of the conformance vectors.
+- **A slow read shortens the wait.** A read that takes more than one second
+  shortens the wait for a decision by the rest, so a read of several seconds
+  does not push the hook's last answer past the harness's timeout. An
+  ordinary read takes milliseconds and changes nothing: the wait, the retry
+  grace and the age at which a question counts as abandoned are as they were.
+- Still slow, and now refused rather than passed: a megabyte of many short
+  path words takes about 20 seconds to read, which is past the deadline.
+
 **Guarded names fold case on every platform.** The guards compared a path's
 names with the guarded names by exact letter case, while APFS, macOS's
 default volume, opens a name under full Unicode case folding. So `echo x >
