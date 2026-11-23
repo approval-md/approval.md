@@ -186,7 +186,9 @@ test("cost: a word of many nested brace groups is bounded", () => {
 });
 
 test("cost: deep nesting is read once, and refused past 128 levels", () => {
-  const nest = (n: number): string => `echo x > "${"$(echo ".repeat(n)}x${")".repeat(n)}"`;
+  // `cat`, whose output the reader does not render: zsh's echo of an unknown
+  // word counts at the first level (the sixth security review of #680's gate).
+  const nest = (n: number): string => `echo x > "${"$(cat ".repeat(n)}x${")".repeat(n)}"`;
   for (const n of [64, 128]) bounded(nest(n), `nesting ${String(n)}`);
   // Read to 64 levels; a deeper body counts as naming .git, the strict side.
   assert.deepEqual(pure(nest(64)), ["files.write.workspace redirect-write"]);
@@ -340,4 +342,27 @@ test("cost: through the hook, in a checkout, the same lines are bounded", { skip
     });
     withinBound(seconds, `hook, ${label}`);
   }
+});
+
+test("cost: the gate follow-up's readers (zsh forms, printf modifiers and words) are bounded", () => {
+  const P = "git push --force && ";
+  // Each is a walk of the line: under 0.2 CPU s at the largest size here.
+  for (const n of [2000, 20000]) {
+    bounded(`${P}f=x; echo x > "${"$f:z".repeat(n)}"`, `unbraced zsh forms that are no modifier, n=${String(n)}`);
+    bounded(`${P}echo x > "${"$OUT[@]".repeat(n)}"`, `unbraced whole-array forms, n=${String(n)}`);
+    bounded(`${P}echo x > "${"${a[@]}".repeat(n)}"`, `braced whole-array forms, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf %.4s${" \"$V\"".repeat(n)})"`, `a cut of many quoted words, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf %s${" $V".repeat(n)})"`, `many words that may split, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf %.4${"l".repeat(n * 10)}s .gitfoo)"`, `a run of length modifiers, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf %${"0".repeat(n * 10)}${"l".repeat(n * 10)}.)"`, `zeros then length modifiers and no conversion, n=${String(n)}`);
+    // Codex's SOURCE HOLD on 101630f2: four readings of path-named printers,
+    // a stray `%` beside many `%%`, and many `\c`.
+    bounded(`${P}echo x > "$(${"/usr/bin/printf x; ".repeat(n)}printf it)"`, `many printers named by path, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf '${"%%".repeat(n * 10)}%')"`, `many %% then a stray %, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf %b${" '\\cX'".repeat(n)})"`, `many words with \\c, n=${String(n)}`);
+    // review-b's read of #683: many `printf -v` segments, and printers by other paths.
+    bounded(`${P}${"printf -v d %s x; ".repeat(n)}echo x > "$d"`, `many printf -v segments, n=${String(n)}`);
+    bounded(`${P}echo x > "$(${"/usr/bin//printf x; ".repeat(n)}printf it)"`, `many printers by other paths, n=${String(n)}`);
+  }
+  assert.deepEqual(pure(`echo x > "$(printf %.4${"l".repeat(1000)}s .gitfoo)/config"`), [DIR_WRITE]);
 });
