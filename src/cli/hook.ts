@@ -167,7 +167,7 @@ import {
   type EventRecord,
 } from "../core/log.js";
 import { settleTerminationGuards } from "../core/log-lock.js";
-import { ANY_NAME, type GlobPattern, globPattern as compiledGlobPattern } from "../core/glob-match.js";
+import { ANY_NAME, type GlobPattern, globPattern as compiledGlobPattern, zshOptionReading } from "../core/glob-match.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import {
@@ -4113,7 +4113,13 @@ export function classifyForHook(
   // fan-out's cost). Only where a `\`+newline sits in quotes or a comment,
   // which the shell keeps, is the text with every one removed read as well.
   const joined = joinContinuations(command);
-  const bases = [...new Set([joined, command.replaceAll("\\\n", "")])];
+  // Security review of ec416318: joinContinuations knows quotes and comments,
+  // not a heredoc's body (where a quoted delimiter keeps every `\`+newline, so
+  // `x\<newline>EOF` still ends it) nor a nested `$(…)` or backquote. Where
+  // the text holds one of those, the text as written is read too, with its
+  // refusal standing, as before the S1 fold; elsewhere it is not (the cost).
+  const shellMayKeep = joined !== command && /<<|\$\(|`/u.test(command);
+  const bases = [...new Set([joined, command.replaceAll("\\\n", ""), ...(shellMayKeep ? [command] : [])])];
   const outer = shellOptionsSet;
   shellOptionsSet = outer || bases.some(setsShellOption);
   try {
@@ -4121,7 +4127,7 @@ export function classifyForHook(
       classifyForHookOnce(text, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments);
     let judged = once(joined);
     for (const base of bases) {
-      if (base !== joined) judged = togetherIfNew(judged, once(base), false);
+      if (base !== joined) judged = togetherIfNew(judged, once(base), base === command);
       // Other readings of the same text, the stricter together: zsh's numeric
       // glob where bash reads a redirect (a refusal of that reading stands),
       // and a group a word carries, which zsh globs with no option set
@@ -4130,6 +4136,15 @@ export function classifyForHook(
       // of that reading alone adds nothing, so `f() { …; }` keeps its
       // verdict). The two compose (`p<->/a(u)th.json`; codex on 83f30bdc): the
       // group reading is taken of the numeric reading too.
+      // The text as zsh reads it under `extendedglob` and `braceccl`, which
+      // the user's zshrc may set (the lead's ruling L61492); a reading that
+      // adds no class leaves the answer as it was.
+      const option = zshOptionCommandReading(base);
+      if (option !== null) {
+        judged = togetherIfNew(judged, once(option), false);
+        const grouped = optionGroupReading(option);
+        if (grouped !== null) judged = togetherIfNew(judged, once(grouped), false);
+      }
       const zsh = zshNumericGlobReading(base);
       if (zsh !== null) judged = together(judged, once(zsh), true);
       for (const reading of new Set([optionGroupReading(base), zsh === null ? null : optionGroupReading(zsh)])) {
@@ -8521,10 +8536,106 @@ function optionGroupReading(command: string): string | null {
     // with no option set, and `.@*nv` would need the `@` (build-2's sweep v3
     // on 83f30bdc, under the abstain policy).
     const prefixed = start > from && /[@!+?*]/u.test(command[start - 1] as string) ? start - 1 : start;
+    // A flag group zsh reads under `extendedglob` that is not a letter-case
+    // or anchor flag (`(#a1)` approximation, `(#c2)` repetition, `(#q)`)
+    // may let the rest of its segment be any name, a dot name too: the rest
+    // of the segment is written as `{.*,*}` (the lead's ruling L61492:
+    // `(#a1).Zermes` names `.hermes`).
+    if (command.startsWith("(#", start) && !/^\(#[ilIbBmMseUu]*\)$/u.test(command.slice(start, end))) {
+      const rest = /[/\s;&|<>'"`)]/u.exec(command.slice(end));
+      text += `${command.slice(from, prefixed)}{.*,*}`;
+      from = rest === null ? command.length : end + rest.index;
+      continue;
+    }
     text += `${command.slice(from, prefixed)}*`;
     from = end;
   }
   return text + command.slice(from);
+}
+
+/**
+ * The command with each unquoted path segment zsh reads as a glob under
+ * `extendedglob` or `braceccl` written as the plain glob it is at most
+ * ({@link zshOptionReading}): `.h^Z` as `.h*`, `.Z#hermes` as `.*hermes`,
+ * `.{hZ}ermes` as `.[hZ]ermes`, `^zz` as `*`. The user's own zshrc may set
+ * either option, so every command is read this way too and the stricter
+ * answer stands (the lead's ruling L61492). Only unquoted text: zsh reads
+ * `'^import'` as itself. A segment holding a quote, a backslash, a `$`, a
+ * backquote or a group is left as written (groups are
+ * {@link optionGroupReading}'s), and so are a comment and a git revision
+ * ({@link GIT_REVISION_SUFFIX}). `null` when nothing
+ * changes. One pass over the text.
+ */
+/**
+ * A git revision suffix in a segment with no `.` (`HEAD~1`, `main^`,
+ * `HEAD^{tree}`, `HEAD@{1}`, `HEAD~1:main`): read as git spells it, not as
+ * zsh's exclusion, negation or brace class, which would turn `HEAD~1` into
+ * `HEAD` (git-push-remote-config's agreement test).
+ */
+const GIT_REVISION_SUFFIX = /^[^.]*(?:[~^](?:\d|$|:|\{)|@\{)/u;
+
+function zshOptionCommandReading(command: string): string | null {
+  if (!/[\^#{~]/u.test(command)) return null;
+  const separator = /[\s;&|<>()]/u;
+  let out = "";
+  let changed = false;
+  let at = 0;
+  while (at < command.length) {
+    const char = command[at] as string;
+    if (separator.test(char)) {
+      out += char;
+      at += 1;
+      continue;
+    }
+    const before = out[out.length - 1];
+    if (char === "#" && (before === undefined || /[\s;&|]/u.test(before))) {
+      const newline = command.indexOf("\n", at);
+      const stop = newline === -1 ? command.length : newline;
+      out += command.slice(at, stop);
+      at = stop;
+      continue;
+    }
+    let word = "";
+    let quote: string | null = null;
+    while (at < command.length) {
+      const next = command[at] as string;
+      if (quote === "'") {
+        word += next;
+        at += 1;
+        if (next === "'") quote = null;
+        continue;
+      }
+      if (next === "\\") {
+        word += command.slice(at, at + 2);
+        at += 2;
+        continue;
+      }
+      if (quote === '"') {
+        word += next;
+        at += 1;
+        if (next === '"') quote = null;
+        continue;
+      }
+      if (next === "'" || next === '"') {
+        quote = next;
+        word += next;
+        at += 1;
+        continue;
+      }
+      if (separator.test(next)) break;
+      word += next;
+      at += 1;
+    }
+    const rewritten = word
+      .split("/")
+      .map((segment) =>
+        /['"`$\\()]/u.test(segment) || GIT_REVISION_SUFFIX.test(segment) ? segment : (zshOptionReading(segment) ?? "*"),
+      )
+      .join("/");
+    if (rewritten !== word) changed = true;
+    out += rewritten;
+  }
+  return changed ? out : null;
 }
 
 /** Names a credential file goes by, for a pattern to be tested against. */

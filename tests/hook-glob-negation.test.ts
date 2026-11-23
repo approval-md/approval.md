@@ -531,3 +531,90 @@ test("review-b's N3 at bcb1be08: a group nested in an attached group is read thr
     assert.match(claude(command, abstainLab), /^deny: /u, command);
   }
 });
+
+test("security review of ec416318: a quoted heredoc keeps its backslash-newline, so a command after its real end is still read", () => {
+  // In `<<'EOF'` the body is literal: `x\<newline>EOF` ends the heredoc at
+  // the second line, and `rm -rf ~/x` runs. Removing the continuation would
+  // join `xEOF` and read the rm as heredoc text. The text as written is read
+  // too wherever a heredoc or a nested substitution is present.
+  const own = classes("rm -rf ~/x");
+  for (const command of [
+    "cat <<'EOF'\nx\\\nEOF\nrm -rf ~/x\nEOF",
+    'cat <<"EOF"\nx\\\nEOF\nrm -rf ~/x\nEOF',
+    "cat <<\\EOF\nx\\\nEOF\nrm -rf ~/x\nEOF",
+    "cat <<'EOF'\nx\\\nEOF\nrm -rf ~/x",
+    'cat <<"EOF"\nx\\\nEOF\nrm -rf ~/x',
+  ]) {
+    // A refusal (the trailing `EOF` line has no rule) is a deny, stricter still.
+    const judged = classes(command);
+    if (judged.length === 1 && judged[0]?.startsWith("refused:") === true) continue;
+    for (const cls of own) assert.ok(judged.includes(cls), `${JSON.stringify(command)}: ${judged.join(", ")} lacks ${cls}`);
+  }
+});
+
+test("lead's ruling L61492: every word is read as zsh reads it under extendedglob and braceccl too, no setter needed", () => {
+  // The user's own zshrc may set either option, so these open what they name
+  // with no setter in the command. At ec416318 each read was allowed under
+  // both policies (the 198 earlier-call rows of sweep v3) and each write
+  // was a workspace write.
+  const reads = [
+    "cat ~/^zz/auth.json", // ^ (extendedglob; globdots for the dot name)
+    "cat ~/.hermes/^zz",
+    "cat ~/.h^Z/auth.json",
+    "cat ~/.hermes/a^Z",
+    "cat ~/.Z#hermes/auth.json", // X# zero or more
+    "cat ~/.hermes/Z#auth.json",
+    "cat ~/.h##ermes/auth.json", // X## one or more
+    "cat ~/.hermes/a##uth.json",
+    "cat ~/(#a1).Zermes/auth.json", // (#a1) approximation
+    "cat ~/.hermes/(#a1)Zuth.json",
+    "cat ~/.{hZ}ermes/auth.json", // braceccl
+    "cat ~/.hermes/{a-z}uth.json",
+    "cat ~/.hermes/auth.json~zz", // ~ exclusion
+    "cat .approval/e#nv",
+    "cat .{a}pproval/env",
+  ];
+  for (const command of reads) {
+    for (const at of [lab, abstainLab]) {
+      const decision = claude(command, at);
+      assert.match(decision, /^deny: /u, `${command}: ${decision}`);
+    }
+    assert.ok(classes(command).includes("account.credential") || classes(command).includes("policy.core"), command);
+  }
+  // Guarded files written through each form: the gate's files, its home and
+  // the git directory.
+  for (const [command, cls] of [
+    ["echo x > APPROVA{L}.md", "policy.core"],
+    ["echo x > A##PPROVAL.md", "policy.core"],
+    ["echo x > APPROV^Z", "policy.core"],
+    ["echo x > APPROVAL.md~zz", "policy.core"],
+    ["echo x > .a^Z/env", "policy.core"],
+    ["echo x > .a##pproval/env", "policy.core"],
+    ["echo x > .{a}pproval/env", "policy.core"],
+    ["echo x > ~/.h^Z/auth.json", "policy.core"],
+    ["echo x > .g##it/config", "vcs.history.rewrite"],
+    ["echo x > .{g}it/config", "vcs.history.rewrite"],
+    ["echo x > .g^Z/config", "vcs.history.rewrite"],
+  ] as const) {
+    assert.ok(classes(command).includes(cls), `${command}: ${classes(command).join(", ")}`);
+    assert.match(claude(command), /^deny: /u, command);
+  }
+  // Ordinary words stay ordinary. `dist/^keep` is `dist/*` to zsh: no guarded
+  // class. The rest answer as their plain spellings do (quoted text is not a
+  // glob to zsh).
+  const GUARDED = /^(policy\.|log\.mutate|vcs\.history\.rewrite|account\.credential)/u;
+  for (const command of ["rm -rf dist/^keep", "echo x > dist/^keep", "ls dist/{a}"]) {
+    assert.ok(!classes(command).some((cls) => GUARDED.test(cls)), `${command}: ${classes(command).join(", ")}`);
+  }
+  for (const [command, plain] of [
+    ["cat notes#1.md", "cat notes1.md"],
+    ["git log HEAD^", "git log HEAD"],
+    ["git diff HEAD~1", "git diff HEAD"],
+    ["grep -r '^import' src", "grep -r 'import' src"],
+    ["sed -n '/^x/p' README.md", "sed -n '/x/p' README.md"],
+    ["echo x > build/{a}.txt", "echo x > build/a.txt"],
+    ["cp README.md backup~", "cp README.md backup"],
+  ] as const) {
+    assert.deepEqual(classes(command), classes(plain), `${command} vs ${plain}`);
+  }
+});

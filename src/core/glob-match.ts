@@ -352,3 +352,75 @@ export function globPattern(component: string): GlobPattern {
   compiledCharacters += component.length;
   return pattern;
 }
+
+/**
+ * One path segment as zsh reads it under `extendedglob` and `braceccl`, as a
+ * plain glob (`*`, `?`, `[...]`) that matches at least every name zsh would,
+ * or `null` for any name (the lead's ruling L61492: either option may be set
+ * in the user's own zshrc, so every word is read both ways and the stricter
+ * answers). The segment itself when it holds none of the forms.
+ *
+ * - `{hZ}`, `{a-z}` (braceccl): the class `[hZ]`, `[a-z]`.
+ * - `X#` (zero or more X): `*` in X's place; `X##` (one or more): `X*`. A
+ *   leading `X#` may match nothing, so the segment is any name.
+ * - `^rest` (negation): any name at the segment's start; after a literal
+ *   prefix, the prefix and `*`.
+ * - `a~b` (exclusion, not at the start): `a`.
+ * - `(#i)`, `(#l)`, `(#I)`, `(#b)`, `(#B)`, `(#m)`, `(#M)`, `(#s)`, `(#e)`,
+ *   `(#U)`, `(#u)`: dropped (letter case is already ignored); any other flag
+ *   group, `(#a1)` approximation among them, makes the segment any name.
+ *
+ * A class (`[...]`) is copied whole, so a `^`, `#` or `~` in one is a member.
+ * One pass over the segment.
+ */
+export function zshOptionReading(segment: string): string | null {
+  // A `$` segment (`${VAR:-x}`, `${x#y}`, `$#`) is a parameter, judged by the
+  // hook's and the classifier's unresolved-variable rules, not read here.
+  if (segment.includes("$")) return segment;
+  if (!/[\^#{]/u.test(segment) && segment.indexOf("~", 1) === -1) return segment;
+  let text = segment;
+  if (text.includes("(#")) {
+    text = text.replace(/\(#[ilIbBmMseUu]*\)/gu, "");
+    if (text.includes("(#")) return null;
+  }
+  text = text.replace(/\{([^{},]+)\}/gu, (whole: string, body: string) => (body.includes("..") ? whole : `[${body}]`));
+  let out = "";
+  let unit = 0;
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at] as string;
+    if (char === "\\") {
+      unit = out.length;
+      out += text.slice(at, at + 2);
+      at += 1;
+      continue;
+    }
+    if (char === "[") {
+      let close = at + 1;
+      if (text[close] === "!" || text[close] === "^") close += 1;
+      if (text[close] === "]") close += 1;
+      close = text.indexOf("]", close);
+      if (close !== -1) {
+        unit = out.length;
+        out += text.slice(at, close + 1);
+        at = close;
+        continue;
+      }
+    }
+    if (char === "^") return out.length === 0 ? null : `${out}*`;
+    if (char === "~" && at > 0) return out.length === 0 ? null : out;
+    if (char === "#") {
+      if (text[at + 1] === "#") {
+        if (out.length === 0) return null;
+        out += "*";
+        at += 1;
+        continue;
+      }
+      if (unit === 0 || out.length === 0) return null;
+      out = `${out.slice(0, unit)}*`;
+      continue;
+    }
+    unit = out.length;
+    out += char;
+  }
+  return out;
+}
