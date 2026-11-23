@@ -50,20 +50,20 @@ for (const [dir, file] of [[".claude", "settings.json"], [".github/workflows", "
 // COST686 <name>:` since), as #694 set "many command words". Lead ruling
 // L62051 asked for "1.5 times its CPU seconds on CI's runner": for
 // glob_sources and rm_dot_names that is THIS branch's figure (the
-// coordinator's reading, not corrected by the lead; review-b to check), taken
+// reading the lead confirmed for all three lines in L62116), taken
 // at 5cba746b, whose cost on these two lines 945bba1c leaves as it was
 // (locally 0.69 and 0.95 CPU s at 5cba746b, 0.65 and 0.94 at 945bba1c).
 // Run 45260235850 (#686 at 5cba746b), shard 2: 2.20 CPU s.
 const BOUND_GLOB_SOURCES_S = 1.5 * 2.2;
 // Run 45260235850 (#686 at 5cba746b), shard 2: 3.86 CPU s.
 const BOUND_RM_DOT_NAMES_S = 1.5 * 3.86;
-// rsync_relative: lead ruling L62090 bounds it at 1.5 x MAIN's CI figure for
-// the same input, which this branch does not reach (about 10 x main locally,
-// see the PR body's floor table); the lead rules on that. Until then the line
-// logs its figure under a bound that cannot red CI and catches only a return
-// of the repeated walks: PROVISIONAL, 3 x the local figure at 945bba1c (1.94
-// CPU s), not a pin. The repeated walks took about 50.
-const BOUND_RSYNC_RELATIVE_S = 3 * 1.94;
+// rsync_relative: lead ruling L62116 (on L62090 and the ask L62115) accepts
+// the line at 1.5 x its OWN figure on CI's runner: about 10 x main after the
+// repeated walks went (1.5 x main is not reachable without changing what is
+// judged; the PR body has the floor table). A regression still reds: the
+// repeated walks took about 50 CPU s here.
+// Run 45266363135 (#686 at 38d219e5), shard 2: 5.47 CPU s.
+const BOUND_RSYNC_RELATIVE_S = 1.5 * 5.47;
 
 /** `head`, then `format(i)` for i = 0, 1, ... while the line stays within `bytes`. */
 function distinct(head: string, format: (index: string) => string, bytes: number): string {
