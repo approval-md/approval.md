@@ -3934,7 +3934,7 @@ export function judgeWriteLanding(
   spelled: string,
   scope: WriteScopeContext,
   homes: readonly string[] = currentHomes(),
-  tree = false,
+  tree: boolean | "listed" = false,
 ): WriteLanding {
   // Longer than any path the kernel opens (PATH_MAX is 1024 on macOS and 4096
   // on Linux): it cannot land anywhere this hook can name, and walking it one
@@ -3961,7 +3961,7 @@ export function judgeWriteLanding(
   // A TREE written at the landing (a recursive copy, a move, a link, an
   // archive, a clone) holds names this hook never reads: an entry under it is
   // within reach.
-  if (tree) {
+  if (tree !== false) {
     for (const form of forms) {
       const entry = guardedEntryBelow(form, homes);
       if (entry !== null) {
@@ -3972,7 +3972,7 @@ export function judgeWriteLanding(
     // hooks folder: a tree written there can lay one down. A landing that does
     // not exist yet holds none today (what the tree itself carries is not
     // read: see the hand-back).
-    if (TREE_AT_A_CHECKOUT_IS_GUARDED) {
+    if (TREE_AT_A_CHECKOUT_IS_GUARDED && tree === true) {
       for (const form of [...new Set([...landing.paths, ...forms])]) {
         try {
           lstatSync(join(form, ".git"));
@@ -4242,56 +4242,76 @@ interface IntoDir {
 }
 
 /**
- * The tar flags this hook reads for an EXTRACT, an allowlist (coordinator,
- * review of d3bd1c1b, point 1): `-x`, `-v`, `-z`, `-j`, `-J`, `-k`, `-m`, `-o`,
- * `-p`, `-O`, and `-f FILE` / `-C DIR`; the same long options spelled in full
- * (no prefix of one). Any other flag (`-P`, `--abs`, `--absolute-paths`,
- * `--insecure`, `-s`, `-U`, `-h` ...), any long option not spelled exactly, an
- * assignment on the segment, or `TAR_OPTIONS` / `TAR_READER_OPTIONS` in the
- * environment: where its members land is not read, so the extract is
- * unreadable (guarded).
+ * THE tar reader (coordinator, review of 90b809fe, rule B): one strict table,
+ * used for both questions, what the segment does and where an extract lands.
+ *
+ * Modes: `-x` / `--extract` / `--get` (extract), `-c` / `--create` (create),
+ * `-t` / `--list` (list); exactly one. Short flags without a value: `v z j J
+ * k m o p O`; with a value (attached, or the next word): `f`, `C`. Long
+ * options, spelled exactly (no abbreviation): `--verbose --gzip --gunzip
+ * --ungzip --bzip2 --xz --keep-old-files --touch --no-same-owner
+ * --preserve-permissions --same-permissions --to-stdout`, and with a value
+ * (`=` or the next word): `--file --directory --exclude --strip-components`.
+ * An old bundled first word (`tar xzf a.tar`) is read letter by letter by the
+ * same table, each value letter taking the next word. At most one `-C` /
+ * `--directory`. Anything else (another flag, a prefix of a long option, a
+ * second `-C`, no mode or two, an assignment on the segment, `TAR_OPTIONS` or
+ * `TAR_READER_OPTIONS` in the hook's environment) is unreadable.
  */
-const TAR_EXTRACT_SHORT = "xvzjJkmopO";
-const TAR_EXTRACT_SHORT_VALUE = "fC";
-const TAR_EXTRACT_LONG: readonly string[] = [
-  "--extract", "--get", "--verbose", "--gzip", "--gunzip", "--ungzip", "--bzip2", "--xz",
+const TAR_MODES: Readonly<Record<string, "extract" | "create" | "list">> = { x: "extract", c: "create", t: "list" };
+const TAR_LONG_MODES: Readonly<Record<string, "extract" | "create" | "list">> = { "--extract": "extract", "--get": "extract", "--create": "create", "--list": "list" };
+const TAR_SHORT = "vzjJkmopO";
+const TAR_SHORT_VALUE = "fC";
+const TAR_LONG: readonly string[] = [
+  "--verbose", "--gzip", "--gunzip", "--ungzip", "--bzip2", "--xz",
   "--keep-old-files", "--touch", "--no-same-owner", "--preserve-permissions", "--same-permissions", "--to-stdout",
 ];
-const TAR_EXTRACT_LONG_VALUE: readonly string[] = ["--file", "--directory"];
+const TAR_LONG_VALUE: readonly string[] = ["--file", "--directory", "--exclude", "--strip-components"];
 /** The tar names read as tar (the two others are refused upstream today: no rule). */
 const TAR_BINS: ReadonlySet<string> = new Set(["tar", "gtar", "bsdtar"]);
 
-/** An extract's `-C` directories, or why its landing cannot be read. */
-function readTarExtract(
+/** What a tar segment does and its one `-C`, or why that cannot be read. */
+export function readTar(
   args: readonly string[],
   assignments: readonly string[],
   env: NodeJS.ProcessEnv,
-): { dirs: string[] } | { unreadable: string } {
+): { mode: "extract" | "create" | "list"; directory: string | null } | { unreadable: string } {
   if (assignments.length > 0) return { unreadable: `an assignment on the tar segment (${assignments[0] as string}) may set its options` };
   for (const name of ["TAR_OPTIONS", "TAR_READER_OPTIONS"]) {
     const value = env[name];
     if (value !== undefined && value.length > 0) return { unreadable: `${name} is set in the environment, adding flags the line does not show` };
   }
-  const dirs: string[] = [];
-  const take = (letter: string, value: string | undefined): string | null => {
-    if (value === undefined) return `-${letter} has no value`;
-    if (letter === "C") dirs.push(value);
-    return null;
+  const modes = new Set<"extract" | "create" | "list">();
+  const directories: string[] = [];
+  /** One letter, read by the table; a value letter takes `value`. */
+  const letter = (each: string, value: () => string | undefined): string | null => {
+    const mode = TAR_MODES[each];
+    if (mode !== undefined) {
+      modes.add(mode);
+      return null;
+    }
+    if (TAR_SHORT_VALUE.includes(each)) {
+      const taken = value();
+      if (taken === undefined) return `-${each} has no value`;
+      if (each === "C") directories.push(taken);
+      return null;
+    }
+    if (TAR_SHORT.includes(each)) return null;
+    return `-${each} is not a flag this hook reads for tar`;
   };
+  let operandsOnly = false;
   for (let at = 0; at < args.length; at += 1) {
     const arg = args[at] as string;
-    if (arg === "--") break;
+    if (operandsOnly) continue;
+    if (arg === "--") {
+      operandsOnly = true;
+      continue;
+    }
     if (at === 0 && /^[A-Za-z]+$/u.test(arg)) {
-      // The old bundled form (`tar xzf a.tar -C d`): each value letter takes the next word.
       let next = at + 1;
-      for (const letter of arg) {
-        if (TAR_EXTRACT_SHORT_VALUE.includes(letter)) {
-          const failed = take(letter, args[next]);
-          next += 1;
-          if (failed !== null) return { unreadable: failed };
-        } else if (!TAR_EXTRACT_SHORT.includes(letter)) {
-          return { unreadable: `the bundled flag ${letter} is not one this hook reads for an extract` };
-        }
+      for (const each of arg) {
+        const failed = letter(each, () => args[next++]);
+        if (failed !== null) return { unreadable: `the bundled first word ${arg}: ${failed}` };
       }
       at = next - 1;
       continue;
@@ -4299,44 +4319,85 @@ function readTarExtract(
     if (arg.startsWith("--")) {
       const equals = arg.indexOf("=");
       const name = equals === -1 ? arg : arg.slice(0, equals);
-      if (TAR_EXTRACT_LONG_VALUE.includes(name)) {
-        const value = equals === -1 ? args[(at += 1)] : arg.slice(equals + 1);
-        if (value === undefined) return { unreadable: `${name} has no value` };
-        if (name === "--directory") dirs.push(value);
+      const mode = TAR_LONG_MODES[name];
+      if (mode !== undefined && equals === -1) {
+        modes.add(mode);
         continue;
       }
-      if (equals === -1 && TAR_EXTRACT_LONG.includes(name)) continue;
-      return { unreadable: `${arg} is not an option this hook reads for an extract (an exact spelling only)` };
+      if (TAR_LONG_VALUE.includes(name)) {
+        const value = equals === -1 ? args[(at += 1)] : arg.slice(equals + 1);
+        if (value === undefined) return { unreadable: `${name} has no value` };
+        if (name === "--directory") directories.push(value);
+        continue;
+      }
+      if (equals === -1 && TAR_LONG.includes(name)) continue;
+      return { unreadable: `${arg} is not an option this hook reads for tar (an exact spelling only)` };
     }
     if (arg.startsWith("-") && arg.length > 1) {
       for (let index = 1; index < arg.length; index += 1) {
-        const letter = arg[index] as string;
-        if (TAR_EXTRACT_SHORT_VALUE.includes(letter)) {
-          const rest = arg.slice(index + 1);
-          const failed = take(letter, rest.length > 0 ? rest : args[(at += 1)]);
-          if (failed !== null) return { unreadable: failed };
-          break;
-        }
-        if (!TAR_EXTRACT_SHORT.includes(letter)) return { unreadable: `-${letter} is not a flag this hook reads for an extract` };
+        const each = arg[index] as string;
+        const rest = arg.slice(index + 1);
+        let consumed = false;
+        const failed = letter(each, () => {
+          consumed = true;
+          return rest.length > 0 ? rest : args[(at += 1)];
+        });
+        if (failed !== null) return { unreadable: failed };
+        if (consumed) break;
       }
     }
   }
-  return { dirs };
+  if (modes.size !== 1) return { unreadable: modes.size === 0 ? "no mode is read" : "more than one mode is read" };
+  if (directories.length > 1) return { unreadable: `${String(directories.length)} directories are named with -C, and each one moves the next` };
+  return { mode: [...modes][0] as "extract" | "create" | "list", directory: directories[0] ?? null };
 }
 
-/** Does this `tar` argv extract (`-x`, `--extract`, `--get`, or a bundled first word holding `x`)? */
-function tarExtracts(args: readonly string[]): boolean {
-  return args.some(
-    (arg, at) =>
-      arg === "--extract" ||
-      arg === "--get" ||
-      (/^-[A-Za-z]+$/u.test(arg) && arg.includes("x")) ||
-      (at === 0 && /^[A-Za-z]+$/u.test(arg) && arg.includes("x")),
-  );
+/**
+ * Rule A's words: every word of the segment but the program's name, the value
+ * half of each `--opt=value`, and each tail of a short cluster (`-oDIR` gives
+ * `oDIR`'s tail `DIR`; every tail of a cluster up to 64 bytes, the first tail
+ * only past that). Over-included on purpose: it can only add a card.
+ */
+function listWords(shape: CommandSegmentShape): string[] {
+  const words: string[] = [];
+  for (const arg of shape.args) {
+    if (arg.length === 0) continue;
+    words.push(arg);
+    if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      if (equals !== -1 && equals + 1 < arg.length) words.push(arg.slice(equals + 1));
+    } else if (arg.startsWith("-") && arg.length > 2) {
+      const last = arg.length <= 64 ? arg.length - 1 : 2;
+      for (let at = 2; at <= last; at += 1) words.push(arg.slice(at));
+    }
+  }
+  return [...new Set(words)];
 }
 
 /**
  * Judge every write a command line makes, and attach what it finds.
+ *
+ * ## No second option parser (coordinator, review of 90b809fe)
+ *
+ * This pass reads a program's flags ONLY where main's classifier already read
+ * them to give its class, and never adds a flag table of its own, because a
+ * second, looser reader beside main's is a parser differential. Three rules:
+ *
+ * - A. A segment main classes as anything but a workspace write or a read
+ *   (`network.call`, `deps.*`, `vcs.*`, `exec.*`, a copy row main tightens
+ *   to a delete class; a refusal stands as refused): no parsing. Every word but the program's name, each
+ *   `--opt=value`'s value and each tail of a short cluster is judged as a
+ *   tree root against the list only ({@link listWords}). So `scp`, `rsync`
+ *   and the rest are never parsed here.
+ * - B. `tar`, `gtar`, `bsdtar`: one strict reader ({@link readTar}) answers
+ *   both what the segment does and where an extract lands; anything it cannot
+ *   read is unreadable.
+ * - C. Everything else main classes as a workspace write: main's own
+ *   candidates (the workspace-write row's operands and `copyTargetDirectories`,
+ *   `writeCandidates`, `fetchOutputs`, `readWriteTargets`, `gitWriteTargets`),
+ *   each judged as a tree root wherever the program may write below it.
+ *
+ * Do not add a flag table here: widen what main reads instead.
  *
  * `cwds` are the directories the line may start in (the hook's own, and the
  * envelope's where the harness sends one). A literal `cd` adds where it lands
@@ -4624,8 +4685,8 @@ export function refineWriteLandings(
   // One landing per spelling per line: the disk is read once for a target the
   // line names many times (a cost bound; the disk does not change within it).
   const landed = new Map<string, WriteLanding>();
-  const landOnce = (spelled: string, tree: boolean): WriteLanding => {
-    const key = `${tree ? "T" : "F"}${spelled}`;
+  const landOnce = (spelled: string, tree: boolean | "listed"): WriteLanding => {
+    const key = `${tree === true ? "T" : tree === false ? "F" : "L"}${spelled}`;
     const known = landed.get(key);
     if (known !== undefined) return known;
     const judged = judgeWriteLanding(spelled, scope, homes, tree);
@@ -4633,7 +4694,7 @@ export function refineWriteLandings(
     return judged;
   };
 
-  const judgeWord = (word: string, at: number, tree = false): WriteLanding => {
+  const judgeWord = (word: string, at: number, tree: boolean | "listed" = false): WriteLanding => {
     if (word.length === 0) return { kind: "in" };
     const resolved = resolveWriteWord(word, at, line);
     if ("unreadable" in resolved) {
@@ -4646,7 +4707,7 @@ export function refineWriteLandings(
     let verdict: WriteLanding = { kind: "in" };
     for (const each of spelled) {
       if (each.length > MAX_LANDING_BYTES) return judgeWriteLanding(each, scope, homes, tree);
-      const moved = volatileOf(each) ?? (tree ? treeTouched(staticPrefix(each)) : null);
+      const moved = volatileOf(each) ?? (tree === true ? treeTouched(staticPrefix(each)) : null);
       if (moved !== null) return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: moved };
       if (/[*?[]/u.test(each)) {
         // Point 6: a glob is read from the disk, bounded by entries and time;
@@ -4715,20 +4776,18 @@ export function refineWriteLandings(
       for (const word of operands) changes.push({ word, kind: bin === "mkdir" ? "mkdir" : "write" });
     } else if (LANDING_DELETE_EVERY.has(bin)) {
       for (const word of operands) changes.push({ word, kind: "remove" });
-    } else if (bin === "cp" || bin === "mv" || bin === "ln" || bin === "install" || bin === "rsync") {
-      const targetDirs = bin === "rsync" ? [] : copyTargetDirectories(shape.args);
+    } else if (bin === "cp" || bin === "mv" || bin === "ln") {
+      const targetDirs = copyTargetDirectories(shape.args);
       const targetDir = targetDirs[0] ?? null;
       const single = targetDir === null && operands.length === 1;
       const sources = single ? operands : targetDir === null ? operands.slice(0, -1) : operands.filter((operand) => operand !== targetDir);
       const destination = single ? "." : (targetDir ?? operands[operands.length - 1]);
       const kind = bin === "mv" ? "move" : "link";
-      // A tree: a move, a link, an rsync, a recursive copy.
-      const recursive = shape.args.some((arg) => arg === "--recursive" || arg === "--archive" || /^-[A-Za-z]*[Rra]/u.test(arg));
-      const tree = bin === "mv" || bin === "ln" || bin === "rsync" || (bin === "cp" && recursive);
-      // `src/`, `src/.` and `.` put the CONTENTS at the destination itself;
-      // `ln -n`/`-h`/`-F` replace a link or directory at the destination.
-      const contents = sources.some((source) => source === "." || source === ".." || source.endsWith("/") || source.endsWith("/.")) ||
-        (bin === "ln" && shape.args.some((arg) => /^-[A-Za-z]*[nhF]/u.test(arg) || arg === "--no-dereference"));
+      // Each writes a tree (rule C, no flag read: a copy is judged as the
+      // recursive one it may be). `src/`, `src/.` and `.` put the CONTENTS at
+      // the destination itself, and a link may replace what is there.
+      const tree = true;
+      const contents = bin === "ln" || sources.some((source) => source === "." || source === ".." || source.endsWith("/") || source.endsWith("/."));
       // A word the shell may still turn into an option (`ln -s "$T" l`) may
       // name the destination: what this segment changes is unknown.
       if (copyArgvUnknown(shape.args, shape.argFlags) !== null) {
@@ -4745,25 +4804,27 @@ export function refineWriteLandings(
         intoDirs.push({ dir: extra, sources, tree, contents });
       }
       if (bin === "mv") for (const source of sources) changes.push({ word: source, kind: "move" });
-    } else if (bin === "chmod" || bin === "chown" || bin === "chgrp") {
-      writes.push(...operands.slice(1));
-      for (const word of operands.slice(1)) changes.push({ word, kind: "write" });
-    } else if (bin === "sed" && shape.args.some((arg) => arg === "--in-place" || /^-[a-zA-Z]*i/u.test(arg))) {
-      const scripted = shape.args.some((arg) => arg === "-e" || arg === "-f" || arg.startsWith("--expression") || arg.startsWith("--file"));
-      const files = scripted ? operands : operands.slice(1);
-      writes.push(...files);
-      for (const word of files) changes.push({ word, kind: "write" });
-    } else if (bin === "dd") {
-      for (const arg of shape.args) {
-        if (!arg.startsWith("of=")) continue;
-        writes.push(arg.slice(3));
-        changes.push({ word: arg.slice(3), kind: "write" });
-      }
+    } else if (bin === "chmod" || (bin === "sed" && (segment === null || segment.rule === "sed-in-place"))) {
+      // Every operand, the mode and the script included (over-included).
+      writes.push(...operands);
+      for (const word of operands) changes.push({ word, kind: "write" });
     } else if (bin === "curl" || bin === "wget") {
+      // Main's own reader of the output words (`fetchOutputs`), no new table.
       const outputs = fetchOutputs(bin, shape.args, shape.argFlags);
       for (const word of [...outputs.files, ...outputs.directories]) {
         writes.push(word);
         changes.push({ word, kind: "write" });
+      }
+    } else if (TAR_BINS.has(bin)) {
+      // Rule B: every tar segment through the one reader.
+      const read = readTar(shape.args, shape.assignments, env);
+      const candidates = writeCandidates(shape.args);
+      writes.push(...candidates);
+      for (const word of candidates) changes.push({ word, kind: "link" });
+      if ("unreadable" in read) {
+        unreadable = `\`${shape.text}\` runs tar, and ${read.unreadable}, so what it writes and where is not read`;
+      } else if (read.mode === "extract") {
+        trees.push(read.directory ?? ".");
       }
     } else if (
       segment === null
@@ -4778,45 +4839,6 @@ export function refineWriteLandings(
       const candidates = writeCandidates(shape.args);
       writes.push(...candidates);
       for (const word of candidates) changes.push({ word, kind: "link" });
-      // An archive extracted is a tree at its directory (the working one when
-      // no `-C` names another), read through an allowlist of flags.
-      if (TAR_BINS.has(bin) && tarExtracts(shape.args)) {
-        const read = readTarExtract(shape.args, shape.assignments, env);
-        if ("unreadable" in read) {
-          unreadable = `\`${shape.text}\` extracts an archive, and ${read.unreadable}, so where its members land is not read`;
-        } else {
-          trees.push(...(read.dirs.length > 0 ? read.dirs : ["."]));
-        }
-      }
-    } else if (bin === "scp") {
-      // `scp [-r] SRC... DEST`: a local destination is written (a tree with
-      // `-r`); a remote one (`host:path`) writes nothing here.
-      const operands: string[] = [];
-      for (let at = 0; at < shape.args.length; at += 1) {
-        const arg = shape.args[at] as string;
-        if (/^-[A-Za-z0-9]*[cFiJloPS]$/u.test(arg)) {
-          at += 1;
-          continue;
-        }
-        if (arg.startsWith("-") && arg.length > 1) continue;
-        operands.push(arg);
-      }
-      const destination = operands[operands.length - 1];
-      if (operands.length >= 2 && destination !== undefined && !/^[^/]*:/u.test(destination)) {
-        const recursive = shape.args.some((arg) => /^-[A-Za-z0-9]*r/u.test(arg));
-        writes.push(destination);
-        changes.push({ word: destination, kind: "link" });
-        intoDirs.push({ dir: destination, sources: operands.slice(0, -1).map((source) => source.replace(/^[^/]*:/u, "")), tree: recursive, contents: false });
-      }
-    } else if (bin === "find") {
-      // `-fprint FILE`, `-fprint0 FILE`, `-fprintf FILE FORMAT`, `-fls FILE`.
-      for (const [at, arg] of shape.args.entries()) {
-        if (!["-fprint", "-fprint0", "-fprintf", "-fls"].includes(arg)) continue;
-        const file = shape.args[at + 1];
-        if (file === undefined) continue;
-        writes.push(file);
-        changes.push({ word: file, kind: "write" });
-      }
     } else if (segment !== null && segment.class.startsWith("files.")) {
       // A write or delete this pass does not model by name: each operand is a
       // path it may change. A program that writes (`npx prettier --write`,
@@ -4941,6 +4963,22 @@ export function refineWriteLandings(
       const judged = judgeWord(word, index, true);
       if (judged.kind === "guarded" && judged.rule === WRITE_GUARDED_RULE) verdict = judged;
       if (verdict?.kind === "guarded") break;
+    }
+    // Rule A: a segment main does not class as a workspace write or a read
+    // (`network.call`, `deps.*`, `vcs.*`, `exec.*` ...) is not parsed. Every
+    // word but the program's name, each `--opt=value`'s value and each tail
+    // of a short cluster (`-oDIR` gives `DIR`), is judged as a tree root
+    // against the list only: on it, inside it, or above a listed place.
+    // A delete (`rm`, `find -delete` ...) stays out, as point 7 rules.
+    const deletes = LANDING_DELETE_EVERY.has(bin ?? "") || (segment !== null && (segment.rule.startsWith("rm-") || segment.rule === "find-delete"));
+    if (verdict?.kind !== "guarded" && !deletes && (segment === null || (!segment.class.startsWith("read.") && segment.class !== WORKSPACE_WRITE))) {
+      for (const word of listWords(shape)) {
+        const judged = judgeWord(word, index, "listed");
+        if (judged.kind === "guarded" && judged.rule === WRITE_GUARDED_RULE) {
+          verdict = judged;
+          break;
+        }
+      }
     }
     // A tree at the destination itself: contents copied there, or a
     // destination that is not an existing directory (it becomes the tree).

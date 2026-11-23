@@ -632,9 +632,10 @@ test("a tree written at a checkout, at home, or above a listed place is guarded;
     "cd repo && tar -xf a.tar",
     "cp -r dotfiles/. repo/",
     "cp -R dotfiles/ repo",
-    "rsync -a dotfiles/ repo/",
+    "rsync -a dotfiles/ ~/",
     "npx prettier --write repo",
     "scp -r h:x/ ~/.config",
+    "scp -r h:x ~/",
     "scp h:key ~/.ssh/",
     "git worktree add ~/.config",
     "mkdir -p nd/.git && tar -xf a.tar -C nd",
@@ -651,8 +652,10 @@ test("a tree written at a checkout, at home, or above a listed place is guarded;
     "cp -r dotfiles repo/",
     "mkdir -p out && cp -r dotfiles/. out",
     "npx prettier --write sub",
-    "scp -r h:x ~/",
     "scp -P 22 a h:/tmp",
+    // Rule A is the list only: a checkout is a disk check, not a listed place,
+    // so an rsync into one is not caught (named in the hand-back).
+    "rsync -a dotfiles/ repo/",
   ]) {
     const seen = see(command);
     assert.ok(!seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
@@ -673,6 +676,32 @@ test("each give-up of the cwd and of a resolved word is guarded (mutant survivor
   // A cd pattern over a prefix an earlier segment changed, matching nothing yet.
   mkdirSync(join(ws, "gl.d"), { recursive: true });
   assert.ok(see("ln -s ~/.ssh gl.d/new; cd gl.d/n* && echo x > authorized_keys").classes.includes(GUARDED));
+});
+
+test("one tar reader, no other option parser (review of 90b809fe)", () => {
+  // B: two -C are unreadable (each moves the next); an exact long spelling and
+  // the old bundled form are read by the same table.
+  for (const command of ["tar -C a -C ../b -xf x.tar", "tar --directory=a -C b -xf x.tar", "tar -xf x.tar --exclude", "tar -xyf x.tar", "tar -f x.tar", "tar -xcf x.tar"]) {
+    const seen = see(command);
+    if (!seen.ok) continue;
+    assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+  for (const command of ["tar --extract --file=x.tar", "tar xf x.tar", "tar xzf x.tgz -C sub", "tar -czf out.tgz --exclude=node_modules src", "tar -tf x.tar", "tar --create --file out.tar -C sub ."]) {
+    const seen = see(command);
+    assert.ok(seen.ok && !seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+  // A: scp is not parsed; every word and every tail of a cluster is judged
+  // against the list as a tree root.
+  for (const command of ["scp -rP 22 a ~/.ssh/", "scp -r ~/.ssh host:b", "scp -i ~/.ssh/id_ed25519 a host:b", "rsync -a --log-file=~/.zshrc a b", "scp -o/etc/ssh_config a host:b"]) {
+    const seen = see(command);
+    assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+  assert.ok(!see("scp -rP 22 a host:b").classes.includes(GUARDED));
+  // A program main refuses stays refused: nothing is added to a refusal.
+  assert.equal(see("unzip a.zip -d ~/Library/LaunchAgents").ok, false);
+  // A read is not a write: its words are not judged.
+  assert.ok(!see("cat ~/.zshrc").classes.includes(GUARDED));
+  assert.ok(!see("ls ~").classes.includes(GUARDED));
 });
 
 test("what the pass cannot read at all fails to guarded, never to nothing", () => {
