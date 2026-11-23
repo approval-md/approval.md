@@ -280,7 +280,17 @@ const DIRECTORY_OR_LINK = (entry: Dirent): boolean => entry.isDirectory() || ent
  * read; the caller then judges a sure target the strict way and a possible
  * one by its text (review of the second fold).
  */
-function expandOnDisk(base: string, word: string): Expansion {
+export function expandOnDisk(
+  base: string,
+  word: string,
+  /**
+   * Design v4, point 6 (the write-scope pass): `keepFiles` keeps a plain file
+   * that matches a pattern segment as a match of its own, so a match is judged
+   * by its own name; `deadline` (a `Date.now()` value) gives up once passed.
+   * Absent, this step behaves exactly as the git-directory pass has it.
+   */
+  options: { keepFiles?: boolean; deadline?: number } = {},
+): Expansion {
   const words = word.includes("{") ? expandBraces(word) : [word];
   if (words === null) return { giveUp: "more brace alternatives than this hook expands" };
   const join2 = (place: string, name: string): string => (place === "/" ? `/${name}` : `${place}/${name}`);
@@ -309,10 +319,15 @@ function expandOnDisk(base: string, word: string): Expansion {
         }
         visited += entries.length;
         if (visited > ENTRY_LIMIT) return { giveUp: `more than ${String(ENTRY_LIMIT)} entries to read` };
+        if (options.deadline !== undefined && Date.now() > options.deadline) {
+          return { giveUp: "the time this hook gives one expansion ran out" };
+        }
         next.push({ path: join2(place.path, segment), from: "parent" });
         for (const entry of entries) {
           if (!globSegmentMatches(segment, entry.name)) continue;
-          if (DIRECTORY_OR_LINK(entry) || foldFileName(entry.name) === ".git") next.push({ path: join2(place.path, entry.name), from: "match" });
+          if (DIRECTORY_OR_LINK(entry) || foldFileName(entry.name) === ".git" || options.keepFiles === true) {
+            next.push({ path: join2(place.path, entry.name), from: "match" });
+          }
         }
       }
       places = next;

@@ -372,7 +372,7 @@ const POLICY_RESOLUTION_OUTPUT: JsonSchema = object(
     // no rule for, decided by the `policy.edit` line it is a sub-class of.
     provenance: { enum: ["rule", "default", "inherited", "fail-closed", "floor"] },
     manualBecause: nullable({
-      enum: ["matched-rule", "irreversibility-floor", "load-failure"],
+      enum: ["matched-rule", "irreversibility-floor", "load-failure", "class-minimum"],
     }),
     loadFailure: nullable(object({ code: STRING, message: STRING }, ["code", "message"])),
     matched: nullable(object({ pattern: STRING, rule: OPEN_OBJECT }, ["pattern", "rule"])),

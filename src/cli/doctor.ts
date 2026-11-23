@@ -54,6 +54,7 @@
  * precisely what this command reports, so they are check failures (exit 1).
  */
 
+import { WRITE_GUARDED_CLASS, WRITE_OUT_OF_SCOPE_CLASS, WRITE_OUT_OF_SCOPE_SHIPPED_AUTONOMY, writeScopeOptedIn } from "../core/write-scope.js";
 import { createServer } from "node:net";
 import {
   closeSync,
@@ -1176,6 +1177,42 @@ function checkAutonomyAlias(policyLoad: PolicyLoadResult): DoctorCheck {
     // that owns both. The prose after it is the edit itself: write
     // supervised-retro.
     fix: "approval policy amend — write supervised-retro in place of the bare supervised on the rules above, and re-attest in the same step; the paste-ready draft for this repo is docs/proposals/approval-md-2026-09.md",
+  };
+}
+
+/**
+ * Does the policy opt in to `files.write.out_of_scope`? (Design v4, point 8.)
+ *
+ * A policy written before the class existed keeps today's answers for a write
+ * outside the workspace, which is the promise that made adopting the class an
+ * explicit act; this row is where an operator learns the row is missing and
+ * what it would be. The guarded list (`files.write.guarded`, never lighter than
+ * manual) applies to every policy whatever this says, and the row says so.
+ *
+ * Never a `fail`: an old policy is not broken. A `skip` when the policy did not
+ * load, whose own failure other rows report.
+ */
+function checkWriteScope(policyLoad: PolicyLoadResult): DoctorCheck {
+  if (!policyLoad.ok) {
+    return {
+      check: "write-scope",
+      status: "skip",
+      detail: `the policy did not load (${policyLoad.code}), so whether it opts in to \`${WRITE_OUT_OF_SCOPE_CLASS}\` could not be read; a failed load resolves every class to \`manual\`.`,
+    };
+  }
+  if (writeScopeOptedIn(policyLoad.policy)) {
+    return {
+      check: "write-scope",
+      status: "pass",
+      detail: `${policyLoad.source.filename} opts in to \`${WRITE_OUT_OF_SCOPE_CLASS}\`: a write landing outside the gate root, the scratch and temp roots${policyLoad.policy.write_scope?.roots === undefined ? "" : " and `write_scope.roots`"} takes that class. Writes onto the guarded list take \`${WRITE_GUARDED_CLASS}\`, never lighter than manual.`,
+    };
+  }
+  return {
+    check: "write-scope",
+    status: "pass",
+    detail: oneLine(
+      `the \`${WRITE_OUT_OF_SCOPE_CLASS}\` row is missing: ${policyLoad.source.filename} names no such class and declares no \`write_scope\`, so a write outside the workspace keeps the answer it had before the class existed. To opt in, add \`${WRITE_OUT_OF_SCOPE_CLASS}: { autonomy: ${WRITE_OUT_OF_SCOPE_SHIPPED_AUTONOMY} }\` under classes (and \`write_scope.roots\` for the folders your agents write to outside the checkout), then \`approval policy amend\` to re-attest. Writes onto the guarded list (\`~/.ssh\`, shell start files, launch agents, \`/etc\`, PATH folders, credential stores) and writes to a target the hook cannot read take \`${WRITE_GUARDED_CLASS}\`, never lighter than manual, under every policy.`,
+    ),
   };
 }
 
@@ -4487,6 +4524,10 @@ export function commandDoctor(
       // record — and the row an operator wiring up a hosted daemon needs BEFORE
       // anything is running.
       checkDaemonIdentity(logPath, verified.records, policyLoad),
+      // Design v4 (writes outside the workspace): appended, twenty-fifth time,
+      // same reason. Point 8's "the row is missing" line, on the surface an
+      // operator opens to read the state of their own repository.
+      checkWriteScope(policyLoad),
     ];
 
     const ok = checks.every((entry) => entry.status !== "fail");

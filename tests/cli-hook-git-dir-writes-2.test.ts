@@ -29,6 +29,12 @@ import { after, test } from "node:test";
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand } from "../src/core/command-class.js";
 
+// Design v4 (writes outside the workspace): a write onto the guarded list (a
+// git hooks folder) or to a target the hook cannot read carries
+// files.write.guarded BESIDE its own class; the class asserted here stands.
+const LISTED = "files.write.guarded write-guarded";
+const UNREADABLE = "files.write.guarded write-unreadable";
+
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-git-dir-writes-2-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
@@ -128,7 +134,7 @@ test("S1 hook: a pattern is expanded on disk and each match walked; one it canno
   assert.deepEqual(hook("echo x >> l*k/config", repo), [DIR_WRITE]);
   assert.deepEqual(hook("echo x >> {li,x}nk/config", repo), [DIR_WRITE]);
   assert.deepEqual(hook("cd l?nk && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
-  assert.deepEqual(hook("cp /tmp/x lin[k]/hooks/pre-push", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cp /tmp/x lin[k]/hooks/pre-push", repo), [DIR_WRITE, LISTED]);
   // Ordinary lines in the same checkout do not move.
   assert.deepEqual(hook("rm *.log", repo), ["files.delete.out_of_scope rm-unreadable-path"]);
   assert.deepEqual(hook("cp src/*.ts out/", repo), ["files.write.workspace workspace-write"]);
@@ -140,8 +146,8 @@ test("S1 hook: a pattern is expanded on disk and each match walked; one it canno
   try {
     // A SURE target that cannot be expanded is judged the strict way; a
     // possible one (a header value) by its text, which names no .git.
-    assert.deepEqual(hook("echo x > locked/*/config", repo), [DIR_WRITE]);
-    assert.deepEqual(hook("echo x > locked/*/.g?t/config", repo), [DIR_WRITE]);
+    assert.deepEqual(hook("echo x > locked/*/config", repo), [DIR_WRITE, UNREADABLE]);
+    assert.deepEqual(hook("echo x > locked/*/.g?t/config", repo), [DIR_WRITE, UNREADABLE]);
     assert.ok(!hook("wget --header=locked/*/x https://example.invalid/x", repo).includes(DIR_WRITE));
   } finally {
     chmodSync(locked, 0o755);

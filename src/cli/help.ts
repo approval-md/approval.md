@@ -672,8 +672,8 @@ const POLICY_EXIT_CODES = `${EXIT_CODES_POINTER}. policy check|test uses only 0,
   2  usage — a missing <class>, an unknown flag, or an invalid action class.
   4  I/O — a policy path that exists but cannot be read.`;
 
-/** The three values of manualBecause, named so an agent can branch on them. */
-const POLICY_MANUAL_BECAUSE = `manualBecause is "matched-rule", "irreversibility-floor" or "load-failure".`;
+/** The four values of manualBecause, named so an agent can branch on them. */
+const POLICY_MANUAL_BECAUSE = `manualBecause is "matched-rule", "irreversibility-floor", "load-failure" or "class-minimum".`;
 
 export const POLICY_HELP = `approval policy — explain what policy does with an action class
 

@@ -25,6 +25,12 @@ import { after, test } from "node:test";
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand } from "../src/core/command-class.js";
 
+// Design v4 (writes outside the workspace): a write onto the guarded list (a
+// git hooks folder) or to a target the hook cannot read carries
+// files.write.guarded BESIDE its own class; the class asserted here stands.
+const LISTED = "files.write.guarded write-guarded";
+const UNREADABLE = "files.write.guarded write-unreadable";
+
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-git-dir-writes-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
@@ -189,9 +195,9 @@ test("S2: an option value that names no git directory does not move", () => {
 test("S1 hook: a hook whose own directory is inside .git makes every relative write git-dir-write", { skip }, () => {
   const repo = checkout();
   const hooks = join(repo, ".git", "hooks");
-  assert.deepEqual(hook("cp /tmp/x pre-push", hooks), [DIR_WRITE]);
+  assert.deepEqual(hook("cp /tmp/x pre-push", hooks), [DIR_WRITE, LISTED]);
   assert.deepEqual(hook("echo x > config", join(repo, ".git")), ["vcs.history.rewrite git-dir-write"]);
-  assert.deepEqual(hook("cd .. && printf x >> config", hooks), ["read.shell read-shell", DIR_WRITE]);
+  assert.deepEqual(hook("cd .. && printf x >> config", hooks), ["read.shell read-shell", DIR_WRITE, LISTED]);
 });
 
 test("S1 hook: the disk pass adds its class beside the segment's own, so later passes still judge the segment", { skip }, () => {
@@ -219,7 +225,7 @@ test("S1 hook: a symlink to .git that exists beforehand is followed", { skip }, 
   symlinkSync(".git", join(repo, "g"));
   assert.deepEqual(pure("echo x >> g/config"), ["files.write.workspace redirect-write"]);
   assert.deepEqual(hook("echo x >> g/config", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("cp /tmp/x g/hooks/pre-push", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cp /tmp/x g/hooks/pre-push", repo), [DIR_WRITE, LISTED]);
   assert.deepEqual(hook("cd ./g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
   // A bare name is tried from the hook's directory (and each CDPATH entry), so it is followed too.
   assert.deepEqual(hook("cd g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
@@ -245,7 +251,7 @@ test("S2 hook: every tail of an option cluster is a candidate, a bare name inclu
   const repo = checkout();
   symlinkSync(".git/hooks", join(repo, "hooks"));
   // `-vthooks`: the value of -t is the bare name `hooks`, the link into .git/hooks.
-  assert.deepEqual(hook("cp /tmp/x -vthooks", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cp /tmp/x -vthooks", repo), [DIR_WRITE, LISTED]);
   assert.deepEqual(hook("tar -xf a.tar -Chooks", repo), [DIR_WRITE]);
   // Inside .git, a bare tail lands there too.
   assert.deepEqual(pure("cd .git && cp /tmp/x -vthooks"), ["read.shell read-shell", DIR_WRITE]);
@@ -293,7 +299,7 @@ test("S1 hook: a sure write target the hook cannot place is judged the strict wa
   // A link loop cannot be placed, whatever names it.
   symlinkSync("loop2", join(repo, "loop1"));
   symlinkSync("loop1", join(repo, "loop2"));
-  assert.deepEqual(hook("echo x > loop1/f", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("echo x > loop1/f", repo), [DIR_WRITE, UNREADABLE]);
 });
 
 test("S1 hook: a possible target that cannot be placed falls back to its text, against the known git directories too", { skip: skip || (process.getuid?.() === 0 ? "root reads a mode-000 directory" : false) }, () => {
@@ -327,7 +333,7 @@ test("S1 hook: ordinary writes in a checkout do not move", { skip }, () => {
   assert.deepEqual(hook("cp a b", repo), ["files.write.workspace workspace-write"]);
   assert.deepEqual(hook("mkdir -p build && cp src.txt build/", repo), ["files.write.workspace workspace-write", "files.write.workspace workspace-write"]);
   // A cd the hook cannot follow adds no directory: the write is judged from the hook's own.
-  assert.deepEqual(hook('cd "$D" && echo x > config', repo), ["read.shell read-shell", "files.write.workspace redirect-write"]);
+  assert.deepEqual(hook('cd "$D" && echo x > config', repo), ["read.shell read-shell", "files.write.workspace redirect-write", UNREADABLE]);
 });
 
 // ---------------------------------------------------------------------------
@@ -338,9 +344,9 @@ test("review 1: a dangling symlink into .git is written through, so the write is
   const repo = checkout();
   // The link exists; its target does not yet. A redirect creates the target.
   symlinkSync(".git/hooks/pre-push", join(repo, "hookfile"));
-  assert.deepEqual(hook("printf '#!/bin/sh' > hookfile", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("printf '#!/bin/sh' > hookfile", repo), [DIR_WRITE, LISTED]);
   symlinkSync(join(repo, ".git", "hooks", "nope", "x"), join(repo, "deep"));
-  assert.deepEqual(hook("cp /tmp/x deep", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cp /tmp/x deep", repo), [DIR_WRITE, LISTED]);
   // A dangling link elsewhere is an ordinary write.
   symlinkSync("build/out.txt", join(repo, "outlink"));
   assert.deepEqual(hook("echo x > outlink", repo), ["files.write.workspace redirect-write"]);
@@ -362,8 +368,8 @@ test("review 2: a bare-name cd is followed from the hook's directory and each CD
   assert.deepEqual(hook("cd -L .git && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
   // Known limit: a target the text cannot give adds no directory, and the
   // write is judged from the others (the write-scope pass ignores every cd).
-  assert.deepEqual(hook('cd "$D" && echo x >> config', repo), ["read.shell read-shell", "files.write.workspace redirect-write"]);
-  assert.deepEqual(hook("cd - && echo x >> config", repo), ["read.shell read-shell", "files.write.workspace redirect-write"]);
+  assert.deepEqual(hook('cd "$D" && echo x >> config', repo), ["read.shell read-shell", "files.write.workspace redirect-write", UNREADABLE]);
+  assert.deepEqual(hook("cd - && echo x >> config", repo), ["read.shell read-shell", "files.write.workspace redirect-write", UNREADABLE]);
 });
 
 test("review 3: `..` after a symlink is applied to the physical directory, as the kernel applies it", { skip }, () => {

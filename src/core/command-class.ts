@@ -1672,6 +1672,14 @@ interface LexSegment {
    * counts as inside.
    */
   subshell: boolean;
+  /**
+   * Did an operator that makes this segment's run conditional or separate
+   * from the line's own shell come before it (`&&`, `||`, `|`, `&`, `(`)?
+   * (Design v4, writes outside the workspace.) Read only by the hook's write
+   * pass, which will not trust a variable assigned in such a segment: bash may
+   * skip it, or run it in a process whose variables the line never sees.
+   */
+  conditional: boolean;
 }
 
 type LexResult =
@@ -1742,6 +1750,7 @@ function lex(command: string): LexResult {
   let depth = 0;
   let segmentStart = 0;
   let index = 0;
+  let conditional = false;
   const pending: PendingHeredoc[] = [];
 
   const flush = (end: number): void => {
@@ -1755,7 +1764,9 @@ function lex(command: string): LexResult {
         heredoc,
         stdinFed,
         subshell: depth !== 0,
+        conditional,
       });
+      conditional = false;
       // Kept across an EMPTY flush, so the `&` of `|&` (or a newline after a
       // trailing `|`) does not drop the pipe into the next real segment.
       stdinFed = false;
@@ -2029,6 +2040,9 @@ function lex(command: string): LexResult {
       const pipe = ch === "|" && command[index + 1] !== "|";
       index += ch === "&" && command[index + 1] === "&" ? 2 : ch === "|" && command[index + 1] === "|" ? 2 : 1;
       flush(boundary);
+      // Design v4: every operator but `;` makes what follows conditional, or
+      // separate from the line's own shell (read by the hook's write pass).
+      if (ch !== ";") conditional = true;
       // APRV-510 (refuter rS2): the subshell depth, read by the next flush.
       if (ch === "(") depth += 1;
       if (ch === ")") depth -= 1;
@@ -10016,6 +10030,12 @@ export interface CommandSegmentShape {
   /** Is this segment's stdin the previous segment's output? (APRV-522.) */
   stdinFed: boolean;
   /**
+   * Is this segment's run conditional, or separate from the line's own shell
+   * (after `&&`, `||`, `|`, `&` or `(`, or inside a subshell)? Design v4: the
+   * write pass trusts no variable assigned in such a segment.
+   */
+  conditional: boolean;
+  /**
    * The inner text of every `$(…)` this segment expands: in its words, its
    * redirection targets and an unquoted heredoc's body (APRV-522), so the
    * hook's disk pass judges the reads a substitution makes.
@@ -10064,6 +10084,7 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
         .filter((redirect) => redirect.op === "<")
         .map((redirect) => redirect.target.text),
       stdinFed: segment.stdinFed,
+      conditional: segment.conditional || segment.subshell,
       substitutions: [
         ...segment.words.flatMap((word) => word.substitutions),
         ...segment.redirects.flatMap((redirect) => redirect.target.substitutions),

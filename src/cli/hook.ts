@@ -117,6 +117,7 @@ import {
   SUBSTITUTION_SENTINEL,
   type ClassifiedSegment,
   type CommandClassification,
+  type CommandSegmentShape,
   type ProtectedPathEntry,
 } from "../core/command-class.js";
 import {
@@ -199,6 +200,18 @@ import {
   renderReadRoots,
 } from "../core/read-scope.js";
 import {
+  DECISION_A_WRITE_RULES_BY_LANDING,
+  DECISION_B_UNREADABLE_CLASS,
+  DECISION_D_OVERWRITE_IS_GUARDED,
+  DECISION_E_WINDOW,
+  effectiveWriteRoots,
+  guardedEntryOf,
+  isInWriteScope,
+  WRITE_GUARDED_CLASS,
+  WRITE_OUT_OF_SCOPE_CLASS,
+  writeScopeOptedIn,
+} from "../core/write-scope.js";
+import {
   harnessLaunchNeedsRule,
   harnessLaunchUnruledRefusal,
   humanOnlyRefusal,
@@ -217,7 +230,7 @@ import {
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
-import { refineGitDirWrites } from "./git-dir-writes.js";
+import { expandOnDisk, refineGitDirWrites } from "./git-dir-writes.js";
 import { refinePushRepo } from "./push-repo.js";
 import { HOOK_GROK_HELP, HOOK_HELP, HOOK_HERMES_HELP, HOOK_MUSE_HELP } from "./help.js";
 import type { Streams } from "./main.js";
@@ -3803,6 +3816,719 @@ export function refineWriteScope(
 }
 
 // ===========================================================================
+// Write landings: the guarded list, unreadable targets, and the opt-in
+// out-of-scope class (design v4, writes outside the workspace)
+// ===========================================================================
+
+/**
+ * ## What this pass adds, and to whom
+ *
+ * Every write a line makes (redirects, the workspace-write row, `sed -i`, the
+ * packaging rows, `curl -o`, `wget -O`, `dd of=`) is judged where it LANDS by
+ * ONE function, {@link judgeWriteLanding}, which the file tools call too
+ * ({@link fileToolGate}). It answers, strictest first:
+ *
+ * 1. `files.write.guarded` when any landing, or the word as spelled, is on the
+ *    guarded list (`core/write-scope.ts`), tested BEFORE any root; and when
+ *    the target cannot be read after resolution (decision B): a variable the
+ *    line does not set, a command substitution, a landing the kernel cannot
+ *    place, a glob this hook could not read from the disk, or a path an
+ *    earlier segment of the same line may have changed under it.
+ * 2. `files.write.out_of_scope` when a landing is outside every write root,
+ *    ONLY for a policy that opts in (point 8). Every other policy keeps the
+ *    answer it had before the class existed.
+ *
+ * ## Only ever stricter, except decision A
+ *
+ * The class is ADDED beside the segment's own, as an entry over the same
+ * segment text (the shape `also` already has), never put in its place: the
+ * gate resolves every class of a command and the strictest decides, so no
+ * answer can get lighter through this pass, whatever the policy says of the
+ * segment's own class. The one exception is decision A, for a policy that opts
+ * in: the two rules that answer `files.delete.out_of_scope` for a WRITE today
+ * are decided by where the write lands instead.
+ *
+ * Last in {@link classifyForHook}'s chain, after every pass that may raise a
+ * segment, so nothing re-reads an entry it added.
+ */
+
+/** What the write pass needs of the policy: the opt-in and the roots (point 8, point 2). */
+export interface WriteScopeContext {
+  /** Does the policy name `files.write.out_of_scope` or carry `write_scope`? */
+  optedIn: boolean;
+  /** The effective write roots, resolved. Read only when `optedIn`. */
+  roots: readonly string[];
+}
+
+/** A policy that does not opt in, or no policy at all: the list and unreadable targets only. */
+export const WRITE_SCOPE_OFF: WriteScopeContext = { optedIn: false, roots: [] };
+
+/**
+ * The write scope a loaded policy asks for, resolved from the gate root (the
+ * loaded policy's own directory), the scratch and temp roots, and
+ * `write_scope.roots`, exactly as the read roots are (point 2).
+ */
+export function resolveWriteScope(
+  cwd: string,
+  gateRoot: string,
+  policy: Policy | null,
+): WriteScopeContext {
+  if (policy === null || !writeScopeOptedIn(policy)) return WRITE_SCOPE_OFF;
+  const roots = effectiveWriteRoots({
+    gateRoot: resolvedPath(gateRoot) ?? gateRoot,
+    systemRoots: resolveScratchRoots(cwd),
+    ...(policy.write_scope?.roots === undefined ? {} : { declared: policy.write_scope.roots }),
+  });
+  const out: string[] = [];
+  for (const root of roots) {
+    for (const each of [root, resolvedPath(root) ?? root]) if (!out.includes(each)) out.push(each);
+  }
+  return { optedIn: true, roots: out };
+}
+
+/** The rule an entry for a write onto the guarded list reports. */
+export const WRITE_GUARDED_RULE = "write-guarded";
+/** The rule an entry for a write whose target cannot be read reports (decision B). */
+export const WRITE_UNREADABLE_RULE = "write-unreadable";
+/** The rule an entry for a write outside every root reports (opt-in). */
+export const WRITE_OUT_OF_SCOPE_RULE = "write-out-of-scope";
+/** The rule a decision-A write takes when its landing is inside a root. */
+export const WRITE_IN_SCOPE_RULE = "write-in-scope-resolved";
+/** The rule a decision-A write takes when its landing is outside every root. */
+export const WRITE_OUT_OF_SCOPE_LANDED_RULE = "write-out-of-scope-landed";
+
+/** Every rule this pass writes, so a caller can tell its entries from the classifier's. */
+export const WRITE_LANDING_RULES: readonly string[] = [
+  WRITE_GUARDED_RULE,
+  WRITE_UNREADABLE_RULE,
+  WRITE_OUT_OF_SCOPE_RULE,
+];
+
+/** The homes the guarded list is anchored on: `HOME` as given and resolved. */
+function currentHomes(env: NodeJS.ProcessEnv = process.env): string[] {
+  const home = env["HOME"];
+  if (home === undefined || home.length === 0 || !isAbsolute(home)) return [];
+  const resolved = resolvedPath(home);
+  return resolved === null || resolved === home ? [home] : [home, resolved];
+}
+
+/** Where one write lands, as {@link judgeWriteLanding} reads it. */
+export type WriteLanding =
+  | { kind: "guarded"; rule: string; path: string; why: string }
+  | { kind: "out"; path: string }
+  | { kind: "in" };
+
+/**
+ * THE scope test (point 3), for the shell pass and the file tools alike.
+ *
+ * `spelled` is one absolute spelling with every `..` kept
+ * ({@link spelledAbsolute}). The list is tested first, on the word as spelled
+ * (`..` collapsed by text) and on every landing: the lexical one, the kernel's
+ * (each symlink resolved before the `..` after it, {@link landingPaths}), and,
+ * where the last component is an existing symlink, the link itself as well as
+ * its target. Only then the roots, and only for a policy that opts in.
+ */
+export function judgeWriteLanding(
+  spelled: string,
+  scope: WriteScopeContext,
+  homes: readonly string[] = currentHomes(),
+): WriteLanding {
+  const text = resolvePathSegments(spelled);
+  const landing = landingPaths(spelled);
+  const forms = [text, ...landing.paths];
+  const name = basename(text);
+  if (name.length > 0) forms.push(join(canonicalPath(dirname(text)), name));
+  const tail = basename(spelled);
+  if (tail !== ".." && tail !== "." && tail.length > 0) {
+    const parent = kernelLanding(dirname(spelled));
+    if (parent !== null) forms.push(join(parent, tail));
+  }
+  for (const form of forms) {
+    const entry = guardedEntryOf(form, homes);
+    if (entry !== null) {
+      return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `${form} is on the guarded list (${entry})` };
+    }
+  }
+  if (landing.unknown) {
+    return {
+      kind: "guarded",
+      rule: WRITE_UNREADABLE_RULE,
+      path: text,
+      why: `where ${spelled} lands cannot be placed (a link loop or a process handle), so it cannot be tested against the guarded list`,
+    };
+  }
+  if (!scope.optedIn) return { kind: "in" };
+  for (const path of landing.paths) {
+    if (isInWriteScope(path, scope.roots)) continue;
+    if (DECISION_D_OVERWRITE_IS_GUARDED && existsSync(path)) {
+      return { kind: "guarded", rule: WRITE_GUARDED_RULE, path, why: `${path} is an existing file outside every write root (decision D)` };
+    }
+    return { kind: "out", path };
+  }
+  return { kind: "in" };
+}
+
+/** Bins whose every operand is a path they write (deletes are not writes here: point 7). */
+const LANDING_WRITE_EVERY: ReadonlySet<string> = new Set(["touch", "truncate", "mkdir", "tee"]);
+/** The deletes: never judged as writes, but each changes the paths after it. */
+const LANDING_DELETE_EVERY: ReadonlySet<string> = new Set(["rm", "rmdir", "shred", "unlink"]);
+/** The packaging rows APRV-402 re-reads, whose candidates over-include on purpose. */
+const LANDING_PACKAGING_RULES: ReadonlySet<string> = new Set([
+  "tar-extract",
+  "tar-create",
+  "gunzip-write",
+  "base64-write",
+  "openssl-digest-out",
+  "npm-pack",
+]);
+
+/**
+ * The snapshot rule (codex, CLAIMS L61466), in ONE place: which earlier
+ * segments make a later write's landing unreadable when their target is a
+ * prefix of, or equal to, that write's path. A landing read from the disk is a
+ * snapshot taken before the line runs, so it is not trusted once the same line
+ * may have changed a component of the path: `ln -s ~/.ssh ws/link; echo x >
+ * ws/link/authorized_keys`, `mv a.d b.d && echo x > b.d/y`. Keys are the kinds
+ * of change; a kind set to `false` stops counting.
+ */
+export const SNAPSHOT_CHANGERS: Record<"write" | "move" | "link" | "remove" | "mkdir", boolean> = {
+  /**
+   * A redirect, `tee`, `touch`, `truncate`, `chmod`, `sed -i`, `dd`, a
+   * download. OFF, deliberately, against the letter of the brief's addition:
+   * none of them can make a path component a symlink (a redirect follows a
+   * link and never makes one), so none can move where a later write lands, and
+   * counting them made `echo a > f && echo b >> f` a card. Measured on the
+   * design's last-day corpus: 195 of 246 guarded Bash calls came from this
+   * rule with `write` and `mkdir` on, 24 with them off. Turn on to follow the
+   * brief's list literally.
+   */
+  write: false,
+  /** `mv`, its destination and its sources. */
+  move: true,
+  /** `ln`, and `cp`, `install`, `rsync` and the packaging rows, which can make or copy a link. */
+  link: true,
+  /** `rm`, `rmdir`, `shred`, `unlink`, and any other `files.delete.*` segment. */
+  remove: true,
+  /**
+   * `mkdir`. OFF for the reason `write` is: it makes a real directory where
+   * none was, which is where the hook already lands a path not yet there
+   * (`mkdir -p build && echo x > build/out.txt` is APRV-511's own "ordinary
+   * work" control). Turn on to follow the brief's list literally.
+   */
+  mkdir: false,
+};
+
+/** One judged write, before it is attached to a segment. */
+interface WriteFinding {
+  text: string;
+  cls: string;
+  rule: string;
+  path: string;
+  note: string;
+}
+
+/**
+ * The names read from this hook's own environment (or, for `PWD`, its working
+ * directory) unless the line sets them. `HERMES_HOME` is read as the Hermes
+ * pass reads it (`APPROVAL_HERMES_HOME`, else `HERMES_HOME`): the operator sets
+ * it, and nothing the agent writes reaches this process's environment.
+ */
+const STEERING_NAMES: readonly string[] = ["HOME", "PWD", "TMPDIR", "HERMES_HOME"];
+
+/** Bins that set a shell variable by name (beside a bare `NAME=value`). */
+const VARIABLE_SETTERS: ReadonlySet<string> = new Set([
+  "read", "export", "declare", "typeset", "local", "readonly", "unset", "getopts", "mapfile", "readarray",
+  "for", "select", "let", "printf", "eval", "source", ".", "set",
+]);
+
+/** What a line tells this pass about one variable. */
+interface LineVariable {
+  /** The shape index of its one bare assignment, or -1 when it has none. */
+  at: number;
+  value: string;
+  /** Set twice, conditionally, by `read` or another setter, or as a prefix: never resolved. */
+  tainted: boolean;
+}
+
+/** The variables a line's own words assign, and how far each may be trusted. */
+function lineVariables(shapes: readonly CommandSegmentShape[]): Map<string, LineVariable> {
+  const vars = new Map<string, LineVariable>();
+  const taint = (name: string): void => {
+    const known = vars.get(name);
+    vars.set(name, { at: known?.at ?? -1, value: known?.value ?? "", tainted: true });
+  };
+  for (const [index, shape] of shapes.entries()) {
+    for (const assignment of shape.assignments) {
+      const equals = assignment.indexOf("=");
+      const name = assignment.slice(0, equals).replace(/\+$/u, "").replace(/\[.*$/su, "");
+      if (shape.bin !== null || shape.conditional || assignment.slice(0, equals).endsWith("+") || vars.has(name)) {
+        taint(name);
+        continue;
+      }
+      vars.set(name, { at: index, value: assignment.slice(equals + 1), tainted: false });
+    }
+    if (shape.bin !== null && VARIABLE_SETTERS.has(basename(shape.bin))) {
+      for (const arg of shape.args) {
+        const word = arg.replace(/^-[A-Za-z]*v/u, "");
+        const match = /^([A-Za-z_][A-Za-z0-9_]*)/u.exec(word);
+        if (match !== null) taint(match[1] as string);
+      }
+    }
+    // A `$(…)` assigns in its own subshell: whatever it sets is never the line's.
+    for (const inner of shape.substitutions) {
+      for (const each of commandSegmentShapes(inner) ?? []) {
+        for (const assignment of each.assignments) taint(assignment.slice(0, Math.max(0, assignment.indexOf("="))).replace(/\+$/u, ""));
+      }
+    }
+  }
+  return vars;
+}
+
+/** A word, resolved the way the shell would, or why it cannot be. */
+type ResolvedWord = { unreadable: string } | { spellings: string[] };
+
+/**
+ * Resolve one target word in the shell's own order (point 1): brace groups,
+ * then a leading `~`, then `$NAME` / `${NAME}`, the line's own assignments
+ * recursively. It gives up rather than guessing: a command substitution, a
+ * name the line does not set (or sets twice, conditionally, by `read`, as a
+ * prefix), a parameter expansion with an operator (`${X:-a}`, `${#X}`), a
+ * special parameter, or `~`, `$HOME`, `$PWD` or `$TMPDIR` on a line that sets
+ * that name (a `cd` sets `PWD`).
+ */
+function resolveWriteWord(
+  word: string,
+  at: number,
+  line: {
+    shapes: readonly CommandSegmentShape[];
+    vars: Map<string, LineVariable>;
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+  },
+  depth = 0,
+): ResolvedWord {
+  if (depth > 8) return { unreadable: `${word} expands through more than eight variables` };
+  if (word.includes(SUBSTITUTION_SENTINEL) || word.includes("`")) {
+    return { unreadable: `${word} holds a command substitution` };
+  }
+  const candidates = braceCandidates(word);
+  if (candidates === null) return { unreadable: `${word} expands to more brace alternatives than this hook reads` };
+  const steered = (name: string): boolean =>
+    line.vars.has(name) ||
+    (name === "PWD" && line.shapes.slice(0, at).some((shape) => shape.bin !== null && ["cd", "pushd", "popd"].includes(basename(shape.bin))));
+  const spellings: string[] = [];
+  for (const candidate of candidates) {
+    let text = candidate;
+    const tilde = /^~([^/]*)(?=\/|$)/u.exec(text);
+    if (tilde !== null) {
+      const prefix = tilde[1] as string;
+      if (prefix === "") {
+        const home = line.env["HOME"];
+        if (steered("HOME") || home === undefined || home.length === 0) return { unreadable: `${word} names ~ on a line that sets HOME, or with no HOME` };
+        text = `${home}${text.slice(1)}`;
+      } else if (prefix === "+") {
+        text = `.${text.slice(2)}`;
+      } else {
+        return { unreadable: `${word} opens with a tilde prefix this hook does not expand` };
+      }
+    }
+    let failed = null as string | null;
+    text = text.replace(/\$\{([^}]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)|\$(.?)/gu, (match, braced?: string, bare?: string) => {
+      if (failed !== null) return match;
+      const name = braced ?? bare;
+      if (name === undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
+        failed = `${word} holds ${match}, a parameter expansion this hook does not read (a default, a length, a substitution or a special parameter)`;
+        return match;
+      }
+      if (STEERING_NAMES.includes(name)) {
+        if (steered(name)) {
+          failed = `${word} reads $${name} on a line that sets it`;
+          return match;
+        }
+        const value =
+          name === "PWD"
+            ? line.cwd
+            : name === "HERMES_HOME"
+              ? (line.env["APPROVAL_HERMES_HOME"] ?? line.env["HERMES_HOME"])
+              : line.env[name];
+        if (value === undefined || value.length === 0) {
+          failed = `${word} reads $${name}, which this hook does not have`;
+          return match;
+        }
+        return value;
+      }
+      const known = line.vars.get(name);
+      if (known === undefined || known.tainted || known.at < 0 || known.at >= at) {
+        failed = `${word} reads $${name}, which the line does not set once, unconditionally and before it`;
+        return match;
+      }
+      const inner = resolveWriteWord(known.value, known.at, line, depth + 1);
+      if ("unreadable" in inner) {
+        failed = inner.unreadable;
+        return match;
+      }
+      if (inner.spellings.length !== 1 || /\s/u.test(inner.spellings[0] as string)) {
+        failed = `${word} reads $${name}, whose value the shell would split or expand into several words`;
+        return match;
+      }
+      return inner.spellings[0] as string;
+    });
+    if (failed !== null) return { unreadable: failed };
+    if (text.includes("$")) return { unreadable: `${word} still holds a $ after resolution` };
+    spellings.push(text);
+  }
+  return { spellings };
+}
+
+/** Is `path` at or under `prefix`, by folded path segment? */
+function atOrUnderFolded(path: string, prefix: string): boolean {
+  const have = path.split("/").filter((part) => part.length > 0).map(foldFileName);
+  const want = prefix.split("/").filter((part) => part.length > 0).map(foldFileName);
+  if (want.length === 0 || have.length < want.length) return false;
+  return want.every((part, index) => part === have[index]);
+}
+
+/** The literal directory a pattern word starts from: every segment before the first pattern one. */
+function staticPrefix(text: string): string {
+  const parts = text.split("/");
+  const kept: string[] = [];
+  for (const part of parts) {
+    if (/[*?[{]/u.test(part)) break;
+    kept.push(part);
+  }
+  return kept.join("/") || (text.startsWith("/") ? "/" : ".");
+}
+
+/**
+ * Judge every write a command line makes, and attach what it finds.
+ *
+ * `cwds` are the directories the line may start in (the hook's own, and the
+ * envelope's where the harness sends one). A literal `cd` adds where it lands
+ * and keeps the directories before it (a `cd` may fail); one this hook cannot
+ * follow makes every later relative write unreadable.
+ */
+export function refineWriteLandings(
+  result: CommandClassification,
+  command: string,
+  cwds: readonly string[],
+  scope: WriteScopeContext,
+  env: NodeJS.ProcessEnv = process.env,
+): RefinedClassification {
+  if (!result.ok) return { result, notes: [] };
+  const top = commandSegmentShapes(command);
+  if (top === null) return { result, notes: [] };
+  // A login-shell wrapper is classified by the segments of its script.
+  const shapes = top.flatMap((shape) =>
+    shape.script === null ? [shape] : (commandSegmentShapes(shape.script) ?? [shape]),
+  );
+  const homes = currentHomes(env);
+  const start = cwds.find((each) => isAbsolute(each)) ?? cwds[0] ?? "/";
+  const line = { shapes, vars: lineVariables(shapes), cwd: start, env };
+
+  let here = [...new Set(cwds.filter((each) => isAbsolute(each)))];
+  let cwdUnknown = here.length === 0;
+  /** What earlier segments changed: each path and everything under it. */
+  const changed: string[] = [];
+  let changedUnknown: string | null = null;
+
+  const findings: WriteFinding[] = [];
+  /** Per shape index, the strictest verdict, for decision A. */
+  const verdicts = new Map<number, WriteLanding>();
+
+  const stricter = (a: WriteLanding | undefined, b: WriteLanding): WriteLanding => {
+    const rank = (v: WriteLanding | undefined): number => (v === undefined ? 3 : v.kind === "guarded" ? 0 : v.kind === "out" ? 1 : 2);
+    return rank(b) < rank(a) ? b : (a as WriteLanding);
+  };
+
+  /** Every absolute spelling of a resolved word from each directory. */
+  const spellingsOf = (resolved: { spellings: string[] }): string[] | null => {
+    const out: string[] = [];
+    for (const spelling of resolved.spellings) {
+      if (isAbsolute(spelling)) {
+        out.push(spelling);
+        continue;
+      }
+      if (cwdUnknown) return null;
+      for (const from of here) out.push(spelledAbsolute(from, spelling));
+    }
+    return out;
+  };
+
+  /** The snapshot rule: has an earlier segment changed this path or a component of it? */
+  const volatileOf = (spelled: string): string | null => {
+    if (changedUnknown !== null) return changedUnknown;
+    const forms = [resolvePathSegments(spelled), ...landingPaths(spelled).paths];
+    for (const prefix of changed) {
+      if (forms.some((form) => atOrUnderFolded(form, prefix))) {
+        return `${spelled} runs through ${prefix}, which an earlier segment of this line changes, so its landing on the disk is not trusted`;
+      }
+    }
+    return null;
+  };
+
+  const judgeWord = (word: string, at: number): WriteLanding => {
+    if (word.length === 0) return { kind: "in" };
+    const resolved = resolveWriteWord(word, at, line);
+    if ("unreadable" in resolved) {
+      return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: resolved.unreadable };
+    }
+    const spelled = spellingsOf(resolved);
+    if (spelled === null) {
+      return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: `${word} is relative, after a cd this hook cannot follow` };
+    }
+    let verdict: WriteLanding = { kind: "in" };
+    for (const each of spelled) {
+      const moved = volatileOf(each);
+      if (moved !== null) return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: moved };
+      if (/[*?[]/u.test(each)) {
+        // Point 6: a glob is read from the disk, bounded by entries and time;
+        // a match is judged as a landing, the pattern standing for the files
+        // it did not keep, and the word as written for no match at all.
+        const expanded = expandOnDisk("/", each, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS });
+        if ("giveUp" in expanded) {
+          return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: `${each} could not be read from the disk: ${expanded.giveUp}` };
+        }
+        for (const placed of expanded.paths) {
+          verdict = stricter(verdict, judgeWriteLanding(placed.path, scope, homes));
+          if (verdict.kind === "guarded") return verdict;
+        }
+        continue;
+      }
+      verdict = stricter(verdict, judgeWriteLanding(each, scope, homes));
+      if (verdict.kind === "guarded") return verdict;
+    }
+    return verdict;
+  };
+
+  /** What this shape writes (judged) and what it changes (for the snapshot rule). */
+  const targetsOf = (shape: CommandSegmentShape, segment: ClassifiedSegment | undefined): {
+    writes: string[];
+    intoDirs: { dir: string; sources: string[] }[];
+    changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[];
+  } => {
+    const writes: string[] = [...shape.writes];
+    const intoDirs: { dir: string; sources: string[] }[] = [];
+    const changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[] = shape.writes.map((word) => ({ word, kind: "write" as const }));
+    const bin = shape.bin === null ? null : basename(shape.bin);
+    if (bin === null) return { writes, intoDirs, changes };
+    const operands = shape.args.filter((arg) => !arg.startsWith("-") && arg.length > 0);
+    if (LANDING_WRITE_EVERY.has(bin)) {
+      writes.push(...operands);
+      for (const word of operands) changes.push({ word, kind: bin === "mkdir" ? "mkdir" : "write" });
+    } else if (LANDING_DELETE_EVERY.has(bin)) {
+      for (const word of operands) changes.push({ word, kind: "remove" });
+    } else if (bin === "cp" || bin === "mv" || bin === "ln" || bin === "install" || bin === "rsync") {
+      const targetDirs = bin === "rsync" ? [] : copyTargetDirectories(shape.args);
+      const targetDir = targetDirs[0] ?? null;
+      const single = targetDir === null && operands.length === 1;
+      const sources = single ? operands : targetDir === null ? operands.slice(0, -1) : operands.filter((operand) => operand !== targetDir);
+      const destination = single ? "." : (targetDir ?? operands[operands.length - 1]);
+      const kind = bin === "mv" ? "move" : "link";
+      // A word the shell may still turn into an option (`ln -s "$T" l`) may
+      // name the destination: what this segment changes is unknown.
+      if (copyArgvUnknown(shape.args, shape.argFlags) !== null) {
+        changes.push({ word: "$__APPROVAL_UNKNOWN_DESTINATION__", kind });
+      }
+      if (destination !== undefined) {
+        writes.push(destination);
+        changes.push({ word: destination, kind });
+        intoDirs.push({ dir: destination, sources });
+      }
+      for (const extra of targetDirs.slice(1)) {
+        writes.push(extra);
+        changes.push({ word: extra, kind });
+        intoDirs.push({ dir: extra, sources });
+      }
+      if (bin === "mv") for (const source of sources) changes.push({ word: source, kind: "move" });
+    } else if (bin === "chmod" || bin === "chown" || bin === "chgrp") {
+      writes.push(...operands.slice(1));
+      for (const word of operands.slice(1)) changes.push({ word, kind: "write" });
+    } else if (bin === "sed" && shape.args.some((arg) => arg === "--in-place" || /^-[a-zA-Z]*i/u.test(arg))) {
+      const scripted = shape.args.some((arg) => arg === "-e" || arg === "-f" || arg.startsWith("--expression") || arg.startsWith("--file"));
+      const files = scripted ? operands : operands.slice(1);
+      writes.push(...files);
+      for (const word of files) changes.push({ word, kind: "write" });
+    } else if (bin === "dd") {
+      for (const arg of shape.args) {
+        if (!arg.startsWith("of=")) continue;
+        writes.push(arg.slice(3));
+        changes.push({ word: arg.slice(3), kind: "write" });
+      }
+    } else if (bin === "curl" || bin === "wget") {
+      const outputs = fetchOutputs(bin, shape.args, shape.argFlags);
+      for (const word of [...outputs.files, ...outputs.directories]) {
+        writes.push(word);
+        changes.push({ word, kind: "write" });
+      }
+    } else if (
+      segment !== undefined &&
+      (LANDING_PACKAGING_RULES.has(segment.rule) ||
+        segment.rule === "packaging-write-out-of-scope" ||
+        segment.rule === "write-out-of-scope-resolved")
+    ) {
+      const candidates = writeCandidates(shape.args);
+      writes.push(...candidates);
+      for (const word of candidates) changes.push({ word, kind: "link" });
+    } else if (segment !== undefined && (segment.class.startsWith("files.") || segment.rule === "write-out-of-scope-resolved")) {
+      // A write or delete this pass does not model by name: each operand is a
+      // path it may change.
+      for (const word of operands) changes.push({ word, kind: segment.class.startsWith("files.delete") ? "remove" : "write" });
+    }
+    return { writes, intoDirs, changes };
+  };
+
+  const segmentFor = (shape: CommandSegmentShape, index: number): ClassifiedSegment | undefined =>
+    shapes.length === result.segments.length
+      ? result.segments[index]
+      : result.segments.find((segment) => segment.text === shape.text);
+
+  for (const [index, shape] of shapes.entries()) {
+    const bin = shape.bin === null ? null : basename(shape.bin);
+    if (bin === "cd" || bin === "pushd" || bin === "popd" || bin === "chdir") {
+      const target = bin === "popd" ? ({ kind: "unknown" } as const) : cdTarget(bin === "chdir" ? "cd" : bin, shape.args, shape.assignments);
+      if (target.kind === "unknown") {
+        cwdUnknown = true;
+        continue;
+      }
+      const word = target.kind === "home" ? "~" : target.word;
+      const resolved = resolveWriteWord(word, index, line);
+      let spelled = "unreadable" in resolved ? null : spellingsOf(resolved);
+      // A pattern is read from the disk, as a write target's is (point 6):
+      // every directory it matches, and the word as written.
+      if (spelled !== null && spelled.some((each) => /[*?[]/u.test(each))) {
+        const placed: string[] = [];
+        for (const each of spelled) {
+          if (!/[*?[]/u.test(each)) {
+            placed.push(each);
+            continue;
+          }
+          const expanded = expandOnDisk("/", each, { deadline: Date.now() + GLOB_TIME_LIMIT_MS });
+          if ("giveUp" in expanded) {
+            spelled = null;
+            break;
+          }
+          for (const path of expanded.paths) if (path.from !== "parent") placed.push(path.path);
+        }
+        if (spelled !== null) spelled = placed;
+      }
+      if (spelled === null) {
+        cwdUnknown = true;
+        continue;
+      }
+      const next = new Set(here);
+      for (const each of spelled) {
+        if (volatileOf(each) !== null) {
+          cwdUnknown = true;
+          break;
+        }
+        const landing = landingPaths(each);
+        if (landing.unknown) cwdUnknown = true;
+        next.add(resolvePathSegments(each));
+        for (const path of landing.paths) next.add(path);
+      }
+      here = [...next];
+      if (here.length > 64) cwdUnknown = true;
+      continue;
+    }
+
+    const segment = segmentFor(shape, index);
+    const { writes, intoDirs, changes } = targetsOf(shape, segment);
+    let verdict: WriteLanding | undefined;
+    for (const word of writes) {
+      verdict = stricter(verdict, judgeWord(word, index));
+      if (verdict.kind === "guarded") break;
+    }
+    // A copy or move INTO a directory writes `<dir>/<source name>` too.
+    if (verdict?.kind !== "guarded") {
+      for (const { dir, sources } of intoDirs) {
+        for (const source of sources) {
+          const name = basename(source);
+          if (name.length === 0 || name === "." || name === ".." || /[$`*?[{~]/u.test(name)) continue;
+          verdict = stricter(verdict, judgeWord(`${dir.replace(/\/+$/u, "")}/${name}`, index));
+          if (verdict.kind === "guarded") break;
+        }
+      }
+    }
+    if (verdict !== undefined && verdict.kind !== "in") {
+      verdicts.set(index, verdict);
+      if (verdict.kind === "guarded") {
+        const cls = verdict.rule === WRITE_UNREADABLE_RULE ? DECISION_B_UNREADABLE_CLASS : WRITE_GUARDED_CLASS;
+        findings.push({ text: shape.text, cls, rule: verdict.rule, path: verdict.path, note: `${verdict.rule}: ${verdict.why}, so \`${shape.text}\` is also ${cls}` });
+      } else if (scope.optedIn) {
+        findings.push({ text: shape.text, cls: WRITE_OUT_OF_SCOPE_CLASS, rule: WRITE_OUT_OF_SCOPE_RULE, path: verdict.path, note: `${WRITE_OUT_OF_SCOPE_RULE}: \`${shape.text}\` lands at ${verdict.path}, outside every write root (${scope.roots.join(", ")}), so it is also ${WRITE_OUT_OF_SCOPE_CLASS}` });
+      }
+    } else if (verdict !== undefined) {
+      verdicts.set(index, verdict);
+    }
+
+    // What this segment changes is in place before the next one runs.
+    for (const change of changes) {
+      if (!SNAPSHOT_CHANGERS[change.kind]) continue;
+      const resolved = resolveWriteWord(change.word, index, line);
+      if ("unreadable" in resolved) {
+        changedUnknown ??= `an earlier segment (\`${shape.text}\`) changes ${change.word}, which cannot be read, so no later landing on the disk is trusted`;
+        continue;
+      }
+      const spelled = spellingsOf({ spellings: resolved.spellings.map(staticPrefix) });
+      if (spelled === null) {
+        changedUnknown ??= `an earlier segment (\`${shape.text}\`) changes ${change.word} after a cd this hook cannot follow, so no later landing on the disk is trusted`;
+        continue;
+      }
+      for (const each of spelled) {
+        changed.push(resolvePathSegments(each));
+        for (const path of landingPaths(each).paths) changed.push(path);
+      }
+    }
+  }
+
+  if (findings.length === 0 && !(scope.optedIn && DECISION_A_WRITE_RULES_BY_LANDING.length > 0)) {
+    return { result, notes: [] };
+  }
+
+  const notes: string[] = [];
+  let segments = result.segments;
+  // Decision A, for a policy that opts in: a write the classifier or the
+  // APRV-402 pass answered `files.delete.out_of_scope` is decided by where it
+  // lands. Each such segment takes the class its landing earns.
+  if (scope.optedIn) {
+    segments = segments.map((segment, at) => {
+      if (segment.class !== OUT_OF_SCOPE_WRITE_CLASS || !DECISION_A_WRITE_RULES_BY_LANDING.includes(segment.rule)) return segment;
+      const index = shapes.length === result.segments.length ? at : shapes.findIndex((shape) => shape.text === segment.text);
+      const verdict = verdicts.get(index);
+      // No target this pass could read is no evidence: the segment keeps its class.
+      if (verdict === undefined || verdict.kind === "guarded") return segment;
+      if (verdict.kind === "out") {
+        notes.push(`decision A: \`${segment.text}\` (${segment.rule}) lands at ${verdict.path}, outside every write root, so it is ${WRITE_OUT_OF_SCOPE_CLASS} rather than ${OUT_OF_SCOPE_WRITE_CLASS}`);
+        return { ...segment, class: WRITE_OUT_OF_SCOPE_CLASS, rule: WRITE_OUT_OF_SCOPE_LANDED_RULE, path: verdict.path };
+      }
+      notes.push(`decision A: \`${segment.text}\` (${segment.rule}) lands inside a write root, so it is files.write.workspace rather than ${OUT_OF_SCOPE_WRITE_CLASS}`);
+      return { ...segment, class: "files.write.workspace", rule: WRITE_IN_SCOPE_RULE };
+    });
+  }
+  const appended: ClassifiedSegment[] = [];
+  for (const finding of findings) {
+    // Under decision A the segment itself already carries the out-of-scope class.
+    if (
+      finding.cls === WRITE_OUT_OF_SCOPE_CLASS &&
+      segments.some((segment) => segment.text === finding.text && segment.class === WRITE_OUT_OF_SCOPE_CLASS)
+    ) {
+      continue;
+    }
+    if (appended.some((each) => each.text === finding.text && each.class === finding.cls)) continue;
+    appended.push({ text: finding.text, class: finding.cls, rule: finding.rule, path: finding.path });
+    notes.push(finding.note);
+  }
+  if (appended.length === 0 && segments === result.segments) return { result, notes: [] };
+  const all = [...segments, ...appended];
+  const classes: string[] = [];
+  for (const segment of all) if (!classes.includes(segment.class)) classes.push(segment.class);
+  return { result: { ok: true, segments: all, classes }, notes };
+}
+
+/** Milliseconds one glob expansion may take before the write is guarded (point 6). */
+const GLOB_TIME_LIMIT_MS = 250;
+
+// ===========================================================================
 // Skill scripts, the disk half (APRV-502)
 // ===========================================================================
 
@@ -4106,6 +4832,12 @@ export function classifyForHook(
   credentialCwds: readonly string[] = [],
   /** A no-rule segment becomes a {@link NO_RULE_CLASS} stand-in (`defaults.unclassified_command: abstain`). */
   noRuleSegments = false,
+  /**
+   * The write scope the loaded policy asks for (design v4). The default is a
+   * policy that does not opt in: the guarded list and unreadable targets are
+   * judged for every caller, the out-of-scope class only for one that opts in.
+   */
+  writeScope: WriteScopeContext = WRITE_SCOPE_OFF,
 ): RefinedClassification {
   const roots = resolveScratchRoots(cwd);
   const classified = classifyCommand(command, protectedPaths, {
@@ -4143,8 +4875,12 @@ export function classifyForHook(
   // APRV-522. Last, and it only ever adds: every path a segment reads, judged
   // where the disk lands it, against the same credential rule the text was.
   const credentialed = refineCredentialReads(scripted.result, command, [cwd, ...credentialCwds]);
+  // Design v4. Last of all, and it only ever adds an entry beside a segment
+  // (decision A aside, for a policy that opts in): every write judged where
+  // it lands, from the hook's directory and the envelope's.
+  const landed = refineWriteLandings(credentialed.result, command, [cwd, ...credentialCwds], writeScope);
   return {
-    result: credentialed.result,
+    result: landed.result,
     notes: [
       ...gitWrites.notes,
       ...pushed.notes,
@@ -4154,6 +4890,7 @@ export function classifyForHook(
       ...written.notes,
       ...scripted.notes,
       ...credentialed.notes,
+      ...landed.notes,
     ],
   };
 }
@@ -4258,6 +4995,10 @@ function commandClassify(argv: string[], streams: Streams, cwd: string): number 
         readRoots,
         // APRV-510: the class the policy opens is the class the hook decides.
         execCodeGate(load.ok ? load.policy : null).shell,
+        [],
+        false,
+        // Design v4: the write scope the loaded policy asks for.
+        resolveWriteScope(cwd, policyRootOf(load, root), load.ok ? load.policy : null),
       ).result,
       boolFlag(parsed.flags, "--json"),
     ),
@@ -4807,6 +5548,14 @@ function describeCodexFileChanges(
 /** What a gated file tool call asks for: one class, its bytes, its headline. */
 interface FileGate {
   cls: string;
+  /**
+   * Classes carried beside `cls` (design v4): the guarded write class, or the
+   * out-of-scope one for a policy that opts in. Resolved with `cls`, and the
+   * strictest decides.
+   */
+  also: string[];
+  /** What the write-scope test found, for the verdict's notes. */
+  landingNotes: string[];
   /** Is this file one the policy protects? (APRV-303.) */
   protectedPath: boolean;
   rule: string;
@@ -4873,6 +5622,7 @@ function fileToolGate(
   toolInput: Record<string, unknown>,
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
+  writeScope: WriteScopeContext = WRITE_SCOPE_OFF,
 ): FileGate | null {
   const declared =
     readString(toolInput, "file_path") ??
@@ -4901,6 +5651,20 @@ function fileToolGate(
   const landing = landingPaths(spelledAbsolute(cwd, declared));
   let surface = landing.unknown ? stricterOrganSurface(spelled, "policy.core") : spelled;
   for (const path of landing.paths) surface = stricterOrganSurface(surface, protectedPathClass(path, protectedPaths));
+  // Design v4 (point 3): the same scope test the shell pass runs, on the same
+  // spelling. Its class is carried BESIDE the one above, never in its place,
+  // so a write the policy already holds stricter keeps that answer.
+  const judged = judgeWriteLanding(spelledAbsolute(cwd, declared), writeScope);
+  const also: string[] = [];
+  const landingNotes: string[] = [];
+  if (judged.kind === "guarded") {
+    const cls = judged.rule === WRITE_UNREADABLE_RULE ? DECISION_B_UNREADABLE_CLASS : WRITE_GUARDED_CLASS;
+    also.push(cls);
+    landingNotes.push(`${judged.rule}: ${judged.why}, so ${toolName} ${declared} is also ${cls}`);
+  } else if (judged.kind === "out" && writeScope.optedIn) {
+    also.push(WRITE_OUT_OF_SCOPE_CLASS);
+    landingNotes.push(`${WRITE_OUT_OF_SCOPE_RULE}: ${toolName} ${declared} lands at ${judged.path}, outside every write root (${writeScope.roots.join(", ")}), so it is also ${WRITE_OUT_OF_SCOPE_CLASS}`);
+  }
   const tier = tierOf(file, cwd);
   const rule = tier.rule;
 
@@ -4926,6 +5690,8 @@ function fileToolGate(
 
   return {
     cls: surface ?? WORKSPACE_WRITE_CLASS,
+    also,
+    landingNotes,
     protectedPath: surface !== null,
     rule,
     file,
@@ -7047,6 +7813,7 @@ function abstainedEarlier(
     load.policy,
     true,
     execGateOf(adapter, load.policy),
+    resolveWriteScope(cwd, policyRootOf(load, root), load.policy),
   );
   if (described.kind !== "gated" || described.abstain === undefined) return false;
   if (!described.classes.every((cls) => resolvePolicy(load, cls).autonomy === "autonomous")) return false;
@@ -7254,6 +8021,12 @@ function describeToolCall(
    * suspends the policy.
    */
   execGate: ExecCodeGate = closedExecCodeGate("silent"),
+  /**
+   * The write scope the loaded policy asks for (design v4). The open window
+   * passes the loaded policy's too: a window suspends the policy's ANSWER,
+   * not what a write is, so the bypass record names the class it bypassed.
+   */
+  writeScope: WriteScopeContext = WRITE_SCOPE_OFF,
 ): ToolDescription {
   // APRV-510. A Hermes `execute_code` call, first, because it is claimed by the
   // rule table below and must never be described by it: the rule table binds
@@ -7402,6 +8175,7 @@ function describeToolCall(
       callGate.shell,
       credentialCwds,
       adapter.kind === "claude-code" && toolPolicy?.defaults?.unclassified_command === "abstain",
+      writeScope,
     );
     const classified = refined.result;
     if (!classified.ok) {
@@ -7482,7 +8256,10 @@ function describeToolCall(
     // lands on an organ takes the organ's class, and a read that lands on a
     // credential takes `account.credential`. It only ever adds a class.
     if (shellCwd !== null) {
-      for (const cls of resolvedPathClasses(raw, classified.segments, shellCwd, protectedPaths, readRoots)) {
+      // The write pass's own entries (design v4) are left out, so the shapes
+      // line up with the classifier's segments as they did before it.
+      const own = classified.segments.filter((segment) => !WRITE_LANDING_RULES.includes(segment.rule));
+      for (const cls of resolvedPathClasses(raw, own, shellCwd, protectedPaths, readRoots)) {
         if (!classes.includes(cls)) classes.push(cls);
       }
     }
@@ -7672,18 +8449,18 @@ function describeToolCall(
     };
   }
 
-  const gated = fileToolGate(input.toolName, input.toolInput, protectedPaths, cwd);
+  const gated = fileToolGate(input.toolName, input.toolInput, protectedPaths, cwd, writeScope);
   if (gated === null) {
     return { kind: "allow", reason: `${input.toolName} names no file, so there is nothing to gate` };
   }
   return {
     kind: "gated",
-    classes: [gated.cls],
+    classes: [gated.cls, ...gated.also.filter((cls) => cls !== gated.cls)],
     payload: gated.payload,
     headline: gated.summary,
     // The tier rides in the verdict's note as well as in the payload, so an
     // `allow` says which checkout it authorized (APRV-124).
-    notes: gated.protectedPath ? [fileTierNote(gated)] : [],
+    notes: [...(gated.protectedPath ? [fileTierNote(gated)] : []), ...gated.landingNotes],
   };
 }
 
@@ -9311,6 +10088,7 @@ function* runBypass(
     // policy statement, and the window suspends the policy; an opaque program is
     // the case this path already names as one nothing here can vouch for.
     closedExecCodeGate("window"),
+    resolveWriteScope(cwd, policyRootOf(load, scope.root), load.ok ? load.policy : null),
   );
   if (described.kind === "deny" || (described.kind === "gated" && described.abstain !== undefined)) {
     const refused = described.kind === "deny" ? described : (described.abstain as { code: string; detail: string });
@@ -9335,6 +10113,18 @@ function* runBypass(
       "the approval CLI is the gate itself and is not gated by it",
       adapter.kind,
       codexCommand,
+    );
+  }
+
+  // Decision E (`core/write-scope.ts`): as recommended, the window treats the
+  // guarded write class as any `manual` class and lets it through, recorded.
+  // The other ruling keeps a card for it even inside a window.
+  if (DECISION_E_WINDOW === "refuse" && classes.includes(WRITE_GUARDED_CLASS)) {
+    return deny(
+      streams,
+      "hook-window-guarded-write",
+      `${WRITE_GUARDED_CLASS} is not reachable through the open window: a write onto the guarded list, or to a target this hook cannot read, waits for a human's decision even while a window is open. Nothing was appended.`,
+      adapter.kind,
     );
   }
 
@@ -10021,6 +10811,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     load.policy,
     true,
     execGateOf(adapter, load.policy),
+    resolveWriteScope(cwd, policyRootOf(load, root), load.policy),
   );
   if (described.kind === "deny") {
     return { permission: "deny", code: described.code, detail: described.detail };
