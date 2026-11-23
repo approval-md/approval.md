@@ -843,18 +843,66 @@ export function protectedPathClass(
   return strictest;
 }
 
+// ===========================================================================
+// Main's class beside every raise (lead ruling L61927; CLAIMS L61926)
+// ===========================================================================
+//
+// GLOB-WRITE adds rules to main's classifier (glob write targets and their
+// listings, organ-directory destinations and the bare organ directories, the
+// dot-name rule, copies and landings, the zsh clobber redirects, the quoting
+// and parameter readings). A rule may only ADD: wherever one fired on a line,
+// the line is classified again with every GLOB-WRITE rule off (the classifier
+// main has), and that answer joins the first as a name reading does
+// ({@link unionNameReadings}): each class main gives rides beside, and a line
+// main refuses stays refused. So no line's decision is looser than main's,
+// under any policy. The second pass runs only where a rule fired.
+//
+// The switch is module state, like `name-fold.ts`'s reading: set only by
+// {@link withMainRules}, whose `finally` restores it. The classifier is
+// synchronous, so nothing runs in the other mode.
+
+let mainRulesOnly = false;
+let globWriteFired = false;
+
+/** A GLOB-WRITE rule changed this line's answer: the main pass must run. */
+function markGlobWriteFired(): void {
+  if (!mainRulesOnly) globWriteFired = true;
+}
+
+/** {@link classifyCommand} with every GLOB-WRITE rule off: main's answer, the one the seam joins. */
+export function classifyCommandWithMainRules(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[] = [],
+  context: ClassifierContext = {},
+): CommandClassification {
+  return withMainRules(() => classifyCommand(command, protectedPaths, context));
+}
+
+/** Run `run` with every GLOB-WRITE rule off (main's classifier), and restore the mode afterwards. */
+function withMainRules<T>(run: () => T): T {
+  const saved = mainRulesOnly;
+  mainRulesOnly = true;
+  try {
+    return run();
+  } finally {
+    mainRulesOnly = saved;
+  }
+}
+
 /**
  * Is `segments[index]` the organ directory ITSELF: the last segment, or one
  * whose tail comes back to it (`.claude/x/..`)? A tail that leaves it first
  * (`.claude/..`) names its parent, which this rule does not judge.
  */
 function bareOrganDirectory(segments: readonly string[], index: number): boolean {
+  if (mainRulesOnly) return false;
   let depth = 0;
   for (const segment of segments.slice(index + 1)) {
     if (segment === "..") depth -= 1;
     else if (segment !== "." && segment.length > 0) depth += 1;
     if (depth < 0) return false;
   }
+  if (depth === 0) markGlobWriteFired();
   return depth === 0;
 }
 
@@ -2154,9 +2202,11 @@ function lex(command: string): LexResult {
     // `>>&!`, `>>&|` (stdout and stderr, clobbering; zsh -f writes each), read
     // ahead of the `>&` dup; `&>!` lexes as `&` and `>!`. Read as zsh reads
     // them: Claude Code's Bash tool runs zsh on macOS.
-    const redirect = /^(\d*)(>>&!|>>&\||>&!|>&\||>>!|>>\||>>|>&|>\||>!|>|<<-|<<|<&|<)/u.exec(command.slice(index));
+    const redirect = (mainRulesOnly ? /^(\d*)(>>|>&|>\||>|<<-|<<|<&|<)/u : /^(\d*)(>>&!|>>&\||>&!|>&\||>>!|>>\||>>|>&|>\||>!|>|<<-|<<|<&|<)/u).exec(command.slice(index));
     if (redirect !== null) {
       const op = redirect[2] as string;
+      // A zsh clobber form main does not read (`>>|`, `>&!`, ...).
+      if (!["", ">>", ">&", ">|", ">", "<<-", "<<", "<&", "<"].includes(op)) markGlobWriteFired();
       index += (redirect[0] as string).length;
       if (op === "<<" && command[index] === "<") {
         // A here-string (`<<<word`). Refused, as it always was, and named
@@ -8940,7 +8990,7 @@ function strictestProtectedWrite(
   let best = strictestProtected(words, protectedPaths, skipProse);
   // The text answer, for the record of whether a reading raised it.
   const text = best;
-  if (glob.off) return best;
+  if (glob.off || mainRulesOnly) return best;
   const offer = (surface: string | null, word: string): void => {
     if (surface !== null && (best === null || protectedRank(surface) < protectedRank(best.surface))) {
       best = { surface, path: word };
@@ -8962,6 +9012,7 @@ function strictestProtectedWrite(
       if (globLive(glob, word) && hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, glob.budget, glob.options, glob.disk), word);
     }
   }
+  if (best !== text) markGlobWriteFired();
   if (best !== text && glob.tracker !== undefined) glob.tracker.raised = true;
   return best;
 }
@@ -9032,6 +9083,13 @@ export function containedInAny(words: readonly string[]): (text: string) => bool
  * (text-only) pass reads no pattern; a hit is a raise (review-b S1).
  */
 function dotGlobNamesGit(word: string, inexact: (word: string) => boolean, glob: GlobReading): boolean {
+  if (mainRulesOnly) return false;
+  const named = dotGlobNamesGitRule(word, inexact, glob);
+  if (named) markGlobWriteFired();
+  return named;
+}
+
+function dotGlobNamesGitRule(word: string, inexact: (word: string) => boolean, glob: GlobReading): boolean {
   if (glob.off || !inexact(word) || !globLive(glob, word)) return false;
   const hit = ((): boolean => {
     const alternatives = word.includes("{") ? expandBraces(word) : [word];
@@ -9139,6 +9197,13 @@ const ORGAN_DIRECTORIES: Readonly<Record<string, string>> = {
  * where the line cannot show it) takes that class.
  */
 function organDestination(dest: string, inexact: (word: string) => boolean, glob: GlobReading): { surface: string; path: string } | null {
+  if (mainRulesOnly) return null;
+  const hit = organDestinationRule(dest, inexact, glob);
+  if (hit !== null) markGlobWriteFired();
+  return hit;
+}
+
+function organDestinationRule(dest: string, inexact: (word: string) => boolean, glob: GlobReading): { surface: string; path: string } | null {
   const { parts } = lexicalParts(dest);
   // `.git` is #683's git-dir rule's, which keeps its own rule id: a landing's
   // `.git` component is spelled in its source word, which that rule reads.
@@ -9869,6 +9934,7 @@ function copyLandings(
   inexact: (word: string) => boolean,
   glob: GlobReading,
 ): { plain: string[]; patterns: string[] } | null {
+  if (mainRulesOnly) return null;
   const { dests, sources } = plan;
   if (dests.length === 0 || sources.length === 0) return null;
   const plain: string[] = [];
@@ -9904,6 +9970,9 @@ function copyLandings(
       else patterns.push(`${into}/${base}`);
     }
   }
+  // Where a file lands is GLOB-WRITE's reading (main judges the destination
+  // as written): the main pass joins the line.
+  if (plain.length > 0 || patterns.length > 0) markGlobWriteFired();
   return { plain, patterns };
 }
 
@@ -10905,7 +10974,11 @@ type SegmentOutcome =
       ruleless?: true;
     };
 
-/** Classes the PR raises a write from knowingly: the plain answer is not carried beside a raised one. */
+/**
+ * Ordinary classes this per-segment join leaves to the seam: main's answer
+ * for the whole line, these classes included, joins every line a GLOB-WRITE
+ * rule fired on ({@link classifyCommandAsRead}, lead ruling L61926).
+ */
 function ordinaryPlainClass(cls: string): boolean {
   return cls === "files.write.workspace" || cls === "files.delete.out_of_scope" || cls.startsWith("read.");
 }
@@ -10916,7 +10989,7 @@ function ordinaryPlainClass(cls: string): boolean {
  * a plain class that differs and is not an ordinary write or read rides beside
  * the raised class as `patternAlso`, so `.approval/*` is `log.mutate` AND
  * `policy.core`, and `$'\x2e'g?t/config` is `log.mutate` AND
- * `vcs.history.rewrite`.
+ * `vcs.history.rewrite`. The ordinary ones ride beside through the seam.
  */
 function besidePlain(raised: SegmentOutcome, plain: SegmentOutcome): SegmentOutcome {
   if (!plain.ok) return plain;
@@ -11527,10 +11600,15 @@ function classifySegment(
   // organ directory (`rm -rf .`, `mv "$PWD" ../x`, `chmod -R 000 ~`), decided
   // by the hook's listing of it ({@link organParentClass}).
   const organParent =
-    context.organParentsOff === true
+    context.organParentsOff === true || mainRulesOnly
       ? { named: null, git: new Set<string>() }
       : organParentClass(organParentOperands(basename, args, positionals, plan), segment.words, protectedPaths, glob.disk);
-  if ((organParent.named !== null || organParent.git.size > 0) && glob.tracker !== undefined) glob.tracker.parent = true;
+  if (organParent.named !== null || organParent.git.size > 0) {
+    // A GLOB-WRITE-family rule (main has none): the main pass joins the line
+    // (lead ruling L61926), as it does for #686's rules.
+    markGlobWriteFired();
+    if (glob.tracker !== undefined) glob.tracker.parent = true;
+  }
   // Review of e6b7bf97 (1): with no destination read, or an implied one,
   // every positional is judged, as main judged them.
   const writtenOperands =
@@ -11583,9 +11661,12 @@ function classifySegment(
   // (`sort -o F`, `uniq in F`, sed's `w F`; {@link readWriteTargets}) writes
   // that file, so a protected one, spelled plainly, by a pattern or by a
   // `${…}` default, takes its class as a redirection onto it would.
-  if (cls.startsWith("read.")) {
+  if (cls.startsWith("read.") && !mainRulesOnly) {
     const written = strictestProtectedWrite(readWriteTargets(basename, args), protectedPaths, inexact, false, glob);
-    if (written !== null) return { ok: true, class: written.surface, rule: "protected-path", path: written.path };
+    if (written !== null) {
+      markGlobWriteFired();
+      return { ok: true, class: written.surface, rule: "protected-path", path: written.path };
+    }
   }
 
   // A protected path anywhere in an effectful segment takes that path's class:
@@ -12124,6 +12205,26 @@ export function unionNameReadings(readings: readonly CommandClassification[]): C
 }
 
 function classifyCommandAsRead(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  context: ClassifierContext,
+): CommandClassification {
+  if (mainRulesOnly) return classifyCommandAsReadWithRules(command, protectedPaths, context);
+  // THE SEAM (lead ruling L61926): where a GLOB-WRITE rule fired, main's
+  // answer for the line joins this one; a refusal in it refuses.
+  const outer = globWriteFired;
+  globWriteFired = false;
+  try {
+    const result = classifyCommandAsReadWithRules(command, protectedPaths, context);
+    if (!globWriteFired) return result;
+    const main = withMainRules(() => classifyCommandAsReadWithRules(command, protectedPaths, context));
+    return unionNameReadings([result, main]);
+  } finally {
+    globWriteFired = outer;
+  }
+}
+
+function classifyCommandAsReadWithRules(
   command: string,
   protectedPaths: readonly ProtectedPathEntry[],
   context: ClassifierContext,

@@ -86,10 +86,17 @@ option, case folded), and takes the strictest class among them.
   `rm -rf assets/*.png`) keeps its class. More than 4,096
   candidate paths, 32 segments or two million matcher steps is `log.mutate`;
   the worst words measured cost about 0.05 CPU s.
-- **One budget, never lower (review-b M1, S1):** the two million matcher
-  steps are one budget for the whole command line, shared by every segment,
-  word and reading. A raised class never takes a segment's plain class away:
-  a plain class that is not an ordinary one rides beside it.
+- **One budget (review-b M1):** the two million matcher steps are one budget
+  for the whole command line, shared by every segment, word and reading.
+- **Main's class is carried beside every raise (lead ruling L61926):** a line
+  any GLOB-WRITE rule fires on is classified a second time with every
+  GLOB-WRITE rule off (main's answer), and the two join: every class of each
+  rides on the line, and a refusal in either refuses. So no line's decision is
+  looser than main's under any policy: `cp a.js .github/README` is
+  `policy.edit` AND `files.write.workspace`, `mv a .gi*/config` keeps
+  `vcs.history.rewrite` beside `policy.edit`, and a line main refuses stays
+  refused. This supersedes review-b S1's reading, which left an ordinary
+  write or read class off a raised segment.
 - **Quoting (review of 3230ecb6):** only an UNQUOTED glob character, or an
   unquoted `$` whose value or `${…}` default the shell may still glob, makes a
   word a pattern (`"exit-$?.txt"`, `"$f[1,4]/out"` are their text), and the
@@ -98,8 +105,9 @@ option, case folded), and takes the strictest class among them.
   expansion (`'$'*` and `\$*` are a literal `$` and a live `*`). zsh's `^`
   and `#` count where the line may set options.
 - **zsh's clobbering redirects (lead ruling L61195 (a)):** `>!`, `>>!`, `>|`,
-  `>>|`, `>&!`, `>&|`, `>>&!`, `>>&|`, `&>!` and `&>>!` write the next word, as
-  `>` does.
+  `>&!`, `&>|` and `&>>!` write the next word, as `>` does. `>>|`, `>&|`,
+  `>>&!`, `>>&|` and `&>!`, which main refuses, stay refused (lead ruling
+  L61926: a reading may make a line stricter, never lift a refusal).
 - **Copies, moves, links, syncs and extractions INTO a guarded directory
   (L61195 (b); reviews of b402adec, 039b840a and e6b7bf97; the split ruling,
   L61320):** a `cp`, `mv`, `ln`, `install`, `rsync`, `scp` or `tar -x -C`
@@ -191,7 +199,9 @@ unchanged from main (`rm -rf .` in a tree of sources is
 `files.delete.out_of_scope`). The rule adds its class and never takes one
 away: the class the segment takes without it (main's, an ordinary write
 included) rides beside, so under a policy that holds `files.write.workspace`
-stricter than `policy.edit` main's answer stands. Names compare through #688's
+stricter than `policy.edit` main's answer stands. The rule is one of the
+GLOB-WRITE family the seam switches off for main's pass (lead ruling
+L61926), so main's answer for the whole line joins it too. Names compare through #688's
 fold in the folded reading and exactly as spelled in the other, so a listed
 `.Claude` is `policy.core` with the segment's own class beside. A chmod mode
 that starts with `-` (`chmod -R -w .`) is the mode, not an option. Fail

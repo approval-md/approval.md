@@ -731,14 +731,15 @@ test("fix round 3 S(open): an argv word the shell may still make into an option 
     ['cp -- "$f" bak/', "files.write.workspace"],
     // GLOB-WRITE round 3 (lead ruling L61195 b): `./*.md` may be APPROVAL.md,
     // which lands as docs/APPROVAL.md; with no listing (the core alone) that is
-    // policy.core, and the hook decides by what the directory holds.
-    ["cp ./*.md docs/", "policy.core"],
+    // policy.core, and the hook decides by what the directory holds. Main's
+    // class rides beside it (lead ruling L61926): see the pair below.
     ["cp src/*.ts dist/", "files.write.workspace"],
     ["mv notes.md archive/", "files.write.workspace"],
     ["cp a{1,2}.md docs/", "files.write.workspace"],
   ] as const) {
     assert.deepEqual(classesOf(command), [cls], command);
   }
+  assert.deepEqual(classesOf("cp ./*.md docs/"), ["policy.core", "files.write.workspace"]);
 });
 
 test("fix round 3 N-a: an over-cap brace word of plain numbers is judged by its first word; letters keep the stricter class", () => {
