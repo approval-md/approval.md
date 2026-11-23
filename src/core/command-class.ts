@@ -9428,7 +9428,13 @@ function organDestinationRule(dest: string, inexact: (word: string) => boolean, 
  * `mv`'s sources, a recursive `chmod`'s files. `chown`, `chgrp`, `rename`,
  * `find -delete` and `git clean` are not read here (refused, or a follow-up).
  */
-function organParentOperands(basename: string, args: readonly string[], positionals: readonly string[], plan: CopyPlan | null): string[] {
+function organParentOperands(
+  basename: string,
+  args: readonly string[],
+  positionals: readonly string[],
+  plan: CopyPlan | null,
+  assignments: readonly LexWord[] = [],
+): string[] {
   const recursive = (...letters: string[]): boolean => hasFlag(args, ["--recursive"]) || hasShortFlag(args, letters);
   if (basename === "rm") return recursive("r", "R") ? [...positionals] : [];
   // `mv .`, `mv ./` and `mv sub/..` are refused by rename(2) (EINVAL in
@@ -9441,7 +9447,45 @@ function organParentOperands(basename: string, args: readonly string[], position
     });
   }
   if (basename === "chmod") return chmodFiles(args);
+  // Security reviews of e9956c84 and 8fe15089: tools that delete what they
+  // read, or every match they find. chown and chgrp have no rule and are
+  // refused before this; were they classified, their files are every word
+  // after the owner or group.
+  if (basename === "chown" || basename === "chgrp") return positionals.slice(1);
+  // find: any -delete, -exec, -execdir or -ok (a test narrows what it deletes
+  // to what matches, which may be `.claude/settings.json`: fail closed).
+  if (basename === "find") return args.some((arg) => ["-delete", "-exec", "-execdir", "-ok", "-okdir"].includes(arg)) ? findStartPaths(args) : [];
+  // `git rm -r P` removes the tracked files under P from the disk (`--cached`
+  // leaves them there); `git clean` removes untracked ones.
+  if (basename === "git" && positionals[0] === "rm") return hasShortFlag(args, ["r"]) && !hasFlag(args, ["--cached"]) ? positionals.slice(1) : [];
+  if (basename === "git" && positionals[0] === "clean") return positionals.slice(1).length > 0 ? positionals.slice(1) : ["."];
+  // tar `--remove-files` (any unique prefix, `--rem` on), or an option from
+  // the environment (`TAR_OPTIONS=` before it): every operand.
+  if (basename === "tar") {
+    const removes = args.some((arg) => /^--rem(?:o(?:v(?:e(?:-(?:f(?:i(?:l(?:es?)?)?)?)?)?)?)?)?$/u.test(arg.split("=")[0] as string));
+    const fromEnvironment = assignments.some((word) => word.text.startsWith("TAR_OPTIONS="));
+    return removes || fromEnvironment ? [...positionals, ...(plan?.anyName ?? [])] : [];
+  }
+  // rsync `--remove-source-files` (from `--remov`: `--rem` and `--remo` are
+  // ambiguous with `--remote-option`, which rsync refuses): its sources.
+  if (basename === "rsync") {
+    const removes = args.some((arg) => /^--remov(?:e(?:-(?:s(?:o(?:u(?:r(?:c(?:e(?:-(?:f(?:i(?:l(?:es?)?)?)?)?)?)?)?)?)?)?)?)?)?$/u.test(arg.split("=")[0] as string));
+    return removes ? [...(plan?.sources ?? positionals)] : [];
+  }
+  // zip `-m` / `--move`: deletes what it archives.
+  if (basename === "zip") return hasShortFlag(args, ["m"]) || hasFlag(args, ["--move"]) ? positionals.slice(1) : [];
   return [];
+}
+
+/** find's start paths: the words before its expression (and after `-H`, `-L`, `-P`). */
+function findStartPaths(args: readonly string[]): string[] {
+  const paths: string[] = [];
+  for (const arg of args) {
+    if (["-H", "-L", "-P"].includes(arg)) continue;
+    if (arg.startsWith("-") || arg === "(" || arg === "!") break;
+    paths.push(arg);
+  }
+  return paths;
 }
 
 /**
@@ -9635,19 +9679,35 @@ function guardedSpellingsByFold(): Map<string, string[]> {
  * (`vcs.history.rewrite`, the git-dir rule's). The table is read directly, so
  * the parent rule does not depend on how the bare-directory rule is scoped.
  */
-function guardedEntryClass(name: string, protectedPaths: readonly ProtectedPathEntry[]): { protectedClass: string | null; git: boolean } {
+function guardedEntryClass(
+  name: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  dir = "",
+): { protectedClass: string | null; classes: string[]; git: boolean } {
   // Every guarded spelling that is this name in the current reading (security
   // review, 3; #688; review-b A686-FOLD5 M1): folded, `.Claude` and
   // `.mu<U+017F>e` are the guarded names, as APFS opens them; as spelled they
   // are other names, so the segment's own class answers there too.
   const spellings = [name, ...(guardedSpellingsByFold().get(foldFileName(name)) ?? []).filter((spelling) => sameGuardedName(spelling, name))];
   let best: string | null = null;
+  const classes: string[] = [];
+  const add = (cls: string | null): void => {
+    if (cls === null) return;
+    if (!classes.includes(cls)) classes.push(cls);
+    if (best === null || protectedRank(cls) < protectedRank(best)) best = cls;
+  };
   for (const spelling of spellings) {
-    for (const cls of [Object.hasOwn(ORGAN_DIRECTORIES, spelling) ? (ORGAN_DIRECTORIES[spelling] as string) : null, protectedPathClass(spelling, protectedPaths)]) {
-      if (cls !== null && (best === null || protectedRank(cls) < protectedRank(best))) best = cls;
-    }
+    const organ = Object.hasOwn(ORGAN_DIRECTORIES, spelling) ? (ORGAN_DIRECTORIES[spelling] as string) : null;
+    // The name's own class, then (lead ruling L62013, S1) the class of every
+    // guarded path inside the folder it names, routed ones included: a parent
+    // takes the classes of the folders it holds, each by that rule.
+    const own = protectedPathClassOfWordAlone(spelling, protectedPaths);
+    add(organ);
+    add(own);
+    const first = own ?? organ;
+    if (first !== null) for (const cls of folderContentClaims(`${dir.replace(/\/+$/u, "")}/${spelling}`, first, protectedPaths)) add(cls);
   }
-  return { protectedClass: best, git: sameGuardedName(name, ".git") };
+  return { protectedClass: best, classes, git: sameGuardedName(name, ".git") };
 }
 
 /**
@@ -9665,7 +9725,11 @@ function organParentClass(
 ): { named: { surface: string; path: string } | null; git: Set<string> } {
   let named: { surface: string; path: string } | null = null;
   const git = new Set<string>();
+  // Every class a held folder gives (lead ruling L62013, S1): the classifier
+  // cannot rank routed classes, so each is a claim and the gate judges all.
+  const claims: string[] = [];
   const offer = (surface: string, path: string): void => {
+    if (!claims.includes(surface)) claims.push(surface);
     if (named === null || protectedRank(surface) < protectedRank(named.surface)) named = { surface, path };
   };
   for (const operand of operands) {
@@ -9688,13 +9752,16 @@ function organParentClass(
         continue;
       }
       for (const name of listing) {
-        const entry = guardedEntryClass(name, protectedPaths);
-        if (entry.protectedClass !== null) offer(entry.protectedClass, operand);
+        const entry = guardedEntryClass(name, protectedPaths, dir);
+        for (const cls of entry.classes) offer(cls, operand);
         if (entry.git) git.add(operand);
       }
     }
   }
-  return { named, git };
+  const strictest = named as { surface: string; path: string } | null;
+  if (strictest === null || claims.length <= 1) return { named: strictest, git };
+  const ordered = [strictest.surface, ...claims.filter((cls) => cls !== strictest.surface)];
+  return { named: { surface: takeAmongEqual(ordered), path: strictest.path }, git };
 }
 
 /**
@@ -11798,16 +11865,6 @@ function classifySegmentWithVerb(
   // Lead ruling L61587: a recursive delete, move or chmod of a PARENT of an
   // organ directory (`rm -rf .`, `mv "$PWD" ../x`, `chmod -R 000 ~`), decided
   // by the hook's listing of it ({@link organParentClass}).
-  const organParent =
-    context.organParentsOff === true || mainRulesOnly
-      ? { named: null, git: new Set<string>() }
-      : organParentClass(organParentOperands(basename, args, positionals, plan), segment.words, protectedPaths, glob.disk);
-  if (organParent.named !== null || organParent.git.size > 0) {
-    // A GLOB-WRITE-family rule (main has none): the main pass joins the line
-    // (lead ruling L61926), as it does for #686's rules.
-    markGlobWriteFired();
-    if (glob.tracker !== undefined) glob.tracker.parent = true;
-  }
   // Review of e6b7bf97 (1): with no destination read, or an implied one,
   // every positional is judged, as main judged them.
   const writtenOperands =
@@ -11818,6 +11875,23 @@ function classifySegmentWithVerb(
           ? [...positionals, ...plan.dests]
           : plan.dests
       : globWriteOperands(basename, positionals);
+  // Lead ruling L62013 (S2): the parents rule reads the operands of the
+  // commands that remove, move or change access to everything below them
+  // ({@link organParentOperands}); a released plain `mkdir` or `touch` has none.
+  // Not every command's: an operand the text cannot place is `policy.core`
+  // here, fail closed, so reading every command's operands would make
+  // `git push origin $BRANCH` and `rm ../sibling/file` policy.core.
+  const parentOperands = organVerbs ? organParentOperands(basename, args, positionals, plan, segment.words.slice(0, cursor)) : [];
+  const organParent =
+    context.organParentsOff === true || mainRulesOnly
+      ? { named: null, git: new Set<string>() }
+      : organParentClass(parentOperands, segment.words, protectedPaths, glob.disk);
+  if (organParent.named !== null || organParent.git.size > 0) {
+    // A GLOB-WRITE-family rule (main has none): the main pass joins the line
+    // (lead ruling L61926), as it does for #686's rules.
+    markGlobWriteFired();
+    if (glob.tracker !== undefined) glob.tracker.parent = true;
+  }
   // A set, not a scan per word (review A686-FOLD2, M2): the same answer.
   const writtenSet = new Set(writtenOperands);
   const writtenInexact = (text: string): boolean => writtenSet.has(text) && inexact(text);

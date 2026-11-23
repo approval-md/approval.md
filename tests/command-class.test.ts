@@ -745,10 +745,12 @@ const FIXTURES: readonly Fixture[] = [
   { command: "grep -l TODO src/a.ts", class: "read.shell", rule: "read-shell" },
   { command: "grep -o TODO src/a.ts", class: "read.shell", rule: "read-shell" },
   // …and the primaries that make `find` act.
+  // A find that deletes under a parent of an organ directory (lead ruling
+  // L62013): with no listing, fail closed; main's class rides beside.
   {
     command: "find . -type f -delete",
-    class: "files.delete.out_of_scope",
-    rule: "find-delete",
+    class: "policy.core",
+    rule: "protected-path",
   },
   { command: "find . -name x -fprint out.txt", class: "files.write.workspace", rule: "find-write" },
 
@@ -950,7 +952,9 @@ test("APRV-283: a find that deletes is not a read, with or without the discard",
     const result = classifyCommand(command);
     assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
     if (!result.ok) return;
-    assert.deepEqual(result.classes, ["files.delete.out_of_scope"], command);
+    // Lead ruling L62013: `.` may hold an organ directory (no listing here),
+    // so the parents rule's class rides beside main's.
+    assert.deepEqual(result.classes, ["policy.core", "files.delete.out_of_scope"], command);
   }
 });
 

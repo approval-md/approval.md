@@ -224,7 +224,19 @@ away: the class the segment takes without it (main's, an ordinary write
 included) rides beside, so under a policy that holds `files.write.workspace`
 stricter than `policy.edit` main's answer stands. The rule is one of the
 GLOB-WRITE family the seam switches off for main's pass (lead ruling
-L61926), so main's answer for the whole line joins it too. Names compare through #688's
+L61926), so main's answer for the whole line joins it too. Lead ruling
+L62013: a parent takes the classes of every organ folder it holds, each by
+the folder rule (the folder's contents and the policy's routed entries under
+it included: `rm -rf .` holding `.github` is `policy.edit` and
+`policy.edit.ci` where `.github/workflows/` is routed there, holding
+`.approval` it carries `log.mutate`). Besides `rm -r`, `mv` and `chmod`, the
+tools that delete what they read or find count, fail closed: `find P` with
+`-delete` or `-exec` (any test included: `find . -type f -delete` deletes
+`.claude/settings.json`), `git rm -r` (not `--cached`), `tar` with
+`--remove-files` (any unique prefix) or `TAR_OPTIONS=` before it, `rsync`
+with `--remove-source-files`, and `chown`, `chgrp`, `git clean` and `zip -m`,
+which are refused today. Nothing is released: `mkdir .` and `touch .` never
+reach the folders below. Names compare through #688's
 fold in the folded reading and exactly as spelled in the other, so a listed
 `.Claude` is `policy.core` with the segment's own class beside. A chmod mode
 that starts with `-` (`chmod -R -w .`) is the mode, not an option. Fail

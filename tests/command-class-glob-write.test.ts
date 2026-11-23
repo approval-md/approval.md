@@ -1752,3 +1752,48 @@ test("lead ruling L62013 (S2), fail closed: every command naming the bare organ 
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
 });
+
+test("lead ruling L62013 for the parents rule: a parent takes the classes of the folders it holds (S1), and the commands that delete what they read count (S2, fail closed)", () => {
+  const disk = (listings: Record<string, readonly string[]>) => ({ globDisk: { cwd: "/w", home: "/h", listings: new Map(Object.entries(listings)) } });
+  // S1: each held folder by the folder rule, routed contents included.
+  const routed = classifyCommand("rm -rf .", [{ path: ".github/workflows/", class: "policy.edit.ci" }], disk({ "/w": [".github", "src"] }));
+  assert.ok(routed.ok && ["policy.edit", "policy.edit.ci", "files.delete.out_of_scope"].every((cls) => routed.classes.includes(cls)), JSON.stringify(routed));
+  assert.deepEqual([...withListing("rm -rf .", { "/w": [".approval", "src"] })].sort(), ["files.delete.out_of_scope", "log.mutate", "policy.core"]);
+  // Two held folders: both classes, not only the higher-ranked one.
+  const both = withListing("chmod -R 000 .", { "/w": [".claude", ".github"] });
+  assert.ok(both.includes("policy.core") && both.includes("policy.edit"), both.join(","));
+  // S2: tools that delete what they read or find, by what `.` holds.
+  const organ = { "/w": [".claude", "src"] };
+  for (const command of [
+    "find . -delete",
+    "find . -name '*.pyc' -delete",
+    "find . -type f -delete",
+    "git rm -r .",
+    "tar --remove-files -czf x.tgz .",
+    "tar --rem -czf x.tgz .",
+    "TAR_OPTIONS=--remove-files tar -czf x.tgz .",
+    "rsync -a --remove-source-files ./ /tmp/x/",
+    "rsync -a --remov ./ /tmp/x/",
+  ]) {
+    assert.ok(withListing(command, organ).includes("policy.core"), `${command} -> ${withListing(command, organ).join(",")}`);
+  }
+  // Nothing held: main's class.
+  for (const command of ["find . -delete", "git rm -r .", "tar --remove-files -czf x.tgz ."]) {
+    assert.ok(!withListing(command, { "/w": ["src", "dist"] }).includes("policy.core"), command);
+  }
+  // Not a removal of what is below: main's class, wherever `.claude` is.
+  for (const [command, main] of [
+    ["git rm -r --cached .", "vcs.commit.branch"],
+    ["tar -czf x.tgz .", "files.write.workspace"],
+    ["rsync -a ./ /tmp/x/", "network.call"],
+    ["mkdir -p .", "files.write.workspace"],
+    ["touch .", "files.write.workspace"],
+    ["git add .", "vcs.commit.branch"],
+  ] as const) {
+    assert.deepEqual(withListing(command, organ), [main], command);
+  }
+  // Refused on main and here: no rule, or opaque.
+  for (const command of ["git clean -fdx", "zip -rm x.zip .", "chown -R x .", "find . -exec rm {} +", "export TAR_OPTIONS=--remove-files; tar -czf x.tgz ."]) {
+    assert.equal(classifyCommand(command).ok, false, command);
+  }
+});
