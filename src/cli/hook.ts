@@ -5343,6 +5343,12 @@ interface HookRun {
    * changes nothing about it.
    */
   waitMs: number;
+  /**
+   * How long reading and describing this call took, in milliseconds. A read
+   * slower than {@link READ_FREE_MS} shortens the wait by the rest
+   * ({@link waitAfterRead}): the harness's timer started before the read did.
+   */
+  readMs: number;
   harness: HarnessKind;
   originApp: string;
   /** Exact native command bytes required in a Codex allow's identity update. */
@@ -6385,7 +6391,14 @@ function* gateHarnessSteps(
     expiryOf,
   );
 
-  const deadline = Date.now() + run.waitMs;
+  // A slow read has used up part of the time the harness allows this process.
+  const waitLeftMs = waitAfterRead(run.waitMs, run.readMs);
+  if (waitLeftMs < run.waitMs) {
+    streams.err(
+      `approval: reading this call took ${String(run.readMs)}ms, so the wait for a decision is ${String(waitLeftMs)}ms of its ${String(run.waitMs)}ms: the hook answers before the harness stops listening.\n`,
+    );
+  }
+  const deadline = Date.now() + waitLeftMs;
 
   // APRV-427. From the first poll to the last this invocation only READS the
   // verified log and sleeps, so an embedding caller (`approval serve`) may let
@@ -7352,6 +7365,27 @@ export function describeDeadlineMs(harnessCapMs: number | null = null, env: Node
  * the same way.
  */
 let describeDeadlinePassed = false;
+
+/** A read of a call that takes no longer than this costs the wait nothing. */
+export const READ_FREE_MS = 1_000;
+
+/**
+ * The wait left for a decision after a read that took `readMs`.
+ *
+ * The harness's own timer started when it spawned this process, and a hook it
+ * kills is a call that proceeds. An operator sets `--timeout` a little under
+ * the harness's timeout; a read of several seconds on top of the whole wait
+ * would end after it. So a read slower than {@link READ_FREE_MS} shortens the
+ * wait by the rest, down to none: the log is still read once, and the question
+ * stays open for the retry grace as after any wait that ran out.
+ *
+ * An ordinary read takes milliseconds and changes nothing: the wait, the
+ * grace and the age at which a question counts as abandoned are judged as
+ * they always were.
+ */
+export function waitAfterRead(waitMs: number, readMs: number): number {
+  return Math.max(0, waitMs - Math.max(0, readMs - READ_FREE_MS));
+}
 
 /**
  * Has a description hit its deadline in this process (or this thread: a
@@ -10257,6 +10291,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
   // both paths since APRV-214 (see `describeToolCall`): the open window
   // classifies exactly as the closed one does, and a second copy of this would
   // be a second answer to "what is this command".
+  const readBeganMs = Date.now();
   const described = describeToolCall(
     describeDeadlineMs(harnessCapMs),
     input,
@@ -10268,6 +10303,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     true,
     execGateOf(adapter, load.policy),
   );
+  const readMs = Date.now() - readBeganMs;
   if (described.kind === "deny") {
     return { permission: "deny", code: described.code, detail: described.detail };
   }
@@ -10351,6 +10387,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
       harnessCapMs === null
         ? timeoutMs
         : Math.max(0, Math.min(timeoutMs, harnessCapMs - HARNESS_CAP_MARGIN_MS)),
+    readMs,
     harness: adapter.kind,
     originApp: adapter.originApp,
     ...(codexCommand === undefined ? {} : { codexCommand }),

@@ -3,13 +3,14 @@
  *
  * A hook the harness kills at its timeout is a tool call that PROCEEDS
  * (`docs/claude-code-hook.md`), so the time this hook takes is part of the
- * gate. Two things are pinned here:
+ * gate. Three things are pinned here:
  *
  * 1. the path walks that ran in the square of a word's length are linear, with
  *    the same answers (against the walks as they were, kept below as the
  *    reference, on a fixture of links, loops and missing components);
  * 2. describing a call has a deadline of its own, and a call that outlasts it
- *    is refused `hook-deadline` (through the real CLI).
+ *    is refused `hook-deadline` (through the real CLI);
+ * 3. a read that takes more than a second shortens the wait for a decision.
  *
  * Costs are CPU time and ratios, never wall-clock time: this machine is shared.
  * No input here is larger than 1 MiB, and none can exhaust memory: every walk
@@ -27,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import {
   canonicalPath,
   classifyForHook,
+  commandHook,
   decideHarnessCall,
   DESCRIBE_DEADLINE_ENV,
   DESCRIBE_DEADLINE_MS,
@@ -37,7 +39,10 @@ import {
   type HookInput,
   hookScope,
   physicalLanding,
+  READ_FREE_MS,
+  waitAfterRead,
 } from "../src/cli/hook.js";
+import { readVerifiedRecords } from "../src/core/state.js";
 import { runUnderDeadline } from "../src/core/deadline.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-deadline-")));
@@ -532,6 +537,70 @@ function decideHere(dir: string, command: string): HarnessVerdict {
     windowRecords: null,
   });
 }
+
+test("a read slower than a second shortens the wait by the rest; an ordinary read leaves it whole", () => {
+  assert.equal(READ_FREE_MS, 1_000);
+  assert.equal(waitAfterRead(55_000, 0), 55_000);
+  assert.equal(waitAfterRead(55_000, 1_000), 55_000);
+  assert.equal(waitAfterRead(55_000, 1_001), 54_999);
+  assert.equal(waitAfterRead(55_000, 7_000), 49_000);
+  assert.equal(waitAfterRead(2_000, 15_000), 0, "never below none");
+  assert.equal(waitAfterRead(0, 0), 0);
+});
+
+test("the wait that follows a slow read is the shortened one: the hook stops polling when it says it will", { skip }, () => {
+  // A call that waits for a human (the POST) and takes seconds to read (250 KB
+  // of path words). The hook reports how long the read took and what is left
+  // of a 2 s wait. Polls are counted, not timed: at one every 50 ms, the wait
+  // that is left allows a known number of them, and the whole 2 s would
+  // allow forty.
+  const dir = lab();
+  labs += 1;
+  let polls = 0;
+  let out = "";
+  let err = "";
+  commandHook(
+    ["claude-code", "--as", "agent:cc", "--timeout", "2s", "--interval", "50ms"],
+    {
+      out: (text) => {
+        out += text;
+      },
+      err: (text) => {
+        err += text;
+      },
+    },
+    dir,
+    () =>
+      JSON.stringify({
+        hook_event_name: "PreToolUse",
+        session_id: "deadline",
+        tool_use_id: `deadline-${String(labs)}`,
+        cwd: dir,
+        transcript_path: "/dev/null",
+        tool_name: "Bash",
+        tool_input: { command: `curl -X POST https://example.com/api -d call=1; cat ${"notes/a.txt ".repeat(21_000)}` },
+      }),
+    {
+      enterWait: () => undefined,
+      leaveWait: () => undefined,
+      pollRead: (logPath) => {
+        polls += 1;
+        return readVerifiedRecords(logPath);
+      },
+    },
+  );
+  const verdict = (JSON.parse(out) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+  assert.equal(verdict.permissionDecision, "deny", verdict.permissionDecisionReason);
+  assert.match(verdict.permissionDecisionReason, /^hook-timeout: /u);
+  const said = /reading this call took (\d+)ms, so the wait for a decision is (\d+)ms of its 2000ms/u.exec(err);
+  assert.ok(said !== null, `no line about the read on stderr: ${err.slice(0, 400)}`);
+  const readMs = Number(said[1]);
+  const left = Number(said[2]);
+  assert.equal(left, waitAfterRead(2_000, readMs));
+  assert.ok(left < 2_000);
+  // One poll per 50 ms of the wait that is left, and a few for its two ends.
+  assert.ok(polls <= Math.ceil(left / 50) + 4, `${String(polls)} polls in a wait of ${String(left)} ms`);
+});
 
 // LAST IN THIS FILE, and on purpose: after it this process describes no call.
 test("after one call has outlasted the deadline, this process reads no further call and says why", { skip }, () => {
