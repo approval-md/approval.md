@@ -163,6 +163,14 @@ by it, so `mkdir .claude`, `cp -r .claude backup/` and
 `find . -name .claude -exec rm …` stays refused (opaque); case variants
 (`rm -rf .Claude`) as for every guarded path.
 
+**GLOB-WRITE names fold with the shared fold (#688; lead ruling 04:11Z).**
+Listing names, organ-directory names, the `.git` check on a listing and the
+glob matcher's characters compare through `foldNameLower`, so they fold what
+APFS folds (long s, the Kelvin sign, ligatures, sharp s, NFD) in the folded
+reading and lower case as before in the as-spelled one; there is one fold. The
+glob matcher folds each whole name before it matches, and reads a pattern
+character whose fold is not one character as any run (strict).
+
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),
 and the `git push m` after it read as an implicit `vcs.push.main` while it was

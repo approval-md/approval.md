@@ -8762,7 +8762,7 @@ const DOTGLOB_LAUNCHERS: readonly string[] = [
 function lineMaySetDotglob(command: string): boolean {
   if (/[$`{}()]/u.test(command)) return true;
   // Shell option names, not file names: zsh folds ASCII case and drops
-  // underscores, so this stays an ASCII lower case, not foldGuardedName.
+  // underscores, so this stays an ASCII lower case, not the guarded-name fold.
   const folded = command.replace(/['"\\_]/gu, "").toLowerCase();
   if (DOTGLOB_OPTION_NAMES.test(folded)) return true;
   for (const piece of folded.split(/[;&|\n]+/u)) {
@@ -9041,7 +9041,7 @@ function dotGlobNamesGit(word: string, inexact: (word: string) => boolean, glob:
             if (listing !== undefined) {
               // One fold for every guarded name (review-b A686-FOLD3 N2): the swap to
               // the shared helper reaches this comparison too.
-              if (listing.some((name) => foldGuardedName(name) === ".git")) return true;
+              if (listing.some((name) => sameGuardedName(name, ".git"))) return true;
               continue;
             }
           }
@@ -9088,17 +9088,13 @@ function globWriteOperands(basename: string, positionals: readonly string[]): st
 }
 
 /**
- * The ONE case fold the GLOB-WRITE code applies to a guarded name, or to a
- * name or pattern character compared with one (listing names, organ-directory
- * names, pattern tokens). To be REPLACED by the shared guarded-name fold
- * helper (build-6; lead ruling 04:11Z), which folds what APFS folds (long s,
- * sharp s as ss, the Kelvin sign, ligatures, NFC/NFD): swap this body for a
- * call to it. Note for that swap: the glob matcher compares one character at
- * a time, so a fold that changes a string's length must be applied to whole
- * names before matching, not per token.
+ * Are `a` and `b` one guarded name? The GLOB-WRITE code compares names
+ * through the shared fold ({@link foldNameLower}, `name-fold.ts`; lead ruling
+ * 04:11Z: one fold): folded in the folded reading, lowered as they were before
+ * names folded in the as-spelled one, so each reading is judged.
  */
-function foldGuardedName(name: string): string {
-  return name.toLowerCase();
+function sameGuardedName(a: string, b: string): boolean {
+  return foldNameLower(a) === foldNameLower(b);
 }
 
 /**
@@ -9150,7 +9146,7 @@ function organDestination(dest: string, inexact: (word: string) => boolean, glob
         ? globSegmentTokens(part, glob.options)
         : null;
     for (const [name, cls] of guarded) {
-      const spelled = foldGuardedName(part) === foldGuardedName(name);
+      const spelled = sameGuardedName(part, name);
       if (spelled && (named === null || protectedRank(cls) < protectedRank(named))) named = cls;
       const hit = spelled || (pattern !== null && globTokensMatch(pattern, name, false, glob.budget) !== false);
       if (hit && (best === null || protectedRank(cls) < protectedRank(best))) best = cls;
@@ -9943,7 +9939,7 @@ function globSegmentTokens(segment: string, options = true): { tokens: GlobToken
       at = end - 1;
     } else if (ch === "{" && options && lastClose > at) {
       const inside = segment.slice(at + 1, lastClose).replace(/[{},]/gu, "");
-      const chars = new Set(foldGuardedName(inside));
+      const chars = new Set(foldNameLower(inside));
       let wide = false;
       for (let k = 1; k + 1 < inside.length && !wide; k += 1) {
         if (inside[k] !== "-") continue;
@@ -9952,7 +9948,7 @@ function globSegmentTokens(segment: string, options = true): { tokens: GlobToken
         if (low <= 0x2f && high >= 0x2f) spans = true;
         // A range wider than ASCII may be any character.
         if (high - low > 0x80) wide = true;
-        else for (let code = low; code <= high; code += 1) chars.add(foldGuardedName(String.fromCharCode(code)));
+        else for (let code = low; code <= high; code += 1) for (const folded of foldNameLower(String.fromCharCode(code))) chars.add(folded);
       }
       if (wide) pushRun();
       else tokens.push({ kind: "set", chars: [...chars].join("") });
@@ -9961,7 +9957,14 @@ function globSegmentTokens(segment: string, options = true): { tokens: GlobToken
       tokens.push({ kind: "bracket" });
     } else {
       if (ch === "]") closes.push(tokens.length);
-      tokens.push({ kind: "lit", ch: foldGuardedName(ch) });
+      // The matcher compares one character at a time against the whole name
+      // folded first. A character whose fold is not one character (`ß` is
+      // `ss`, a ligature two or three letters, a combining mark split off by
+      // NFD, an HFS+-ignored code point none) cannot be one token: it is read
+      // as any run, which is strict (it may match more, never less).
+      const folded = foldNameLower(ch);
+      if ([...folded].length === 1) tokens.push({ kind: "lit", ch: folded });
+      else pushRun();
     }
   }
   return { tokens, closes, spans };
@@ -9982,7 +9985,8 @@ function globTokensMatch(
   budget: { left: number },
 ): boolean | null {
   const { tokens, closes } = pattern;
-  const text = foldGuardedName(name);
+  // The whole name folded before it is matched: a fold may change its length.
+  const text = foldNameLower(name);
   const memo = new Map<number, boolean>();
   let exhausted = false;
   const match = (ti: number, si: number): boolean => {
@@ -10175,7 +10179,7 @@ function globGuardClass(
           for (const name of present) {
             if (!test(name, false)) continue;
             listed.push([name]);
-            for (const guard of names) if (guard !== name && foldGuardedName(guard) === foldGuardedName(name)) listed.push([guard]);
+            for (const guard of names) if (guard !== name && sameGuardedName(guard, name)) listed.push([guard]);
           }
           return listed;
         }

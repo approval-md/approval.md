@@ -1240,3 +1240,18 @@ test("lead ruling L61587 (review-b A686-FOLD3 M1): a delete, move or chmod of an
   // Not covered (the follow-up): a parent of an organ directory keeps main's class.
   assert.deepEqual(classesOf("rm -rf ."), ["files.delete.out_of_scope"]);
 });
+
+test("one fold (#688's shared helper, lead ruling 04:11Z): listing names, organ directories and pattern characters fold as APFS does", () => {
+  // A listed name in another spelling APFS opens as the guarded one.
+  for (const name of ["Approval.MD", "APPROVAL.md", ".Claude", ".CURSOR", "approval.md".toUpperCase()]) {
+    assert.ok(withListing("rm -rf *", { "/w": [name, "a.js"] }).includes("policy.core"), name);
+  }
+  assert.ok(withListing("rm -rf .*", { "/w": [".claude".replace("c", "C")] }).includes("policy.core"));
+  // Organ directories by the shared fold: case, long s, Kelvin sign.
+  for (const command of ["rm -rf .Claude", "chmod -R 000 .CLAUDE", "mv .Cursor gone", "rm -rf .muſe", "rm -rf .grоK".replace("о", "o")]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // A pattern character whose fold is not one character (the ligature fl is
+  // `fl`): read as any run, strict, never a miss.
+  assert.ok(classesOf("echo x > .github/workﬂow*/ci.yml").includes("policy.edit"));
+});
