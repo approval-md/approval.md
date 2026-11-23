@@ -179,6 +179,35 @@ on the change above.
   operator that transforms a value (removal, substring, replacement, case,
   `@`) counts, on any parameter. That one costs: `echo x >
   "${f%.txt}.log"` or `"${1%.md}.html"` becomes `git-dir-write`.
+- **The fold of #680's gate.** printf is read only when its format is a
+  literal word using `%s`, `%b`, `%c` and `%d` alone and every word after it
+  keeps its place (a literal word or a fully quoted plain scalar); every `echo`
+  only when every word does; `printf` and `echo` named by the system's path
+  (`/usr/bin/printf`) are read, and also as the unknown output main read
+  them as, so a body is never read looser than before; any other path
+  ending in a printer's name (`/usr/bin//printf`, `/bin/../usr/bin/printf`,
+  `./printf`) counts. `printf -v` (and zsh's `print -v`) makes the line
+  count as spelling `.git`, so a target its variable reaches counts
+  (`printf -v d %.4s .gitfoo; echo x > "$d/config"`), and in a body its
+  segment counts. Anything else in a substitution body counts
+  as naming `.git`: `printf %.4ls .gitfoo` (bash skips the `l`), a format in
+  a variable (`F=%.4s; printf "$F" .gitfoo`, `printf $F`), `%q`, bash's
+  `%(…)T`, and words that may become no word or several (`printf
+  '%.4s%.0s' $u .gitfoo` is `.git` when `u` is empty), a quoted word whose
+  text the lexer does not keep as the shell's (`"\x2e""git"`), a `\c` (which
+  stops all output) in any printf or echo word, and a `%` the parse did not
+  take (`printf %`, `'%s%'`). `echo` (zsh's
+  decodes escapes with no `-e`) and `%b` of a value the text cannot read
+  count too (`X='\056git'; echo x > "$(echo "$X")/config"`, a miss on
+  main), so `"$(echo $(date +%F))"` asks. zsh's subscripts and
+  modifiers count as operators: in braces any subscript but `[@]`/`[*]`,
+  and after an unbraced parameter any `[` or `:` and a letter (`$f[1,4]`,
+  `$f:r`, `$f:S/x/i/`, `$@:r`, and the flags `$=f`, `$~f`, `$^f`).
+  Evidence: the gate's 95 shell-truth cases and 116 more, in bash 3.2 and
+  zsh: 0 looser against main and 0.4.8, 53 lines that land in `.git` now
+  counted (the 5 left are the known limits); over the gate's 3,668-line
+  corpus, 0 looser against main and 0.4.8, 9 lines stricter than main.
+  Conformance is unchanged.
 - **A line cannot be built to make the classifier slow.** A hook past its
   timeout lets the call through, so the cost of reading a line is bounded.
   The split-spelling reader tried every window of a word as its own

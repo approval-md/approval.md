@@ -1028,11 +1028,44 @@ the shell reads it, its pieces decoded and joined (`$'\x2e'"g""i""t"`), and a
 quote that does not close counts. What `printf` or `echo` prints is read from
 the body's words with quotes removed: the format filled from its arguments,
 escapes decoded, an argument the text cannot read an unknown output, and a
-body's segments printed in turn (`$(printf .g; printf it)`). Every operator
+body's segments printed in turn (`$(printf .g; printf it)`). `printf` and
+`echo` named by the system's path (`/usr/bin/printf`) are read the same way,
+and also as an unknown output, as before they were read, so a body is never
+read looser than that (`printf .g; /usr/bin/printf x` still counts). Any
+other path whose last name is a printer (`/usr/bin//printf`,
+`/bin/../usr/bin/printf`, `./printf`) may run the system's own, and what it
+prints counts. `printf -v` and zsh's `print -v` set a variable to what
+would be printed: the line then counts as spelling `.git`, so a target the
+variable reaches counts (`printf -v d %.4s .gitfoo; echo x > "$d/config"`),
+and in a body such a segment counts.
+printf is read only when its format is a literal word using no conversion
+but `%s`, `%b`, `%c` and `%d` (with flags, width and precision) and every word
+after it keeps its place: a literal word, or a fully quoted plain scalar
+whose whole text is one name (`"$SHA"`, `"${SHA}"`). Anything else counts
+as naming `.git`: a quoted word whose text this lexer does not keep as the
+shell's (`"\x2e""git"`, whose backslash it drops), a `\c` in any printf
+or echo word (it stops all output: `printf %b '.g\cX'; printf it` is
+`.git`), a format held in a
+variable (`F=%.4s; printf "$F" .gitfoo`, `printf $F`), a length modifier
+(`%.4ls`, which bash cuts as `%.4s`), `%q`, `%Q`, bash's `%(…)T`, a `%` the
+parse did not take (`printf %`, `printf '%s%' a`; a `%%` is read), and a word that may become no word or several (`$u`,
+`"$@"`, `${a[@]}`, `${!r}`, `{a,b}`, `*`), since it moves which conversion
+takes the words after it (`printf '%.4s%.0s' $u .gitfoo` is `.git` when `u`
+is empty). `echo` is read only when every word keeps its place and holds
+no value the text cannot read, since zsh's `echo` decodes escapes without
+`-e` (`X='\056git'; echo x > "$(echo "$X")/config"` lands in `.git`); `%b`
+of such a value, zsh's `print` with one, an ANSI-C or locale word
+(`$'.gitfoo'`) and a format whose escapes decode to a `%` count too. So
+`"$(echo $(date +%F))"` asks, while `"$(cat $(date +%F))"` does not. Every operator
 that transforms a value (removal, substring, replacement, case, `@`) counts,
 on any parameter, a name the line sets included: so `echo x >
 "${f%.txt}.log"` and `"${1%.md}.html"` are `git-dir-write`, while a length,
-a plain `${f}`, an indirection and `:?` stay unknown values. (Working the
+a plain `${f}`, an indirection and `:?` stay unknown values. zsh's
+subscripts and modifiers count the same way: in braces any subscript but
+`[@]` and `[*]` (`${f[1,4]}`, `${f[2]}`), and after an unbraced parameter,
+special ones included, any `[` or a `:` then a letter or `&` (`$f[1,4]`,
+`$f:r`, `$f:S/x/i/`, `$@:r`), as do zsh's flags before an unbraced name
+(`$=f`, `$~f`, `$^f`); this also asks for `"$HOST:path"`. (Working the
 result out exactly was tried and left out: each review round found another
 shell corner.) `${!-.git}` is the default word of `$!`, read as the operator
 it is; and a `${` that does not close counts. Inside an operator's word a nested
