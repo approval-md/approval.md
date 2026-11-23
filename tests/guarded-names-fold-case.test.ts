@@ -347,6 +347,12 @@ test("the guard functions fold: protectedPathClass, isCredentialPath, isGateOrga
   // is not an organ as spelled (main says no class at all), so it is not one.
   assert.equal(isGateOrganPath(".claude/settings.json"), true);
   assert.equal(isGateOrganPath(".Claude/Settings.json"), false);
+  // Both readings call these organ files `policy.core`; the folded reading's
+  // exclusions (the approval home, the policy file) fold too, so neither is
+  // an organ (main called both organs: its exclusions were exact).
+  assert.equal(isGateOrganPath(".Approval/x/.claude/settings.json"), false);
+  assert.equal(isGateOrganPath(".claude/settings/Approval.md"), false);
+  assert.equal(isGateOrganPath("x/.claude/settings.json"), true);
   assert.equal(isGateOrganPath("APPROVAL.md"), false);
   assert.equal(isGateOrganPath("approval.md"), false);
   assert.equal(isGateOrganPath(`APPROVAL${LONG_S}.md`), false);
