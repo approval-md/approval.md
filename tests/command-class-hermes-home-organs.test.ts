@@ -40,6 +40,7 @@ import {
   isGateOrganPath,
   protectedPathClass,
 } from "../src/core/command-class.js";
+import { runner, scaledBound } from "./cost-runner.js";
 
 function classesOf(command: string): string[] {
   const result = classifyCommand(command);
@@ -544,7 +545,8 @@ test("recheck S(new): the brace expander is bounded and fails to the stricter cl
   // 10.3 s and 10.4 s). About 2 CPU s on a laptop; the bound is the old one.
   const used = process.cpuUsage(start);
   const ms = (used.user + used.system) / 1000;
-  assert.ok(ms < 10_000, `took ${ms.toFixed(0)} CPU ms`);
+  const bound = scaledBound(10) * 1000;
+  assert.ok(ms < bound, `took ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (10 s x ${runner().line})`);
 });
 
 test("cost: nested literal braces are read in one pass, not one scan per brace", () => {
@@ -558,7 +560,8 @@ test("cost: nested literal braces are read in one pass, not one scan per brace",
       classes = classesOf(line);
     });
     assert.deepEqual(classes, ["files.write.workspace"], `n=${String(n)}`);
-    assert.ok(ms < 2_000, `n=${String(n)}: ${ms.toFixed(0)} CPU ms, bound 2,000`);
+    const bound = scaledBound(2) * 1000;
+    assert.ok(ms < bound, `n=${String(n)}: ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (2 s x ${runner().line})`);
   }
 });
 
