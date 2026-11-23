@@ -7935,7 +7935,7 @@ function outrankingProtected(
   readTargets: readonly string[],
   writesOnly: boolean,
   protectedPaths: readonly ProtectedPathEntry[],
-): { surface: string; path: string } | null {
+): StrictestProtected | null {
   // APRV-522: a credential word whose OWN protected class outranks
   // `policy.core` stays in the scan. Since `..` resolves in the credential
   // rule, a `..` spelling can name the environment map while its spelling also
@@ -7956,7 +7956,19 @@ function outrankingProtected(
     fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))
       ? named
       : fed;
-  return found !== null && outranksCredential(found.surface) ? found : null;
+  if (found === null || !outranksCredential(found.surface)) return null;
+  // #682 (codex HOLD at d24f98ab): every other class the positionals' and the
+  // `<` targets' readings name rides beside the chosen one, so a policy that
+  // holds one of them stricter still sees it (`rm -rf .approval/* <
+  // .approval/env` is `log.mutate` beside `policy.core`, never `log.mutate` alone).
+  const others = new Set<string>();
+  for (const part of [named, fed]) {
+    if (part === null) continue;
+    others.add(part.surface);
+    for (const cls of part.others) others.add(cls);
+  }
+  others.delete(found.surface);
+  return { ...found, others: [...others] };
 }
 
 /**
@@ -9570,6 +9582,7 @@ function classifySegment(
         rule: "protected-path",
         path: outranking.path,
         also: deferredCredential,
+        ...alsoProtected(outranking),
       };
     }
     const named = strictestProtected(judged, protectedPaths, true);

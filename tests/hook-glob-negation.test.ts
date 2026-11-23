@@ -504,6 +504,10 @@ test("review-b's N1 and codex's M1 at bcb1be08: each class a word's readings nam
   for (const command of [
     "rm -rf .approval/*",
     "cp README.md .approval/*",
+    // codex's HOLD at d24f98ab: a credential read beside the glob (the
+    // deferral path) keeps every class the readings named.
+    "rm -rf .approval/* < .approval/env",
+    "cp .approval/* /tmp/x < .approval/env",
     "echo x > .approval/log/*/*",
     `echo x > .approval/log/${"b*/".repeat(65)}x`,
   ]) {
