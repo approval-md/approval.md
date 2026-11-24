@@ -2117,8 +2117,13 @@ test("lead ruling L62435 (S6): a chmod of a word the text cannot read keeps main
 test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary variable alone or below a place that holds no workspace, keep main's class", () => {
   // What `.claude` holds, as the hook walks it (lead ruling L62511, S-C).
   const organ = { "/": ["w", "h"], "/w": [".claude", "src"], "/h": [], [guardedContentsKey("/w/.claude")]: ["settings.json", "agents", "a.md"], ...realpaths("/w", "/h") };
-  // A plain name narrows only by a listing (L62511, S-C): with none, strict.
-  assert.ok(classesOf("find . -name .DS_Store -delete").includes("policy.core"));
+  // A plain name narrows only by a listing (L62511, S-C): with none, strict;
+  // a junk name is read as `*.tmp` is (L62546): main's class, as before L62511.
+  assert.ok(classesOf("find . -name x.js -delete").includes("policy.core"));
+  for (const command of ["find . -name .DS_Store -delete", "find . -iname .ds_store -delete", "find . -name Thumbs.db -delete", "find . -name desktop.ini -delete", "find . -name '._*' -delete"]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
+  }
+  assert.ok(classesOf("find . -name .ds_store -delete").includes("policy.core"), "-name is exact");
   assert.deepEqual(withListing("find . -name .DS_Store -delete", organ), ["files.delete.out_of_scope"]);
   for (const command of [
     "find . -name '*.tmp' -delete",
@@ -2613,7 +2618,12 @@ test("lead ruling L62511: an assigned guarded name, `${X:=…}`, a find that rea
   }
   const cut = { ...checkout, [guardedContentsKey("/w/.claude")]: [GUARDED_WALK_CUT, "settings.json"] };
   for (const command of ["find . -name '*.tmp' -delete", "find . -name '*.pyc' -delete"]) assert.deepEqual(run(command, cut), ["files.delete.out_of_scope"], `${command} (cut)`);
-  for (const command of ["find . -name .DS_Store -delete", "find . -name 'x.*' -delete", "find . -name '*.json' -delete"]) assert.ok(run(command, cut).includes("policy.core"), `${command} (cut)`);
+  for (const command of ["find . -name 'x.*' -delete", "find . -name x.js -delete", "find . -name '*.json' -delete"]) assert.ok(run(command, cut).includes("policy.core"), `${command} (cut)`);
+  // Lead ruling L62546: a junk name is read as `*.tmp` is: not reached past a
+  // cut, strict where a full walk shows that name inside a guarded folder.
+  for (const command of ["find . -name .DS_Store -delete", "find . -name Thumbs.db -delete", "find . -name '._*' -delete"]) assert.deepEqual(run(command, cut), ["files.delete.out_of_scope"], `${command} (cut)`);
+  const junkInside = { ...checkout, [guardedContentsKey("/w/.claude")]: ["settings.json", ".DS_Store", "._a.md"] };
+  for (const command of ["find . -name .DS_Store -delete", "find . -name '._*' -delete"]) assert.ok(run(command, junkInside).includes("policy.core"), `${command} (inside)`);
   const gitCut = { ...checkout, [guardedContentsKey("/w/.git")]: [GUARDED_WALK_CUT, "HEAD", "objects"] };
   assert.deepEqual(run("find . -name '*.tmp' -delete", gitCut), ["files.delete.out_of_scope"]);
   for (const command of ["find . -name '*.lock' -delete", "find . -name '*.orig' -delete", "find . -name x.tmp -delete"]) assert.ok(run(command, gitCut).includes("vcs.history.rewrite"), `${command} (.git cut)`);

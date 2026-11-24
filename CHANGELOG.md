@@ -283,9 +283,9 @@ guarded prefix (`settings*`, `.env.*`, `vault*`, `hooks*`), and (lead ruling
 L62511) when nothing inside a guarded folder below the start path matches
 it: the hook walks each organ directory, guarded name and `.git` it lists
 there (64 directories, 4,000 names, a 2-second timeout and the hook's
-deadline; symlinks not followed; each directory read whole, names sorted,
-breadth-first; in a `.git`, `refs` whole first, then `hooks`, `info`,
-`worktrees`, `modules`, the rest, `logs` last; `.git/objects` not walked but
+deadline; symlinks not followed; breadth-first, in the order each
+directory returns its entries, with no other ordering, so what a limit
+leaves unread is whatever came later; `.git/objects` not walked but
 judged by git's own name shapes there, two-hex directories, hashes,
 `pack-*.pack` and the rest; `packed-refs` contents never read), and a folder a
 match may reach (`find . -name x.js -delete` and
@@ -297,7 +297,9 @@ an extension guarded folders do not ordinarily hold stays narrowed
 (`*.tmp`, `*.pyc`, `*.log`; not `js mjs cjs ts py sh bash zsh json jsonc
 yml yaml toml md mdc txt lock env ini cfg conf xml`, nor for `.git` `pack
 idx rev bitmap keep mtimes promisor lock sample graph orig`; no plain
-name). `-path`, `-regex`, `-type` or `-empty` alone narrow nothing.
+name but the junk names `.DS_Store`, `Thumbs.db`, `desktop.ini` (exactly;
+any case under `-iname`) and the pattern `._*`, read as `*.tmp` is: lead
+ruling L62546). `-path`, `-regex`, `-type` or `-empty` alone narrow nothing.
 Nothing is released:
 `mkdir .` and `touch .` never reach the folders below. Names compare through
 #688's fold in the folded reading and exactly as spelled in the other, so a
@@ -361,20 +363,20 @@ is covered), a `CDPATH` (or a variable) set only in the environment or
 inside `eval`, a sourced file, a function or an alias, an alias or function
 named `cd` or `rsync`, an ordinary variable whose value (set
 in an earlier call) is a parent, organ directories nested below a subdirectory
-(`rm -rf packages` holding `packages/a/.claude`), an unguarded file inside an
-organ folder a narrowed `find` reaches (`find . -name '*.tmp' -delete` and
-`.claude/x.tmp`), `rsync`'s `-e`/`--rsync-path` value (a command on the
-receiving side), an absolute path for a caller with no listing, `rmdir .`,
-`chown`/`chgrp` (refused), a name in the unread part of a guarded folder whose
-walk a limit cut short that a `*.<ext>` pattern outside the lists matches (a
-reflog file or a deep file in a large `.claude` named `x.tmp`), a brace past
-its cap or an assigned reading past
-its cap carrying `policy.core` without the classes the working directory and
-the home hold (with #682's fix), and organ directories in a sibling tree
-under an
-ancestor (`rm -rf ..` lists only the chain to the working directory and the
-home). On macOS (and GNU) `rm -rf .`, `./`, `..` and `sub/..` refuse to run;
+(`rm -rf packages` holding `packages/a/.claude`), `rsync`'s
+`-e`/`--rsync-path` value (a command on the receiving side), an absolute
+path for a caller with no listing, `rmdir .`, `chown`/`chgrp` (refused), and
+organ directories in a sibling tree under an ancestor (`rm -rf ..` lists
+only the chain to the working directory and the home). On macOS (and GNU) `rm
+-rf .`, `./`, `..` and `sub/..` refuse to run;
 they are judged by the rule anyway, as the ruling says.
+One follow-up PR after 0.4.9 (lead ruling L62546), each equal on main: a
+name in the part of a guarded folder a cut walk left unread that a
+`*.<ext>` pattern outside the lists or a junk name matches (S-F); guarded
+folders nested below the start path's own entries or reached through a
+symlink (S-G); zsh's `${X::=..}` (S-J); and a brace or an assigned reading
+past its cap carrying `policy.core` without the classes the working
+directory and the home hold (S-E part 1, with #682's fix).
 
 **GLOB-WRITE names fold with the shared fold (#688; lead ruling 04:11Z).**
 Listing names, organ-directory names, the `.git` check on a listing and the

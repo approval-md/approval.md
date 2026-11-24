@@ -1003,16 +1003,43 @@ test("lead ruling L62511 (S-C), through the real hook in a checkout with a reali
   const decide = (command: string): string => decideAv(dir, home, dir, command).permission;
   for (const command of ["find . -name '*.tmp' -delete", "find . -name '*.pyc' -delete", "find . -name .DS_Store -delete"]) assert.equal(decide(command), "allow", command);
   for (const command of ["find . -name HEAD -delete", "find . -name config -delete", "find . -name '*.pack' -delete", "find . -name main -delete", "find . -name 'pack-*' -delete"]) assert.equal(decide(command), "deny", command);
-  // The walk's order (security review of the fold): `refs` before the bulky
-  // `logs`, so a ref named `zz.tmp` is read before a limit cuts the walk.
+  // The walk is breadth-first in the order each directory returns its
+  // entries (no other order): a ref shallower than the bulk (`refs/heads`,
+  // depth 2, against `logs/refs/heads`, depth 3) is read before a limit cuts it.
   for (let index = 0; index < 4_100; index += 1) put(`.git/logs/refs/heads/r${String(index)}`);
   put(".git/refs/heads/zz.tmp");
   assert.equal(decide("find . -name '*.tmp' -delete"), "deny");
   rmSync(join(dir, ".git", "refs", "heads", "zz.tmp"));
   assert.equal(decide("find . -name '*.tmp' -delete"), "allow");
   // A `.claude` past the walk's limits (4,000 names): `*.<ext>` outside the
-  // list keeps main's class, a plain name or `x.*` takes the folder's.
+  // list and a junk name (L62546) keep main's class, a plain name or `x.*`
+  // takes the folder's.
   for (let index = 0; index < 4_100; index += 1) put(`.claude/cache/f${String(index)}.json`);
-  assert.equal(decide("find . -name '*.tmp' -delete"), "allow");
-  for (const command of ["find . -name .DS_Store -delete", "find . -name 'x.*' -delete"]) assert.equal(decide(command), "deny", command);
+  for (const command of ["find . -name '*.tmp' -delete", "find . -name .DS_Store -delete"]) assert.equal(decide(command), "allow", command);
+  for (const command of ["find . -name x.js -delete", "find . -name 'x.*' -delete"]) assert.equal(decide(command), "deny", command);
+});
+
+test("lead ruling L62546, through the real hook under the agent-village classes: a junk name is read as `*.tmp` is", () => {
+  const labFor = (name: string, folder: string, count: number, extra: readonly string[] = []): { dir: string; home: string } => {
+    const lab = join(scratch, name);
+    const dir = join(lab, "proj");
+    const home = join(lab, "home");
+    for (const rel of [`${folder}/settings.json`, "src/a.ts", ...extra, ...Array.from({ length: count }, (_, index) => `${folder}/cache/f${String(index)}.json`)]) {
+      mkdirSync(join(dir, rel, ".."), { recursive: true });
+      writeFileSync(join(dir, rel), "made-up\n");
+    }
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(dir, "APPROVAL.md"), POLICY_AV);
+    const attested = spawnSync(process.execPath, [CLI_ENTRY, "policy", "attest", "--as", "human:alice"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home } });
+    assert.equal(attested.status, 0, attested.stderr);
+    return { dir, home };
+  };
+  // A `.claude` and a `.cursor` past the walk's limits: main's class for a junk name, strict for another plain name.
+  for (const { dir, home } of [labFor("l62546-claude", ".claude", 4_100), labFor("l62546-cursor", ".cursor", 4_100)]) {
+    for (const command of ["find . -name .DS_Store -delete", "find . -name Thumbs.db -delete"]) assert.equal(decideAv(dir, home, dir, command).permission, "allow", command);
+    assert.equal(decideAv(dir, home, dir, "find . -name x.js -delete").permission, "deny");
+  }
+  // A full walk that shows the junk name inside a guarded folder: strict.
+  const small = labFor("l62546-inside", ".claude", 0, [".claude/.DS_Store"]);
+  assert.equal(decideAv(small.dir, small.home, small.dir, "find . -name .DS_Store -delete").permission, "deny");
 });

@@ -10091,13 +10091,30 @@ function findPatternsReachGitObjects(patterns: readonly FindNamePattern[]): bool
 }
 
 /**
+ * Operating-system junk names (lead ruling L62546): a `find … -name` of one
+ * is read as the ruled `*.<ext>` form is, wherever no listing (or a cut walk)
+ * shows what a guarded folder holds. Spelled exactly (`-iname`: in any case);
+ * `._*` (AppleDouble) only as that literal pattern.
+ */
+const FIND_JUNK_NAMES: readonly string[] = [".DS_Store", "Thumbs.db", "desktop.ini"];
+
+/** Is this find name test one of {@link FIND_JUNK_NAMES}, or exactly `._*`? */
+function findJunkPattern({ pattern, caseless }: FindNamePattern): boolean {
+  if (pattern === "._*") return true;
+  return FIND_JUNK_NAMES.some((name) => (caseless ? name.toLowerCase() === pattern.toLowerCase() : name === pattern));
+}
+
+/**
  * Without a listing (lead ruling L62511, S-C): narrowed only by the ruled form
  * `*.<ext>` with an extension no guarded folder ordinarily holds
- * ({@link FIND_GUARDED_EXTENSIONS}); a plain name, `x.*` or any other
- * pattern is not.
+ * ({@link FIND_GUARDED_EXTENSIONS}), or by a junk name (L62546,
+ * {@link findJunkPattern}); any other plain name, `x.*` or other pattern is
+ * not.
  */
 function findPatternsNarrowWithoutListing(patterns: readonly FindNamePattern[], git = false): boolean {
-  return patterns.some(({ pattern }) => {
+  return patterns.some((each) => {
+    if (findJunkPattern(each)) return true;
+    const { pattern } = each;
     const match = /^\*\.([A-Za-z0-9]+)$/u.exec(pattern);
     const ext = (match?.[1] ?? "").toLowerCase();
     return match !== null && !FIND_GUARDED_EXTENSIONS.has(ext) && !(git && FIND_GIT_EXTENSIONS.has(ext));
