@@ -2322,6 +2322,26 @@ const commandClassVectors = [
       "a reader in front of a redirection onto the policy file adds nothing: its argument is read, not written (every-protected-target control)",
     input: { command: "cat CLAUDE.md > APPROVAL.md" },
   },
+  // A credential read that answers at once reports the protected paths the
+  // segment writes beside it, the credential class first.
+  {
+    id: "every-protected-target-credential-and-copy",
+    description:
+      "a copy of the environment map onto an instruction file is account.credential and policy.edit: the credential class answers first and the protected target's class is reported beside it",
+    input: { command: "cp .approval/env CLAUDE.md" },
+  },
+  {
+    id: "every-protected-target-credential-redirect-and-workflow",
+    description:
+      "a writer fed the environment map on stdin is account.credential and, for the workflow it writes, policy.edit",
+    input: { command: "tee .github/workflows/ci.yml < .approval/env" },
+  },
+  {
+    id: "every-protected-target-credential-reader",
+    description:
+      "a reader of the environment map adds nothing for the instruction file it also reads: account.credential alone (every-protected-target control)",
+    input: { command: "cat .approval/env CLAUDE.md" },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",
