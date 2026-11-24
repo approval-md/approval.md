@@ -123,13 +123,14 @@ option, case folded), and takes the strictest class among them.
   word, as `>` does, and the file bash writes (`!`, or `!word` when joined)
   rides beside. Main refuses `>!`, `>>!` and `>&!` (#700, below); this
   reading lifts that refusal only where the word is the file zsh writes, and
-  any other refusal main has for the line still stands. Kept refused, because
-  zsh writes another file there or none: inside a `bash -c` or `sh -c`
-  script, a descriptor of two or more digits (`10>!x`, where zsh reads `10`
-  as an argument), joined to a dup's word (`2>&1>!x`) or after a line
-  continuation, a target opening `=` or `#`, and one carrying `$'…'`.
-  `>>|`, `>&|`, `>>&!`, `>>&|` and a spaced `&>! x`, which main refused
-  before #700, stay refused (lead ruling L61926).
+  any other refusal main has for the line still stands. Kept refused, each
+  failing closed: inside a `bash -c` or `sh -c` script (bash writes `!x`
+  there); a descriptor of two or more digits (`10>!x`: zsh writes `x` and
+  passes `10` as an argument, a form this reading does not take); joined to
+  a dup's word (`2>&1>!x`) or after a line continuation, a target opening
+  `=` or `#`, and one carrying `$'…'`. `>>|`, `>&|`, `>>&!`, `>>&|` and the
+  spaced `&>! x` and `&>>! x`, which main refused before #700, stay refused
+  (lead ruling L61926).
 - **Copies, moves, links, syncs and extractions INTO a guarded directory
   (L61195 (b); reviews of b402adec, 039b840a and e6b7bf97; the split ruling,
   L61320):** a `cp`, `mv`, `ln`, `install`, `rsync`, `scp` or `tar -x -C`
