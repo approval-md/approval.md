@@ -2360,6 +2360,28 @@ const commandClassVectors = [
       "a file whose name only contains a guarded name stays a workspace write (guarded names fold case control)",
     input: { command: "echo x > approval-notes.md" },
   },
+  // --- every protected target of a segment is judged -------------------------
+  // One class named the segment, and the other protected paths it writes were
+  // judged on that class's terms. Each other class is its own entry over the
+  // same text, the one the classifier's precedence picks first.
+  {
+    id: "every-protected-target-two-positionals",
+    description:
+      "a command that writes an instruction file and the policy file is policy.core and policy.edit: every protected target's class is reported, the strictest by the classifier's precedence first",
+    input: { command: "tee CLAUDE.md APPROVAL.md" },
+  },
+  {
+    id: "every-protected-target-writer-and-redirect",
+    description:
+      "a writer in front of a redirection onto the policy file keeps the class of the protected path it names: redirect-protected policy.core, then policy.edit for the writer's own target",
+    input: { command: "tee CLAUDE.md > APPROVAL.md" },
+  },
+  {
+    id: "every-protected-target-reader-and-redirect",
+    description:
+      "a reader in front of a redirection onto the policy file adds nothing: its argument is read, not written (every-protected-target control)",
+    input: { command: "cat CLAUDE.md > APPROVAL.md" },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",

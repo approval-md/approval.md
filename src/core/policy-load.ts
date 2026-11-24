@@ -1117,8 +1117,13 @@ export function protectedRouteSpellingNotes(load: PolicyLoadResult): string[] {
     if (withNamesAsSpelled(() => builtinProtectedPathClass(entry.path)) !== null) continue;
     const folded = builtinProtectedPathClass(entry.path);
     if (folded === null) continue;
+    // By tier (a source review of #688): the organ rows answer before any
+    // route, so there the route is never read for that path; beside a
+    // built-in `policy.edit` path the route's class is judged as well.
     notes.push(
-      `protected_paths entry ${JSON.stringify(entry.path)} names a built-in ${folded} path in another spelling; the built-in class always applies to that path, and the route to ${JSON.stringify(parsedEntry.routed)} is judged beside it and can only make the answer stricter.`,
+      folded === "policy.edit"
+        ? `protected_paths entry ${JSON.stringify(entry.path)} names a built-in ${folded} path in another spelling; the built-in class always applies to that path, and the route to ${JSON.stringify(parsedEntry.routed)} is judged beside it and can only make the answer stricter.`
+        : `protected_paths entry ${JSON.stringify(entry.path)} names a built-in ${folded} path in another spelling; the built-in class answers that path, and the route to ${JSON.stringify(parsedEntry.routed)} never lightens it.`,
     );
   }
   return notes;
