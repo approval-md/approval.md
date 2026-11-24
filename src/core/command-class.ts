@@ -1848,6 +1848,13 @@ interface LexWord {
    * same `text` as an assignment and is a command word, the program bash runs.
    */
   assignment: boolean;
+  /**
+   * Does the word open with an UNQUOTED `=` followed by a name character
+   * (`=mytool`)? zsh's equals expansion turns it into the path of that
+   * program on PATH unless `NO_EQUALS` is set (S2, N1). Read by the hook's
+   * write pass alone; no rule here reads it.
+   */
+  equalsHead?: boolean;
 }
 
 interface LexRedirect {
@@ -2106,7 +2113,8 @@ function lex(command: string): LexResult {
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
     const assignment = ASSIGNMENT.test(command.slice(start, index));
-    return { text, quoted, substitutions, splits, expands, exact, assignment };
+    const equalsHead = command[start] === "=" && /^[A-Za-z0-9_.]$/u.test(command[start + 1] ?? "");
+    return { text, quoted, substitutions, splits, expands, exact, assignment, ...(equalsHead ? { equalsHead } : {}) };
   };
 
   while (index < command.length) {
@@ -10543,6 +10551,12 @@ export interface CommandSegmentShape {
    * its script reads cannot be judged, so the hook's disk pass fails closed.
    */
   opaqueShell: boolean;
+  /**
+   * The redirect targets and words after the binary that open with an
+   * unquoted `=` and a name character (zsh's equals expansion, S2 N1), as
+   * their text: the hook's write pass cannot read where they land.
+   */
+  equalsWords?: string[];
 }
 
 export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
@@ -10579,6 +10593,10 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
       assignments: words.slice(0, cursor),
       script,
       opaqueShell: script === null && inlineShellFlagged(words[cursor] ?? null, words.slice(cursor + 1)),
+      equalsWords: [
+        ...segment.redirects.filter((redirect) => redirect.target.equalsHead === true).map((redirect) => redirect.target.text),
+        ...segment.words.slice(cursor + 1).filter((word) => word.equalsHead === true).map((word) => word.text),
+      ],
     };
   });
 }

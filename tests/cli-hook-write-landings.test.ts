@@ -1663,3 +1663,29 @@ test("S2.2 fold parity: a move or delete whose word cannot be read, placed or tr
     assert.ok(see("rm -rf ~/tools/hooks", WRITE_SCOPE_OFF, lab).classes.includes(GUARDED));
   });
 });
+
+// ---------------------------------------------------------------------------
+// S2, part 4: zsh's `=name` (lead, N1)
+// ---------------------------------------------------------------------------
+
+test("S2.4 Bash: an unquoted =name redirect or write target is unreadable; '=x', =, == and a=b are not that form", () => {
+  for (const command of ["echo x > =mytool", "echo x >> =node", "cp a =mytool", "tee =python3 < a", "touch =x.y", "echo x 2> =_t"]) {
+    const seen = see(command);
+    assert.equal(seen.ok, true, command);
+    assert.ok(seen.segments.some(([cls, rule]) => cls === GUARDED && rule === "write-unreadable"), `${command}: ${JSON.stringify(seen.segments)}`);
+    assert.match(seen.notes, /equals expansion/u, command);
+  }
+  for (const command of ["echo x > '=mytool'", 'echo x > "=mytool"', "echo x > \\=mytool", "echo x > =", "echo x > ==", "echo x > a=b", "cp a b=c", "echo =mytool > out.txt"]) {
+    const seen = see(command);
+    assert.equal(seen.ok, true, command);
+    assert.ok(!seen.classes.includes(GUARDED), `${command}: ${seen.notes}`);
+  }
+});
+
+test("S2.4 through the real hook: echo x > =mytool is denied under a policy that guards", () => {
+  const dir = gate([`  ${GUARDED}: { autonomy: human-only }`, "  files.*: { autonomy: autonomous }"]);
+  const denied = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Bash", { command: "echo x > =mytool" })));
+  assert.equal(denied.permission, "deny", denied.reason);
+  const allowed = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Bash", { command: "echo x > '=mytool'" })));
+  assert.equal(allowed.permission, "allow", allowed.reason);
+});

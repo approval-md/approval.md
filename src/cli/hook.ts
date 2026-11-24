@@ -5163,6 +5163,11 @@ export function refineWriteLandings(
 
   const judgeWord = (word: string, at: number, tree: boolean | "listed" = false): WriteLanding => {
     if (word.length === 0) return { kind: "in" };
+    // S2 (N1): zsh reads an unquoted `=name` as the path of the program
+    // `name` on PATH (unless NO_EQUALS is set): where it lands is not read.
+    if (word.startsWith("=") && (shapes[at]?.equalsWords?.includes(word) ?? false)) {
+      return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: `${word} is zsh's equals expansion, the path of a program found on PATH, which this hook does not read` };
+    }
     const resolved = resolveWriteWord(word, at, line);
     if ("unreadable" in resolved) {
       return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: resolved.unreadable };
