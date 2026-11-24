@@ -173,13 +173,18 @@ test("cost: the answers of the bounded walk are the old window reading's", () =>
   const READ_OUT = "$(pwd)";
   // Each is timed too, so a slow build fails here at once, not after hours.
   // Spellings across an output's edge still count, however many outputs.
-  assert.deepEqual(bounded(`echo x >> ${READ_OUT.repeat(1000)}.g${READ_OUT}it/config`, "answer 1"), [DIR_WRITE]);
-  assert.deepEqual(bounded(`echo x >> .g${READ_OUT.repeat(1000)}t/config`, "answer 2"), [DIR_WRITE]);
+  // Lead ruling L62568: past eight unread parts a word could be any path, so
+  // the spliced reading's strictest class rides beside the `.git` write.
+  assert.deepEqual(bounded(`echo x >> ${READ_OUT.repeat(1000)}.g${READ_OUT}it/config`, "answer 1"), ["log.mutate redirect-protected", DIR_WRITE]);
+  assert.deepEqual(bounded(`echo x >> .g${READ_OUT.repeat(1000)}t/config`, "answer 2"), ["log.mutate redirect-protected", DIR_WRITE]);
   // GLOB-WRITE (22 Nov 2026): an output beside a glob construct may hold a `/`
   // and name any directory, the approval log's among them.
   assert.deepEqual(bounded(`echo x >> .${"*".repeat(500)}${READ_OUT}t/config`, "answer 3"), ["log.mutate redirect-protected", "vcs.history.rewrite git-dir-write"]);
-  // And ordinary words do not, however many outputs.
-  assert.deepEqual(bounded(`echo x > out/${`${READ_OUT}-`.repeat(1000)}.txt`, "answer 4"), ["files.write.workspace redirect-write"]);
+  // And ordinary words do not, however many outputs, up to the spliced
+  // reading's bound (lead ruling L62568: past eight unread parts a word could
+  // be any path, and asks with the strictest class; main's answer beside).
+  assert.deepEqual(bounded(`echo x > out/${`${READ_OUT}-`.repeat(8)}.txt`, "answer 4"), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(bounded(`echo x > out/${`${READ_OUT}-`.repeat(1000)}.txt`, "answer 4, past the bound"), ["log.mutate redirect-protected", "files.write.workspace redirect-write"]);
 });
 
 test("cost: a run of glob characters in a target is bounded", () => {

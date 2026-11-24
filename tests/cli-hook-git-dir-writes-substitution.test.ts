@@ -340,8 +340,11 @@ test("security review a: every ANSI-C piece of a word is decoded and joined, quo
 test("security review b: quotes are tracked, and a quote that does not close is the strict side", () => {
   // `$'` inside single quotes is text the shell leaves as written.
   assert.deepEqual(pure("echo '$'\"'\"'\\x2egit' > \"$D\""), [REDIRECT]);
-  // The lexer and the shell disagree on `\'` inside `$'…'`: unreadable, strict.
-  assert.deepEqual(pure("echo $'x\\'' ' > \"$D\""), [DIR_WRITE]);
+  // `\'` inside `$'…'` is a quote character (lead ruling L62542: the lexer
+  // reads it as the shell does), so the `'` after the string opens a quote that
+  // never closes: bash 3.2 and zsh 5.9 refuse the line (lab), and so does the
+  // classifier. It was a `.git` write while the lexer ended the string there.
+  assert.deepEqual(pure("echo $'x\\'' ' > \"$D\""), ["refused unparseable"]);
 });
 
 test("security review c: what printf or echo prints is read with quotes removed", () => {
@@ -638,7 +641,10 @@ test("hook: the gate's spellings in a checkout", { skip }, () => {
 
 test("gate N2 (m11): an ANSI-C string ends at a NUL past the near reader's reach", () => {
   // Past the near reader's five characters, only the NUL end reads it.
-  assert.deepEqual(pure(`echo x > $'.g\\0junk'""""""""it/config`), [DIR_WRITE]);
+  // Lead ruling L62568: after a decoded NUL the rest of the word is unread
+  // (bash keeps it, zsh ends the path), and `.g` then any text may be a
+  // guarded `.github` path: the spliced reading's class rides beside.
+  assert.deepEqual(pure(`echo x > $'.g\\0junk'""""""""it/config`), ["policy.core redirect-protected", DIR_WRITE]);
 });
 
 test("gate N2 (m17): %c prints the first character of each word", () => {

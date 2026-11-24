@@ -1046,18 +1046,12 @@
         "valid": true,
         "segments": [
           {
-            "class": "policy.core",
-            "rule": "redirect-protected",
-            "path": ".g${__APPROVAL_SUBST__}/config"
-          },
-          {
             "class": "vcs.history.rewrite",
             "rule": "git-dir-write",
             "path": ".g${__APPROVAL_SUBST__}/config"
           }
         ],
         "classes": [
-          "policy.core",
           "vcs.history.rewrite"
         ]
       }

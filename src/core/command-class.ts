@@ -10811,8 +10811,9 @@ const SPLICED_PARTS_CAP = 8;
  * The unread parts of a word's text: each parameter expansion (`$X`, `${…}`,
  * `$1`, `$?`; a substitution's output and an unread dollar-quote escape are
  * `${…}` placeholders too). `null` when there is none, or when the word's
- * literal text (what is left, `/` aside) is empty: a word that is only unread
- * parts keeps main's answer for an unknown word. Otherwise the word with each
+ * literal text (what is left, `/` and `.` aside) is empty: a word that is only unread
+ * parts (or only parts, dots and slashes: `${name}.${ext}`) keeps main's
+ * answer for an unknown word. Otherwise the word with each
  * run of unread parts as one {@link UNREAD_MARK} (`marked`), and as one
  * {@link SUBSTITUTION_SENTINEL} (`asOutputs`, for the `.git` reader), and how
  * many parts it holds. A `$` that opens no expansion is literal.
@@ -10847,7 +10848,9 @@ function unreadParts(text: string): { marked: string; asOutputs: string; parts: 
     }
     at = end;
   }
-  if (parts === 0 || literal.split("/").join("").length === 0) return null;
+  // A dot names nothing on its own (every dot-name and extension holds one):
+  // literal text of dots and slashes alone is no literal text.
+  if (parts === 0 || literal.replace(/[/.]/gu, "").length === 0) return null;
   return { marked, asOutputs, parts };
 }
 
@@ -10915,7 +10918,9 @@ function splicedGuardClass(
   // An unread directory: the word opens with unread components.
   const leadingDirectory = pieces[0] === "" && (pieces[1] ?? "").startsWith("/");
   let strictest: string | null = null;
-  for (const slashed of [-1, ...inside]) {
+  // A part inside a brace group is read within it (`.g{x,$(…)}`): no `/`
+  // reading, which would cut the group in two.
+  for (const slashed of [-1, ...(/[{}]/u.test(literal) ? [] : inside)]) {
     const found = globGuardClass(reading(slashed), protectedPaths, budget, options, undefined, { leadingDirectory });
     if (found !== null && (strictest === null || protectedRank(found) < protectedRank(strictest))) strictest = found;
     if (strictest === "log.mutate") break;
@@ -11026,7 +11031,7 @@ function globGuardClass(
         // A component made only of unread parts ({@link splicedGuardClass}):
         // nothing, or any one guarded name. Its value is no pattern, and the
         // disk does not bound it.
-        if (spliced !== false && segment.length > 0 && segment.split(UNREAD_MARK).join("").length === 0) {
+        if (spliced !== false && segment.includes(UNREAD_MARK) && segment.replace(/[\uE001.]/gu, "").length === 0) {
           return [[], ...names.map((name) => [name])];
         }
         const listing = firstGlobSeen || !hasGlobConstruct(segment) ? undefined : listingFor(segments.slice(0, index));
@@ -11094,14 +11099,19 @@ function globGuardClass(
       // unread parts alone (`$D/notes.md` as `.approval/notes.md`, `out/$F` as
       // `out/APPROVAL.md`), which a word with no literal text would reach as
       // well: main's answer for an unknown word stands there.
-      // Where the word OPENS with unread components (`$D/tail`, an unread
-      // directory), the tail must END a guarded path by name, as the brief's
+      // Where an unread directory comes before the tail (the word OPENS with
+      // unread components, `$D/tail`, or a part may hold a `/`), the tail must
+      // END a guarded path by name, as the brief's
       // edge has it (`$D/APPROVAL.md`, `$D/settings.json` count): a candidate
       // that is just as guarded with its last name replaced (`$D/log/x.txt` as
       // `.approval/log/x.txt`, `$L/scripts/run.sh` under a guarded `scripts`
       // folder) comes from the directory the unread part names, not the tail.
-      const bearing = segments.map((segment) => spliced !== false && segment.length > 0 && segment.split(UNREAD_MARK).join("").length > 0);
+      const bearing = segments.map((segment) => spliced !== false && segment.length > 0 && segment.replace(/[\uE001.]/gu, "").length > 0);
       const lastBearing = bearing[bearing.length - 1] === true;
+      // An unread directory anywhere before the tail (`$D/x`, or a part that
+      // holds a `/`: `.gi$X/config` as `.gi…/…/config`) is read the same way.
+      const unreadDirectory =
+        spliced !== false && (spliced.leadingDirectory || segments.some((segment, at) => at < segments.length - 1 && segment.length > 0 && !bearing[at]));
       const lighterWithout = (found: string, path: string): boolean => {
         const without = protectedPathClass(path, protectedPaths);
         return without === null || protectedRank(without) > protectedRank(found);
@@ -11113,7 +11123,7 @@ function globGuardClass(
           const found = protectedPathClass(path, protectedPaths);
           if (spliced !== false && found !== null) {
             if (!lighterWithout(found, neutral.join("/"))) return false;
-            if (spliced.leadingDirectory && lastBearing && !lighterWithout(found, [...parts.slice(0, -1), SPLICED_NEUTRAL].join("/"))) return false;
+            if (unreadDirectory && lastBearing && !lighterWithout(found, [...parts.slice(0, -1), SPLICED_NEUTRAL].join("/"))) return false;
           }
           return consider(found);
         }

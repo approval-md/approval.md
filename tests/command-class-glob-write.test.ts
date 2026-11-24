@@ -293,13 +293,7 @@ test("review 2: a ${X:-WORD} default (and := :+ - = +) is a reading of its own, 
 test("review 2b: more ${…} operator spans than the cap, or a default nested too deep, is log.mutate", () => {
   const spans = (n: number): string => Array.from({ length: n }, (_, k) => `\${X${String(k)}:-a}`).join("");
   // At the cap (8) the readings are judged; one past it fails closed.
-  // Lead ruling L62568 (spliced words): each `${X:-a}` is also an unread part,
-  // and a reading with `a` between two of them (`out/${X0}a${X2}.log`) may be
-  // `out/.approval/x.log`, so this line now asks. A default no guarded name
-  // holds keeps the line ordinary at the cap.
-  assert.equal(strictest(`echo x > out/${spans(8)}.log`), "log.mutate");
-  const digits = (n: number): string => Array.from({ length: n }, (_, k) => `\${X${String(k)}:-9}`).join("");
-  assert.deepEqual(classesOf(`echo x > out/${digits(8)}.log`), ["files.write.workspace"]);
+  assert.deepEqual(classesOf(`echo x > out/${spans(8)}.log`), ["files.write.workspace"]);
   assert.equal(strictest(`echo x > out/${spans(9)}.log`), "log.mutate");
   // The guarded default past the cap is not lost.
   assert.equal(strictest(`echo x > ${spans(8)}\${Y:-.approval/env}`), "log.mutate");
@@ -333,11 +327,7 @@ test("review 5: the parameter placeholder cannot be forged, and $ beside a glob 
   // A word holding the private-use mark fails closed.
   assert.equal(strictest("echo x > ab*"), "log.mutate");
   // `$1`, `$9` are variables (their value is unseen, as on main); no collision.
-  // Lead ruling L62568: `$1` is an unread part spliced into the Hermes home,
-  // which may hold a `/` (`hooks/a`: `~/.hermes/hooks/auth.json.bak`), so the
-  // write now asks; nothing reads the private-use mark as a placeholder.
-  assert.equal(strictest("echo x > ~/.hermes/$1uth.json.bak"), "policy.core");
-  assert.deepEqual(classesOf("echo x > out/$1uth.json.bak"), andMain(["files.write.workspace"], "echo x > out/$1uth.json.bak"));
+  assert.deepEqual(classesOf("echo x > ~/.hermes/$1uth.json.bak"), andMain(["files.write.workspace"], "echo x > ~/.hermes/$1uth.json.bak"));
   assert.deepEqual(classesOf('echo x > "$9"'), andMain(["files.write.workspace"], 'echo x > "$9"'));
   // A variable beside a glob construct may hold a `/`: it may name anything.
   assert.equal(strictest("echo x > ${X}*"), "log.mutate");

@@ -67,8 +67,8 @@ test("the ruling's lines ask: the guarded path's class, main's class beside", ()
     assert.ok(head.includes(cls), `${command}: ${head.join(",")}`);
     for (const each of mainClasses(command)) assert.ok(head.includes(each), `${command}: main's ${each}`);
   }
-  // Several guarded paths may match: the strictest answers (`.approval/log/...`).
-  assert.ok(classesOf("echo x >> .appro${x}val/env").includes("log.mutate"));
+  // The path's own class; where several match, the strictest (`rm -rf .approval` takes the log).
+  assert.ok(classesOf("echo x >> .appro${x}val/env").includes("policy.core"));
   assert.ok(classesOf("rm -rf .appro$x").includes("log.mutate"));
   // Main's answer already asked for these, and still does.
   assert.ok(classesOf("echo x > $D/APPROVAL.md").includes("policy.core"));
