@@ -150,9 +150,8 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
     if (strict) assert.ok(classes.some((cls) => GUARDED.has(cls)), `${label}: ${classes.join(",")}`);
     else assert.deepEqual(classes, mainClasses(command), label);
   }
-  // Literal text longer than a file name may be (NAME_MAX) is not matched: a
-  // 100 KB component costs a scan, not a walk (0.03 to 0.08 CPU s measured;
-  // 0.7 s with the bound removed).
+  // A 100 KB literal component beside an unread part costs a scan, not a walk
+  // (0.03 to 0.09 CPU s measured on a laptop).
   for (const command of [`echo x > a$E${"b".repeat(99_000)}`, `cp a $'${"a\\q".repeat(33_000)}'`]) {
     const seconds = cpuSeconds(() => classifyCommand(command, []));
     assert.ok(seconds < scaledBound(0.4), `${command.slice(0, 20)}: ${seconds.toFixed(3)} CPU s (${runner().line})`);

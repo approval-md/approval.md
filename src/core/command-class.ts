@@ -10802,8 +10802,6 @@ function globTokensMatch(
 const UNREAD_MARK = "\uE001";
 /** A name no guarded-path rule reads: the stand-in for literal text in the spliced reading's check. */
 const SPLICED_NEUTRAL = "__neutral__";
-/** The longest file name the filesystems the hook stands beside allow (NAME_MAX). */
-const NAME_MAX_BYTES = 255;
 /** A character no guarded name holds: a quoted glob character's stand-in in the spliced reading. */
 const SPLICED_INERT = "\uE002";
 /** Most unread parts one word is read through; past it the word could be any path, and answers `log.mutate`. */
@@ -10893,10 +10891,6 @@ function splicedGuardClass(
   // so each stands as a character that matches nothing guarded. A word it may
   // glob keeps them as patterns, as the glob reading does.
   const literal = live ? read.marked : read.marked.replace(/[*?[\]{}()#^<>|]|(?<=.)~/gu, SPLICED_INERT);
-  // A file name is at most 255 bytes (NAME_MAX): literal text longer than
-  // that in one component (no `/`, no unread part, no brace that could
-  // shorten it) names no file the write could make, guarded or not.
-  if (literal.split(/[/\uE001]/u).some((run) => run.length > NAME_MAX_BYTES && !/[{},]/u.test(run))) return null;
   const pieces = literal.split(UNREAD_MARK);
   // Which marks sit inside a component (literal text beside them in it).
   const inside: number[] = [];
