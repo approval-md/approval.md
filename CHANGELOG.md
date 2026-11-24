@@ -223,6 +223,15 @@ on the change above.
   are each read once (each took 64 to 174 s through the hook before). A
   word with outputs in it is brace-expanded to 16 alternatives, and past
   that counts (`{a,b}$(pwd)` to 1 MB took 39 s at 1,024).
+- **A word of unclosed `${` cannot make the path readers slow.** The reader
+  that collapses `${NAME:-…}` to `${NAME}` before a path is split, and the
+  hook's two copies of it in its credential pass, scanned to the word's end
+  from every `${` with no `}` after it: a 1 MB redirect target took 105 s
+  through the hook, and the same word as a read took longer. curl's
+  `%output{` reader had the same shape. Each now stops at the last `}` of
+  its text, where a closed form must end, and reads the text once (under
+  0.3 s at 1 MB). No answer changes: 17,402 lines classify as before, with
+  and without the hook.
 - **Looser than the change above, by design.** A read whose only write is its
   redirection writes nothing through its own words: `cat .git/HEAD > /tmp/x`,
   `ls .git/hooks > list.txt` and the like are the workspace write 0.4.8 called
@@ -265,6 +274,83 @@ on the change above.
   0 looser of its own. A word of 10,000 substitutions, a run of 1,000 `*`
   and 10,000 levels of nesting each take under half a second of CPU through
   the hook.
+
+**Every protected path a command writes is judged.** A segment that named
+two protected paths took the class of one of them: the stricter by the
+classifier's own precedence (`log.mutate`, `policy.core`, then `policy.edit`
+and every routed sub-class together), and on equal rank the first named. So
+with `design/` routed to a class a policy runs lightly and
+`.github/workflows/` routed to one it stops for, `tee design/x
+.github/workflows/ci.yml` was the design class alone and wrote the workflow
+with no tap; `tee .github/workflows/ci.yml > design/x`, `cp design/x
+.github/workflows/ci.yml`, `echo x > design/a > .github/workflows/ci.yml` and
+`tee {design/x,.github/workflows/ci.yml}` did the same. The classifier's
+precedence is not a policy's order of strictness, so it now reports every
+protected class the segment's targets take, each as its own entry over the
+same text (the answer it gave before comes first), and the hook judges each
+and the strictest decision answers.
+
+- **Which words count is unchanged.** The other classes come from the same
+  words the classifier already scanned: the write redirections, a download's
+  outputs, a copy's target directory, the positionals and `<` targets of an
+  effectful command. A writer in front of a protected redirection is asked
+  for its own answer too. A reader's arguments are still not targets:
+  `cat SPEC.md > design/x` is the design class alone.
+- **Built-in paths too:** `tee CLAUDE.md APPROVAL.md` is `policy.core` and
+  `policy.edit`. Under a policy that holds `policy.core` the strictest, as
+  the shipped ones do, the decision is the same as before.
+- **A command naming paths of several classes a policy stops for asks once
+  per class.**
+- **One word that brace expansion makes several files of** reports each
+  file's class, and where two of them each match tied routes, every tied
+  class of both.
+- **Not changed:** a segment whose answer is a credential read alone
+  (`cp .approval/env design/x`) reports no protected class beside it, as
+  before.
+- The load note for a routed entry spelled like a built-in path in another
+  case is worded by tier: beside a built-in `policy.edit` path the route is
+  judged too; a built-in `policy.core` or `log.mutate` path is answered by
+  its built-in class and the route never lightens it.
+- Conformance: three new `command-class` vectors; the 392 before them are
+  byte-identical.
+
+**The hook answers before the harness stops listening.** A hook the harness
+kills at its timeout is a tool call that proceeds, and reading one long word
+could take that long: `cat b/b/b/…/env`, a path of 100 KB that names nothing
+guarded, took 76 CPU seconds to classify, past Claude Code's default 60 second
+hook timeout. So a command line that long ran with no gate at all, whatever
+else was on it.
+
+- **The path walks are linear.** Two walks resolved the whole path once per
+  component: the search for a path's deepest existing ancestor
+  (`canonicalPath`) now halves after 32 climbs, and the kernel-order landing
+  (`physicalLanding`) keeps the components below the first missing one as a
+  list. Two more took each component from the front of an array, which moves
+  the rest every time; they pop from the end. Answers are unchanged, held
+  against the old walks on a fixture of links, loops and missing components.
+  That 100 KB word now takes 0.2 seconds, and a megabyte under two.
+- **Reading a call has its own deadline: 15 seconds**, or the harness ceiling
+  less two seconds where one is stated or assumed and that is shorter (Hermes's
+  30 second default leaves the whole 15; a ceiling too short to spare two
+  seconds gives a quarter of itself). With a gate window open the deadline is
+  the same one. A call
+  the hook cannot read in that time is refused `hook-deadline`, with nothing
+  registered or requested, while the hook can still say so. The deadline stops
+  the hook's own work from outside it, so no input can outrun it; it does not
+  interrupt a blocking system call. `APPROVAL_HOOK_DESCRIBE_DEADLINE_MS` can
+  shorten it and can never lengthen it. A read that is stopped is stopped part
+  way, so a process that answers many calls on one thread (the Codex bridge)
+  refuses every later call the same way, and says so, until it is started
+  again. `approval serve` retires the thread that was stopped, and the next
+  call is read by a fresh one. `hook-deadline` joins the `hook_deny_codes`
+  union of the conformance vectors.
+- **A slow read shortens the wait.** A read that takes more than one second
+  shortens the wait for a decision by the rest, so a read of several seconds
+  does not push the hook's last answer past the harness's timeout. An
+  ordinary read takes milliseconds and changes nothing: the wait, the retry
+  grace and the age at which a question counts as abandoned are as they were.
+- Still slow, and now refused rather than passed: a megabyte of many short
+  path words takes about 20 seconds to read, which is past the deadline.
 
 **Guarded names fold case on every platform.** The guards compared a path's
 names with the guarded names by exact letter case, while APFS, macOS's
@@ -348,6 +434,12 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   strictest decision answers, for every spelling of the path. The most
   specific route still wins over a shallower one. One more classification
   pass per tied entry, on lines that name such a path.
+- **The placeholder a `$(…)` leaves in a word is not folded.** It is spelled
+  in capitals, so folding it like a name made every word with a substitution
+  count as a name whose two readings differ, and the whole as-spelled reading
+  ran for it: about twice the cost on any line with a `$(…)` in a path word,
+  for an answer that could not differ. One reading runs for it now, with the
+  same answers; a name beside the substitution that does fold still runs both.
 - **The Hermes-home walk is linear.** It sliced and re-walked the rest of
   the path at every home segment, so a 1 MiB path of `.hermes/x/` segments
   took about a minute of CPU on main (and through the fold, `.herme<U+017F>/x/`
@@ -364,6 +456,29 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   landed on the guarded file, and the dotless i and a fullwidth a did not.
   Conformance: ten new `command-class` vectors; main's 382 are
   byte-identical. The vectors version is bumped once, at the release cut.
+
+**zsh's clobber redirections are refused (open in 0.4.8).** In zsh `>!`,
+`>>!` and `>&!` are each one operator, and the word after it is the file:
+`echo x >! APPROVAL.md` overwrites the policy file. bash reads the same text
+as a redirection onto a file named `!`, with `APPROVAL.md` an argument of
+`echo`. The classifier read bash's, so under zsh, the shell Claude Code's
+Bash tool runs on macOS, a line that wrote a protected file was
+`files.write.workspace` and ran wherever a policy lets workspace writes run.
+
+- **The form is refused `unparseable`**, with or without a space before the
+  target, with a descriptor in front (`2>!`, `1>>!`) and after an `&`
+  (`&>!`), anywhere on the line and inside `$(…)` or a `sh -c` script. The
+  two shells write different files, so neither reading is admitted. The
+  refusal names what to write instead.
+- **Unmoved:** `>|`, the clobber operator both shells share, and a file
+  really named `!` when it is quoted, escaped or set apart (`>'!'`, `>\!`,
+  `> !`), which both shells read alike. `>>|`, `>&|`, `>>&!` and their
+  kin are zsh's alone and were refused already.
+- **Evidence.** Each form was run in zsh 5.9 and bash 3.2 in a scratch
+  folder, and the test repeats that where both shells are installed. No
+  overlay recipe and no earlier conformance vector carries the form.
+  Conformance: three new `command-class` vectors (two refusals and `>|`);
+  the 395 before them are byte-identical.
 
 ### Added
 
@@ -585,6 +700,18 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   The For Kicks entry is unchanged here: it takes the flag in the overlay PR
   that lands the card. A core without the flag refuses it (`usage`), which the
   check reads as a refused propose.
+
+### Changed
+
+- **`approval policy amend --as agent:<id>` no longer loses a stop request
+  sent during its proposal (APRV-479).** A SIGINT, SIGTERM or SIGHUP that
+  landed while the `policy.proposed` append held the log lock was held by the
+  lock's guard and then dropped when the attestation wait began, so the verb
+  slept out its whole `--wait` (15 minutes by default). The verb now turns the
+  event loop once after that append, so the process dies of the signal there,
+  with the lock released and the record whole, and the wait sleeps on a timer,
+  so a signal at any later point ends it at once. What the verb writes, prints
+  and exits with is unchanged.
 
 ## 0.4.8 — 2026-11-20
 

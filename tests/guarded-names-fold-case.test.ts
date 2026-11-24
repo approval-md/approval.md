@@ -52,7 +52,17 @@ import {
   protectedPathClasses,
   type ProtectedPathEntry,
 } from "../src/core/command-class.js";
-import { eachNameReading, foldFileName, foldNameExact, namesReadAsSpelled, takeAmongEqual, withNamesAsSpelled } from "../src/core/name-fold.js";
+import {
+  eachNameReading,
+  equalClaims,
+  foldedOnly,
+  foldFileName,
+  foldNameExact,
+  namesReadAsSpelled,
+  takeAmongEqual,
+  withNamesAsSpelled,
+  SUBSTITUTION_SENTINEL,
+} from "../src/core/name-fold.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-fold-case-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -1072,8 +1082,248 @@ test("under such a policy the real hook answers an ordinary write as main does, 
     assert.equal(decision.permission, "allow", `${path}: ${decision.reason}`);
     const checked = runCli(["policy", "check", "files.write.workspace"], dir);
     assert.equal(checked.code, 0, checked.stderr);
-    assert.match(checked.stdout, new RegExp(`note: protected_paths entry "${path.replace(/[.]/gu, "\\.")}" names a built-in policy\\.core path in another spelling`, "u"));
+    assert.match(checked.stdout, new RegExp(`note: protected_paths entry "${path.replace(/[.]/gu, "\\.")}" names a built-in policy\\.core path in another spelling; the built-in class answers that path, and the route to "policy\\.edit\\.mine" never lightens it\\.`, "u"));
   }
+});
+
+// ---------------------------------------------------------------------------
+// Every protected target of a segment is judged (review-b's FINDING on main,
+// the lead's ruling: one command writing two routed paths was judged by the
+// first named only).
+// ---------------------------------------------------------------------------
+
+/** The shape of this repository's own entries: design docs light, CI strict. */
+const TWO_ROUTES: ProtectedPathEntry[] = [
+  { path: "SPEC.md", class: "policy.edit.spec" },
+  { path: "design/", class: "policy.edit.design" },
+  { path: ".github/workflows/", class: "policy.edit.ci" },
+];
+
+test("a segment that writes two protected paths reports both classes, in either order, for every verb", () => {
+  const DESIGN = "policy.edit.design protected-path";
+  const CI = "policy.edit.ci protected-path";
+  const cases: readonly (readonly [string, readonly string[]])[] = [
+    ["tee design/x .github/workflows/ci.yml", [DESIGN, CI]],
+    ["tee .github/workflows/ci.yml design/x", [CI, DESIGN]],
+    ["cp design/x .github/workflows/ci.yml", [DESIGN, CI]],
+    ["cp .github/workflows/ci.yml design/x", [CI, DESIGN]],
+    ["cp a design/x .github/workflows/", [DESIGN, CI]],
+    ["cp -t .github/workflows/ design/x", [CI, DESIGN]],
+    ["mv design/x .github/workflows/ci.yml", [DESIGN, CI]],
+    ["mv .github/workflows/ci.yml design/x", [CI, DESIGN]],
+    ["ln design/x .github/workflows/ci.yml", [DESIGN, CI]],
+    // Two write redirections, and a writer in front of a redirection.
+    ["echo x > design/a > .github/workflows/ci.yml", ["policy.edit.design redirect-protected", "policy.edit.ci redirect-protected"]],
+    ["echo x > .github/workflows/ci.yml >> design/a", ["policy.edit.ci redirect-protected", "policy.edit.design redirect-protected"]],
+    ["tee .github/workflows/ci.yml > design/x", ["policy.edit.design redirect-protected", CI]],
+    ["tee design/x > .github/workflows/ci.yml", ["policy.edit.ci redirect-protected", DESIGN]],
+    ["tee SPEC.md .github/workflows/ci.yml > design/x", ["policy.edit.design redirect-protected", "policy.edit.spec protected-path", CI]],
+    // An input redirection stands in for a named argument.
+    ["node x.js design/x < .github/workflows/ci.yml", [DESIGN, CI]],
+    // One word that brace expansion makes two files of.
+    ["tee {design/x,.github/workflows/ci.yml}", [DESIGN, CI]],
+    // Its classes come strictest rank first, whatever order the files are
+    // written in, so the first is the one class main gave the word.
+    ["tee {CLAUDE.md,APPROVAL.md}", ["policy.core protected-path", "policy.edit protected-path"]],
+    ["tee {design/x,CLAUDE.md,.approval/log/x}", ["log.mutate protected-path", DESIGN, "policy.edit protected-path"]],
+    // A download's outputs.
+    ["curl -o design/x -o .github/workflows/ci.yml https://e.example/a https://e.example/b", [DESIGN, CI]],
+    // A copy whose destination the text cannot know keeps `policy.core` first.
+    ["cp $X design/x .github/workflows/ci.yml", ["policy.core copy-target-unknown", DESIGN, CI]],
+    // The classifier's own precedence still names the segment; nothing is dropped.
+    ["tee design/x SPEC.md .github/workflows/ci.yml APPROVAL.md", ["policy.core protected-path", DESIGN, "policy.edit.spec protected-path", CI]],
+    ["tee design/x CLAUDE.md", [DESIGN, "policy.edit protected-path"]],
+    ["tee design/x .approval/log/x", ["log.mutate protected-path", DESIGN]],
+    ["git add SPEC.md design/x", ["policy.edit.spec protected-path", DESIGN]],
+    ["rm design/x SPEC.md", [DESIGN, "policy.edit.spec protected-path"]],
+  ];
+  for (const [line, want] of cases) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    // As spelled, the one class main gave answers alone.
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [want[0]], line);
+  }
+  // A credential read that a protected path outranks rides beside it, as it
+  // did, and the other protected class follows.
+  assert.deepEqual(pure("cp .approval/env APPROVAL.md design/x", TWO_ROUTES), [
+    "policy.core protected-path",
+    "account.credential credential-path",
+    DESIGN,
+  ]);
+  assert.deepEqual(spelledPure("cp .approval/env APPROVAL.md design/x", TWO_ROUTES), [
+    "policy.core protected-path",
+    "account.credential credential-path",
+  ]);
+  // Each further class names the word that takes it.
+  const classified = classifyCommand("tee design/x .github/workflows/ci.yml", TWO_ROUTES);
+  assert.equal(classified.ok, true);
+  if (classified.ok) {
+    assert.deepEqual(classified.segments.map((segment) => segment.path), ["design/x", ".github/workflows/ci.yml"]);
+    assert.deepEqual(classified.segments.map((segment) => segment.text), ["tee design/x .github/workflows/ci.yml", "tee design/x .github/workflows/ci.yml"]);
+    assert.deepEqual(classified.classes, ["policy.edit.design", "policy.edit.ci"]);
+  }
+});
+
+test("a segment with one protected class, or none the classifier scans, answers as it did", () => {
+  const DESIGN = "policy.edit.design protected-path";
+  for (const [line, want] of [
+    ["tee design/x design/y", [DESIGN]],
+    ["tee design/x notes.txt", [DESIGN]],
+    // A reader's arguments are not targets: only the redirection is a write.
+    ["cat .github/workflows/ci.yml > design/x", ["policy.edit.design redirect-protected"]],
+    ["grep foo SPEC.md >> design/notes.md", ["policy.edit.design redirect-protected"]],
+    ["cat design/x .github/workflows/ci.yml", ["read.shell read-shell"]],
+    // A download's URL is not a target, whatever its last segment spells.
+    ["curl -o design/x https://e.example/SPEC.md", [DESIGN]],
+    // Each segment of a line keeps its own answer.
+    ["tee design/x; tee .github/workflows/ci.yml", [DESIGN, "policy.edit.ci protected-path"]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), want, line);
+  }
+});
+
+test("two targets that each have tied routes report every class of both", () => {
+  const extra: ProtectedPathEntry[] = [
+    ...OPEN_FIRST,
+    { path: "a/b/", class: "policy.edit.ab" },
+    { path: "c/d/", class: "policy.edit.cd" },
+  ];
+  const all = ["policy.edit.open", "policy.edit.closed", "policy.edit.ab", "policy.edit.cd"];
+  const classes = (line: string): string[] => {
+    const classified = classifyCommand(line, extra);
+    return classified.ok ? [...classified.classes].sort() : [`refused ${classified.code}`];
+  };
+  for (const line of [
+    "touch spec/x a/b/c/d/y",
+    "touch a/b/c/d/y spec/x",
+    "tee {spec/x,a/b/c/d/y}",
+    "tee {a/b/c/d/y,spec/x}",
+    "echo x > spec/x > a/b/c/d/y",
+    "tee spec/x > a/b/c/d/y",
+  ]) {
+    assert.deepEqual(classes(line), [...all].sort(), line);
+  }
+  // One word of two expansions is one path class as spelled, as on main.
+  assert.deepEqual(spelledPure("tee {spec/x,a/b/c/d/y}", extra), ["policy.edit.closed protected-path"]);
+  assert.deepEqual(protectedPathClasses("{spec/x,a/b/c/d/y}", extra).sort(), [...all].sort());
+});
+
+test("equalClaims and foldedOnly: all claims folded; the first, or none, as spelled", () => {
+  assert.deepEqual(equalClaims(["a", "b"]), ["a", "b"]);
+  assert.deepEqual(withNamesAsSpelled(() => equalClaims(["a", "b"])), ["a"]);
+  assert.deepEqual(withNamesAsSpelled(() => equalClaims([])), []);
+  assert.deepEqual(foldedOnly(() => ["a"]), ["a"]);
+  let made = 0;
+  assert.deepEqual(withNamesAsSpelled(() => foldedOnly(() => { made += 1; return ["a"]; })), []);
+  assert.equal(made, 0, "as spelled the other answers are not even computed");
+});
+
+/** `design/` runs unattended, the workflow folder is a tap; the shape of the repository's own policy. */
+const POLICY_TWO_ROUTES = [
+  ...POLICY_HEAD,
+  "protected_paths:",
+  "  - { path: design/, class: policy.edit.design }",
+  "  - { path: .github/workflows/, class: policy.edit.ci }",
+  "classes:",
+  ...POLICY_TAIL,
+  "  policy.edit.design:",
+  "    autonomy: autonomous",
+  "  policy.edit.ci:",
+  "    autonomy: manual",
+  "```",
+  "",
+].join("\n");
+
+test("through the real hook, a command that writes a design file and a workflow waits for the workflow's tap, in either order", { skip }, () => {
+  const dir = attestedLab(POLICY_TWO_ROUTES);
+  for (const command of [
+    "tee design/x .github/workflows/ci.yml",
+    "tee .github/workflows/ci.yml design/x",
+    "cp design/x .github/workflows/ci.yml",
+    "mv design/x .github/workflows/ci.yml",
+    "echo x > design/a > .github/workflows/ci.yml",
+    "tee .github/workflows/ci.yml > design/x",
+    "tee {design/x,.github/workflows/ci.yml}",
+  ]) {
+    const decision = decide(dir, bash(command));
+    assert.equal(strictness(decision), 1, `${command}: ${decision.permission} ${decision.reason}`);
+    assert.match(decision.reason, /:policy\.edit\.ci within /u, command);
+  }
+  // One class, or a reader in front of the redirection: unattended, as before.
+  for (const command of ["tee design/x design/y", "cat .github/workflows/ci.yml > design/x"]) {
+    const decision = decide(dir, bash(command));
+    assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
+  }
+});
+
+test("a segment with a protected redirection is walked once: it costs about what it costs without the redirection", () => {
+  // The command in front of a protected redirection is asked for its own
+  // answer. That is the walk every segment takes, made once. A ratio of CPU
+  // time, like the tests around it, over 1 MiB of plain words. Measured five
+  // times each: with one walk the line costs 0.59 to 0.73 of the control;
+  // with the walk made twice, 1.04 to 1.34. The bound sits between, and each
+  // side is the least of three runs, so one slow run does not decide it.
+  const SIZE = 1024 * 1024;
+  const words = "x ".repeat(SIZE / 2);
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  const least = (run: () => void): number => Math.min(cpu(run), cpu(run), cpu(run));
+  const control = least(() => classifyCommand(`tee design/x ${words}`, TWO_ROUTES));
+  const spent = least(() => classifyCommand(`tee design/x ${words}> .github/workflows/ci.yml`, TWO_ROUTES));
+  assert.ok(spent <= 0.9 * control, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
+  assert.deepEqual(pure(`tee design/x ${"x ".repeat(8)}> .github/workflows/ci.yml`, TWO_ROUTES), [
+    "policy.edit.ci redirect-protected",
+    "policy.edit.design protected-path",
+  ]);
+});
+
+// ---------------------------------------------------------------------------
+// The placeholder a `$(…)` leaves in a word is not a name: it is not folded,
+// and a word that differs from its folded form only there runs one reading.
+// ---------------------------------------------------------------------------
+
+test("the fold leaves the substitution placeholder as it is, and folds the text around it", () => {
+  const S = SUBSTITUTION_SENTINEL;
+  assert.notEqual(S.toLowerCase(), S, "the placeholder has capitals, which is why this matters");
+  assert.equal(foldFileName(S), S);
+  assert.equal(foldFileName(`Approval${S}.MD`), `approval${S}.md`);
+  assert.equal(foldFileName(`${S}${S}X${S}`), `${S}${S}x${S}`);
+  assert.equal(foldFileName(foldFileName(`A${S}${LONG_S}`)), foldFileName(`A${S}${LONG_S}`));
+  // Text that merely resembles it is folded like any other.
+  assert.equal(foldFileName("${__APPROVAL_SUBST_}"), "${__approval_subst_}");
+});
+
+test("a word with a substitution runs one reading unless a name in it folds, and its answers are unmoved", () => {
+  const readings = (command: string): number => eachNameReading(() => classifyCommand(command)).length;
+  // Only the placeholder would differ: one reading. Each of these ran two.
+  for (const command of [
+    'echo x > "$(echo a)"',
+    "echo x > .approval/$(echo a)",
+    "echo x > .git/$(echo a)",
+    'git push origin "$(echo main)"',
+    "cat $(echo a)/.env",
+    "cat .approval/$(echo a)",
+  ]) {
+    assert.equal(readings(command), 1, command);
+  }
+  // A name beside the substitution that does fold still runs both.
+  assert.equal(readings("echo x > .APPROVAL/$(echo a)"), 2);
+  assert.equal(readings("echo x > Approval.MD$(echo a)"), 2);
+  // The answers, in both readings, are what they were.
+  for (const [command, want] of [
+    ['echo x > "$(echo a)"', ["files.write.workspace redirect-write"]],
+    ["echo x > .approval/$(echo a)", [WRITE_CORE]],
+    ["echo x > .APPROVAL/$(echo a)", [WRITE_CORE, "files.write.workspace redirect-write"]],
+    ["cat $(echo a)/.env", ["account.credential credential-path"]],
+  ] as const) {
+    assert.deepEqual(pure(command), want, command);
+  }
+  assert.deepEqual(spelledPure("echo x > .APPROVAL/$(echo a)"), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(spelledPure("echo x > .approval/$(echo a)"), [WRITE_CORE]);
 });
 
 test("a line of many folded segments costs about what the same line spelled canonically costs", () => {

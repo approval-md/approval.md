@@ -220,6 +220,7 @@
           "hook-withdrawn",
           "hook-timeout",
           "hook-harness-cap-too-short",
+          "hook-deadline",
           "hook-gate-refused",
           "hook-grant-unverified",
           "hook-sandbox-required",

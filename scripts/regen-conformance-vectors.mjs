@@ -2300,6 +2300,28 @@ const commandClassVectors = [
       "a file whose name only contains a guarded name stays a workspace write (guarded names fold case control)",
     input: { command: "echo x > approval-notes.md" },
   },
+  // --- every protected target of a segment is judged -------------------------
+  // One class named the segment, and the other protected paths it writes were
+  // judged on that class's terms. Each other class is its own entry over the
+  // same text, the one the classifier's precedence picks first.
+  {
+    id: "every-protected-target-two-positionals",
+    description:
+      "a command that writes an instruction file and the policy file is policy.core and policy.edit: every protected target's class is reported, the strictest by the classifier's precedence first",
+    input: { command: "tee CLAUDE.md APPROVAL.md" },
+  },
+  {
+    id: "every-protected-target-writer-and-redirect",
+    description:
+      "a writer in front of a redirection onto the policy file keeps the class of the protected path it names: redirect-protected policy.core, then policy.edit for the writer's own target",
+    input: { command: "tee CLAUDE.md > APPROVAL.md" },
+  },
+  {
+    id: "every-protected-target-reader-and-redirect",
+    description:
+      "a reader in front of a redirection onto the policy file adds nothing: its argument is read, not written (every-protected-target control)",
+    input: { command: "cat CLAUDE.md > APPROVAL.md" },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",
@@ -2825,6 +2847,25 @@ const commandClassVectors = [
       "a here-string is refused as unparseable, as it was before this vector existed: parsing it could only loosen an answer, and a credential read through one has spellings that classify",
     input: { command: 'cat <<< "$(cat ~/.hermes/.env)"' },
     control: true,
+  },
+  // --- zsh's clobber redirections are refused ---------------------------------
+  {
+    id: "zsh-clobber-redirect-is-refused",
+    description:
+      "`>!` is one operator in zsh, and the word after it is the file written; bash reads a file named `!` and an argument. The two shells write different files, so the form is refused rather than read as either",
+    input: { command: "echo x >! APPROVAL.md" },
+    control: true,
+  },
+  {
+    id: "zsh-clobber-append-joined-is-refused",
+    description: "the append form, joined to its target, with a descriptor in front: zsh appends to the policy file, bash to a file named `!APPROVAL.md`",
+    input: { command: "echo x 1>>!APPROVAL.md" },
+    control: true,
+  },
+  {
+    id: "clobber-redirect-both-shells-share-is-read",
+    description: "beside the two above: `>|` is the clobber operator bash and zsh share, and its target is read as any redirection target is",
+    input: { command: "echo x >| APPROVAL.md" },
   },
   {
     id: "redirect-read-of-an-ordinary-file-is-a-read",
@@ -5669,6 +5710,8 @@ const SUITES = [
     // long-s home, and a control, `approval-notes.md`, which stays a workspace
     // write. Regenerating over main's 382 leaves them byte-identical. The
     // number is bumped once, at the release cut, for every change it carries.
+    // zsh's clobber redirections: three more in the same unreleased 1.12.0,
+    // `>!` and `1>>!` refused (controls), and `>|`, which reads as it did.
     vectors_version: "1.12.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",

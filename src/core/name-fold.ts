@@ -70,8 +70,29 @@ const HFS_IGNORED = /[\u200C-\u200F\u202A-\u202E\u206A-\u206F\uFEFF]/gu;
  * `foldFileName(a)` with `foldFileName(b)`, through the reading helpers below.
  */
 export function foldFileName(text: string): string {
+  if (!text.includes(SUBSTITUTION_SENTINEL)) return foldText(text);
+  return text.split(SUBSTITUTION_SENTINEL).map(foldText).join(SUBSTITUTION_SENTINEL);
+}
+
+function foldText(text: string): string {
   return text.replace(HFS_IGNORED, "").normalize("NFD").toLowerCase().toUpperCase().toLowerCase();
 }
+
+/**
+ * What a `$(…)` leaves in a word's text: see `command-class.ts`, which reads
+ * and re-exports it. It stands for text nobody has, so it is not a name and
+ * {@link foldFileName} leaves it as it is.
+ *
+ * It is spelled in capitals. Folded like a name it became another string, so
+ * every word holding a substitution counted as a name whose two readings
+ * differ, and the whole as-spelled reading ran for it: twice the cost on any
+ * line with a `$(…)` in a path word, for an answer that could not differ (no
+ * guarded name holds a `$`).
+ */
+export const SUBSTITUTION_SENTINEL = "${__APPROVAL_SUBST__}";
+
+/** The placeholder as a lowering compare spells it in the as-spelled reading. */
+const SENTINEL_LOWERED = SUBSTITUTION_SENTINEL.toLowerCase();
 
 
 // ===========================================================================
@@ -139,7 +160,20 @@ export function foldNameExact(text: string): string {
 export function foldNameLower(text: string): string {
   if (spelledReading) return text.toLowerCase();
   const folded = foldFileName(text);
-  if (!readingsDiverged && folded !== text.toLowerCase()) readingsDiverged = true;
+  if (!readingsDiverged) {
+    const lowered = text.toLowerCase();
+    // The as-spelled answer lowers the placeholder and the folded one keeps
+    // it: the same word either way, so that alone is no divergence. The
+    // placeholder is looked for only when the two already differ: this runs
+    // once per name compared, and 400,000 plain words must not each pay for
+    // a split and a join.
+    if (
+      folded !== lowered &&
+      (!lowered.includes(SENTINEL_LOWERED) || folded !== lowered.split(SENTINEL_LOWERED).join(SUBSTITUTION_SENTINEL))
+    ) {
+      readingsDiverged = true;
+    }
+  }
   return folded;
 }
 
@@ -220,6 +254,25 @@ export function takeAmongEqual<T>(claims: readonly T[]): T {
   if (spelledReading) return first;
   if (claims.length > widestEqual) widestEqual = claims.length;
   return claims[equalTurn % claims.length] as T;
+}
+
+/**
+ * The equal claims a compare offers the caller to gather (and hand on to
+ * {@link takeAmongEqual} once it has every one): all of them folded, the
+ * first alone as spelled.
+ */
+export function equalClaims<T>(claims: readonly T[]): readonly T[] {
+  return spelledReading ? claims.slice(0, 1) : claims;
+}
+
+/**
+ * Answers that only the folded reading reports, beside the one the guards
+ * gave before names folded (every OTHER guarded class a segment's targets
+ * take): `make()` folded, nothing as spelled, so the as-spelled reading stays
+ * exactly the old answer.
+ */
+export function foldedOnly<T>(make: () => readonly T[]): readonly T[] {
+  return spelledReading ? [] : make();
 }
 
 /**
