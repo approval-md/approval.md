@@ -687,7 +687,10 @@ test("lead ruling L61195 (a): zsh's clobbering redirects write the next word", (
     assert.equal(classifyCommandWithMainRules(command).ok, false, command);
   }
   assert.ok(classesOf("echo x >! .git/config").includes("vcs.history.rewrite"));
-  assert.deepEqual(classesOf("echo x >! out.log"), andMain(["files.write.workspace"], "echo x >! out.log"));
+  // Main refuses `>!` since #700; lead ruling L62319 keeps this reading, with
+  // the file bash writes (`!`) beside: a workspace file too.
+  assert.equal(classifyCommandWithMainRules("echo x >! out.log").ok, false);
+  assert.deepEqual(classesOf("echo x >! out.log"), ["files.write.workspace"]);
 });
 
 test("lead ruling L61195 (b): a copy, move or link into a directory is judged by the file it lands", () => {
@@ -1941,4 +1944,106 @@ test("automated security review of 79150dc4: every protected class a line writes
   assert.deepEqual([...classesOf("echo x > APPROVA?.md > .appro*/log/x")].sort(), ["files.write.workspace", "log.mutate", "policy.core"]);
   assert.deepEqual([...classesOf("echo x > CLAUDE.m? > .appro*/log/x")].sort(), ["files.write.workspace", "log.mutate", "policy.edit"]);
   assert.deepEqual([...classesOf("tee APPROVA?.md .appro*/log/x < y")].sort(), ["files.write.workspace", "log.mutate", "policy.core"]);
+});
+
+// ---------------------------------------------------------------------------
+// Lead ruling L62319 (keeping L61206), after main's #700: zsh's `>!`, `>>!`
+// and `>&!` are read at the word zsh writes where that word IS the file zsh
+// writes (zsh 5.9, `zsh -f -c`, run in a scratch folder for each form), and
+// the file bash writes (`!` or `!word`) rides beside. Every form zsh reads
+// otherwise keeps main's refusal.
+// ---------------------------------------------------------------------------
+
+/** Each target, its protected-path entries, and the class zsh's write of it has. */
+const CLOBBER_TARGETS: readonly (readonly [string, readonly { path: string; class: string }[], string])[] = [
+  ["APPROVAL.md", [], "policy.core"],
+  [".github/workflows/ci.yml", [{ path: ".github/workflows/", class: "policy.edit.ci" }], "policy.edit.ci"],
+  ["APPROVA?.md", [], "policy.core"],
+  [".claude/settings.json", [], "policy.core"],
+  [".cl*/settings.json", [], "policy.core"],
+];
+
+test("lead ruling L62319: each zsh clobber form zsh writes the next word with is read there, bash's file beside", () => {
+  // `T` is the target. Each of these writes T in zsh 5.9.
+  const read = [
+    "echo x >! T",
+    "echo x >!T",
+    "echo x >>! T",
+    "echo x >>!T",
+    "echo x >&! T",
+    "echo x >&!T",
+    "echo x 2>! T",
+    "echo x 1>>! T",
+    "echo x 2>&! T",
+    "echo x 9>!T",
+    "echo x &>!T",
+    "echo x &>>!T",
+    "echo x >!\tT",
+    "echo x >!\\\nT",
+    "echo x >! T 2>&1",
+    "echo x 2>&1 >!T",
+    "ls; echo x >!T",
+    "(echo x)>!T",
+    "zsh -c 'echo x >!T'",
+  ];
+  for (const [target, routes, cls] of CLOBBER_TARGETS) {
+    for (const form of read) {
+      const command = form.replace("T", target);
+      assert.equal(classifyCommandWithMainRules(command, routes).ok, false, `${command}: main refuses it (#700)`);
+      const classes = classesOf(command, routes);
+      assert.ok(classes.includes(cls), `${command} -> ${classes.join(",")}`);
+      // bash writes `!` or `!<target>`, an ordinary file here.
+      assert.ok(classes.includes("files.write.workspace"), `${command} -> ${classes.join(",")}`);
+    }
+  }
+  // A file really named `!` or `$` is what zsh writes after `>!!` and `>!$`.
+  assert.deepEqual(classesOf("echo x >!! APPROVAL.md"), ["files.write.workspace"]);
+  assert.deepEqual(classesOf("echo x >!$ APPROVAL.md"), ["files.write.workspace"]);
+  // `>&!` takes a FILE in zsh, digits included (`>&!2` writes a file named 2).
+  assert.deepEqual(classesOf("echo x >&!2"), ["files.write.workspace"]);
+});
+
+test("lead ruling L62319: a zsh clobber form zsh does not read as the next word keeps main's refusal", () => {
+  const refused = [
+    // A script bash or sh runs: `>!` is bash's there (a file named `!T`).
+    "bash -c 'echo x >!T'",
+    "sh -c 'echo x >! T'",
+    "bash -lc 'echo x >>!T'",
+    "/bin/bash -c 'echo x >&!T'",
+    // zsh reads `10` and `12` as arguments, not descriptors.
+    "echo x 10>!T",
+    "echo x 12>>! T",
+    // zsh refuses the line and writes nothing.
+    "echo x 2>&1>!T",
+    "echo x >&2>!T",
+    "echo x >\\\n>!T",
+    "echo x >!=T",
+    "echo x >!#T",
+    // zsh decodes `$'…'`; this lexer reads `$T` (as it does after `>`).
+    "echo x >!$'T'",
+    "echo x >>! $'T'",
+    // Main refused these before #700, and they stay refused (L61926).
+    "echo x >>| T",
+    "echo x >&| T",
+    "echo x >>&! T",
+    "echo x &>! T",
+  ];
+  for (const [target, routes] of CLOBBER_TARGETS) {
+    for (const form of refused) {
+      const command = form.replace("T", target);
+      const result = classifyCommand(command, routes);
+      assert.equal(result.ok, false, `${command} -> ${result.ok ? result.classes.join(",") : ""}`);
+      assert.equal(classifyCommandWithMainRules(command, routes).ok, false, `${command}: main refuses it`);
+    }
+  }
+  // Each refusal of this reading's own is main's, by its detail.
+  const own = classifyCommand("bash -c 'echo x >!APPROVAL.md'");
+  assert.ok(!own.ok && own.code === "unparseable" && /zsh writes the word after it and bash a file named "!"/u.test(own.detail), JSON.stringify(own));
+});
+
+test("lead ruling L62319: a refusal main has for another reason still refuses a line this reading reads", () => {
+  // The main pass runs again reading `>!` as bash does, so the here-string
+  // main refuses still refuses the line.
+  assert.equal(classifyCommand("echo x >! APPROVAL.md; cat <<< y").ok, false);
+  assert.equal(classifyCommand("echo x >! out.log; python3 -c 'print(1)'").ok, classifyCommand("echo x > out.log; python3 -c 'print(1)'").ok);
 });

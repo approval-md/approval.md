@@ -118,10 +118,18 @@ option, case folded), and takes the strictest class among them.
   is a parameter's name only where every `$` in the word is a real
   expansion (`'$'*` and `\$*` are a literal `$` and a live `*`). zsh's `^`
   and `#` count where the line may set options.
-- **zsh's clobbering redirects (lead ruling L61195 (a)):** `>!`, `>>!`, `>|`,
-  `>&!`, `&>|` and `&>>!` write the next word, as `>` does. `>>|`, `>&|`,
-  `>>&!`, `>>&|` and `&>!`, which main refuses, stay refused (lead ruling
-  L61926: a reading may make a line stricter, never lift a refusal).
+- **zsh's clobbering redirects (lead ruling L61195 (a); L62319 after
+  main's #700):** `>!`, `>>!`, `>|`, `>&!`, `&>|` and `&>>!` write the next
+  word, as `>` does, and the file bash writes (`!`, or `!word` when joined)
+  rides beside. Main refuses `>!`, `>>!` and `>&!` (#700, below); this
+  reading lifts that refusal only where the word is the file zsh writes, and
+  any other refusal main has for the line still stands. Kept refused, because
+  zsh writes another file there or none: inside a `bash -c` or `sh -c`
+  script, a descriptor of two or more digits (`10>!x`, where zsh reads `10`
+  as an argument), joined to a dup's word (`2>&1>!x`) or after a line
+  continuation, a target opening `=` or `#`, and one carrying `$'…'`.
+  `>>|`, `>&|`, `>>&!`, `>>&|` and a spaced `&>! x`, which main refused
+  before #700, stay refused (lead ruling L61926).
 - **Copies, moves, links, syncs and extractions INTO a guarded directory
   (L61195 (b); reviews of b402adec, 039b840a and e6b7bf97; the split ruling,
   L61320):** a `cp`, `mv`, `ln`, `install`, `rsync`, `scp` or `tar -x -C`
@@ -723,6 +731,34 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   landed on the guarded file, and the dotless i and a fullwidth a did not.
   Conformance: ten new `command-class` vectors; main's 382 are
   byte-identical. The vectors version is bumped once, at the release cut.
+
+**zsh's clobber redirections are refused (open in 0.4.8).** In zsh `>!`,
+`>>!` and `>&!` are each one operator, and the word after it is the file:
+`echo x >! APPROVAL.md` overwrites the policy file. bash reads the same text
+as a redirection onto a file named `!`, with `APPROVAL.md` an argument of
+`echo`. The classifier read bash's, so under zsh, the shell Claude Code's
+Bash tool runs on macOS, a line that wrote a protected file was
+`files.write.workspace` and ran wherever a policy lets workspace writes run.
+
+- **The form is refused `unparseable`**, with or without a space before the
+  target, with a descriptor in front (`2>!`, `1>>!`) and after an `&`
+  (`&>!`), anywhere on the line and inside `$(…)` or a `sh -c` script. The
+  two shells write different files, so neither reading is admitted. The
+  refusal names what to write instead.
+- **Unmoved:** `>|`, the clobber operator both shells share, and a file
+  really named `!` when it is quoted, escaped or set apart (`>'!'`, `>\!`,
+  `> !`), which both shells read alike. `>>|`, `>&|`, `>>&!` and their
+  kin are zsh's alone and were refused already.
+- **Evidence.** Each form was run in zsh 5.9 and bash 3.2 in a scratch
+  folder, and the test repeats that where both shells are installed. No
+  overlay recipe and no earlier conformance vector carries the form.
+  Conformance: three new `command-class` vectors (two refusals and `>|`);
+  the 395 before them are byte-identical.
+- **With GLOB-WRITE (lead ruling L62319):** the forms above are read at the
+  word zsh writes, with bash's file beside, where that word is the file zsh
+  writes; the rest keep this refusal (the GLOB-WRITE entry lists them). The
+  two refusal vectors read `policy.core` beside `files.write.workspace`, and
+  two refused controls are added (`bash -c`, a two-digit descriptor).
 
 ### Added
 

@@ -2848,6 +2848,38 @@ const commandClassVectors = [
     input: { command: 'cat <<< "$(cat ~/.hermes/.env)"' },
     control: true,
   },
+  // --- zsh's clobber redirections: read at zsh's target, or refused ----------
+  // Lead ruling L62319 (keeping L61206): a form read at the word zsh writes is
+  // read there, and the file bash writes rides beside; a form zsh reads
+  // otherwise keeps main's refusal (#700).
+  {
+    id: "zsh-clobber-redirect-is-read-at-its-target",
+    description:
+      "`>!` is one operator in zsh, and the word after it is the file written; bash reads a file named `!` and an argument. The word zsh writes is read, and the file bash writes rides beside",
+    input: { command: "echo x >! APPROVAL.md" },
+  },
+  {
+    id: "zsh-clobber-append-joined-is-read-at-its-target",
+    description: "the append form, joined to its target, with a descriptor in front: zsh appends to the policy file, bash to a file named `!APPROVAL.md`, and both are read",
+    input: { command: "echo x 1>>!APPROVAL.md" },
+  },
+  {
+    id: "zsh-clobber-in-a-bash-script-is-refused",
+    description: "inside a `bash -c` script `>!` is bash's, a file named `!APPROVAL.md`, not zsh's; the form keeps the refusal",
+    input: { command: "bash -c 'echo x >!APPROVAL.md'" },
+    control: true,
+  },
+  {
+    id: "zsh-clobber-two-digit-descriptor-is-refused",
+    description: "zsh reads `10` in front of `>!` as an argument, not a descriptor; the form keeps the refusal",
+    input: { command: "echo x 10>!APPROVAL.md" },
+    control: true,
+  },
+  {
+    id: "clobber-redirect-both-shells-share-is-read",
+    description: "beside the ones above: `>|` is the clobber operator bash and zsh share, and its target is read as any redirection target is",
+    input: { command: "echo x >| APPROVAL.md" },
+  },
   {
     id: "redirect-read-of-an-ordinary-file-is-a-read",
     description: "an ordinary file on stdin is the read it always was",
@@ -5691,6 +5723,10 @@ const SUITES = [
     // long-s home, and a control, `approval-notes.md`, which stays a workspace
     // write. Regenerating over main's 382 leaves them byte-identical. The
     // number is bumped once, at the release cut, for every change it carries.
+    // zsh's clobber redirections: five more in the same unreleased 1.12.0,
+    // `>!` and `1>>!` read at zsh's target (lead ruling L62319), `bash -c`
+    // and a two-digit descriptor refused (controls), and `>|`, which reads as
+    // it did.
     vectors_version: "1.12.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",

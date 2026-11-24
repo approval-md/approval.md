@@ -791,3 +791,63 @@ test("review-b A686-FOLD7 S1 (lead ruling L62219), through the real hook after #
     assert.match(decided.reason, /^hook-class-human-only: class policy\.(edit\.ci|edit\.agents|core) /u, command);
   }
 });
+
+test("lead ruling L62319, through the real hook after main's #700: a zsh clobber form is read at the file zsh writes, or refused as main refuses it", () => {
+  // Made up: workspace writes autonomous, everything else human-only, the
+  // workflows routed. Main a86c6bbf denies every `>!` line here unparseable.
+  const dir = join(scratch, "l62319");
+  const home = join(scratch, "l62319-home");
+  mkdirSync(home, { recursive: true });
+  for (const [sub, file] of [[".github/workflows", "ci.yml"], [".claude", "settings.json"], ["", "notes.txt"]] as const) {
+    mkdirSync(join(dir, sub), { recursive: true });
+    writeFileSync(join(dir, sub, file), "made-up\n");
+  }
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    [
+      "# Policy",
+      "",
+      "```yaml approval-policy",
+      'version: "0.1"',
+      "defaults:",
+      "  autonomy: human-only",
+      '  approval_ttl: "1h"',
+      "  on_expiry: reject",
+      "protected_paths:",
+      '  - { path: ".github/workflows/", class: policy.edit.ci }',
+      "classes:",
+      "  read.*:",
+      "    autonomy: autonomous",
+      "  files.write.workspace:",
+      "    autonomy: autonomous",
+      "```",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(runCliIn(["policy", "attest", "--as", "human:alice"], dir).code, 0);
+  // Read at an ordinary file (bash's `!` beside it is ordinary too): allowed, as `>` is.
+  for (const command of ["echo x > notes.txt", "echo x >! notes.txt", "echo x >>!notes.txt", "echo x 2>&! notes.txt"]) {
+    const decided = decideIn(dir, home, command);
+    assert.equal(decided.permission, "allow", `${command}: ${decided.reason}`);
+  }
+  // Read at a protected, a routed, a glob and an organ-folder target: held on that class.
+  for (const [command, cls] of [
+    ["echo x >! APPROVAL.md", "policy\\.core"],
+    ["echo x >>!APPROVAL.md", "policy\\.core"],
+    ["echo x >! .github/workflows/ci.yml", "policy\\.edit\\.ci"],
+    ["echo x >&!.github/workflows/ci.yml", "policy\\.edit\\.ci"],
+    ["echo x >! APPROVA?.md", "policy\\.core"],
+    ["echo x 2>! .claude/settings.json", "policy\\.core"],
+    ["echo x >! .cl*/settings.json", "policy\\.core"],
+  ] as const) {
+    const decided = decideIn(dir, home, command);
+    assert.equal(decided.permission, "deny", `${command}: ${decided.reason}`);
+    assert.match(decided.reason, new RegExp(`^hook-class-human-only: class ${cls} `, "u"), command);
+  }
+  // Refused as main refuses it: zsh writes another file there, or none.
+  for (const command of ["bash -c 'echo x >! notes.txt'", "echo x 10>! notes.txt", "echo x 2>&1>!notes.txt", "echo x >!=notes.txt"]) {
+    const decided = decideIn(dir, home, command);
+    assert.equal(decided.permission, "deny", `${command}: ${decided.reason}`);
+    assert.match(decided.reason, /^hook-unparseable: redirection /u, command);
+  }
+});

@@ -889,6 +889,33 @@ export function protectedPathClass(
 let mainRulesOnly = false;
 let globWriteFired = false;
 
+// zsh's clobber redirects `>!`, `>>!` and `>&!` (lead ruling L62319, which
+// keeps L61206). Main refuses them (#700): zsh writes the word after the
+// operator and bash a file named `!`. This classifier READS them at zsh's
+// target, the word after the operator, where that reading is the target zsh
+// writes ({@link zshClobberRefusal} names the forms that keep main's
+// refusal). Where the line is read, main's refusal is the one exception the
+// seam lets through: the main pass runs again reading the form as bash reads
+// it, the classifier main had before #700 (`clobberAsBash`), so the file bash
+// writes rides beside the file zsh writes, and every other refusal main has
+// still refuses the line. `mainClobberRefused` says main's pass refused one.
+let clobberAsBash = false;
+let mainClobberRefused = false;
+// The script being read is run by a shell other than zsh (`bash -c`, `sh -c`):
+// there the word after `>!` is an argument, so the form keeps main's refusal.
+let clobberShellNotZsh = false;
+
+/**
+ * The refusal main gives a zsh clobber redirect (#700), for the operator as
+ * spelled (`>!`, `2>>!`, `>&!`).
+ */
+function zshClobberRefusal(spelled: string): { ok: false; detail: string } {
+  return {
+    ok: false,
+    detail: `redirection ${spelled} is not read by this classifier: zsh writes the word after it and bash a file named "!"; write >| to overwrite a file, or quote the name`,
+  };
+}
+
 /** A GLOB-WRITE rule changed this line's answer: the main pass must run. */
 function markGlobWriteFired(): void {
   if (!mainRulesOnly) globWriteFired = true;
@@ -901,6 +928,17 @@ export function classifyCommandWithMainRules(
   context: ClassifierContext = {},
 ): CommandClassification {
   return withMainRules(() => classifyCommand(command, protectedPaths, context));
+}
+
+/** Run `run` reading zsh's clobber redirects as bash does (main before #700), and restore the mode afterwards. */
+function withClobberAsBash<T>(run: () => T): T {
+  const saved = clobberAsBash;
+  clobberAsBash = true;
+  try {
+    return run();
+  } finally {
+    clobberAsBash = saved;
+  }
 }
 
 /** Run `run` with every GLOB-WRITE rule off (main's classifier), and restore the mode afterwards. */
@@ -2239,6 +2277,9 @@ function lex(command: string): LexResult {
   let depth = 0;
   let segmentStart = 0;
   let index = 0;
+  // Where the last descriptor dup's word ended (`2>&1`): zsh refuses a
+  // redirect operator joined to it (`2>&1>!x` writes nothing).
+  let dupEnd = -1;
   const pending: PendingHeredoc[] = [];
 
   const flush = (end: number): void => {
@@ -2431,6 +2472,54 @@ function lex(command: string): LexResult {
       // A zsh clobber form main does not read (`>>|`, `>&!`, ...).
       if (!["", ">>", ">&", ">|", ">", "<<-", "<<", "<&", "<"].includes(op)) markGlobWriteFired();
       index += (redirect[0] as string).length;
+      // zsh's clobber forms. `>!`, `>>!` and `>&!` (with a descriptor in
+      // front too, or after a `&`) are ONE operator there, and the target is
+      // the word after it: `echo x >! APPROVAL.md` writes the policy file.
+      // bash reads the same text as a redirect to a file named `!`, with the
+      // next word an argument. The two shells write different files, and
+      // this lexer read bash's: the policy file was an argument of `echo` and
+      // the line an ordinary workspace write. Neither reading is right for
+      // both shells, so the form is refused. `>|` is the clobber operator
+      // both share, and a file really named `!` can be quoted or set apart
+      // (`>'!'`, `>\!`, `> !`), which both read alike: only an unquoted `!`
+      // right after the operator is zsh's.
+      // Lead ruling L62319: that refusal is main's answer, the main pass's
+      // here. The pass the seam runs again where this classifier read the
+      // form (`clobberAsBash`) reads it as bash does, as main did before.
+      if ((op === ">" || op === ">>" || op === ">&") && command[index] === "!" && !clobberAsBash) {
+        mainClobberRefused = true;
+        return zshClobberRefusal(`${redirect[0] as string}!`);
+      }
+      // This classifier's own reading of the three forms (the regex above
+      // took the `!` into the operator): the word after it is the target, as
+      // zsh 5.9 writes it. Each form below writes something else in zsh, or
+      // nothing, so it keeps main's refusal (lead ruling L62319: a form not
+      // read at its real target is refused):
+      // - inside a `bash -c` or `sh -c` script, where `>!` is bash's;
+      // - a descriptor of two or more digits: zsh reads `10` as an argument;
+      // - joined to a dup's word (`2>&1>!x`), or after a line continuation
+      //   (`>\` newline `>!x`): zsh refuses the line and writes nothing;
+      // - a target opening `=` (zsh's command lookup) or `#` (a comment in
+      //   zsh, so no target), or carrying `$'…'`, which zsh decodes and this
+      //   lexer does not.
+      const clobber = op === ">!" || op === ">>!" || op === ">&!";
+      if (clobber) {
+        const start = index - (redirect[0] as string).length;
+        let next = index;
+        while (command[next] === " " || command[next] === "\t" || command.startsWith("\\\n", next)) {
+          next += command[next] === "\\" ? 2 : 1;
+        }
+        if (
+          clobberShellNotZsh ||
+          (redirect[1] ?? "").length > 1 ||
+          start === dupEnd ||
+          command.slice(Math.max(0, start - 2), start) === "\\\n" ||
+          command[next] === "=" ||
+          command[next] === "#"
+        ) {
+          return zshClobberRefusal(redirect[0] as string);
+        }
+      }
       if (op === "<<" && command[index] === "<") {
         // A here-string (`<<<word`). Refused, as it always was, and named
         // (APRV-503): the shell expands its word, and that word is the
@@ -2499,7 +2588,10 @@ function lex(command: string): LexResult {
         }
         const dup =
           target.substitutions.length === 0 && (/^\d+-?$/u.test(target.text) || target.text === "-");
-        if (dup) continue;
+        if (dup) {
+          dupEnd = index;
+          continue;
+        }
         if (op === "<&") {
           return {
             ok: false,
@@ -2510,10 +2602,12 @@ function lex(command: string): LexResult {
         continue;
       }
       while (command[index] === " " || command[index] === "\t") index += 1;
+      const targetStart = index;
       const target = readWord();
       if (target === null) {
         return { ok: false, detail: `redirection ${op} has no target` };
       }
+      if (clobber && command.slice(targetStart, index).includes("$'")) return zshClobberRefusal(redirect[0] as string);
       redirects.push({ op: op.startsWith(">>") ? ">>" : op === "<" ? "<" : ">", target });
       continue;
     }
@@ -8238,6 +8332,12 @@ export function loginShellScript(segment: LexSegment): string | null {
   return script.text.trim().length === 0 ? null : script.text;
 }
 
+/** The shell a {@link loginShellScript} wrapper names (`bash`, `zsh`), by its last path part. */
+function loginShellName(segment: LexSegment): string {
+  const shell = segment.words[0]?.text ?? "";
+  return pathSegments(shell).slice(-1)[0] ?? shell;
+}
+
 /** Interpreters that are opaque only when handed inline source. */
 const INLINE_SOURCE_BINS: Readonly<Record<string, readonly string[]>> = {
   python: ["-c"],
@@ -12862,8 +12962,20 @@ function classifyCommandAsRead(
   try {
     const result = classifyCommandAsReadWithRules(command, protectedPaths, context);
     if (!globWriteFired) return result;
-    const main = withMainRules(() => classifyCommandAsReadWithRules(command, protectedPaths, context));
-    return unionNameReadings([result, main]);
+    const outerRefused = mainClobberRefused;
+    mainClobberRefused = false;
+    try {
+      let main = withMainRules(() => classifyCommandAsReadWithRules(command, protectedPaths, context));
+      // Lead ruling L62319: main refused a zsh clobber redirect that this
+      // reading read at the word zsh writes (a form it does not read refused
+      // `result` above). Main's pass runs again reading the form as bash
+      // does, and that answer joins, so the file bash writes rides beside and
+      // any other refusal main has still refuses the line.
+      if (!main.ok && result.ok && mainClobberRefused) main = withClobberAsBash(() => withMainRules(() => classifyCommandAsReadWithRules(command, protectedPaths, context)));
+      return unionNameReadings([result, main]);
+    } finally {
+      mainClobberRefused = outerRefused;
+    }
   } finally {
     globWriteFired = outer;
   }
@@ -12957,13 +13069,22 @@ function classifyCommandAsReadWithRules(
       // F-12 fold (review-b M2a): the inner script runs in the directory the
       // OUTER command moved to, which the inner scan cannot see, so after an
       // outer cd/pushd/popd/chdir no inner segment stands in.
-      const inner = classifyCommandAsRead(script, protectedPaths, {
-        ...context,
-        shellDir: execContext.shellDir ?? null,
-        unwrapShell: false,
-        execCode: false,
-        noRuleSegments: context.noRuleSegments === true && !movesDirectory,
-      });
+      // Lead ruling L62319: a script bash or sh runs reads `>!` as bash
+      // does, so there the zsh clobber forms keep main's refusal.
+      const savedShell = clobberShellNotZsh;
+      clobberShellNotZsh = loginShellName(segment) !== "zsh";
+      let inner: CommandClassification;
+      try {
+        inner = classifyCommandAsRead(script, protectedPaths, {
+          ...context,
+          shellDir: execContext.shellDir ?? null,
+          unwrapShell: false,
+          execCode: false,
+          noRuleSegments: context.noRuleSegments === true && !movesDirectory,
+        });
+      } finally {
+        clobberShellNotZsh = savedShell;
+      }
       if (!inner.ok) {
         // The refusal is the INNER one, reported against the inner segment: an
         // operator told `hook-opaque` for `zsh` learns nothing, and one told
