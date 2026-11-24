@@ -69,6 +69,7 @@ import {
   eachNameReading,
   equalClaims,
   foldedOnly,
+  foldedOnlyQuietly,
   foldNameExact,
   foldNameLower,
   nameListIncludes,
@@ -5825,11 +5826,14 @@ function readDollarQuoted(
   let unread = false;
   let endsWord = false;
   let unreadParts = 0;
+  // Whether the text ends in the placeholder: a flag, as in {@link unreadParts}.
+  let atPlaceholder = false;
   const unknown = (): void => {
-    if (!text.endsWith(SUBSTITUTION_SENTINEL)) {
+    if (!atPlaceholder) {
       text += SUBSTITUTION_SENTINEL;
       unreadParts += 1;
     }
+    atPlaceholder = true;
     unread = true;
   };
   const hexRun = (from: number, most: number): number => {
@@ -5841,6 +5845,7 @@ function readDollarQuoted(
     const char = command[at] as string;
     if (char !== "\\") {
       text += char;
+      atPlaceholder = false;
       continue;
     }
     const next = command[at + 1] as string;
@@ -5885,6 +5890,7 @@ function readDollarQuoted(
       continue;
     }
     text += decoded;
+    atPlaceholder = false;
   }
   return { text, end: close, unread, endsWord, unreadParts };
 }
@@ -9596,8 +9602,11 @@ function strictestProtectedWrite(
   // The text answer (`text`) is kept, for the record of whether a reading raised it.
   let best = text;
   if (glob.off || mainRulesOnly) return best;
-  const offer = (surface: string | null, word: string): void => {
+  // Did a reading other than the spliced one raise the answer? (See the end.)
+  let raisedOtherwise = false;
+  const offer = (surface: string | null, word: string, spliced = false): void => {
     if (surface !== null && (best === null || protectedRank(surface) < protectedRank(best.surface))) {
+      if (!spliced) raisedOtherwise = true;
       // Every class the words took so far rides beside the raise (#690: every
       // protected class a command writes is judged): main's text answer and
       // its others, and the answer this one replaces and its others
@@ -9626,7 +9635,7 @@ function strictestProtectedWrite(
     if (!inexact(word)) {
       // A substitution leaves its word `exact` to the lexer, and its output is
       // an unread part all the same (`APPROVAL$(true).md`).
-      if (word.includes(SUBSTITUTION_SENTINEL) && !(skipProse && /\s/u.test(word))) offer(splicedGuardClass(word, protectedPaths, glob.budget, glob.options, globLive(glob, word)), word);
+      if (word.includes(SUBSTITUTION_SENTINEL) && !(skipProse && /\s/u.test(word))) offer(splicedGuardClass(word, protectedPaths, glob.budget, glob.options, globLive(glob, word)), word, true);
       continue;
     }
     if (skipProse && /\s/u.test(word)) continue;
@@ -9649,12 +9658,17 @@ function strictestProtectedWrite(
       // An unread part spliced into literal text (lead ruling CLAIMS L62568):
       // `APPROVAL$E.md` is the policy file when E is empty, inside double
       // quotes too (the value is spliced in, only not globbed).
-      offer(splicedGuardClass(reading, protectedPaths, glob.budget, glob.options, globLive(glob, word)), word);
+      offer(splicedGuardClass(reading, protectedPaths, glob.budget, glob.options, globLive(glob, word)), word, true);
     }
     spent.set(word, budgetBefore - glob.budget.left);
   }
-  if (best !== text) markGlobWriteFired();
-  if (best !== text && glob.tracker !== undefined) glob.tracker.raised = true;
+  // A spliced reading that only raised a protected text answer to a stricter
+  // protected class keeps that answer beside it (`others`, above): the line's
+  // main pass and the segment's plain pass would add nothing, and on a long
+  // line they cost as much again each, so they are not asked for.
+  const quiet = !raisedOtherwise && text !== null;
+  if (best !== text && !quiet) markGlobWriteFired();
+  if (best !== text && !quiet && glob.tracker !== undefined) glob.tracker.raised = true;
   return best;
 }
 
@@ -10824,6 +10838,7 @@ function unreadParts(text: string): { marked: string; asOutputs: string; parts: 
   let asOutputs = "";
   let literal = "";
   let parts = 0;
+  let afterPart = false;
   for (let at = 0; at < text.length; at += 1) {
     const char = text[at] as string;
     let end = -1;
@@ -10839,13 +10854,17 @@ function unreadParts(text: string): { marked: string; asOutputs: string; parts: 
       marked += char;
       asOutputs += char;
       literal += char;
+      afterPart = false;
       continue;
     }
     parts += 1;
-    if (!marked.endsWith(UNREAD_MARK)) {
+    // A flag, not `endsWith`: a string built a character at a time is a rope,
+    // and reading its end flattens it each time (a 256 KB word took 3 s).
+    if (!afterPart) {
       marked += UNREAD_MARK;
       asOutputs += SUBSTITUTION_SENTINEL;
     }
+    afterPart = true;
     at = end;
   }
   // A dot names nothing on its own (every dot-name and extension holds one):
@@ -10921,7 +10940,10 @@ function splicedGuardClass(
   // A part inside a brace group is read within it (`.g{x,$(…)}`): no `/`
   // reading, which would cut the group in two.
   for (const slashed of [-1, ...(/[{}]/u.test(literal) ? [] : inside)]) {
-    const found = globGuardClass(reading(slashed), protectedPaths, budget, options, undefined, { leadingDirectory });
+    // The folded reading's alone, and quietly: the guarded names it walks fold
+    // (`APPROVAL.md`), and a word whose own names do not fold keeps its one
+    // name reading. Main's answer, as spelled, has no spliced reading.
+    const found = foldedOnlyQuietly(() => globGuardClass(reading(slashed), protectedPaths, budget, options, undefined, { leadingDirectory }));
     if (found !== null && (strictest === null || protectedRank(found) < protectedRank(strictest))) strictest = found;
     if (strictest === "log.mutate") break;
   }

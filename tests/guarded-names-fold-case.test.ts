@@ -1656,11 +1656,15 @@ test("a word with a substitution runs one reading unless a name in it folds, and
   // A name beside the substitution that does fold still runs both.
   assert.equal(readings("echo x > .APPROVAL/$(echo a)"), 2);
   assert.equal(readings("echo x > Approval.MD$(echo a)"), 2);
-  // The answers, in both readings, are what they were.
+  // The answers, in both readings, are what they were, except that lead ruling
+  // L62568 reads the substitution's output after a guarded folder as any text,
+  // `log/x` too: the log's class answers, the folder's rides beside (the
+  // spliced reading is the folded reading's alone).
+  const LOG = "log.mutate redirect-protected";
   for (const [command, want] of [
     ['echo x > "$(echo a)"', ["files.write.workspace redirect-write"]],
-    ["echo x > .approval/$(echo a)", [WRITE_CORE]],
-    ["echo x > .APPROVAL/$(echo a)", [WRITE_CORE, "files.write.workspace redirect-write"]],
+    ["echo x > .approval/$(echo a)", [LOG, WRITE_CORE]],
+    ["echo x > .APPROVAL/$(echo a)", [LOG, WRITE_CORE, "files.write.workspace redirect-write"]],
     ["cat $(echo a)/.env", ["account.credential credential-path"]],
   ] as const) {
     assert.deepEqual(pure(command), want, command);
