@@ -959,19 +959,18 @@ test("lead's ruling L62400: the write-target cases #682's reader caught and #686
   // human-only, log.mutate at the autonomous default), though each writes or
   // deletes a gate file in bash and zsh; #682's reader judged each policy.core.
   const deniedAsCore = [
-    // 1. A pattern the reader cannot finish (here an ANSI-C quoted `!` in a
-    //    class, a member to every shell) was `log.mutate` alone: the log is
-    //    not the strict answer under a policy that leaves it autonomous. Now
-    //    GLOB_GUARD_UNKNOWN, `log.mutate` and `policy.core`, each judged.
+    // 1. A walk stopped at the first candidate naming the log, and the other
+    //    candidates' classes were not judged: the log is not the strict
+    //    answer under a policy that leaves it autonomous. An ANSI-C quoted
+    //    `!` in a class is a member to every shell, so these write
+    //    APPROVAL.md and .claude/settings.json; `**` may be the log's folder
+    //    or the Hermes home's own.
     "echo x >> [$'!'A]PPROVAL.md",
     "rm -f [$'!'A]PPROVAL.md",
     "echo x >> .[$'!'c]laude/settings.json",
-    // 2. A walk stopped at the first candidate naming the log, and the other
-    //    candidates' classes were not judged: `**` may be the log's folder or
-    //    the Hermes home's own.
     "echo x > ~/.hermes/**/config.yaml",
     "cp README.md ~/.hermes/**/auth.json",
-    // 3. A segment's words stopped at the first word whose answer was
+    // 2. A segment's words stopped at the first word whose answer was
     //    `log.mutate`, and the words after it were not read: `A*.md` is
     //    APPROVAL.md.
     "tee .approval/log/x A*.md",
@@ -982,17 +981,22 @@ test("lead's ruling L62400: the write-target cases #682's reader caught and #686
     const decision = claude(command, lab);
     assert.match(decision, /^deny: .*policy\.core/u, `${command}: ${decision}`);
   }
-  // 4. Every class a candidate names is judged, not the strictest by the
+  // 3. Every class a candidate names is judged, not the strictest by the
   //    classifier's rank alone (review-b N1 at bcb1be08; #690): `A*.md` is
   //    AGENTS.md as well as APPROVAL.md, and `~/.hermes/*/.env` may be a
   //    profile's or the cron folder's.
   assert.ok(classes("echo x > A*.md").includes("policy.edit"), classes("echo x > A*.md").join(", "));
   assert.ok(classes("cp -r ~/.hermes/*/.env").includes("cron.manage"), classes("cp -r ~/.hermes/*/.env").join(", "));
-  // 5. The deferral path (a credential read beside a protected write) read no
+  // 4. The deferral path (a credential read beside a protected write) read no
   //    pattern: `log.mutate` was lost (codex's HOLD at d24f98ab).
   for (const command of ["rm -rf .approval/* < .approval/env", "tee .approval/l* < .approval/env"]) {
     const judged = classes(command);
     assert.ok(["log.mutate", "policy.core", "account.credential"].every((cls) => judged.includes(cls)), `${command}: ${judged.join(", ")}`);
     assert.match(claude(command, logLab), /^deny: /u, command);
   }
+  // 5. Past #686's caps a pattern was `log.mutate` alone; it is now
+  //    GLOB_GUARD_UNKNOWN, the log and the gate's organs, each judged.
+  const pastCaps = `echo x > build/${"b*/".repeat(65)}x`;
+  assert.ok(classes(pastCaps).includes("policy.core"), classes(pastCaps).join(", "));
+  assert.match(claude(pastCaps, lab), /^deny: .*policy\.core/u);
 });
