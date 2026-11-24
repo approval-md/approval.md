@@ -1798,8 +1798,17 @@ test("a credential read is walked once: it costs about what the same line with a
   // this change: 0.93 to 1.04 of the control; with the protected scan made a
   // second time, 1.43 to 1.55. The rest of the walk without that scan costs
   // too little beside the lexing to show here, made once or twice.
+  //
+  // Every word is distinct (`x0 x1 x2 …`). The control's credential check
+  // judges each of its words, as the credential line's side scan judges each
+  // of its own. With one word repeated, a check that judges a word once
+  // (#682's, in `credentialTouch`) skipped all but one on the control alone:
+  // the control became cheaper than the work it stands for, and the node
+  // ratio rose from about 0.97 to about 1.1 here and 1.24 to 1.29 under CI's
+  // load, with the credential line no slower.
   const SIZE = 512 * 1024;
-  const words = "x ".repeat(SIZE / 2);
+  let words = "";
+  for (let at = 0; words.length < SIZE; at += 1) words += `x${at} `;
   const cpu = (run: () => void): number => {
     const start = process.cpuUsage();
     run();
@@ -1815,7 +1824,11 @@ test("a credential read is walked once: it costs about what the same line with a
   // second text scan no longer shows on the copy (0.92 to 1.02 with it, 0.75
   // to 0.81 without). A program with no copy plan has no landings: there the
   // line costs 0.91 to 1.02 of its control with one scan, and 1.32 to 1.86
-  // with the scan made twice (this Mac, merge of 9122cb3e).
+  // with the scan made twice (this Mac, merge of 9122cb3e). With distinct
+  // words: 0.76 to 0.96 with one scan, on main 03931ea2 and on #682 alike
+  // (102 runs, 72 of them beside 3 or 15 more copies of this test); 1.36 to
+  // 1.48 with the protected scan made twice, 1.46 to 1.58 with the whole side
+  // scan made twice (this Mac, main 03931ea2).
   const plainControl = least(() => classifyCommand(`node x.js notes.txt design/x ${words}`, TWO_ROUTES));
   const plainSpent = least(() => classifyCommand(`node x.js .approval/env design/x ${words}`, TWO_ROUTES));
   assert.ok(plainSpent <= 1.2 * plainControl, `node: ${plainSpent.toFixed(3)} s against a control of ${plainControl.toFixed(3)} s`);
