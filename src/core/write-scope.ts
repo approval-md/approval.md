@@ -203,10 +203,19 @@ export const HOOK_SCRIPT_ENTRY = "a hook script the settings name";
 export const CLAUDE_CONFIG_FOLDER_ENTRY = "a Claude Code config folder";
 
 /**
+ * The name a note reports for a config folder's `plugins` tree (seat ruling
+ * on the review of 8cd41612): plugin content is code and configuration that
+ * runs (hooks, scripts, `.mcp.json`, manifests, `installed_plugins.json`,
+ * `known_marketplaces.json`), and Claude Code installs plugins itself, not
+ * through the agent's tools, so the whole tree is guarded.
+ */
+export const CLAUDE_PLUGINS_FOLDER_ENTRY = "a Claude Code plugins folder";
+
+/**
  * Inside a Claude Code config folder, the places whose content runs later
  * without being asked: a direct child named `settings*` or `remote-settings*`,
- * `.claude.json`, `hooks` and everything under it, and a `hooks` anywhere under
- * `plugins`. `rest` is the FOLDED segments under the folder. The folder itself
+ * `.claude.json`, `hooks` and everything under it, and `plugins` and
+ * everything under it. `rest` is the FOLDED segments under the folder. The folder itself
  * is not guarded whole: Claude Code's own memory, plan and transcript files
  * live under it and the agent writes them.
  */
@@ -215,7 +224,7 @@ function configFolderEntryOf(rest: readonly string[]): string | null {
   if (first === undefined) return null;
   if (first.startsWith("settings") || first.startsWith("remote-settings") || first === ".claude.json") return CLAUDE_CONFIG_FOLDER_ENTRY;
   if (first === "hooks") return "a Claude Code hooks folder";
-  if (first === "plugins" && rest.indexOf("hooks", 1) !== -1) return "a Claude Code hooks folder";
+  if (first === "plugins") return CLAUDE_PLUGINS_FOLDER_ENTRY;
   return null;
 }
 
@@ -271,8 +280,8 @@ function startsWithFolded(have: readonly string[], want: readonly string[]): boo
  * `/ETC/hosts` are the guarded places on a volume that folds case.
  *
  * Claude Code's config folders (lead, CLAIMS L62289, S2): a `.claude-<suffix>`
- * segment counts as `.claude` does for the hooks pair, and so does a `hooks`
- * anywhere under a config folder's `plugins`. `configDirs` is every spelling
+ * segment counts as `.claude` does for the hooks pair, and a config folder's
+ * `plugins` pair guards that whole tree. `configDirs` is every spelling
  * of the folder `$CLAUDE_CONFIG_DIR` names (as given and resolved), whatever it
  * is called; under it, and under `~/.claude` and `~/.claude-<suffix>`, the
  * places {@link configFolderEntryOf} lists are guarded.
@@ -287,7 +296,7 @@ export function guardedEntryOf(path: string, homes: readonly string[], configDir
     const next = folded[index + 1] as string;
     if (at === ".git" && next === "hooks") return "a git hooks folder";
     if (isClaudeConfigFolderName(at) && next === "hooks") return "a Claude Code hooks folder";
-    if (isClaudeConfigFolderName(at) && next === "plugins" && folded.indexOf("hooks", index + 2) !== -1) return "a Claude Code hooks folder";
+    if (isClaudeConfigFolderName(at) && next === "plugins") return CLAUDE_PLUGINS_FOLDER_ENTRY;
   }
   for (const entry of GUARDED_ABSOLUTE_ENTRIES) {
     if (startsWithFolded(have, entry.segments)) return entry.name;
@@ -334,8 +343,7 @@ export function guardedEntryOf(path: string, homes: readonly string[], configDir
  * tree written AT that path (a recursive copy, a move, a link, an archive
  * extracted there, a clone) may put onto the list without naming it. `/` holds
  * every entry; a `.git` folder holds its `hooks`, and a `.claude` (or
- * `.claude-<suffix>`) folder its own, and a config folder's `plugins` (or any
- * folder under it) a plugin's `hooks`; `/Users` and `/var` hold other users'
+ * `.claude-<suffix>`) folder its own and its `plugins` tree; `/Users` and `/var` hold other users'
  * homes; the folder `$CLAUDE_CONFIG_DIR` names (`configDirs`), and every folder
  * above it, holds its settings and hooks. Compared through {@link foldFileName}.
  */
@@ -349,13 +357,13 @@ export function guardedEntryBelow(path: string, homes: readonly string[], config
   if (last !== undefined && isClaudeConfigFolderName(foldFileName(last))) return "a Claude Code hooks folder";
   const folded = have.map((segment) => foldFileName(segment));
   for (let index = 0; index + 1 < folded.length; index += 1) {
-    if (isClaudeConfigFolderName(folded[index] as string) && folded[index + 1] === "plugins") return "a Claude Code hooks folder";
+    if (isClaudeConfigFolderName(folded[index] as string) && folded[index + 1] === "plugins") return CLAUDE_PLUGINS_FOLDER_ENTRY;
   }
   for (const dir of configDirs) {
     const anchor = segmentsOf(dir);
     if (anchor.length === 0) continue;
     if (strictlyUnder(anchor) || (anchor.length === have.length && startsWithFolded(have, anchor))) return CLAUDE_CONFIG_FOLDER_ENTRY;
-    if (startsWithFolded(have, anchor) && folded[anchor.length] === "plugins") return "a Claude Code hooks folder";
+    if (startsWithFolded(have, anchor) && folded[anchor.length] === "plugins") return CLAUDE_PLUGINS_FOLDER_ENTRY;
   }
   for (const entry of GUARDED_ABSOLUTE_ENTRIES) {
     if (strictlyUnder(entry.segments)) return entry.name;

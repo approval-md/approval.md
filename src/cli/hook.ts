@@ -3950,12 +3950,22 @@ function currentHomes(env: NodeJS.ProcessEnv = process.env): string[] {
 
 /**
  * The Claude Code config folder `CLAUDE_CONFIG_DIR` names in this hook's own
- * environment, as given and resolved (lead, CLAIMS L62289, S2). Read where
- * `HOME` is read: the operator sets it, and nothing the agent writes reaches
- * this process's environment. Absent, empty or relative: none.
+ * environment (lead, CLAIMS L62289, S2). Read where `HOME` is read: the
+ * operator sets it, and nothing the agent writes reaches this process's
+ * environment. Absent or empty: none. A relative value is joined to this
+ * hook process's cwd, as Claude Code (started from that directory) would
+ * read it; every value has its `..` collapsed lexically, and the folder is
+ * taken both that way and through `realpath` (seat ruling on the review of
+ * 8cd41612). A leading `~` is not expanded: nothing expands it in an
+ * environment variable, so `~/x` is a folder named `~` under the cwd.
  */
-function currentConfigDirs(env: NodeJS.ProcessEnv = process.env): string[] {
-  return givenAndResolved(env["CLAUDE_CONFIG_DIR"]);
+function currentConfigDirs(env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): string[] {
+  const value = env["CLAUDE_CONFIG_DIR"];
+  if (value === undefined || value.length === 0) return [];
+  const lexical = isAbsolute(value) ? resolvePathSegments(value) : resolvePathSegments(cwd, value);
+  if (!isAbsolute(lexical)) return [];
+  const resolved = resolvedPath(lexical);
+  return resolved === null || resolved === lexical ? [lexical] : [lexical, resolved];
 }
 
 /** An absolute path as given and, when it differs, as `realpath` resolves it; `[]` for anything else. */

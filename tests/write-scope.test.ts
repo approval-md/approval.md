@@ -319,15 +319,23 @@ test("S2.1: settings under .claude-<suffix> are policy.core in the pure classifi
   }
 });
 
-test("S2.1: the hooks pair and a plugin's hooks count under .claude-<suffix>; the folder itself is not guarded whole", () => {
+test("S2.1: the hooks pair and the plugins tree count under .claude-<suffix>; the folder itself is not guarded whole", () => {
   const cases: Array<[path: string, entry: string]> = [
     [`${HOME}/.claude-x/hooks/h.sh`, "a Claude Code hooks folder"],
     [`${HOME}/.claude-x/hooks`, "a Claude Code hooks folder"],
     ["/work/repo/.claude-old/hooks/x", "a Claude Code hooks folder"],
     [`${HOME}/.Claude-X/HOOKS/h.sh`, "a Claude Code hooks folder"],
-    [`${HOME}/.claude/plugins/cache/p/1.0/hooks/hooks.json`, "a Claude Code hooks folder"],
-    [`${HOME}/.claude-x/plugins/p/hooks`, "a Claude Code hooks folder"],
-    [`${HOME}/.claude-x/plugins/marketplaces/m/plugins/p/hooks/run.sh`, "a Claude Code hooks folder"],
+    [`${HOME}/.claude/plugins/cache/p/1.0/hooks/hooks.json`, "a Claude Code plugins folder"],
+    [`${HOME}/.claude-x/plugins/p/hooks`, "a Claude Code plugins folder"],
+    [`${HOME}/.claude-x/plugins/marketplaces/m/plugins/p/hooks/run.sh`, "a Claude Code plugins folder"],
+    // The whole plugins tree (seat ruling on the review of 8cd41612): code and configuration that runs.
+    [`${HOME}/.claude-x/plugins/p/index.js`, "a Claude Code plugins folder"],
+    [`${HOME}/.claude-x/plugins/p/.mcp.json`, "a Claude Code plugins folder"],
+    [`${HOME}/.claude/plugins/installed_plugins.json`, "a Claude Code plugins folder"],
+    [`${HOME}/.claude/plugins/known_marketplaces.json`, "a Claude Code plugins folder"],
+    [`${HOME}/.claude-x/plugins`, "a Claude Code plugins folder"],
+    [`${HOME}/.Claude-X/PLUGINS/p/x`, "a Claude Code plugins folder"],
+    ["/work/repo/.claude/plugins/p/x", "a Claude Code plugins folder"],
     [`${HOME}/.claude.json`, "~/.claude.json"],
     [`${HOME}/.CLAUDE.JSON`, "~/.claude.json"],
     [`${HOME}/.claude/.claude.json`, "a Claude Code config folder"],
@@ -342,8 +350,10 @@ test("S2.1: the hooks pair and a plugin's hooks count under .claude-<suffix>; th
     `${HOME}/.claude-x/notes.md`,
     `${HOME}/.claude-x/projects/p/memory/m.md`,
     `${HOME}/.claude/plans/a.md`,
-    `${HOME}/.claude-x/plugins/p/index.js`,
-    `${HOME}/.claude-x/plugins/hooks-notes/x`,
+    `${HOME}/.claude-x/pluginsx/a`,
+    `${HOME}/.claude-x/projects/plugins/a`,
+    `${HOME}/.claude-/plugins/a`,
+    `${HOME}/dev/plugins/a`,
     `${HOME}/.claude-x/statusline.sh`,
     `${HOME}/.clauderc`,
     `${HOME}/.claude-/hooks/h.sh`,
@@ -366,12 +376,14 @@ test("S2.1: the folder CLAUDE_CONFIG_DIR names is a config folder whatever it is
     ["/opt/cc/.claude.json", "a Claude Code config folder"],
     ["/opt/cc/hooks/h.sh", "a Claude Code hooks folder"],
     ["/opt/cc/hooks", "a Claude Code hooks folder"],
-    ["/opt/cc/plugins/p/hooks/h.sh", "a Claude Code hooks folder"],
+    ["/opt/cc/plugins/p/hooks/h.sh", "a Claude Code plugins folder"],
+    ["/opt/cc/plugins/p/x.js", "a Claude Code plugins folder"],
+    ["/opt/cc/plugins/installed_plugins.json", "a Claude Code plugins folder"],
     ["/private/opt/cc-real/settings.json", "a Claude Code config folder"],
     ["/OPT/CC/HOOKS/x", "a Claude Code hooks folder"],
   ];
   for (const [path, entry] of cases) assert.equal(guardedEntryOf(path, HOMES, CONFIG_DIRS), entry, path);
-  for (const path of ["/opt/cc/notes.md", "/opt/cc/projects/p/memory/m.md", "/opt/cc/plans/a.md", "/opt/cc/plugins/p/x.js", "/opt/ccx/settings.json", "/opt/settings.json", "/opt/cc/sub/settings.json"]) {
+  for (const path of ["/opt/cc/notes.md", "/opt/cc/projects/p/memory/m.md", "/opt/cc/plans/a.md", "/opt/cc/pluginsx/a", "/opt/cc/projects/plugins/a", "/opt/ccx/settings.json", "/opt/settings.json", "/opt/cc/sub/settings.json"]) {
     assert.equal(guardedEntryOf(path, HOMES, CONFIG_DIRS), null, path);
   }
   // With no folder named, the same paths are what they were.
@@ -382,11 +394,11 @@ test("S2.1: the folder CLAUDE_CONFIG_DIR names is a config folder whatever it is
 test("S2.1: a tree written at a config folder, at its plugins, or above the variable's folder can hold its hooks", () => {
   assert.equal(guardedEntryBelow(`${HOME}/.claude-x`, HOMES), "a Claude Code hooks folder");
   assert.equal(guardedEntryBelow("/work/repo/.Claude-Old", HOMES), "a Claude Code hooks folder");
-  assert.equal(guardedEntryBelow(`${HOME}/.claude/plugins`, HOMES), "a Claude Code hooks folder");
-  assert.equal(guardedEntryBelow(`${HOME}/.claude-x/plugins/cache/p`, HOMES), "a Claude Code hooks folder");
+  assert.equal(guardedEntryBelow(`${HOME}/.claude/plugins`, HOMES), "a Claude Code plugins folder");
+  assert.equal(guardedEntryBelow(`${HOME}/.claude-x/plugins/cache/p`, HOMES), "a Claude Code plugins folder");
   assert.equal(guardedEntryBelow("/opt/cc", HOMES, CONFIG_DIRS), "a Claude Code config folder");
   assert.equal(guardedEntryBelow("/opt", HOMES, CONFIG_DIRS), "a Claude Code config folder");
-  assert.equal(guardedEntryBelow("/opt/cc/plugins/p", HOMES, CONFIG_DIRS), "a Claude Code hooks folder");
+  assert.equal(guardedEntryBelow("/opt/cc/plugins/p", HOMES, CONFIG_DIRS), "a Claude Code plugins folder");
   for (const path of [`${HOME}/.claude-x/projects`, `${HOME}/.claude-`, "/opt/cc/projects/p", "/opt/ccx", "/work/repo/plugins/p"]) {
     assert.equal(guardedEntryBelow(path, HOMES, CONFIG_DIRS), null, path);
   }

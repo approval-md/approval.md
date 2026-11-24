@@ -1161,6 +1161,9 @@ test("S2.1 Bash: a config folder's settings, hooks, plugin hooks and .claude.jso
       "echo x > ~/.claude/.claude.json",
       "echo x > ~/.claude-x/remote-settings.json",
       "cp -r a ~/.claude-x/plugins/new",
+      "echo x > ~/.claude-x/plugins/p/index.js",
+      "echo '{}' > ~/.claude/plugins/installed_plugins.json",
+      "echo x > ~/.Claude-X/Plugins/p/.mcp.json",
     ]) {
       const seen = see(command);
       assert.equal(seen.ok, true, command);
@@ -1175,7 +1178,8 @@ test("S2.1 Bash: a config folder's settings, hooks, plugin hooks and .claude.jso
       "echo x > ~/.clauderc",
       "echo x > ~/.claude-/settings.json",
       "echo x > ~/.claude-/hooks/h.sh",
-      "echo x > ~/.claude-x/plugins/p/index.js",
+      "echo x > ~/.claude-x/pluginsx/a",
+      "echo x > ~/.claude-x/projects/plugins/a",
       "echo x > ~/.claude.json.bak",
     ]) {
       const seen = see(command);
@@ -1198,13 +1202,14 @@ test("S2.1 Bash: the folder CLAUDE_CONFIG_DIR names is guarded only when the var
     `echo x > ${dir}/.claude.json`,
     `echo x > ${dir}/hooks/h.sh`,
     `echo x > ${dir}/plugins/p/hooks/h.sh`,
+    `echo x > ${dir}/plugins/p/x.js`,
   ];
-  const controls = (dir: string): string[] => [`echo x > ${dir}/notes.md`, `echo x > ${dir}/projects/p/memory/m.md`, `echo x > ${dir}x/settings.json`, `echo x > ${dir}/plugins/p/x.js`];
+  const controls = (dir: string): string[] => [`echo x > ${dir}/notes.md`, `echo x > ${dir}/projects/p/memory/m.md`, `echo x > ${dir}x/settings.json`, `echo x > ${dir}/pluginsx/a`, `echo x > ${dir}/projects/plugins/a`];
   withConfigDir(ccReal, () => {
     for (const command of lines(ccReal)) {
       const seen = see(command);
       assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
-      assert.match(seen.notes, /a Claude Code (config|hooks) folder/u, command);
+      assert.match(seen.notes, /a Claude Code (config|hooks|plugins) folder/u, command);
     }
     // Not policy.core: the pure classifier cannot see the variable; guarded is the answer.
     assert.ok(!see(`echo x > ${ccReal}/settings.json`).classes.includes("policy.core"));
@@ -1215,8 +1220,8 @@ test("S2.1 Bash: the folder CLAUDE_CONFIG_DIR names is guarded only when the var
     for (const command of [...lines(ccLink), ...lines(ccReal)]) assert.ok(see(command).classes.includes(GUARDED), command);
     for (const command of controls(ccReal)) assert.ok(!see(command).classes.includes(GUARDED), command);
   });
-  // Unset, empty or relative: no folder.
-  for (const value of [undefined, "", "cc-real", "./cc-real"]) {
+  // Unset or empty: no folder.
+  for (const value of [undefined, ""]) {
     withConfigDir(value, () => {
       for (const command of lines(ccReal)) {
         if (command.includes("/hooks/") || command.includes("/plugins/")) continue;
@@ -1224,6 +1229,45 @@ test("S2.1 Bash: the folder CLAUDE_CONFIG_DIR names is guarded only when the var
       }
     });
   }
+});
+
+/** Run `body` with this process's cwd at `dir`, then put it back. */
+function withCwd<T>(dir: string, body: () => T): T {
+  const before = process.cwd();
+  process.chdir(dir);
+  try {
+    return body();
+  } finally {
+    process.chdir(before);
+  }
+}
+
+test("S2.1 Bash: a relative CLAUDE_CONFIG_DIR is the hook's cwd joined to it, .. collapsed, as given and through realpath; ~ is not expanded", () => {
+  mkdirSync(join(base, "rel-sub"), { recursive: true });
+  mkdirSync(join(base, "~", "x"), { recursive: true });
+  withCwd(base, () => {
+    for (const [value, folders] of [
+      ["cc-real", [ccReal]],
+      ["./cc-real", [ccReal]],
+      ["rel-sub/../cc-real", [ccReal]],
+      ["cc-link", [ccLink, ccReal]],
+      ["~/x", [join(base, "~", "x")]],
+      [`${base}/rel-sub/../cc-real`, [ccReal]],
+    ] as const) {
+      withConfigDir(value, () => {
+        for (const folder of folders) {
+          for (const command of [`echo '{}' > ${folder}/settings.json`, `echo x > ${folder}/hooks/h.sh`]) {
+            assert.ok(see(command, WRITE_SCOPE_OFF, base).classes.includes(GUARDED), `${value}: ${command}`);
+          }
+          assert.ok(!see(`echo x > ${folder}/notes.md`, WRITE_SCOPE_OFF, base).classes.includes(GUARDED), `${value}: notes`);
+        }
+      });
+    }
+    // `~/x` is never the home's x.
+    withConfigDir("~/x", () => {
+      assert.ok(!see(`echo '{}' > ${home}/x/settings.json`, WRITE_SCOPE_OFF, base).classes.includes(GUARDED));
+    });
+  });
 });
 
 test("S2.1 through the real hook: Bash and the file tools onto a config folder are denied; a note beside them is allowed", () => {
@@ -1246,6 +1290,10 @@ test("S2.1 through the real hook: Bash and the file tools onto a config folder a
       assert.equal(seen.permission, "allow", `${tool} ${path}: ${seen.reason}`);
     }
   }
+  // A relative value, read from the hook's own cwd (the gate here).
+  mkdirSync(join(dir, "rel-cc"), { recursive: true });
+  deny(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Write", { file_path: join(dir, "rel-cc", "settings.json"), content: "x" }), { CLAUDE_CONFIG_DIR: "rel-cc" }), "relative Write");
+  deny(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Bash", { command: "echo x > rel-cc/hooks/h.sh" }), { CLAUDE_CONFIG_DIR: "./sub/../rel-cc" }), "relative Bash");
   // The variable unset in the hook: the folder it named is an ordinary place.
   const unset = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Write", { file_path: join(ccReal, "settings.json"), content: "x" }), { CLAUDE_CONFIG_DIR: undefined }));
   assert.equal(unset.permission, "allow", unset.reason);
