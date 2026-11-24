@@ -61,6 +61,8 @@ test("the ruling's lines ask: the guarded path's class, main's class beside", ()
     ["echo x > .approval$E/log/y", "log.mutate"],
     ["echo x > \"APPROVAL$E.md\"", "policy.core"],
     ["echo x > $D/settings.json", "policy.core"],
+    // A part may hold a `/`: `notes-$F.md` is `notes-/../APPROVAL.md` with F=`/../APPROVAL`.
+    ["echo x > notes-$F.md", "policy.core"],
   ];
   for (const [command, cls] of rows) {
     const head = classesOf(command);
