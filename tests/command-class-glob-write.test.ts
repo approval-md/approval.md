@@ -1536,3 +1536,16 @@ test("review-b A686-FOLD7 N3: two different words of the same length are each ju
   assert.deepEqual([...classesOf("tee .z*/settings.json .c*/settings.json < x")].sort(), ["files.write.workspace", "policy.core"]);
   assert.deepEqual([...classesOf("tee .c*/settings.json .z*/settings.json < x")].sort(), ["files.write.workspace", "policy.core"]);
 });
+
+test("automated security review of 79150dc4: every protected class a line writes is listed, the answer's and the ones it outranked", () => {
+  // (a) A landing that does not raise the operands' answer rides beside it:
+  // `cp` into a directory named APPROVAL.md also writes `<dir>/a.md`, under
+  // the workflows. Main 6c789753 answers policy.core alone (it has no landing).
+  assert.deepEqual([...classesOf('cp a.md ".github/workflows/sub dir/APPROVAL.md"')].sort(), ["policy.core", "policy.edit"]);
+  // (b) A pattern answer that a later, stricter pattern answer replaces rides
+  // beside it: the first target may be the policy file (or the agent
+  // instructions), the second the log. Main answers files.write.workspace alone.
+  assert.deepEqual([...classesOf("echo x > APPROVA?.md > .appro*/log/x")].sort(), ["files.write.workspace", "log.mutate", "policy.core"]);
+  assert.deepEqual([...classesOf("echo x > CLAUDE.m? > .appro*/log/x")].sort(), ["files.write.workspace", "log.mutate", "policy.edit"]);
+  assert.deepEqual([...classesOf("tee APPROVA?.md .appro*/log/x < y")].sort(), ["files.write.workspace", "log.mutate", "policy.core"]);
+});

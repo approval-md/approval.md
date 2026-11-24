@@ -9210,9 +9210,18 @@ function strictestProtectedWrite(
   if (glob.off || mainRulesOnly) return best;
   const offer = (surface: string | null, word: string): void => {
     if (surface !== null && (best === null || protectedRank(surface) < protectedRank(best.surface))) {
-      // Main's text answer and its other classes ride beside the raise (#690:
-      // every protected class the words take, as main reports them).
-      best = { surface, path: word, others: foldedOnly(() => (text === null ? [] : distinctOthers(surface, [text, ...text.others]))) };
+      // Every class the words took so far rides beside the raise (#690: every
+      // protected class a command writes is judged): main's text answer and
+      // its others, and the answer this one replaces and its others
+      // (automated security review of 79150dc4, b).
+      const before = best;
+      best = {
+        surface,
+        path: word,
+        others: foldedOnly(() =>
+          distinctOthers(surface, [...(text === null ? [] : [text, ...text.others]), ...(before === null ? [] : [before, ...before.others])]),
+        ),
+      };
     }
   };
   // The matcher steps each word already judged here took. The same word again
@@ -11879,12 +11888,10 @@ function classifySegmentWithVerb(
             });
             return plainHit === null || (patternHit !== null && protectedRank(patternHit.surface) < protectedRank(plainHit.surface)) ? patternHit : plainHit;
           })();
-    // A landing answers only where it is stricter than the operands' answer,
-    // which then rides beside it (#690, {@link strongerProtected}).
-    const named =
-      landedNamed !== null && (operandNamed === null || protectedRank(landedNamed.surface) < protectedRank(operandNamed.surface))
-        ? strongerProtected({ ...landedNamed, others: [] }, operandNamed)
-        : operandNamed;
+    // The operands' answer and the landing's, as one answer: the landing
+    // answers only where it is stricter, and the other always rides beside
+    // (#690; automated security review of 79150dc4, a).
+    const named = strongerProtected(operandNamed, landedNamed === null ? null : { ...landedNamed, others: [] });
     const touched = strongerProtected(named, strictestProtected(readTargets, protectedPaths));
     if (touched !== null) {
       return {
