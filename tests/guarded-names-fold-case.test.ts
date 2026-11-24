@@ -1905,7 +1905,6 @@ test("a copy that writes a credential path reports the class that write takes (t
     "rsync README.md ~/.hermes/auth.json",
     "cp README.md ~/.hermes/hermes-agent/.env",
     "cp README.md ~/.hermes/.env.local",
-    "cp --frob README.md .approval/env",
   ]) {
     assert.deepEqual(pure(line, TWO_ROUTES), ["policy.core protected-path", CRED], line);
   }
@@ -1919,9 +1918,15 @@ test("a copy that writes a credential path reports the class that write takes (t
 
 test("a copy into a credential path keeps every class main gave it, and the forms that already reached the class are unmoved", () => {
   for (const [line, want] of [
-    // The same credential word both the only source and unknowable as a
-    // source or a destination: main gave the credential and policy.core.
-    ["cp $X .approval/env", ["policy.core protected-path", CRED]],
+    // Which word is written is unknown (a word the shell may turn into an
+    // option, an option the table does not know): main's answer, the
+    // copy-unknown class beside the credential.
+    ["cp $X .approval/env", [CRED, UNKNOWN]],
+    ["cp ~/.hermes/.env $X", [CRED, UNKNOWN]],
+    ["cp ~/.hermes/.env ${X:-.github/workflows/ci.yml}", [CRED, UNKNOWN, "policy.edit.ci protected-path"]],
+    ["cp --frob README.md .approval/env", [CRED]],
+    // A `-t` destination that is the credential path: main gave the
+    // credential and policy.core; now the write first.
     ["cp -t .approval/env notes.txt", ["policy.core protected-path", CRED]],
     // Already the write's class on main: a redirect, tee, mv, a path that outranks.
     ["echo x > .approval/env", ["policy.core redirect-protected"]],

@@ -567,7 +567,9 @@ other segments, and the hook judges each.
   write: the class a write of that path takes (`policy.core`) outranks the
   credential class and answers first, with the credential touch beside it,
   as for any outranking path (`cp .approval/env APPROVAL.md`). A source
-  that lands at a credential path counts the same way. So under a policy
+  that lands at a credential path counts the same way. Where the table
+  cannot read the argv (an option it does not know, `cp $X .approval/env`)
+  the line answers as before. So under a policy
   that runs `account.credential` more lightly than `policy.core`, such a
   copy now also waits on `policy.core`. A credential source is still the
   read (`cp .approval/env notes.txt` is the credential class alone), and
