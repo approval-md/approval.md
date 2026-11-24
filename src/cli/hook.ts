@@ -6814,14 +6814,23 @@ function fileToolGate(
   // a symlink lands beside `p`'s TARGET), and an unknowable one is
   // `policy.core`.
   const landing = landingPaths(spelledAbsolute(cwd, declared));
+  // S2 (N2): a `file_path` of `~` or `~/...` is read both ways, joined to the
+  // cwd as before and with `~` expanded from this hook's HOME, and the
+  // stricter answer stands (whether a harness expands it is not known here).
+  const tildeHome = process.env["HOME"];
+  const tildeSpelled =
+    (declared === "~" || declared.startsWith("~/")) && tildeHome !== undefined && tildeHome.length > 0 && isAbsolute(tildeHome)
+      ? `${tildeHome.replace(/\/+$/u, "")}${declared.slice(1)}`
+      : null;
+  const tildeLanding = tildeSpelled === null ? null : landingPaths(tildeSpelled);
   // In both name readings (`name-fold.ts`): a fold can change which class the
   // target takes (`.approval/LOG/x` is `policy.core` as spelled, `log.mutate`
   // folded), so each reading's class is reported and the gate judges every
   // one, as it judges the classes of a shell line. Never picked by rank.
   const surfaces = eachNameReading(() => {
     const spelled = protectedPathClass(declared, protectedPaths);
-    let surface = landing.unknown ? stricterOrganSurface(spelled, "policy.core") : spelled;
-    for (const path of landing.paths) surface = stricterOrganSurface(surface, protectedPathClass(path, protectedPaths));
+    let surface = landing.unknown || tildeLanding?.unknown === true ? stricterOrganSurface(spelled, "policy.core") : spelled;
+    for (const path of [...landing.paths, ...(tildeLanding?.paths ?? [])]) surface = stricterOrganSurface(surface, protectedPathClass(path, protectedPaths));
     return surface;
   });
   const classes: string[] = [];
@@ -6834,7 +6843,10 @@ function fileToolGate(
   // spelling. Its class is carried BESIDE the ones above, never in their
   // place. It compares through `foldFileName` itself, so it answers the same
   // in both name readings and runs once.
-  const judged = judgeWriteLanding(spelledAbsolute(cwd, declared), writeScope);
+  const asJoined = judgeWriteLanding(spelledAbsolute(cwd, declared), writeScope);
+  const asExpanded = tildeSpelled === null ? null : judgeWriteLanding(tildeSpelled, writeScope);
+  const rank = (verdict: WriteLanding): number => (verdict.kind === "guarded" ? 0 : verdict.kind === "out" ? 1 : 2);
+  const judged = asExpanded !== null && rank(asExpanded) < rank(asJoined) ? asExpanded : asJoined;
   const landingNotes: string[] = [];
   if (judged.kind === "guarded") {
     const cls = judged.rule === WRITE_UNREADABLE_RULE ? DECISION_B_UNREADABLE_CLASS : WRITE_GUARDED_CLASS;

@@ -1689,3 +1689,31 @@ test("S2.4 through the real hook: echo x > =mytool is denied under a policy that
   const allowed = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Bash", { command: "echo x > '=mytool'" })));
   assert.equal(allowed.permission, "allow", allowed.reason);
 });
+
+// ---------------------------------------------------------------------------
+// S2, part 5: `~` in a file tool's path (lead, N2)
+// ---------------------------------------------------------------------------
+
+test("S2.5 through the real hook: a file tool's ~/ path is also read with HOME expanded, and the stricter answer stands", () => {
+  const dir = gate([`  ${GUARDED}: { autonomy: human-only }`, "  files.*: { autonomy: autonomous }"]);
+  mkdirSync(join(home, ".claude-x", "hooks"), { recursive: true });
+  for (const [tool, input] of FILE_TOOLS) {
+    for (const path of ["~/.zshrc", "~/.ssh/authorized_keys", "~/.claude-x/hooks/h.sh", "~/.npmrc", "~/.ZSHRC"]) {
+      const seen = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event(tool, input(path))));
+      assert.equal(seen.permission, "deny", `${tool} ${path}: ${seen.reason}`);
+      assert.match(seen.reason, /files\.write\.guarded resolves to human-only/u, `${tool} ${path}`);
+    }
+    // Controls: the home itself, a note under it, a `~` that is not the first segment, and `~user`.
+    for (const path of ["~", "~/notes.md", "sub/~/.zshrc", "~nobody/.zshrc"]) {
+      const seen = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event(tool, input(path))));
+      assert.equal(seen.permission, "allow", `${tool} ${path}: ${seen.reason}`);
+    }
+  }
+  // A landing that only the expanded reading reaches takes its organ class:
+  // ~/s2-log is a link to the gate's own log folder.
+  mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  symlinkSync(join(dir, ".approval", "log"), join(home, "s2-log"));
+  // (This gate's default resolves log.mutate autonomous: the class is what is pinned.)
+  const organ = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Write", { file_path: "~/s2-log/x.jsonl", content: "x" })));
+  assert.match(organ.reason, /log\.mutate/u, organ.reason);
+});
