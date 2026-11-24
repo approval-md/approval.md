@@ -3937,10 +3937,39 @@ export const WRITE_LANDING_RULES: readonly string[] = [
 
 /** The homes the guarded list is anchored on: `HOME` as given and resolved. */
 function currentHomes(env: NodeJS.ProcessEnv = process.env): string[] {
-  const home = env["HOME"];
-  if (home === undefined || home.length === 0 || !isAbsolute(home)) return [];
-  const resolved = resolvedPath(home);
-  return resolved === null || resolved === home ? [home] : [home, resolved];
+  return givenAndResolved(env["HOME"]);
+}
+
+/**
+ * The Claude Code config folder `CLAUDE_CONFIG_DIR` names in this hook's own
+ * environment, as given and resolved (lead, CLAIMS L62289, S2). Read where
+ * `HOME` is read: the operator sets it, and nothing the agent writes reaches
+ * this process's environment. Absent, empty or relative: none.
+ */
+function currentConfigDirs(env: NodeJS.ProcessEnv = process.env): string[] {
+  return givenAndResolved(env["CLAUDE_CONFIG_DIR"]);
+}
+
+/** An absolute path as given and, when it differs, as `realpath` resolves it; `[]` for anything else. */
+function givenAndResolved(path: string | undefined): string[] {
+  if (path === undefined || path.length === 0 || !isAbsolute(path)) return [];
+  const resolved = resolvedPath(path);
+  return resolved === null || resolved === path ? [path] : [path, resolved];
+}
+
+/**
+ * What the guarded list is anchored on, for one judgement: the homes, the
+ * config folders the hook knows, and (S2) the files a settings file names as
+ * hook commands, read lazily.
+ */
+export interface LandingGuard {
+  homes: readonly string[];
+  configDirs: readonly string[];
+}
+
+/** The guard this hook's own environment gives. */
+function currentGuard(env: NodeJS.ProcessEnv = process.env): LandingGuard {
+  return { homes: currentHomes(env), configDirs: currentConfigDirs(env) };
 }
 
 /** Where one write lands, as {@link judgeWriteLanding} reads it. */
@@ -3962,9 +3991,10 @@ export type WriteLanding =
 export function judgeWriteLanding(
   spelled: string,
   scope: WriteScopeContext,
-  homes: readonly string[] = currentHomes(),
+  guard: LandingGuard = currentGuard(),
   tree: boolean | "listed" = false,
 ): WriteLanding {
+  const { homes, configDirs } = guard;
   // Longer than any path the kernel opens (PATH_MAX is 1024 on macOS and 4096
   // on Linux): it cannot land anywhere this hook can name, and walking it one
   // component at a time is the cost a 1 MiB word must not buy. Guarded.
@@ -3982,7 +4012,7 @@ export function judgeWriteLanding(
     if (parent !== null) forms.push(join(parent, tail));
   }
   for (const form of forms) {
-    const entry = guardedEntryOf(form, homes);
+    const entry = guardedEntryOf(form, homes, configDirs);
     if (entry !== null) {
       return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `${form} is on the guarded list (${entry})` };
     }
@@ -3992,7 +4022,7 @@ export function judgeWriteLanding(
   // within reach.
   if (tree !== false) {
     for (const form of forms) {
-      const entry = guardedEntryBelow(form, homes);
+      const entry = guardedEntryBelow(form, homes, configDirs);
       if (entry !== null) {
         return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can hold ${entry}, which is on the guarded list` };
       }
@@ -4514,7 +4544,7 @@ export function refineWriteLandings(
   });
   const units: Unit[] = primary.flatMap(({ shape, unreadable }, hostIndex) => withSubstitutions(shape, shape, hostIndex, 0, unreadable));
   const shapes = units.map((unit) => unit.shape);
-  const homes = currentHomes(env);
+  const guard = currentGuard(env);
   // One disk reading per spelling per line (a cost bound: the disk does not
   // change within the pass, and a line names the same target many times).
   const landingMemo = new Map<string, { paths: string[]; unknown: boolean }>();
@@ -4933,7 +4963,7 @@ export function refineWriteLandings(
     const key = `${tree === true ? "T" : tree === false ? "F" : "L"}${spelled}`;
     const known = landed.get(key);
     if (known !== undefined) return known;
-    const judged = judgeWriteLanding(spelled, scope, homes, tree);
+    const judged = judgeWriteLanding(spelled, scope, guard, tree);
     landed.set(key, judged);
     return judged;
   };
@@ -4950,7 +4980,7 @@ export function refineWriteLandings(
     }
     let verdict: WriteLanding = { kind: "in" };
     for (const each of spelled) {
-      if (each.length > MAX_LANDING_BYTES) return judgeWriteLanding(each, scope, homes, tree);
+      if (each.length > MAX_LANDING_BYTES) return judgeWriteLanding(each, scope, guard, tree);
       const moved = volatileOf(each) ?? (tree === true ? treeTouched(staticPrefix(each)) : null);
       if (moved !== null) return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: moved };
       if (/[*?[]/u.test(each)) {
@@ -4964,7 +4994,7 @@ export function refineWriteLandings(
           return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: `${each} could not be read from the disk: ${expanded.giveUp}` };
         }
         for (const placed of expanded.paths) {
-          verdict = stricter(verdict, judgeWriteLanding(placed.path, scope, homes, tree));
+          verdict = stricter(verdict, judgeWriteLanding(placed.path, scope, guard, tree));
           if (verdict.kind === "guarded") return verdict;
         }
         continue;

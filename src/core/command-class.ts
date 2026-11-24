@@ -931,7 +931,10 @@ function protectedClassOfWord(candidate: string, extra: readonly ProtectedPathEn
     // map, queue. The bare `.approval` directory itself lands here too.
     if (segment === ".approval") return "policy.core";
     // The harness's own settings, which is where a hook is installed or removed.
-    if (segment === ".claude") {
+    // A `.claude-<suffix>` folder (one or more characters after the dash) is a
+    // config folder too: every account run with `CLAUDE_CONFIG_DIR=~/.claude-<name>`
+    // reads its settings there (lead, CLAIMS L62289, S2).
+    if (segment === ".claude" || (segment !== undefined && segment.startsWith(".claude-") && segment.length > ".claude-".length)) {
       const next = segments[index + 1];
       if (next !== undefined && next.startsWith("settings")) return "policy.core";
     }

@@ -56,6 +56,10 @@ after(() => {
 // HOME is a fixture folder: nothing here reads or writes the real one.
 const home = join(base, "home");
 process.env["HOME"] = home;
+// The seats that run this suite set CLAUDE_CONFIG_DIR to a real config folder:
+// a test that inherited it would judge (and read) the real one. Each case
+// below that needs it sets it, and puts it back (S2).
+delete process.env["CLAUDE_CONFIG_DIR"];
 mkdirSync(join(home, ".ssh", "sub"), { recursive: true });
 writeFileSync(join(home, ".zshrc"), "# rc\n", "utf8");
 const ws = join(base, "ws");
@@ -1016,9 +1020,15 @@ interface Run {
   stderr: string;
 }
 
-function runCli(args: string[], cwd: string, input = ""): Run {
+function runCli(args: string[], cwd: string, input = "", env: Record<string, string | undefined> = {}): Run {
   const childEnv = { ...process.env };
   delete childEnv["APPROVAL_HUMAN"];
+  // Set or deleted explicitly in every spawned hook's environment (S2).
+  delete childEnv["CLAUDE_CONFIG_DIR"];
+  for (const [name, value] of Object.entries(env)) {
+    if (value === undefined) delete childEnv[name];
+    else childEnv[name] = value;
+  }
   const result = spawnSync(process.execPath, [CLI_ENTRY, ...args], { cwd, encoding: "utf8", env: childEnv, input });
   assert.equal(result.error, undefined, `spawn failed: ${String(result.error)}`);
   return { code: result.status ?? -1, stdout: result.stdout, stderr: result.stderr };
@@ -1112,4 +1122,131 @@ test("the open window treats files.write.guarded as a manual class: decision E",
   const log = readFileSync(join(dir, ".approval", "log", "events.jsonl"), "utf8");
   assert.match(log, /gate\.bypassed/u);
   assert.ok(existsSync(join(dir, ".approval")));
+});
+
+// ---------------------------------------------------------------------------
+// S2, part 1: Claude Code's config folders (lead, CLAIMS L62289)
+// ---------------------------------------------------------------------------
+
+/** Run `body` with CLAUDE_CONFIG_DIR set (or deleted, for `undefined`) in this process, then put it back. */
+function withConfigDir<T>(value: string | undefined, body: () => T): T {
+  const before = process.env["CLAUDE_CONFIG_DIR"];
+  if (value === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+  else process.env["CLAUDE_CONFIG_DIR"] = value;
+  try {
+    return body();
+  } finally {
+    if (before === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+    else process.env["CLAUDE_CONFIG_DIR"] = before;
+  }
+}
+
+const ccReal = join(base, "cc-real");
+const ccLink = join(base, "cc-link");
+mkdirSync(join(ccReal, "hooks"), { recursive: true });
+mkdirSync(join(home, ".claude-x", "hooks"), { recursive: true });
+mkdirSync(join(home, ".claude", "plugins", "cache", "p", "hooks"), { recursive: true });
+symlinkSync(ccReal, ccLink);
+
+test("S2.1 Bash: a config folder's settings, hooks, plugin hooks and .claude.json are guarded; its memory, plans and notes are not", () => {
+  withConfigDir(undefined, () => {
+    for (const command of [
+      "echo x > ~/.claude-x/hooks/h.sh",
+      "echo x > ~/.Claude-X/Hooks/h.sh",
+      "tee ~/.claude/plugins/cache/p/hooks/hooks.json < a",
+      "echo x > ~/.claude-x/plugins/p/1.0/hooks/run.sh",
+      "echo x > ~/.claude.json",
+      "echo x > ~/.CLAUDE.json",
+      "cp a ~/.claude-x/.claude.json",
+      "echo x > ~/.claude/.claude.json",
+      "echo x > ~/.claude-x/remote-settings.json",
+      "cp -r a ~/.claude-x/plugins/new",
+    ]) {
+      const seen = see(command);
+      assert.equal(seen.ok, true, command);
+      assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+    }
+    // Settings are policy.core already (the pure classifier), and guarded beside it.
+    const settings = see("echo '{}' > ~/.claude-x/settings.json");
+    assert.ok(settings.classes.includes("policy.core"), JSON.stringify(settings.segments));
+    assert.ok(settings.classes.includes(GUARDED), JSON.stringify(settings.segments));
+    for (const command of [
+      "echo x > ~/.claude-x/notes.md",
+      "echo x > ~/.clauderc",
+      "echo x > ~/.claude-/settings.json",
+      "echo x > ~/.claude-/hooks/h.sh",
+      "echo x > ~/.claude-x/plugins/p/index.js",
+      "echo x > ~/.claude.json.bak",
+    ]) {
+      const seen = see(command);
+      assert.equal(seen.ok, true, command);
+      assert.ok(!seen.classes.includes(GUARDED), `${command}: ${seen.notes}`);
+      assert.ok(!seen.classes.includes("policy.core"), `${command}: ${JSON.stringify(seen.segments)}`);
+    }
+    // Claude Code's own memory, plan and transcript files keep the class they had.
+    for (const command of ["echo x > ~/.claude-x/projects/p/memory/m.md", "echo x > ~/.claude/plans/a.md", "echo x >> ~/.claude-x/projects/p/s.jsonl"]) {
+      assert.deepEqual(see(command).segments, [[WORKSPACE, "redirect-write"]], command);
+    }
+  });
+});
+
+test("S2.1 Bash: the folder CLAUDE_CONFIG_DIR names is guarded only when the variable is set, absolute, and as given and resolved", () => {
+  const lines = (dir: string): string[] => [
+    `echo '{}' > ${dir}/settings.json`,
+    `echo x > ${dir}/Settings.local.json`,
+    `echo x > ${dir}/remote-settings.json`,
+    `echo x > ${dir}/.claude.json`,
+    `echo x > ${dir}/hooks/h.sh`,
+    `echo x > ${dir}/plugins/p/hooks/h.sh`,
+  ];
+  const controls = (dir: string): string[] => [`echo x > ${dir}/notes.md`, `echo x > ${dir}/projects/p/memory/m.md`, `echo x > ${dir}x/settings.json`, `echo x > ${dir}/plugins/p/x.js`];
+  withConfigDir(ccReal, () => {
+    for (const command of lines(ccReal)) {
+      const seen = see(command);
+      assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+      assert.match(seen.notes, /a Claude Code (config|hooks) folder/u, command);
+    }
+    // Not policy.core: the pure classifier cannot see the variable; guarded is the answer.
+    assert.ok(!see(`echo x > ${ccReal}/settings.json`).classes.includes("policy.core"));
+    for (const command of controls(ccReal)) assert.ok(!see(command).classes.includes(GUARDED), command);
+  });
+  // Pointing at a symlink: the folder as given and as resolved.
+  withConfigDir(ccLink, () => {
+    for (const command of [...lines(ccLink), ...lines(ccReal)]) assert.ok(see(command).classes.includes(GUARDED), command);
+    for (const command of controls(ccReal)) assert.ok(!see(command).classes.includes(GUARDED), command);
+  });
+  // Unset, empty or relative: no folder.
+  for (const value of [undefined, "", "cc-real", "./cc-real"]) {
+    withConfigDir(value, () => {
+      for (const command of lines(ccReal)) {
+        if (command.includes("/hooks/") || command.includes("/plugins/")) continue;
+        assert.ok(!see(command, WRITE_SCOPE_OFF, base).classes.includes(GUARDED), `${String(value)}: ${command}`);
+      }
+    });
+  }
+});
+
+test("S2.1 through the real hook: Bash and the file tools onto a config folder are denied; a note beside them is allowed", () => {
+  const dir = gate([`  ${GUARDED}: { autonomy: human-only }`, "  files.*: { autonomy: autonomous }"]);
+  const env = { CLAUDE_CONFIG_DIR: ccLink };
+  const deny = (run: Run, label: string): void => {
+    const seen = verdict(run);
+    assert.equal(seen.permission, "deny", `${label}: ${seen.reason}`);
+    assert.match(seen.reason, /files\.write\.guarded resolves to human-only/u, label);
+  };
+  for (const command of ["echo x > ~/.claude-x/hooks/h.sh", "echo x > ~/.claude.json", `echo x > ${ccReal}/settings.json`, `echo x > ${ccLink}/hooks/h.sh`]) {
+    deny(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Bash", { command }), env), command);
+  }
+  for (const [tool, input] of FILE_TOOLS) {
+    for (const path of [join(home, ".claude-x", "settings.json"), join(home, ".claude-x", "hooks", "h.sh"), join(home, ".claude.json"), join(ccReal, "settings.json"), join(ccLink, ".claude.json")]) {
+      deny(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event(tool, input(path)), env), `${tool} ${path}`);
+    }
+    for (const path of [join(home, ".claude-x", "notes.md"), join(home, ".claude-x", "projects", "p", "memory", "m.md"), join(ccReal, "notes.md")]) {
+      const seen = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event(tool, input(path)), env));
+      assert.equal(seen.permission, "allow", `${tool} ${path}: ${seen.reason}`);
+    }
+  }
+  // The variable unset in the hook: the folder it named is an ordinary place.
+  const unset = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Write", { file_path: join(ccReal, "settings.json"), content: "x" }), { CLAUDE_CONFIG_DIR: undefined }));
+  assert.equal(unset.permission, "allow", unset.reason);
 });

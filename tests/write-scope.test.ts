@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
+import { classifyCommand } from "../src/core/command-class.js";
 import { explain } from "../src/core/policy-explain.js";
 import { loadPolicy, type PolicyLoadResult } from "../src/core/policy-load.js";
 import { CLASS_MINIMUMS, resolve } from "../src/core/policy-match.js";
@@ -25,6 +26,7 @@ import {
   DECISION_E_WINDOW,
   guardedEntryBelow,
   guardedEntryOf,
+  isClaudeConfigFolderName,
   WRITE_GUARDED_CLASS,
   WRITE_GUARDED_MINIMUM,
   WRITE_OUT_OF_SCOPE_CLASS,
@@ -272,10 +274,120 @@ test("a write_scope block loads, and an unexpandable root is refused by the sche
 });
 
 test("a Claude Code hooks folder is the pair of segments, nothing beside it; a tree written at .claude can hold it", () => {
-  for (const path of ["/work/repo/.claude/notes.md", "/work/repo/.claude/hooks-notes/x", "/work/repo/claude/hooks/x", "/work/repo/.claude-old/hooks/x", "/work/repo/hooks/.claude/x"]) {
+  for (const path of ["/work/repo/.claude/notes.md", "/work/repo/.claude/hooks-notes/x", "/work/repo/claude/hooks/x", "/work/repo/.claude-/hooks/x", "/work/repo/hooks/.claude/x"]) {
     assert.equal(guardedEntryOf(path, HOMES), null, path);
   }
   assert.equal(guardedEntryBelow("/work/repo/.claude", HOMES), "a Claude Code hooks folder");
   assert.equal(guardedEntryBelow("/work/repo/.CLAUDE", HOMES), "a Claude Code hooks folder");
   assert.equal(guardedEntryBelow("/work/repo/.claude/notes", HOMES), null);
+});
+
+// ---------------------------------------------------------------------------
+// S2, part 1: Claude Code's config folders (lead, CLAIMS L62289)
+// ---------------------------------------------------------------------------
+
+/** A folder `CLAUDE_CONFIG_DIR` names, as given and resolved. */
+const CONFIG_DIRS = ["/opt/cc", "/private/opt/cc-real"];
+
+test("S2.1: a config folder is .claude or .claude-<suffix>, one or more characters after the dash, through the fold", () => {
+  for (const name of [".claude", ".claude-x", ".claude-b1", ".claude-edge2", ".claude--"]) assert.equal(isClaudeConfigFolderName(name), true, name);
+  for (const name of [".claude-", ".claudex", "claude-x", ".clauderc", ".claude.json", "x.claude-x", ""]) assert.equal(isClaudeConfigFolderName(name), false, name);
+});
+
+test("S2.1: settings under .claude-<suffix> are policy.core in the pure classifier, as .claude's are; near misses keep their class", () => {
+  for (const command of [
+    "echo x > ~/.claude-work/settings.json",
+    "echo x > ~/.claude-b1/settings.local.json",
+    "cp a .claude-2/settings.json",
+    "echo x > ~/.Claude-Work/Settings.json",
+    "echo x > /Users/tester/.claude-x/settings.json.tmp",
+  ]) {
+    const result = classifyCommand(command, []);
+    assert.equal(result.ok, true, command);
+    if (result.ok) assert.ok(result.classes.includes("policy.core"), `${command}: ${JSON.stringify(result.classes)}`);
+  }
+  for (const command of [
+    "echo x > ~/.claude-/settings.json",
+    "echo x > ~/.claudex/settings.json",
+    "echo x > ~/.claude-x/notes.md",
+    "echo x > ~/.claude-x/projects/p/memory/settings-notes.md",
+    "echo x > ~/.clauderc",
+  ]) {
+    const result = classifyCommand(command, []);
+    assert.equal(result.ok, true, command);
+    if (result.ok) assert.ok(!result.classes.includes("policy.core"), `${command}: ${JSON.stringify(result.classes)}`);
+  }
+});
+
+test("S2.1: the hooks pair and a plugin's hooks count under .claude-<suffix>; the folder itself is not guarded whole", () => {
+  const cases: Array<[path: string, entry: string]> = [
+    [`${HOME}/.claude-x/hooks/h.sh`, "a Claude Code hooks folder"],
+    [`${HOME}/.claude-x/hooks`, "a Claude Code hooks folder"],
+    ["/work/repo/.claude-old/hooks/x", "a Claude Code hooks folder"],
+    [`${HOME}/.Claude-X/HOOKS/h.sh`, "a Claude Code hooks folder"],
+    [`${HOME}/.claude/plugins/cache/p/1.0/hooks/hooks.json`, "a Claude Code hooks folder"],
+    [`${HOME}/.claude-x/plugins/p/hooks`, "a Claude Code hooks folder"],
+    [`${HOME}/.claude-x/plugins/marketplaces/m/plugins/p/hooks/run.sh`, "a Claude Code hooks folder"],
+    [`${HOME}/.claude.json`, "~/.claude.json"],
+    [`${HOME}/.CLAUDE.JSON`, "~/.claude.json"],
+    [`${HOME}/.claude/.claude.json`, "a Claude Code config folder"],
+    [`${HOME}/.claude-x/.claude.json`, "a Claude Code config folder"],
+    [`${HOME}/.claude-x/settings.json`, "a Claude Code config folder"],
+    [`${HOME}/.claude-x/remote-settings.json`, "a Claude Code config folder"],
+    [`${HOME}/.claude/remote-settings.json`, "a Claude Code config folder"],
+    ["/private/var/tester-real/.claude-x/.claude.json", "a Claude Code config folder"],
+  ];
+  for (const [path, entry] of cases) assert.equal(guardedEntryOf(path, HOMES), entry, path);
+  for (const path of [
+    `${HOME}/.claude-x/notes.md`,
+    `${HOME}/.claude-x/projects/p/memory/m.md`,
+    `${HOME}/.claude/plans/a.md`,
+    `${HOME}/.claude-x/plugins/p/index.js`,
+    `${HOME}/.claude-x/plugins/hooks-notes/x`,
+    `${HOME}/.claude-x/statusline.sh`,
+    `${HOME}/.clauderc`,
+    `${HOME}/.claude-/hooks/h.sh`,
+    `${HOME}/.claude-/settings.json`,
+    `${HOME}/.claude.json.bak`,
+    `${HOME}/.claude.jsonx`,
+    `${HOME}/dev/.claude-x/.claude.json`,
+    `${HOME}/dev/plugins/p/hooks/x`,
+  ]) {
+    assert.equal(guardedEntryOf(path, HOMES), null, path);
+  }
+});
+
+test("S2.1: the folder CLAUDE_CONFIG_DIR names is a config folder whatever it is called, as given and resolved", () => {
+  const cases: Array<[path: string, entry: string]> = [
+    ["/opt/cc/settings.json", "a Claude Code config folder"],
+    ["/opt/cc/settings.local.json", "a Claude Code config folder"],
+    ["/opt/cc/Settings.JSON", "a Claude Code config folder"],
+    ["/opt/cc/remote-settings.json", "a Claude Code config folder"],
+    ["/opt/cc/.claude.json", "a Claude Code config folder"],
+    ["/opt/cc/hooks/h.sh", "a Claude Code hooks folder"],
+    ["/opt/cc/hooks", "a Claude Code hooks folder"],
+    ["/opt/cc/plugins/p/hooks/h.sh", "a Claude Code hooks folder"],
+    ["/private/opt/cc-real/settings.json", "a Claude Code config folder"],
+    ["/OPT/CC/HOOKS/x", "a Claude Code hooks folder"],
+  ];
+  for (const [path, entry] of cases) assert.equal(guardedEntryOf(path, HOMES, CONFIG_DIRS), entry, path);
+  for (const path of ["/opt/cc/notes.md", "/opt/cc/projects/p/memory/m.md", "/opt/cc/plans/a.md", "/opt/cc/plugins/p/x.js", "/opt/ccx/settings.json", "/opt/settings.json", "/opt/cc/sub/settings.json"]) {
+    assert.equal(guardedEntryOf(path, HOMES, CONFIG_DIRS), null, path);
+  }
+  // With no folder named, the same paths are what they were.
+  assert.equal(guardedEntryOf("/opt/cc/settings.json", HOMES), null);
+  assert.equal(guardedEntryOf("/opt/cc/settings.json", HOMES, []), null);
+});
+
+test("S2.1: a tree written at a config folder, at its plugins, or above the variable's folder can hold its hooks", () => {
+  assert.equal(guardedEntryBelow(`${HOME}/.claude-x`, HOMES), "a Claude Code hooks folder");
+  assert.equal(guardedEntryBelow("/work/repo/.Claude-Old", HOMES), "a Claude Code hooks folder");
+  assert.equal(guardedEntryBelow(`${HOME}/.claude/plugins`, HOMES), "a Claude Code hooks folder");
+  assert.equal(guardedEntryBelow(`${HOME}/.claude-x/plugins/cache/p`, HOMES), "a Claude Code hooks folder");
+  assert.equal(guardedEntryBelow("/opt/cc", HOMES, CONFIG_DIRS), "a Claude Code config folder");
+  assert.equal(guardedEntryBelow("/opt", HOMES, CONFIG_DIRS), "a Claude Code config folder");
+  assert.equal(guardedEntryBelow("/opt/cc/plugins/p", HOMES, CONFIG_DIRS), "a Claude Code hooks folder");
+  for (const path of [`${HOME}/.claude-x/projects`, `${HOME}/.claude-`, "/opt/cc/projects/p", "/opt/ccx", "/work/repo/plugins/p"]) {
+    assert.equal(guardedEntryBelow(path, HOMES, CONFIG_DIRS), null, path);
+  }
 });

@@ -2360,6 +2360,42 @@ const commandClassVectors = [
       "a file whose name only contains a guarded name stays a workspace write (guarded names fold case control)",
     input: { command: "echo x > approval-notes.md" },
   },
+  // --- Claude Code config folders (S2, lead CLAIMS L62289) --------------------
+  // Every account run with `CLAUDE_CONFIG_DIR=~/.claude-<name>` reads its
+  // settings from that folder, so a `.claude-<suffix>` segment (one or more
+  // characters after the dash, through the fold) followed by `settings*` is
+  // the harness settings `.claude/settings*` is. A bare `.claude-` is not a
+  // config folder, and a file beside the settings keeps its class.
+  {
+    id: "claude-config-folder-settings",
+    description:
+      "a write to the settings of a .claude-<suffix> config folder is policy.core, as .claude/settings.json is",
+    input: { command: "echo x > ~/.claude-work/settings.json" },
+  },
+  {
+    id: "claude-config-folder-settings-local-copy",
+    description:
+      "a copy onto settings.local.json in a .claude-<suffix> config folder is policy.core",
+    input: { command: "cp a .claude-2/settings.local.json" },
+  },
+  {
+    id: "claude-config-folder-settings-case",
+    description:
+      "a write to a .claude-<suffix> config folder's settings spelled in another case is policy.core: guarded names fold case on every platform",
+    input: { command: "echo x > ~/.Claude-Work/Settings.json" },
+  },
+  {
+    id: "claude-config-folder-empty-suffix-unmoved",
+    description:
+      "a folder named .claude- with nothing after the dash is not a config folder: its settings.json stays a workspace write",
+    input: { command: "echo x > ~/.claude-/settings.json" },
+  },
+  {
+    id: "claude-config-folder-other-file-unmoved",
+    description:
+      "a file beside the settings in a .claude-<suffix> config folder stays a workspace write",
+    input: { command: "echo x > ~/.claude-work/notes.md" },
+  },
   // --- every protected target of a segment is judged -------------------------
   // One class named the segment, and the other protected paths it writes were
   // judged on that class's terms. Each other class is its own entry over the
@@ -5751,6 +5787,11 @@ const SUITES = [
     // long-s home, and a control, `approval-notes.md`, which stays a workspace
     // write. Regenerating over main's 382 leaves them byte-identical. The
     // number is bumped once, at the release cut, for every change it carries.
+    // Claude Code config folders (S2): five more vectors in the same
+    // unreleased 1.12.0, and no expectation moved: a `.claude-<suffix>`
+    // folder's settings, settings.local.json and a case spelling are
+    // policy.core; a bare `.claude-` folder and a file beside the settings
+    // stay workspace writes.
     vectors_version: "1.12.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
