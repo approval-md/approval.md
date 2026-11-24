@@ -258,7 +258,8 @@ target below the parent is counted, never only the first or the strictest:
 cannot be placed (`cd .. && rm -rf proj`, `"$PWD"` on a line that moves a
 directory) carries what the working directory, the session's directory and
 the home hold beside `policy.core`, and `mv "$PWD" /tmp/x` carries them
-beside its own `policy.core`. Besides `rm -r`, `mv` and `chmod`, the
+(and `vcs.history.rewrite` where `.git` is all there is) beside its own
+`policy.core`. Besides `rm -r`, `mv` and `chmod`, the
 tools that delete what they read or find count, fail closed: `find P` with
 `-exec` or `-delete` (`find . -delete`, `find . -type f -delete`), `git rm -r`
 (not `--cached`), `tar` with `--remove-files` (any unique prefix) or
@@ -278,8 +279,18 @@ written (quoted, no backslash or bracket), and the classifier's own matcher
 shows it can match no organ directory, no guarded name (`APPROVAL.md`,
 `CLAUDE.md`, `auth.json`, `.env`, ...), no `.git`, no part of a protected
 path and (unless it is exactly `*.<letters or digits>`, by the ruling) no
-guarded prefix (`settings*`, `.env.*`, `vault*`, `hooks*`); `-path`,
-`-regex`, `-type` or `-empty` alone narrow nothing. Nothing is released:
+guarded prefix (`settings*`, `.env.*`, `vault*`, `hooks*`), and (lead ruling
+L62511) when nothing inside a guarded folder below the start path matches
+it: the hook walks each organ directory, guarded name and `.git` it lists
+there (64 directories, 4,000 names, its deadline), and a folder a match may
+reach (`find . -name x.js -delete` and `.cursor/hooks/x.js`, `-name ci.yml`
+and `.github/workflows/ci.yml`, `-name HEAD` and `.git/HEAD`), one past the
+walk's limits, or a routed folder it does not walk gives its class. With no
+listing (every caller but the hook) only `*.<ext>` with an extension guarded
+folders do not ordinarily hold stays narrowed (`*.tmp`, `*.pyc`, `*.log`;
+not `*.js`, `*.py`, `*.json`, `*.md`, `*.yml`, `*.txt`, ..., and no plain
+name). `-path`, `-regex`, `-type` or `-empty` alone narrow nothing.
+Nothing is released:
 `mkdir .` and `touch .` never reach the folders below. Names compare through
 #688's fold in the folded reading and exactly as spelled in the other, so a
 listed `.Claude` is `policy.core` with the segment's own class beside. A
@@ -302,11 +313,17 @@ working directory or the home (`rm -rf ../$X`, `~/$X`, `/$X` are
 `policy.core`); alone, below the working directory (`./$X`,
 `scripts/$NAME`) or below a directory that holds neither (`/tmp/$name`,
 `/private/tmp/$SESSION`) it keeps main's class, so `chmod +x "$f"` and `rm
--rf $BUILD_DIR` answer as on main. A variable the line itself sets is read
+-rf $BUILD_DIR` answer as on main; a recursive `chmod` (`-R`,
+`--recursive`, `-Rv`) of one is `policy.core` (lead ruling L62511: `chmod
+-R 755 "$OUT"`, `chmod -R 000 ./$X`). A variable the line itself sets is read
 as written and as each value it is given, through chains to a fixpoint, the
 strictest answering (`X=. ; rm -rf $X`
 and `A=..; B=$A; rm -rf $B` are `policy.core`; `printf -v` with a plain
-format too; partial readings are judged as well; one `read` or `mapfile`
+format too, and `${X:=word}` or `${X=word}` in any word of the line (lead
+ruling L62511: `echo ${X:=..}; rm -rf $X`); a reading that names a guarded
+target takes that target's classes, as the word spelled so does (`D=.claude;
+rm -rf $D` is `rm -rf .claude`); partial readings are judged as well;
+one `read` or `mapfile`
 binds, a self-reference, a cycle, a nameref (`declare -n`), an indirect
 expansion (`${!X}`), `$_`, and positionals on a line that runs `set`, `shift`,
 `eval` or `source` with arguments, defines a function, or assigns `argv` or a
@@ -340,7 +357,10 @@ in an earlier call) is a parent, organ directories nested below a subdirectory
 organ folder a narrowed `find` reaches (`find . -name '*.tmp' -delete` and
 `.claude/x.tmp`), `rsync`'s `-e`/`--rsync-path` value (a command on the
 receiving side), an absolute path for a caller with no listing, `rmdir .`,
-`chown`/`chgrp` (refused), and organ directories in a sibling tree under an
+`chown`/`chgrp` (refused), a brace past its cap or an assigned reading past
+its cap carrying `policy.core` without the classes the working directory and
+the home hold (with #682's fix), and organ directories in a sibling tree
+under an
 ancestor (`rm -rf ..` lists only the chain to the working directory and the
 home). On macOS (and GNU) `rm -rf .`, `./`, `..` and `sub/..` refuse to run;
 they are judged by the rule anyway, as the ruling says.

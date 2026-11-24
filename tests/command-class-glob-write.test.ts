@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyCommand, classifyCommandWithMainRules, containedInAny, gitRemovedPaths, globWriteListingDirs, realpathKey } from "../src/core/command-class.js";
+import { classifyCommand, classifyCommandWithMainRules, containedInAny, gitRemovedPaths, globWriteListingDirs, guardedContentsKey, realpathKey } from "../src/core/command-class.js";
 
 const HUMAN_ONLY = new Set(["policy.core", "log.mutate", "account.credential"]);
 
@@ -1449,7 +1449,9 @@ test("security review of the parents rule (L61587), 4: an operand the text canno
   }
   // Lead ruling L62435 (S6, S7) reverses this review's first answer for an
   // ordinary variable: alone it keeps main's class (it was policy.core).
-  for (const command of ["rm -rf $X", 'rm -rf "$X"', "rm -rf ${X}/", "chmod -R 000 $X", 'mv "$X" ../y']) {
+  // Lead ruling L62511 (S-D) puts a recursive chmod of one back at policy.core.
+  assert.ok(classesOf("chmod -R 000 $X").includes("policy.core"));
+  for (const command of ["rm -rf $X", 'rm -rf "$X"', "rm -rf ${X}/", 'mv "$X" ../y']) {
     const main = classifyCommandWithMainRules(command);
     assert.ok(main.ok, command);
     assert.deepEqual(classesOf(command), main.classes, command);
@@ -1492,7 +1494,9 @@ test("security review of the parents rule (L61587), 5: a tail after an unreadabl
   // directory, or after another, keeps main's class (it was policy.core).
   // (`$X/*` keeps #686's pattern answer, main's since 9122cb3e.)
   assert.deepEqual(classesOf("rm -rf $X/*"), ["policy.core", "files.delete.out_of_scope", "log.mutate"]);
-  for (const command of ["chmod -R 000 ./$X", "chmod -R 000 sub/$X", 'rm -rf "$X/$Y"', "chmod -R 000 $X/$Y"]) {
+  // Lead ruling L62511 (S-D): a recursive chmod of one is policy.core again.
+  for (const command of ["chmod -R 000 ./$X", "chmod -R 000 sub/$X", "chmod -R 000 $X/$Y"]) assert.ok(classesOf(command).includes("policy.core"), command);
+  for (const command of ['rm -rf "$X/$Y"']) {
     const main = classifyCommandWithMainRules(command);
     assert.ok(main.ok, command);
     assert.deepEqual(classesOf(command), main.classes, command);
@@ -1804,8 +1808,9 @@ test("lead ruling L62013 for the parents rule: a parent takes the classes of the
   // Two held folders: both classes, not only the higher-ranked one.
   const both = withListing("chmod -R 000 .", { "/w": [".claude", ".github"] });
   assert.ok(both.includes("policy.core") && both.includes("policy.edit"), both.join(","));
-  // S2: tools that delete what they read or find, by what `.` holds.
-  const organ = { "/w": [".claude", "src"] };
+  // S2: tools that delete what they read or find, by what `.` holds. (What
+  // `.claude` holds, walked by the hook: lead ruling L62511, S-C.)
+  const organ = { "/w": [".claude", "src"], [guardedContentsKey("/w/.claude")]: ["settings.json"] };
   for (const command of [
     "find . -delete",
     "find . -type f -delete",
@@ -2082,7 +2087,9 @@ function mainClasses(command: string, globDisk?: Parameters<typeof classifyComma
 
 test("lead ruling L62435 (S6): a chmod of a word the text cannot read keeps main's class, with or without -R", () => {
   const disk = { cwd: "/w", home: "/h", listings: new Map<string, readonly string[]>(Object.entries({ "/w": [".claude", "scripts"], "/w/scripts": ["run.sh"], ...realpaths("/w", "/h", "/w/scripts") })) };
-  for (const command of ['chmod +x "$f"', "chmod +x ./$NAME", "chmod u+x $1", "chmod 755 $DIR", 'chmod -R 755 "$OUT"', "chmod +x $SCRIPT", "chmod +x scripts/$NAME"]) {
+  // Lead ruling L62511 (S-D): `chmod -R 755 "$OUT"` (in this list before) is a
+  // recursive chmod of an unreadable word: policy.core, below.
+  for (const command of ['chmod +x "$f"', "chmod +x ./$NAME", "chmod u+x $1", "chmod 755 $DIR", "chmod +x $SCRIPT", "chmod +x scripts/$NAME"]) {
     assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
     const withDiskClasses = classifyCommand(command, [], { globDisk: disk });
     assert.ok(withDiskClasses.ok, command);
@@ -2093,6 +2100,14 @@ test("lead ruling L62435 (S6): a chmod of a word the text cannot read keeps main
   for (const command of ["chmod 000 .", "chmod 000 ..", "chmod 000 ~"]) {
     assert.ok(classesOf(command).includes("policy.core"), command);
   }
+  // Lead ruling L62511 (S-D): a recursive chmod reads an unreadable word as a
+  // parent may be, alone too; `$X/dist` names something below it, as on main.
+  for (const command of ["chmod -R 000 $X", 'chmod -R 000 "$X"', "chmod -R -w $X", 'chmod -R 755 "$OUT"', 'chmod -R u+w "$DIR"', "chmod -R 000 $X/", "(B=src); chmod -R 000 ./$B", "chmod --recursive 000 $X", "chmod -Rv 000 $X"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} (pure)`);
+    const withDiskClasses = classifyCommand(command, [], { globDisk: disk });
+    assert.ok(withDiskClasses.ok && withDiskClasses.classes.includes("policy.core") && withDiskClasses.classes.includes("files.write.workspace"), `${command} (listing)`);
+  }
+  assert.deepEqual(classesOf("chmod -R 755 $X/dist"), mainClasses("chmod -R 755 $X/dist"));
   // Below a proven parent, an unreadable word may be the workspace: strict.
   for (const command of ["chmod +x ../$X", "chmod -R 000 ~/$X", "chmod 000 /$X"]) {
     assert.ok(classesOf(command).includes("policy.core"), command);
@@ -2100,11 +2115,14 @@ test("lead ruling L62435 (S6): a chmod of a word the text cannot read keeps main
 });
 
 test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary variable alone or below a place that holds no workspace, keep main's class", () => {
-  const organ = { "/w": [".claude", "src"], ...realpaths("/w", "/h") };
+  // What `.claude` holds, as the hook walks it (lead ruling L62511, S-C).
+  const organ = { "/": ["w", "h"], "/w": [".claude", "src"], "/h": [], [guardedContentsKey("/w/.claude")]: ["settings.json", "agents", "a.md"], ...realpaths("/w", "/h") };
+  // A plain name narrows only by a listing (L62511, S-C): with none, strict.
+  assert.ok(classesOf("find . -name .DS_Store -delete").includes("policy.core"));
+  assert.deepEqual(withListing("find . -name .DS_Store -delete", organ), ["files.delete.out_of_scope"]);
   for (const command of [
     "find . -name '*.tmp' -delete",
     "find . -name '*.pyc' -delete",
-    "find . -name .DS_Store -delete",
     "find . -type f -name '*.log' -delete",
     "find .. -name '*.tmp' -delete",
     "find . -iname '*.TMP' -delete",
@@ -2242,8 +2260,10 @@ test("lead ruling L62435 (S7): a variable the line itself sets is read as what i
     const result = classifyCommand(command);
     assert.ok(!result.ok || result.classes.includes("policy.core"), `${command} -> ${result.ok ? result.classes.join(",") : result.code}`);
   }
-  // `.claude` is not a parent (main's own rules judge the organ by name): main's class.
-  for (const command of ["D=.claude; rm -rf $D", "X=dist; rm -rf $X", "printf -v d dist; rm -rf $d", "OUT=dist; rm -rf $OUT", "D=build; T=$D/tmp; rm -rf $T"]) {
+  // Lead ruling L62511 (S-A): an assigned organ name takes the organ's class,
+  // as the word spelled so does; an ordinary name keeps main's class.
+  assert.ok(classesOf("D=.claude; rm -rf $D").includes("policy.core"));
+  for (const command of ["X=dist; rm -rf $X", "printf -v d dist; rm -rf $d", "OUT=dist; rm -rf $OUT", "D=build; T=$D/tmp; rm -rf $T"]) {
     assert.deepEqual(classesOf(command), mainClasses(command), command);
   }
   // Automated security review of the fold, 3b: bound another way the text
@@ -2510,4 +2530,79 @@ test("lead ruling L62483 (true class): a parent takes the class of EVERY guarded
   }
   // `.git` alone keeps the git-dir rule's answer (no organ beside it).
   assert.ok(classesWith("rm -rf src/..").includes("policy.core"));
+});
+
+test("lead ruling L62511: an assigned guarded name, `${X:=…}`, a find that reaches inside a guarded folder, and a recursive chmod of an unreadable word", () => {
+  const routes = [{ path: ".github/workflows/", class: "policy.edit.ci" }, { path: ".claude/agents/", class: "policy.edit.agents" }];
+  const tree: Record<string, readonly string[]> = {
+    "/": ["w", "h"],
+    "/w": [".claude", ".cursor", ".github", ".git", ".approval", "src"],
+    "/h": [".hermes", ".claude"],
+    [guardedContentsKey("/w/.claude")]: ["settings.json", "agents", "a.md"],
+    [guardedContentsKey("/w/.cursor")]: ["hooks", "x.js"],
+    [guardedContentsKey("/w/.github")]: ["workflows", "ci.yml"],
+    [guardedContentsKey("/w/.git")]: ["HEAD", "config", "objects"],
+    [guardedContentsKey("/w/.approval")]: ["env", "log", "made-up.jsonl"],
+    ...realpaths("/w", "/h"),
+  };
+  const run = (command: string, listings: Record<string, readonly string[]> = tree): string[] => {
+    const result = classifyCommand(command, routes, { globDisk: { cwd: "/w", home: "/h", listings: new Map(Object.entries(listings)) } });
+    assert.ok(result.ok, command);
+    return result.classes;
+  };
+  const guardedOnly = (classes: readonly string[]): string[] => classes.filter((cls) => !cls.startsWith("files.") && !cls.startsWith("read.")).sort();
+  // S-A: each assigned reading that names a guarded target carries that target's classes, as the literal word does.
+  for (const [assigned, literal] of [
+    ["D=.claude; rm -rf $D", "rm -rf .claude"],
+    ["D=.github; rm -rf $D", "rm -rf .github"],
+    ["D=.approval; rm -rf $D", "rm -rf .approval"],
+    ["D=~/.hermes; rm -rf $D", "rm -rf ~/.hermes"],
+    ["D=$HOME/.claude; rm -rf $D", "rm -rf $HOME/.claude"],
+    ["D=.claude; X=$D; rm -rf $X", "rm -rf .claude"],
+    ["D=.claude/agents; rm -rf $D", "rm -rf .claude/agents"],
+    ["D=.claude; find $D -delete", "find .claude -delete"],
+    ["D=.cl; rm -rf ${D}aude", "rm -rf .claude"],
+    ["D=.claude; chmod -R 000 $D", "chmod -R 000 .claude"],
+    ["D=.git; rm -rf $D", "rm -rf .git"],
+    ["D=.claude; mv $D /tmp/zz", "mv .claude /tmp/zz"],
+  ] as const) {
+    const got = guardedOnly(run(assigned));
+    for (const cls of guardedOnly(run(literal))) assert.ok(got.includes(cls), `${assigned} -> ${got.join(",")} lacks ${cls} (${literal})`);
+  }
+  for (const command of ["OUT=dist; rm -rf $OUT", "D=build; T=$D/tmp; rm -rf $T"]) assert.deepEqual(guardedOnly(run(command)), [], command);
+  // S-B: the assigning operators bind the name on the line.
+  for (const command of ["echo ${X:=..}; rm -rf ./$X", "ls ${X:=..} && rm -rf $X", "echo ${X=..}; rm -rf $X", "echo ${X:=/}; rm -rf $X/", "echo ${X:=~}; rm -rf $X", "cat ${X:=..}/f; rm -rf $X", "echo ${X:=$Y}; rm -rf $X"]) {
+    assert.ok(run(command).includes("policy.core"), command);
+    assert.ok(classesOf(command).includes("policy.core"), `${command} (pure)`);
+  }
+  assert.deepEqual(guardedOnly(run("echo ${X:=dist}; rm -rf $X")), []);
+  // S-C: a narrowed find takes the class of each guarded folder its names may reach inside.
+  for (const [command, cls] of [
+    ["find . -name x.js -delete", "policy.core"],
+    ["find . -name 'x.*' -delete", "policy.core"],
+    ["find . -name '*.js' -delete", "policy.core"],
+    ["find . -name ci.yml -delete", "policy.edit"],
+    ["find . -name 'ci.*' -delete", "policy.edit.ci"],
+    ["find . -name HEAD -delete", "vcs.history.rewrite"],
+    ["find . -name config -delete", "vcs.history.rewrite"],
+    ["find . -name made-up.jsonl -delete", "log.mutate"],
+  ] as const) {
+    assert.ok(run(command).includes(cls), `${command} -> ${run(command).join(",")} lacks ${cls}`);
+  }
+  for (const command of ["find . -name '*.tmp' -delete", "find . -name '*.pyc' -delete", "find . -name .DS_Store -delete", "find . -iname '*.TMP' -delete"]) {
+    assert.deepEqual(run(command), ["files.delete.out_of_scope"], command);
+  }
+  // ...and strict once a guarded folder holds a match, or its walk is missing or unreadable.
+  assert.ok(run("find . -name '*.tmp' -delete", { ...tree, [guardedContentsKey("/w/.claude")]: ["settings.json", "x.tmp"] }).includes("policy.core"));
+  const { [guardedContentsKey("/w/.cursor")]: _walked, ...unwalked } = tree;
+  assert.ok(run("find . -name '*.tmp' -delete", unwalked).includes("policy.core"));
+  // Pure (no listing): only `*.<ext>` with an extension no guarded folder ordinarily holds.
+  for (const command of ["find . -name '*.tmp' -delete", "find . -name '*.pyc' -delete", "find . -name '*.log' -delete"]) assert.deepEqual(classesOf(command), mainClasses(command), command);
+  for (const command of ["find . -name '*.js' -delete", "find . -name '*.py' -delete", "find . -name '*.txt' -delete", "find . -name x.tmp -delete", "find . -name 'x.*' -delete"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} (pure)`);
+  }
+  // S-E part 2: `.git` alone below a moved parent rides beside policy.core.
+  const gitOnly = { "/": ["w", "h"], "/w": [".git", "src"], "/h": [], ...realpaths("/w", "/h") };
+  const moved = run('mv "$PWD" /tmp/zz', gitOnly);
+  assert.ok(moved.includes("policy.core") && moved.includes("vcs.history.rewrite"), moved.join(","));
 });

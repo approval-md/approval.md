@@ -918,7 +918,6 @@ test("lead ruling L62435 (S6, S7), through the real hook under the agent-village
     "chmod +x ./$NAME",
     "chmod u+x $1",
     "chmod 755 $DIR",
-    'chmod -R 755 "$OUT"',
     "chmod +x $SCRIPT",
     "chmod +x scripts/$NAME",
     "find . -name '*.tmp' -delete",
@@ -930,7 +929,6 @@ test("lead ruling L62435 (S6, S7), through the real hook under the agent-village
     `rm -rf ${other}/$name`,
     "rm -rf ./$X",
     `rm -rf ${other}/$SESSION`,
-    "D=.claude; rm -rf $D",
     "rsync -a --delete src/ build/out/",
     "cd src && rm -rf dist",
   ]) {
@@ -942,6 +940,23 @@ test("lead ruling L62435 (S6, S7), through the real hook under the agent-village
     const decision = decideAv(dir, home, dir, command);
     assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
   }
+  // Lead ruling L62511: an assigned organ name (S-A, `D=.claude; rm -rf $D` was
+  // pinned to allow here before), `${X:=..}` (S-B), a find whose name reaches
+  // inside a guarded folder (S-C) and a recursive chmod of an unreadable word
+  // (S-D, `chmod -R 755 "$OUT"` was in the allow list before): human-only.
+  writeFileSync(join(dir, ".claude", "hook.js"), "made-up\n");
+  for (const command of ["D=.claude; rm -rf $D", "D=.cl; rm -rf ${D}aude", "echo ${X:=..}; rm -rf $X", "find . -name hook.js -delete", "find . -name 'hook.*' -delete", 'chmod -R 755 "$OUT"', "chmod -R 000 $X"]) {
+    const decision = decideAv(dir, home, dir, command);
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+  }
+  for (const command of ["OUT=dist; rm -rf $OUT", "find . -name '*.tmp' -delete", "chmod u+x $1"]) {
+    const decision = decideAv(dir, home, dir, command);
+    assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
+  }
+  writeFileSync(join(dir, ".claude", "made-up.tmp"), "made-up\n");
+  assert.equal(decideAv(dir, home, dir, "find . -name '*.tmp' -delete").permission, "deny");
+  rmSync(join(dir, ".claude", "made-up.tmp"));
+  rmSync(join(dir, ".claude", "hook.js"));
   // The opposite: an unreadable word below the lab's own parent (or the lab) may
   // be the workspace's parent, so it denies on every OS.
   for (const command of [`rm -rf ${scratch}/$name`, `rm -rf ${lab}/$name`]) {

@@ -9257,6 +9257,25 @@ export function realpathKey(path: string): string {
 }
 
 /**
+ * The key under which the hook passes the names found anywhere inside a
+ * guarded folder it listed (lead ruling L62511, S-C): every entry, at every
+ * depth, by basename, or `"unreadable"` past the walk's caps or deadline.
+ */
+export function guardedContentsKey(path: string): string {
+  return `\u0000guarded-contents:${path}`;
+}
+
+/**
+ * Is a listed name one whose contents the hook walks for a narrowed `find …
+ * -delete` (lead ruling L62511, S-C)? An organ directory, a guarded name or
+ * `.git`, as {@link guardedEntryClass} reads a listing (any case it folds).
+ */
+export function guardedFolderName(name: string): boolean {
+  const guarded = guardedEntryClass(name, []);
+  return guarded.git || guarded.classes.length > 0;
+}
+
+/**
  * The names the caller listed in `dir`, or `undefined` (not listed, or not
  * listable in full). A directory that was not there is empty only to a glob on
  * a one-segment line (`missingIsEmpty`); to a contents copy it is never empty
@@ -9930,15 +9949,37 @@ const FIND_BARE = new Set(["-depth", "-d", "-xdev", "-mount", "-x", "-print", "-
  * else: not narrowed, so the start paths are read by the parents rule.
  */
 function findDeleteNarrowed(args: readonly string[], protectedPaths: readonly ProtectedPathEntry[], argWords: readonly LexWord[] = []): boolean {
+  return findNarrowPatterns(args, protectedPaths, argWords) !== null;
+}
+
+/** A find name test that narrows (`-name` or `-iname`), as find receives it. */
+interface FindNamePattern {
+  pattern: string;
+  caseless: boolean;
+}
+
+/**
+ * {@link findDeleteNarrowed}'s reading: the name tests that narrow, every one
+ * of which a file must match to be deleted, or `null` when the line is not
+ * narrowed by its text. Lead ruling L62511 (S-C): the text is not the whole
+ * proof; the parents rule then reads what the guarded folders below the
+ * start path hold ({@link organParentClass}).
+ */
+function findNarrowPatterns(
+  args: readonly string[],
+  protectedPaths: readonly ProtectedPathEntry[],
+  argWords: readonly LexWord[] = [],
+): FindNamePattern[] | null {
   const start = args.findIndex((arg) => FIND_PRIMARY.test(arg) || arg === "!" || arg === "(");
-  if (start === -1) return false;
+  if (start === -1) return null;
   let narrowed = false;
   let deletes = false;
+  const patterns: FindNamePattern[] = [];
   for (let at = start; at < args.length; at += 1) {
     const arg = args[at] as string;
     if (FIND_VALUED.has(arg)) {
       const value = args[at + 1];
-      if (value === undefined) return false;
+      if (value === undefined) return null;
       // The pattern as find receives it: after the shell's quotes, and only
       // where the shell passes exactly that text (security review of the
       // fold, 6 and 10: the gate the exact-word readers use; an unquoted
@@ -9948,16 +9989,57 @@ function findDeleteNarrowed(args: readonly string[], protectedPaths: readonly Pr
       const word = argWords.length === args.length ? argWords[at + 1] : undefined;
       const asWritten =
         word !== undefined && word.text === value && word.exact && word.zshGlob === false && !word.expands && !word.splits && word.substitutions.length === 0;
-      if ((arg === "-name" || arg === "-iname") && asWritten && findNameMissesGuarded(value, arg === "-iname", protectedPaths)) narrowed = true;
+      if ((arg === "-name" || arg === "-iname") && asWritten && findNameMissesGuarded(value, arg === "-iname", protectedPaths)) {
+        narrowed = true;
+        patterns.push({ pattern: value, caseless: arg === "-iname" });
+      }
       at += 1;
       continue;
     }
     if (arg === "-delete") {
-      if (!narrowed) return false;
+      if (!narrowed) return null;
       deletes = true;
-    } else if (!FIND_BARE.has(arg)) return false;
+    } else if (!FIND_BARE.has(arg)) return null;
   }
-  return deletes;
+  return deletes ? patterns : null;
+}
+
+/**
+ * Extensions a guarded folder ordinarily holds (lead ruling L62511, S-C):
+ * where no listing shows what the folders hold (every caller but the hook),
+ * a `find … -name '*.<ext>' -delete` with one of these is not narrowed.
+ */
+const FIND_GUARDED_EXTENSIONS: ReadonlySet<string> = new Set([
+  "js", "mjs", "cjs", "ts", "py", "sh", "bash", "zsh", "json", "jsonc", "yml", "yaml", "toml", "md", "mdc", "txt", "lock", "env", "ini", "cfg", "conf", "xml",
+]);
+
+/**
+ * Without a listing (lead ruling L62511, S-C): narrowed only by the ruled form
+ * `*.<ext>` with an extension no guarded folder ordinarily holds
+ * ({@link FIND_GUARDED_EXTENSIONS}); a plain name, `x.*` or any other
+ * pattern is not.
+ */
+function findPatternsNarrowWithoutListing(patterns: readonly FindNamePattern[]): boolean {
+  return patterns.some(({ pattern }) => {
+    const match = /^\*\.([A-Za-z0-9]+)$/u.exec(pattern);
+    return match !== null && !FIND_GUARDED_EXTENSIONS.has((match[1] as string).toLowerCase());
+  });
+}
+
+/**
+ * May find's name tests all match `name` (lead ruling L62511, S-C)? Read with
+ * the classifier's matcher as {@link findNameMissesGuarded} reads them; a spent
+ * budget matches (fail closed).
+ */
+function findPatternsMatch(patterns: readonly FindNamePattern[], name: string, budget: { left: number }): boolean {
+  return patterns.every(({ pattern, caseless }) => {
+    const spellings = caseless ? [pattern, pattern.toLowerCase(), pattern.toUpperCase()] : [pattern];
+    const names = caseless ? [name, name.toLowerCase(), name.toUpperCase()] : [name];
+    return spellings.some((spelling) => {
+      const tokens = globSegmentTokens(spelling, true);
+      return names.some((each) => globTokensMatch(tokens, each, false, budget) !== false);
+    });
+  });
 }
 
 /**
@@ -10152,7 +10234,7 @@ function organParentDirs(
   pwdWord: boolean,
   disk: GlobDisk | undefined,
   cdParent = false,
-  lineFlags: { positionalsSet?: boolean; nameref?: boolean } = {},
+  lineFlags: OrganParentFlags = {},
 ): string[] | "unplaced" | null {
   let base: "cwd" | "home" | "root";
   let rest: string;
@@ -10193,6 +10275,10 @@ function organParentDirs(
   if (firstUnread >= 0) {
     const last = stack[stack.length - 1] as string;
     if (!unreadable(last) && !stack.slice(firstUnread + 1).some(globbed)) return null;
+    // Lead ruling L62511 (S-D, the S6 lean): a recursive chmod reads a word
+    // it cannot read as a parent may be (`chmod -R 000 $X`, `chmod -R 755
+    // "$OUT"`); a plain chmod keeps main's class (`chmod u+x $1`).
+    if (lineFlags.strictUnreadable === true) return "unplaced";
     // Lead ruling L62435 (S6, S7; it reverses part of security review 4): a
     // word whose unreadable parts are ordinary variables places as a parent
     // only when its readable part proves it may be one
@@ -10370,6 +10456,19 @@ function guardedEntryClass(
  * A parent the caller cannot place or list is `policy.core`, fail closed; one
  * whose listings hold no guarded name keeps the segment's own class.
  */
+/** What the line and the segment tell {@link organParentClass} and {@link organParentDirs} beside the operands. */
+interface OrganParentFlags {
+  positionalsSet?: boolean;
+  nameref?: boolean;
+  /**
+   * Lead ruling L62511 (S-D): a recursive `chmod` (`-R`, `--recursive`, a
+   * bundled `-Rv`) reads a word it cannot read as a parent may be.
+   */
+  strictUnreadable?: boolean;
+  /** Lead ruling L62511 (S-C): the name tests of a `find … -delete` its text narrows. */
+  findPatterns?: readonly FindNamePattern[];
+}
+
 function organParentClass(
   operands: readonly string[],
   words: readonly LexWord[],
@@ -10377,10 +10476,18 @@ function organParentClass(
   disk: GlobDisk | undefined,
   assigned: ReadonlyMap<string, readonly string[]> | undefined = undefined,
   cdParent = false,
-  lineFlags: { positionalsSet?: boolean; nameref?: boolean } = {},
+  lineFlags: OrganParentFlags = {},
 ): { named: { surface: string; path: string } | null; git: Set<string> } {
   let named: { surface: string; path: string } | null = null;
   const git = new Set<string>();
+  // Lead ruling L62511 (S-C): a `find … -delete` its name tests narrow by
+  // text. With no listing, only the ruled `*.<ext>` form stays narrowed; any
+  // other is read as the delete of everything below its start paths.
+  let findPatterns = lineFlags.findPatterns;
+  if (findPatterns !== undefined && disk === undefined) {
+    if (findPatternsNarrowWithoutListing(findPatterns)) return { named: null, git };
+    findPatterns = undefined;
+  }
   // Every class a held folder gives (lead ruling L62013, S1): the classifier
   // cannot rank routed classes, so each is a claim and the gate judges all.
   const claims: string[] = [];
@@ -10416,6 +10523,7 @@ function organParentClass(
     held.set(dir, entry);
     return entry;
   };
+  const findBudget = { left: GLOB_GUARD_STEP_CAP };
   const seen = new Set<string>();
   for (const operand of operands) {
     if (seen.has(operand)) continue;
@@ -10429,6 +10537,7 @@ function organParentClass(
       continue;
     }
     const readings: string[] = [];
+    const assignedOnes = new Set<string>();
     for (const each of braced) {
       const assignedEach = assignedReadings(each, assigned);
       if (assignedEach === null) {
@@ -10436,12 +10545,23 @@ function organParentClass(
         break;
       }
       readings.push(...assignedEach);
+      for (const reading of assignedEach) if (reading !== each) assignedOnes.add(reading);
     }
     if (readings.length === 0) {
       offer("policy.core", operand);
       continue;
     }
     for (const reading of readings) {
+      // Lead ruling L62511 (S-A): a reading the line's own assignment gives
+      // that NAMES a guarded target takes that target's class, as the word
+      // spelled so would (`D=.claude; rm -rf $D` is `rm -rf .claude`).
+      if (assignedOnes.has(reading)) {
+        for (const cls of assignedTargetClaims(reading, protectedPaths)) offer(cls, operand);
+        if (lastNameIsGit(reading)) {
+          git.add(operand);
+          offer("vcs.history.rewrite", operand);
+        }
+      }
       const dirs = organParentDirs(reading, reading === operand && pwdWords.has(operand), disk, cdParent, lineFlags);
       if (dirs === null) continue;
       if (dirs === "unplaced" || disk === undefined) {
@@ -10462,6 +10582,35 @@ function organParentClass(
         continue;
       }
       for (const dir of dirs) {
+        if (findPatterns !== undefined) {
+          // Lead ruling L62511 (S-C): a narrowed find deletes what its names
+          // match INSIDE the guarded folders below its start, so each folder
+          // whose contents (walked by the hook) a match may reach gives its
+          // classes; one the hook did not walk, could not read or walk to the
+          // end, or a routed folder it does not walk, fails closed.
+          disk.collect?.add(dir);
+          const listing = diskListing(disk, dir, true);
+          if (listing === undefined) {
+            offer("policy.core", operand);
+            continue;
+          }
+          for (const name of listing) {
+            const guarded = guardedEntryClass(name, protectedPaths, dir);
+            const routed = guarded.classes.length === 0 && !guarded.git ? routedFolderClasses(name, protectedPaths) : [];
+            if (guarded.classes.length === 0 && !guarded.git && routed.length === 0) continue;
+            const inside = routed.length > 0 ? undefined : disk.listings.get(guardedContentsKey(`${dir.replace(/\/+$/u, "")}/${name}`));
+            const patterns = findPatterns;
+            const reached =
+              inside === undefined || inside === "unreadable" ? true : inside === "missing" ? false : inside.some((each) => findPatternsMatch(patterns, each, findBudget));
+            if (!reached) continue;
+            for (const cls of [...guarded.classes, ...routed]) offer(cls, operand);
+            if (guarded.git) {
+              git.add(operand);
+              offer("vcs.history.rewrite", operand);
+            }
+          }
+          continue;
+        }
         const entry = readDir(dir);
         if (entry === undefined) {
           offer("policy.core", operand);
@@ -10480,6 +10629,45 @@ function organParentClass(
   if (strictest === null || claims.length <= 1) return { named: strictest, git };
   const ordered = [strictest.surface, ...claims.filter((cls) => cls !== strictest.surface)];
   return { named: { surface: takeAmongEqual(ordered), path: strictest.path }, git };
+}
+
+/**
+ * The classes a path a line assigns takes as a write target (lead ruling
+ * L62511, S-A): the word's own protected claims and, for an organ folder,
+ * those of every guarded path inside it (routed ones too), as the word
+ * spelled so takes them ({@link folderContentClaims}).
+ */
+function assignedTargetClaims(reading: string, protectedPaths: readonly ProtectedPathEntry[]): string[] {
+  const path = reading.length > 1 ? reading.replace(/\/+$/u, "") : reading;
+  if (path.length === 0) return [];
+  const own = protectedClaimsOfWord(path, protectedPaths);
+  return own.length === 0 ? [] : folderContentClaims(path, own, protectedPaths);
+}
+
+/** Is the last name of `path` `.git` (any case the fold reads), so the git-dir rule's class applies? */
+function lastNameIsGit(path: string): boolean {
+  const last = path.replace(/\/+$/u, "").split("/").pop() ?? "";
+  return last.length > 0 && sameGuardedName(last, ".git");
+}
+
+/**
+ * The classes of the policy's routed DIRECTORY entries whose first name is
+ * `name` (lead ruling L62511, S-C): the hook walks only the guarded folders
+ * it knows, so a routed folder outside them (`design/` routed to
+ * `policy.edit.design`) is read as reached.
+ */
+function routedFolderClasses(name: string, protectedPaths: readonly ProtectedPathEntry[]): string[] {
+  const out: string[] = [];
+  for (const raw of protectedPaths) {
+    const entry = parseProtectedEntry(raw);
+    if (entry === null) continue;
+    const first = entry.segments[0];
+    if (first === undefined || foldNameExact(first) !== foldNameExact(name)) continue;
+    if (!entry.directory && entry.segments.length < 2) continue;
+    const cls = typeof raw === "string" ? "policy.edit" : raw.class;
+    if (!out.includes(cls)) out.push(cls);
+  }
+  return out;
 }
 
 /**
@@ -10674,7 +10862,18 @@ function lineAssignments(segments: readonly LexSegment[], outer: ReadonlyMap<str
     assigned.set(name, [...(assigned.get(name) ?? []), value]);
   };
   const named = /^([A-Za-z_][A-Za-z0-9_]*)(?:\+?=([\s\S]*))?$/u;
+  // Lead ruling L62511 (S-B): `${X:=word}` and `${X=word}` in any word of the
+  // line bind X to `word` (`echo ${X:=..}; rm -rf $X` is `rm -rf ..`); a
+  // word the text cannot read binds X unreadably, read strictly.
+  const assigning = /\$\{([A-Za-z_][A-Za-z0-9_]*):?=([^}]*)\}/gu;
   for (const segment of segments) {
+    for (const word of segment.words) {
+      for (const match of word.text.matchAll(assigning)) {
+        const value = match[2] as string;
+        const opaque = /[$`{]/u.test(value) || value.includes(SUBSTITUTION_SENTINEL) || value.includes(PARAMETER_MARK);
+        bind(match[1] as string, opaque ? UNREAD_BINDING : value);
+      }
+    }
     for (const word of segment.words) {
       if (!word.assignment) continue;
       const match = /^([A-Za-z_][A-Za-z0-9_]*)\+?=([\s\S]*)$/u.exec(word.text);
@@ -13024,14 +13223,32 @@ function classifySegmentWithVerb(
   // Not every command's: an operand the text cannot place is `policy.core`
   // here, fail closed, so reading every command's operands would make
   // `git push origin $BRANCH` and `rm ../sibling/file` policy.core.
-  const parentOperands = organVerbs ? organParentOperands(basename, args, positionals, plan, segment.words.slice(0, cursor), protectedPaths, segment.words.slice(cursor + 1)) : [];
+  // Lead ruling L62511 (S-C): a `find … -delete` its name tests narrow by
+  // text is still read from its start paths, by what the guarded folders
+  // below them hold ({@link organParentClass}).
+  const findNarrowed =
+    organVerbs && basename === "find" && args.includes("-delete") && !args.some((arg) => ["-exec", "-execdir", "-ok", "-okdir"].includes(arg))
+      ? findNarrowPatterns(args, protectedPaths, segment.words.slice(cursor + 1))
+      : null;
+  const parentOperands = !organVerbs
+    ? []
+    : findNarrowed !== null
+      ? findStartPaths(args)
+      : organParentOperands(basename, args, positionals, plan, segment.words.slice(0, cursor), protectedPaths, segment.words.slice(cursor + 1));
   const organParent =
     context.organParentsOff === true || mainRulesOnly
       ? { named: null, git: new Set<string>() }
       : organParentClass(parentOperands, segment.words, protectedPaths, glob.disk, context.lineAssigned, context.organCdParent === true, {
+          ...(findNarrowed === null ? {} : { findPatterns: findNarrowed }),
+          strictUnreadable: basename === "chmod" && (hasFlag(args, ["--recursive"]) || hasShortFlag(args, ["R"])),
           positionalsSet: context.organPositionalsSet === true,
           nameref: context.organNameref === true,
         });
+  // A `.git` the parents rule found below an operand, as a hit of its own
+  // where nothing else names it (lead ruling L62511, S-E part 2: `mv "$PWD"
+  // /tmp/zz` in a workspace holding only `.git`).
+  const organParentGit: { surface: string; path: string } | null =
+    organParent.git.size > 0 ? { surface: "vcs.history.rewrite", path: [...organParent.git][0] as string } : null;
   if (organParent.named !== null || organParent.git.size > 0) {
     // A GLOB-WRITE-family rule (main has none): the main pass joins the line
     // (lead ruling L61926), as it does for #686's rules.
@@ -13132,8 +13349,9 @@ function classifySegmentWithVerb(
         class: named.surface,
         rule: "protected-path",
         path: named.path,
-        // Lead ruling L62483 (true class): the parents rule's classes ride beside.
-        ...besideProtected(named.surface, [named, organParent.named]),
+        // Lead ruling L62483 (true class): the parents rule's classes ride
+        // beside, `.git` alone below the parent too (L62511, S-E part 2).
+        ...besideProtected(named.surface, [named, organParent.named, organParentGit]),
       };
     }
     return {
@@ -13141,7 +13359,7 @@ function classifySegmentWithVerb(
       class: "policy.core",
       rule: "copy-target-unknown",
       path: copyUnknown,
-      ...besideProtected("policy.core", [named, organParent.named]),
+      ...besideProtected("policy.core", [named, organParent.named, organParentGit]),
     };
   }
 

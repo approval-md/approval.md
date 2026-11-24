@@ -26,12 +26,12 @@
  * check-then-act window is the reviewers' call (noted on the PR).
  */
 
-import { opendir as fsOpendir, realpath as fsRealpath } from "node:fs/promises";
+import { lstat as fsLstat, opendir as fsOpendir, realpath as fsRealpath } from "node:fs/promises";
 import type { Dir } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
-import { globWriteListingDirs, realpathKey, type GlobDisk } from "../core/command-class.js";
+import { globWriteListingDirs, guardedContentsKey, guardedFolderName, realpathKey, type GlobDisk } from "../core/command-class.js";
 import { runUnderDeadline } from "../core/deadline.js";
 
 /** Most entries one directory is read for before it is judged unreadable. */
@@ -71,6 +71,68 @@ export class GlobListingDeadline extends Error {
   constructor() {
     super("the classification that finds the directories to list outlasted the hook's deadline");
     this.name = "GlobListingDeadline";
+  }
+}
+
+/** Most directories one guarded folder's walk opens (lead ruling L62511, S-C). */
+export const GUARDED_WALK_DIR_CAP = 64;
+/** Most names one guarded folder's walk reads, at every depth. */
+export const GUARDED_WALK_ENTRY_CAP = 4_000;
+
+/**
+ * Every name inside a guarded folder, at every depth, by basename (lead ruling
+ * L62511, S-C): what a narrowed `find … -name P -delete` from a parent of it
+ * may reach. Symlinks are not followed (find does not by default). `[]` for a
+ * name that is not a directory, `"missing"` for one that is gone, and
+ * `"unreadable"` on any other error, past {@link GUARDED_WALK_DIR_CAP} or
+ * {@link GUARDED_WALK_ENTRY_CAP}, or at the timeout: the classifier then
+ * reads the folder as reached.
+ */
+export async function walkGuardedFolder(path: string, options: GlobListingOptions = {}): Promise<GlobListing> {
+  const timeoutMs = options.timeoutMs ?? GLOB_LISTING_TIMEOUT_MS;
+  let timedOut = false;
+  let timer: NodeJS.Timeout | undefined;
+  const walking = (async (): Promise<GlobListing> => {
+    try {
+      if (!(await fsLstat(path)).isDirectory()) return [];
+    } catch (error: unknown) {
+      const code = (error as { code?: unknown } | null)?.code;
+      return code === "ENOENT" ? "missing" : "unreadable";
+    }
+    const names: string[] = [];
+    const queue = [path];
+    let opened = 0;
+    while (queue.length > 0) {
+      if (timedOut || (options.deadlineAt !== undefined && Date.now() > options.deadlineAt)) return "unreadable";
+      opened += 1;
+      if (opened > GUARDED_WALK_DIR_CAP) return "unreadable";
+      const at = queue.shift() as string;
+      const dir = await fsOpendir(at);
+      try {
+        for (;;) {
+          const entry = await dir.read();
+          if (timedOut) return "unreadable";
+          if (entry === null) break;
+          names.push(entry.name);
+          if (names.length > GUARDED_WALK_ENTRY_CAP) return "unreadable";
+          if (entry.isDirectory()) queue.push(join(at, entry.name));
+        }
+      } finally {
+        dir.close().catch(() => undefined);
+      }
+    }
+    return names;
+  })().catch((): GlobListing => "unreadable");
+  const deadline = new Promise<GlobListing>((settle) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      settle("unreadable");
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([walking, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -148,6 +210,19 @@ export async function listGlobWriteDirs(
   const chosen = dirs.slice(0, options.dirCap ?? GLOB_LISTING_DIR_CAP);
   const results = await Promise.all(chosen.map((dir) => listGlobDirectory(dir, options)));
   chosen.forEach((dir, index) => listings.set(dir, results[index] as GlobListing));
+  // Lead ruling L62511 (S-C): on a line that may run `find … -delete`, what
+  // each guarded folder in a listed directory holds, at every depth, so a
+  // narrowed find is judged by what its names may reach inside them.
+  if (/\bfind\b/u.test(command) && /-delete\b/u.test(command)) {
+    const folders: string[] = [];
+    chosen.forEach((dir, index) => {
+      const listing = results[index];
+      if (!Array.isArray(listing)) return;
+      for (const name of listing as readonly string[]) if (guardedFolderName(name)) folders.push(`${dir.replace(/\/+$/u, "")}/${name}`);
+    });
+    const walked = await Promise.all(folders.map((folder) => walkGuardedFolder(folder, options)));
+    folders.forEach((folder, index) => listings.set(guardedContentsKey(folder), walked[index] as GlobListing));
+  }
   // The canonical form of each listed path and of the working directory and
   // the home (lead ruling L61587, security review 6): the classifier compares
   // these to see whether an absolute path reaches either by another spelling
