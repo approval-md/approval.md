@@ -10425,11 +10425,12 @@ function segmentCdsToParent(segment: LexSegment, disk: GlobDisk | undefined, cdp
   else if (pwdWord && word.startsWith(SUBSTITUTION_SENTINEL)) [base, tail] = ["cwd", word.slice(SUBSTITUTION_SENTINEL.length)];
   else if (word.startsWith("/")) [base, tail] = ["root", word];
   else [base, tail] = ["cwd", word];
+  // Security review of the fold, 15 and 18: with `CDPATH` on the line, any
+  // target that does not start with `/`, `./` or `../` (and is not placed
+  // as `~`, `$HOME` or `$PWD` below) may land anywhere CDPATH names, a
+  // parent included: a glob, a brace or an expansion too.
+  if (cdpath && home === null && pwd === null && !pwdWord && !word.startsWith("/") && !/^\.{1,2}(?:\/|$)/u.test(word)) return true;
   if (/[$`*?[\]{}~]/u.test(tail) || tail.includes(SUBSTITUTION_SENTINEL) || tail.includes(PARAMETER_MARK)) return false;
-  // Security review of the fold, 15: with `CDPATH` set on the line, a
-  // relative name that does not start with `./` or `../` may land anywhere
-  // CDPATH names, a parent included.
-  if (cdpath && base === "cwd" && home === null && pwd === null && !pwdWord && !/^\.{1,2}(?:\/|$)/u.test(word)) return true;
   const stack: string[] = [];
   for (const part of tail.split("/")) {
     if (part.length === 0 || part === ".") continue;
@@ -13544,8 +13545,9 @@ function classifyCommandAsReadWithRules(
   execContext = { ...execContext, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned };
   // Lead ruling L62435 (S2, narrow): a `cd` to a parent spelling earlier on the line.
   let cdParent = context.organCdParent === true;
-  // Security review of the fold, 15: `CDPATH=`, `export CDPATH=`, `env CDPATH=` anywhere on the line.
-  const lineSetsCdpath = context.organCdpath === true || /(?:^|[^A-Za-z0-9_])CDPATH\+?=/u.test(command);
+  // Security review of the fold, 15 and 19: the token `CDPATH` anywhere on
+  // the line (any quoting, any builtin that may set it) counts as setting it.
+  const lineSetsCdpath = context.organCdpath === true || /(?:^|[^A-Za-z0-9_])CDPATH(?![A-Za-z0-9_])/u.test(command);
   execContext = { ...execContext, organCdpath: lineSetsCdpath };
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {

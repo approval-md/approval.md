@@ -2392,8 +2392,19 @@ test("automated security review of the fold, 7, 8 and 11-14: an rsync delete thr
 });
 
 test("automated security review of the fold, 15: with CDPATH set on the line, a cd to a bare name may land in a parent", () => {
-  for (const command of ["CDPATH=.. cd proj && rm -rf x", "CDPATH=/ cd Users && chmod -R 000 x"]) {
-    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  for (const command of [
+    "CDPATH=.. cd proj && rm -rf x",
+    "CDPATH=/ cd Users && chmod -R 000 x",
+    // 18: a glob, brace or expansion target with CDPATH on the line.
+    "CDPATH=.. cd pr* && rm -rf x",
+    "CDPATH=.. cd {proj,x} && rm -rf x",
+    "CDPATH=.. cd $D && rm -rf x",
+    // 19: the token anywhere on the line counts as setting it.
+    "echo $CDPATH; cd proj && rm -rf x",
+    'printf -v CDPATH .. && cd proj && rm -rf x',
+  ]) {
+    const result = classifyCommand(command);
+    assert.ok(!result.ok || result.classes.includes("policy.core"), `${command} -> ${result.ok ? result.classes.join(",") : result.code}`);
   }
   // A plain or exported CDPATH assignment is refused on main and here.
   for (const command of ["CDPATH=/ ; cd Users && rm -rf x", "CDPATH=..; cd proj; chmod -R 000 x", "export CDPATH=..; cd proj; rm -rf x"]) {
