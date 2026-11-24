@@ -60,6 +60,7 @@ process.env["HOME"] = home;
 // a test that inherited it would judge (and read) the real one. Each case
 // below that needs it sets it, and puts it back (S2).
 delete process.env["CLAUDE_CONFIG_DIR"];
+delete process.env["CLAUDE_PROJECT_DIR"];
 mkdirSync(join(home, ".ssh", "sub"), { recursive: true });
 writeFileSync(join(home, ".zshrc"), "# rc\n", "utf8");
 const ws = join(base, "ws");
@@ -1025,6 +1026,7 @@ function runCli(args: string[], cwd: string, input = "", env: Record<string, str
   delete childEnv["APPROVAL_HUMAN"];
   // Set or deleted explicitly in every spawned hook's environment (S2).
   delete childEnv["CLAUDE_CONFIG_DIR"];
+  delete childEnv["CLAUDE_PROJECT_DIR"];
   for (const [name, value] of Object.entries(env)) {
     if (value === undefined) delete childEnv[name];
     else childEnv[name] = value;
@@ -1467,4 +1469,109 @@ test("S2.2 through the real hook: Bash and the file tools onto a named hook scri
     assert.equal(beside.permission, "allow", `${tool} beside: ${beside.reason}`);
   }
   assert.equal(run("Bash", { command: "echo x > ~/tools/hooks/other.py" }).permission, "allow");
+});
+
+// ---------------------------------------------------------------------------
+// S2, part 2 fold: ancestors, the project folders, relative words (seat
+// ruling on the review of e2a76e15)
+// ---------------------------------------------------------------------------
+
+/** Run `body` with CLAUDE_PROJECT_DIR set (or deleted) in this process, then put it back. */
+function withProjectDir<T>(value: string | undefined, body: () => T): T {
+  const before = process.env["CLAUDE_PROJECT_DIR"];
+  if (value === undefined) delete process.env["CLAUDE_PROJECT_DIR"];
+  else process.env["CLAUDE_PROJECT_DIR"] = value;
+  try {
+    return body();
+  } finally {
+    if (before === undefined) delete process.env["CLAUDE_PROJECT_DIR"];
+    else process.env["CLAUDE_PROJECT_DIR"] = before;
+  }
+}
+
+test("S2.2 fold: removing or moving a named hook script's folder or a grandparent is guarded; a sibling folder is not", () => {
+  const h = freshHome({ "settings.json": S2_SETTINGS });
+  mkdirSync(join(h, "tools", "hooks"), { recursive: true });
+  mkdirSync(join(h, "tools", "hooks2"), { recursive: true });
+  writeFileSync(join(h, "tools", "hooks", "guard.py"), "# hook\n", "utf8");
+  mkdirSync(join(ws, "s2-src"), { recursive: true });
+  withHome(h, undefined, () => {
+    for (const command of [
+      "rm -rf ~/tools/hooks",
+      "rm -rf ~/tools",
+      "rm ~/tools/hooks/guard.py",
+      "rm -rf ~/TOOLS/Hooks",
+      "mv ~/tools/hooks ~/old-hooks",
+      "mv ~/tools ~/old-tools",
+      "mv a ~/tools/hooks/guard.py",
+      "cp -r s2-src/. ~/tools/hooks",
+      "rm -rf ~/tools/*",
+    ]) {
+      const seen = see(command);
+      assert.equal(seen.ok, true, command);
+      assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+      assert.match(seen.notes, /a hook script the settings name/u, command);
+    }
+    for (const command of ["rm -rf ~/tools/hooks2", "mv ~/tools/hooks2 ~/old2", "rm -rf ~/other", "cp -r s2-src/. ~/tools/hooks2", "rm -rf ~/tools/hooks/guard.py.bak"]) {
+      const seen = see(command);
+      assert.ok(!seen.classes.includes(GUARDED), `${command}: ${seen.notes}`);
+    }
+  });
+});
+
+test("S2.2 fold: CLAUDE_PROJECT_DIR is a project folder beside the gate root; $CLAUDE_PROJECT_DIR and relative words are read against both", () => {
+  const h = freshHome();
+  const project = join(base, `s2-cpd-${String(s2Homes)}`);
+  const gateRoot = join(base, `s2-gate-${String(s2Homes)}`);
+  for (const dir of [project, gateRoot]) mkdirSync(join(dir, ".claude"), { recursive: true });
+  writeFileSync(
+    join(project, ".claude", "settings.json"),
+    JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "bash $CLAUDE_PROJECT_DIR/hooks/p.sh && python3 ./scripts/rel.py --flag; node tools/x.mjs $FOO/bar/y.sh a=b/c.sh" }] }] } }),
+    "utf8",
+  );
+  writeFileSync(join(gateRoot, ".claude", "settings.local.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "${CLAUDE_PROJECT_DIR}/g.sh" }] }] } }), "utf8");
+  const scope: WriteScopeContext = { ...WRITE_SCOPE_OFF, gateRoot };
+  withHome(h, undefined, () => {
+    withProjectDir(project, () => {
+      for (const dir of [project, gateRoot]) {
+        for (const file of ["hooks/p.sh", "scripts/rel.py", "tools/x.mjs", "g.sh"]) {
+          const seen = see(`echo x > ${dir}/${file}`, scope);
+          assert.ok(seen.classes.includes(GUARDED), `${dir}/${file}: ${JSON.stringify(seen.segments)}`);
+        }
+        // Controls: a word without a slash names nothing; a word reading another variable is skipped.
+        for (const file of ["python3", "--flag", "bar/y.sh", "c.sh", "a=b/c.sh", "hooks/other.sh"]) {
+          assert.ok(!see(`echo x > ${dir}/${file}`, scope).classes.includes(GUARDED), `${dir}/${file}`);
+        }
+      }
+    });
+    // The variable unset: only the gate root's settings, read against the gate root.
+    withProjectDir(undefined, () => {
+      assert.ok(see(`echo x > ${gateRoot}/g.sh`, scope).classes.includes(GUARDED));
+      assert.ok(!see(`echo x > ${project}/hooks/p.sh`, scope).classes.includes(GUARDED));
+      assert.ok(!see(`echo x > ${project}/g.sh`, scope).classes.includes(GUARDED));
+    });
+    // Relative: not a project folder.
+    withProjectDir("s2-relative", () => {
+      assert.ok(!see(`echo x > ${join(base, "s2-relative", "g.sh")}`, scope).classes.includes(GUARDED));
+    });
+  });
+});
+
+test("S2.2 fold through the real hook: CLAUDE_PROJECT_DIR's settings, a relative word, and an rm -rf above a script", () => {
+  const h = freshHome();
+  const project = join(base, `s2-cpd-cli-${String(s2Homes)}`);
+  mkdirSync(join(project, ".claude"), { recursive: true });
+  mkdirSync(join(project, "scripts"), { recursive: true });
+  writeFileSync(join(project, ".claude", "settings.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "./scripts/stop.sh" }] }] } }), "utf8");
+  writeFileSync(join(project, "scripts", "stop.sh"), "#!/bin/sh\n", "utf8");
+  const dir = gate([`  ${GUARDED}: { autonomy: human-only }`, "  files.*: { autonomy: autonomous }"]);
+  const run = (tool: string, input: Record<string, unknown>, projectDir: string | undefined): { permission: string; reason: string } =>
+    verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event(tool, input), { HOME: h, CLAUDE_CONFIG_DIR: undefined, CLAUDE_PROJECT_DIR: projectDir }));
+  for (const [tool, input] of FILE_TOOLS) {
+    assert.equal(run(tool, input(join(project, "scripts", "stop.sh")), project).permission, "deny", tool);
+    assert.equal(run(tool, input(join(project, "scripts", "other.sh")), project).permission, "allow", tool);
+    assert.equal(run(tool, input(join(project, "scripts", "stop.sh")), undefined).permission, "allow", `${tool} without the variable`);
+  }
+  assert.equal(run("Bash", { command: `rm -rf ${join(project, "scripts")}` }, project).permission, "deny");
+  assert.equal(run("Bash", { command: `mv ${project} ${project}-old` }, project).permission, "deny");
 });

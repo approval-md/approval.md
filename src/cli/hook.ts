@@ -3992,12 +3992,43 @@ function currentGuard(env: NodeJS.ProcessEnv = process.env, gateRoot?: string): 
   const homes = currentHomes(env);
   const configDirs = currentConfigDirs(env);
   const home = homes[0] ?? null;
-  return { homes, configDirs, hookScripts: () => namedHookScripts(home, configDirs, gateRoot ?? null) };
+  const projectDirs = currentProjectDirs(env, gateRoot);
+  return { homes, configDirs, hookScripts: () => namedHookScripts(home, configDirs, projectDirs) };
+}
+
+/**
+ * The project folders whose `.claude/settings*.json` are read, and what
+ * `$CLAUDE_PROJECT_DIR` (and a relative word) in a hook command is read
+ * against (seat ruling on the review of e2a76e15): the gate root, and
+ * `CLAUDE_PROJECT_DIR` from this hook's environment when it is set and
+ * absolute (Claude Code sets it for hooks). `..` collapsed lexically.
+ */
+function currentProjectDirs(env: NodeJS.ProcessEnv, gateRoot: string | undefined): string[] {
+  const out: string[] = [];
+  for (const each of [gateRoot, env["CLAUDE_PROJECT_DIR"]]) {
+    if (each === undefined || each.length === 0 || !isAbsolute(each)) continue;
+    const normal = resolvePathSegments(each);
+    if (!out.includes(normal)) out.push(normal);
+  }
+  return out;
 }
 
 /** A path as one key, each segment folded ({@link foldFileName}): how two spellings of one file compare. */
 function foldedPathKey(path: string): string {
   return `/${path.split("/").filter((part) => part.length > 0 && part !== ".").map(foldFileName).join("/")}`;
+}
+
+/**
+ * Is a named hook script at `path`, or anywhere under it? Compared by folded
+ * segments, so `/a/hooks2` is not above `/a/hooks/x.sh`.
+ */
+function hookScriptAtOrUnder(path: string, scripts: ReadonlySet<string>): boolean {
+  if (scripts.size === 0) return false;
+  const key = foldedPathKey(path);
+  if (scripts.has(key)) return true;
+  const prefix = key === "/" ? "/" : `${key}/`;
+  for (const script of scripts) if (script.startsWith(prefix)) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -4028,7 +4059,9 @@ export const hookSettingsReads = { count: 0 };
  * Every file a settings file names as a hook command (lead, CLAIMS L62289,
  * S2), as folded path keys, as given and as resolved. The settings read are
  * `settings.json` and `settings.local.json` in `~/.claude`, in the folder
- * `CLAUDE_CONFIG_DIR` names, and in `<gate root>/.claude`. Lazy: called only
+ * `CLAUDE_CONFIG_DIR` names, and in `<project>/.claude` for each project
+ * folder (the gate root, and `CLAUDE_PROJECT_DIR` when the hook has it
+ * absolute). Lazy: called only
  * when a landing is judged and is not guarded already, and read at most once
  * per hook process for the same folders. A file over
  * {@link HOOK_SETTINGS_MAX_BYTES}, not a regular file, or not JSON is
@@ -4037,17 +4070,21 @@ export const hookSettingsReads = { count: 0 };
  *
  * A word of a command is a path when it starts with `/`, `~/`, `$HOME/`,
  * `${HOME}/` or `$CLAUDE_PROJECT_DIR/` (`${CLAUDE_PROJECT_DIR}/`), quotes
- * removed: `~` and `$HOME` are this hook's HOME, `$CLAUDE_PROJECT_DIR` the
- * gate root. The file itself is guarded, not its folder. A path under `/dev`
- * is not taken.
+ * removed: `~` and `$HOME` are this hook's HOME, `$CLAUDE_PROJECT_DIR` each
+ * project folder. A RELATIVE word that holds a `/` and no `$`, backtick, glob
+ * character, brace or `=` (`./scripts/h.sh`, `tools/hooks/x.py`) is read
+ * against each project folder too. A word that reads any other variable is
+ * skipped: its value cannot be known here. The file itself is guarded, not
+ * its folder (a tree written, moved or removed above it is, see
+ * {@link hookScriptAtOrUnder}). A path under `/dev` is not taken.
  */
-export function namedHookScripts(home: string | null, configDirs: readonly string[], gateRoot: string | null): ReadonlySet<string> {
+export function namedHookScripts(home: string | null, configDirs: readonly string[], projectDirs: readonly string[]): ReadonlySet<string> {
   const folders: string[] = [];
   if (home !== null) folders.push(join(home, ".claude"));
   for (const dir of configDirs) folders.push(dir);
-  if (gateRoot !== null && isAbsolute(gateRoot)) folders.push(join(gateRoot, ".claude"));
+  for (const dir of projectDirs) folders.push(join(dir, ".claude"));
   const unique = [...new Set(folders)];
-  const key = JSON.stringify([home, gateRoot, unique]);
+  const key = JSON.stringify([home, projectDirs, unique]);
   const known = namedHookScriptsMemo.get(key);
   if (known !== undefined) return known;
   const scripts = new Set<string>();
@@ -4060,7 +4097,7 @@ export function namedHookScripts(home: string | null, configDirs: readonly strin
       for (const commandKey of HOOK_SETTINGS_COMMAND_KEYS) {
         if (!Object.prototype.hasOwnProperty.call(settings, commandKey)) continue;
         for (const command of jsonStringLeaves(settings[commandKey])) {
-          for (const path of hookCommandPaths(command, home, gateRoot)) {
+          for (const path of hookCommandPaths(command, home, projectDirs)) {
             scripts.add(foldedPathKey(path));
             const resolved = resolvedPath(path);
             if (resolved !== null) scripts.add(foldedPathKey(resolved));
@@ -4074,23 +4111,35 @@ export function namedHookScripts(home: string | null, configDirs: readonly strin
 }
 
 /** The words of one hook command that are paths, expanded and `..`-collapsed (see {@link namedHookScripts}). */
-function hookCommandPaths(command: string, home: string | null, gateRoot: string | null): string[] {
+function hookCommandPaths(command: string, home: string | null, projectDirs: readonly string[]): string[] {
   const out: string[] = [];
   for (const raw of command.split(/[\s;&|()<>`]+/u)) {
     const word = raw.replace(/["']/gu, "");
-    let path: string | null = null;
-    if (word.startsWith("/")) path = word;
-    else if (home !== null && word.startsWith("~/")) path = `${home}${word.slice(1)}`;
-    else if (home !== null && word.startsWith("$HOME/")) path = `${home}${word.slice("$HOME".length)}`;
-    else if (home !== null && word.startsWith("${HOME}/")) path = `${home}${word.slice("${HOME}".length)}`;
-    else if (gateRoot !== null && word.startsWith("$CLAUDE_PROJECT_DIR/")) path = `${gateRoot}${word.slice("$CLAUDE_PROJECT_DIR".length)}`;
-    else if (gateRoot !== null && word.startsWith("${CLAUDE_PROJECT_DIR}/")) path = `${gateRoot}${word.slice("${CLAUDE_PROJECT_DIR}".length)}`;
-    if (path === null || !isAbsolute(path)) continue;
-    const normal = resolvePathSegments(path);
-    // A device (`2>/dev/null`, `>/dev/stderr`) is no script, and guarding it
-    // would make `tee /dev/null` a card.
-    if (normal === "/dev" || normal.startsWith("/dev/")) continue;
-    out.push(normal);
+    const paths: string[] = [];
+    if (word.startsWith("/")) paths.push(word);
+    else if (word.startsWith("~/")) {
+      if (home !== null) paths.push(`${home}${word.slice(1)}`);
+    } else if (word.startsWith("$HOME/")) {
+      if (home !== null) paths.push(`${home}${word.slice("$HOME".length)}`);
+    } else if (word.startsWith("${HOME}/")) {
+      if (home !== null) paths.push(`${home}${word.slice("${HOME}".length)}`);
+    } else if (word.startsWith("$CLAUDE_PROJECT_DIR/")) {
+      for (const dir of projectDirs) paths.push(`${dir}${word.slice("$CLAUDE_PROJECT_DIR".length)}`);
+    } else if (word.startsWith("${CLAUDE_PROJECT_DIR}/")) {
+      for (const dir of projectDirs) paths.push(`${dir}${word.slice("${CLAUDE_PROJECT_DIR}".length)}`);
+    } else if (word.includes("/") && !/[$`*?[\]{}=~]/u.test(word)) {
+      // A relative word naming a file under the project (`./scripts/h.sh`).
+      for (const dir of projectDirs) paths.push(`${dir}/${word}`);
+    }
+    for (const path of paths) {
+      if (!isAbsolute(path)) continue;
+      const normal = resolvePathSegments(path);
+      // A device (`2>/dev/null`, `>/dev/stderr`) is no script, and guarding it
+      // would make `tee /dev/null` a card. In this extraction only: a landing
+      // under /dev is judged as before.
+      if (normal === "/dev" || normal.startsWith("/dev/")) continue;
+      out.push(normal);
+    }
   }
   return out;
 }
@@ -4158,6 +4207,17 @@ export function judgeWriteLanding(
       const entry = guardedEntryBelow(form, homes, configDirs);
       if (entry !== null) {
         return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can hold ${entry}, which is on the guarded list` };
+      }
+    }
+    // S2 (seat ruling on the review of e2a76e15): a tree written at a folder
+    // above a named hook script replaces it. Only a real tree writer
+    // (`tree === true`), not rule A's list words: `git add .` at a project
+    // root whose settings name a script under it stays as it was.
+    if (tree === true) {
+      for (const form of forms) {
+        if (hookScriptAtOrUnder(form, scripts)) {
+          return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can replace ${HOOK_SCRIPT_ENTRY}, which is on the guarded list` };
+        }
       }
     }
     // A directory holding `.git` (a folder, or a worktree's file) holds a
@@ -5138,6 +5198,26 @@ export function refineWriteLandings(
     return verdict;
   };
 
+  /** A move or delete at (or above) a named hook script, as a guarded landing, or `null` (S2). */
+  const hookScriptMovedOrRemoved = (word: string, at: number): (WriteLanding & { kind: "guarded" }) | null => {
+    if (word.length === 0) return null;
+    const resolved = resolveWriteWord(word, at, line);
+    if ("unreadable" in resolved) return null;
+    const spelled = spellingsOf({ spellings: resolved.spellings.map(staticPrefix) });
+    if (spelled === null) return null;
+    const scripts = guard.hookScripts();
+    if (scripts.size === 0) return null;
+    for (const each of spelled) {
+      if (each.length > MAX_LANDING_BYTES) continue;
+      for (const path of [resolvePathSegments(each), ...landingPathsOnce(each).paths]) {
+        if (hookScriptAtOrUnder(path, scripts)) {
+          return { kind: "guarded", rule: WRITE_GUARDED_RULE, path, why: `moving or removing ${path} reaches ${HOOK_SCRIPT_ENTRY}, which is on the guarded list` };
+        }
+      }
+    }
+    return null;
+  };
+
   /** Is this word, resolved, an existing directory on every reading? Unreadable is `false`. */
   const existingDirectory = (word: string, at: number): boolean => {
     const resolved = resolveWriteWord(word, at, line);
@@ -5435,6 +5515,20 @@ export function refineWriteLandings(
           }
           if (name.length === 0 || name === "." || name === "..") continue;
           take(judgeWord(`${dir.replace(/\/+$/u, "")}/${name}`, index, tree));
+        }
+      }
+    }
+    // S2 (seat ruling on the review of e2a76e15): a move or a delete of a
+    // named hook script, or of a folder above one, removes the hook's code or
+    // puts other code there. Only this rule reads a delete (point 7 keeps
+    // deletes off the list); a word it cannot read adds nothing here.
+    if (guarded === undefined) {
+      for (const change of changes) {
+        if (change.kind !== "move" && change.kind !== "remove") continue;
+        const found = hookScriptMovedOrRemoved(change.word, index);
+        if (found !== null) {
+          guarded = found;
+          break;
         }
       }
     }
