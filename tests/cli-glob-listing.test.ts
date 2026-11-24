@@ -921,12 +921,13 @@ test("lead ruling L62435 (S6, S7), through the real hook under the agent-village
     "rm -rf ./$X",
     "rm -rf /private/tmp/$SESSION",
     "D=.claude; rm -rf $D",
+    "rsync -a --delete src/ build/out/",
   ]) {
     const decision = decideAv(dir, home, dir, command);
     assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
   }
   // A parent, or an unreadable word below one: human-only.
-  for (const command of ["find . -delete", "find . -empty -delete", "find . -name settings.json -delete", "find . -delete -name '*.tmp'", "rm -rf ../$X", "rm -rf ~/$X", "rm -rf $CLAUDE_PROJECT_DIR", "chmod 000 .", "X=. ; rm -rf $X"]) {
+  for (const command of ["rsync -a --delete /tmp/b2-l62435-empty/ ./", "rsync -a --delete /tmp/b2-l62435-empty/ ~/", "find . -delete", "find . -empty -delete", "find . -name settings.json -delete", "find . -delete -name '*.tmp'", "rm -rf ../$X", "rm -rf ~/$X", "rm -rf $CLAUDE_PROJECT_DIR", "chmod 000 .", "X=. ; rm -rf $X"]) {
     const decision = decideAv(dir, home, dir, command);
     assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
   }

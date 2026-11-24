@@ -2262,3 +2262,36 @@ test("lead ruling L62435 (S1): each word a brace makes is judged by the parents 
     assert.deepEqual(classesOf(command), main.classes, command);
   }
 });
+
+test("lead ruling L62435 (S5): rsync --delete onto a parent is a recursive delete of what is below it", () => {
+  const organ = { "/w": [".claude", "src"], "/h": [".hermes"], ...realpaths("/w", "/h") };
+  for (const command of [
+    "rsync -a --delete /tmp/empty/ ./",
+    "rsync -a --delete /tmp/empty/ .",
+    "rsync -a --delete /tmp/empty/ ~/",
+    "rsync -a --delete /tmp/empty/ ..",
+    'rsync -a --delete /tmp/empty/ "$PWD"',
+    "rsync -a --delete /tmp/empty/ $HOME",
+    "rsync -a --del /tmp/empty/ ./",
+    "rsync -a --delete-before /tmp/empty/ ./",
+    "rsync -a --delete-during /tmp/empty/ ./",
+    "rsync -a --delete-delay /tmp/empty/ ./",
+    "rsync -a --delete-after /tmp/empty/ ./",
+    "rsync -a --delete-excluded /tmp/empty/ ./",
+    "rsync -a --delete /tmp/empty/ ../$X",
+  ]) {
+    const classes = classesOf(command);
+    assert.ok(classes.includes("policy.core"), `${command} -> ${classes.join(",")}`);
+    // Main's network.call rides beside.
+    assert.ok(classes.includes("network.call"), `${command} -> ${classes.join(",")}`);
+  }
+  leads(withListing("rsync -a --delete /tmp/empty/ ./", organ), "policy.core");
+  // `~` holding `.hermes`: its folder classes ride beside (L62013).
+  assert.equal(withListing("rsync -a --delete /tmp/empty/ ~/", organ)[0], "policy.core");
+  assert.deepEqual(withListing("rsync -a --delete /tmp/empty/ ./", { "/w": ["src"], ...realpaths("/w", "/h") }), ["network.call"]);
+  // A destination that is not a parent, one the text cannot read alone, a
+  // remote one, or no --delete: main's class.
+  for (const command of ["rsync -a --delete src/ build/out/", "rsync -a --delete /tmp/empty/ $X", "rsync -a --delete src/ host:/srv/x/", "rsync -a src/ ./"]) {
+    assert.deepEqual(classesOf(command), ["network.call"], command);
+  }
+});

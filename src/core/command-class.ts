@@ -9660,7 +9660,15 @@ function organParentOperands(
     // `--remove-source-files`, the older `--remove-sent-files`, or any prefix
     // (openrsync on this Mac takes `--remov` and both spellings): fail closed.
     const removes = args.some((arg) => arg.startsWith("--remov"));
-    return removes ? [...(plan?.sources ?? positionals)] : [];
+    // Lead ruling L62435 (S5): `--delete` and its spellings (`--del`,
+    // `--delete-before`, `-during`, `-delay`, `-after`, `-excluded`, and any
+    // other `--del…`) remove what is below the destination that the sources
+    // lack: the destination is read by the parents rule. A remote one
+    // (`host:path`) is not on this disk.
+    const deletes = args.some((arg) => (arg.split("=")[0] as string).startsWith("--del"));
+    const local = (dest: string): boolean => !/^[^/]*:/u.test(dest);
+    const dests = deletes ? (plan === null || plan.dests.length === 0 ? positionals.slice(-1) : plan.dests).filter(local) : [];
+    return [...(removes ? [...(plan?.sources ?? positionals)] : []), ...dests];
   }
   // zip `-m` / `--move`: deletes what it archives.
   if (basename === "zip") return hasShortFlag(args, ["m"]) || hasFlag(args, ["--move"]) ? positionals.slice(1) : [];
