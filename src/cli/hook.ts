@@ -4268,28 +4268,78 @@ const LANDING_DELETE_EVERY: ReadonlySet<string> = new Set(["rm", "rmdir", "shred
 const CHMOD_PLAIN_LONG_OPTIONS: ReadonlySet<string> = new Set(["--changes", "--silent", "--quiet", "--verbose", "--reference", "--preserve-root", "--no-preserve-root", "--help", "--version"]);
 
 /**
- * Is this chmod recursive, or may it be (lead rulings L62511 S-D and L62656)?
- * A short bundle holding `R` anywhere on the line (`-R`, `-Rv`, `-fR`; main's
- * own test), or a long option this hook does not know as plain: `--recursive`
- * and every abbreviation GNU's getopt accepts (`--rec`) fail closed so.
+ * Names the shell, the hook or the harness gives a meaning (lead ruling
+ * L62656, the seat's fourth review): a chmod operand that reads one is never
+ * relaxed. Every `BASH*`, `ZSH*` and `COMP*` name too.
  */
-export function chmodRecursive(args: readonly string[]): boolean {
-  return args.some((arg) => {
-    if (arg === "--") return false;
-    if (arg.startsWith("--")) {
-      const equals = arg.indexOf("=");
-      return !CHMOD_PLAIN_LONG_OPTIONS.has(equals === -1 ? arg : arg.slice(0, equals));
-    }
-    return arg.startsWith("-") && arg.slice(1).includes("R");
-  });
+const SHELL_SPECIAL_NAMES: ReadonlySet<string> = new Set([
+  "_", "REPLY", "BASH_REMATCH", "PWD", "OLDPWD", "OPTARG", "OPTIND", "IFS", "PATH", "HOME", "CDPATH", "TMPDIR", "HERMES_HOME",
+  "CLAUDE_PROJECT_DIR", "INIT_CWD", "MAPFILE", "PIPESTATUS", "FUNCNAME", "LINENO", "RANDOM", "SECONDS", "PPID", "SHLVL",
+  "UID", "EUID", "HOSTNAME", "COPROC", "argv", "status", "path", "cdpath", "fpath", "psvar", "match", "MATCH", "MBEGIN", "MEND", "mbegin", "mend",
+]);
+
+/** Is this a name the shell, the hook or the harness gives a meaning? */
+function shellSpecialName(name: string): boolean {
+  return SHELL_SPECIAL_NAMES.has(name) || STEERING_NAMES.includes(name) || /^(?:BASH|ZSH|COMP)/u.test(name);
+}
+
+/** One plain parameter and nothing else (`$X`, `${X}`, `$1`): its name, or `null`. */
+function plainParameterName(word: string): string | null {
+  const match = /^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\}|([1-9]))$/u.exec(word);
+  return match === null ? null : ((match[1] ?? match[2] ?? match[3]) as string);
+}
+
+/** A word with no expansion character at all: no `$`, backtick, substitution, brace, glob or `=name` head. */
+function plainLiteralWord(word: string): boolean {
+  return !/[$`{}*?[\]]/u.test(word) && !word.includes(SUBSTITUTION_SENTINEL) && !word.startsWith("=");
 }
 
 /**
- * The root a plain chmod's unread operand's literal tail is judged under
- * ({@link refineWriteLandings}): no list entry names it, so only the entries
- * matched anywhere (`.git/hooks`, `.claude/settings*` ...) can hit.
+ * The two shapes of an unread chmod operand lead ruling L62656 relaxes, read
+ * from the text alone, or `null`: (a) the whole word one plain parameter
+ * (`$SCRIPT`, `"$f"`, `$1`); (b) a literal prefix with no expansion
+ * character (no `~` either), `/`, and a final segment that is one plain
+ * parameter (`scripts/$NAME`, `./$NAME`). Whether it is relaxed is decided
+ * in {@link refineWriteLandings} (the line must not set the name; the prefix
+ * is judged as a tree).
  */
-const METADATA_UNREAD_ROOT = "__approval_unread_root__";
+export function chmodRelaxedShape(word: string): { name: string; prefix: string | null } | null {
+  const whole = plainParameterName(word);
+  if (whole !== null) return { name: whole, prefix: null };
+  const slash = word.lastIndexOf("/");
+  if (slash <= 0) return null;
+  const name = plainParameterName(word.slice(slash + 1));
+  const prefix = word.slice(0, slash);
+  if (name === null || !plainLiteralWord(prefix) || prefix.startsWith("~")) return null;
+  return { name, prefix };
+}
+
+/**
+ * May a chmod take the plain path of lead ruling L62656 (it is not, and
+ * cannot become, recursive)? Every word before `--` up to and including the
+ * mode is a plain literal (so `chmod $R 755 $D`, `R=-R; chmod $R 755 $D`,
+ * `chmod {-R,-v} 755 $D`, `chmod "$@"` and `chmod -$F x` are not); the
+ * options are chmod's own (`-[RcfvhHLP]+`, main's `chmodFiles`) without `R`
+ * and long ones known not to recurse; after the mode, every word is a plain
+ * literal that is no recursing option, or one of the two relaxed shapes.
+ */
+export function chmodPlainArgv(args: readonly string[]): boolean {
+  let modeSeen = false;
+  for (const arg of args) {
+    if (arg === "--") return modeSeen;
+    if (modeSeen && chmodRelaxedShape(arg) !== null) continue;
+    if (!plainLiteralWord(arg)) return false;
+    if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      if (!CHMOD_PLAIN_LONG_OPTIONS.has(equals === -1 ? arg : arg.slice(0, equals))) return false;
+      continue;
+    }
+    if (arg.startsWith("-") && arg.slice(1).includes("R")) return false;
+    if (!modeSeen && /^-[cfvhHLP]+$/u.test(arg)) continue;
+    modeSeen = true;
+  }
+  return true;
+}
 
 /** The packaging rows APRV-402 re-reads, whose candidates over-include on purpose. */
 const LANDING_PACKAGING_RULES: ReadonlySet<string> = new Set([
@@ -5311,52 +5361,51 @@ export function refineWriteLandings(
   };
 
   /**
-   * Is this word one the pass cannot read as a path (lead ruling L62656)?
-   * zsh's `=name`, a word {@link resolveWriteWord} gives up on (a variable the
-   * line does not set, a substitution, `~user` ...), or a relative word after
-   * a `cd` this pass cannot follow. A word that reads but whose landing an
-   * earlier segment changes, or a pattern the disk listing gives up on, is
-   * NOT unread here: those stay guarded.
+   * Lead ruling L62656, the seat's fourth review: the whole line is exactly
+   * one plain chmod segment (no `;`, `&&`, `||`, pipe, subshell, loop,
+   * function, other segment, env prefix, redirect or substitution), so no
+   * part of the line sets a name the operand reads (`read X`, `for X in`,
+   * `cd` for OLDPWD, `[[ =~ ]]`, `getopts` ... set names with no
+   * assignment, so a list of setters cannot be trusted).
    */
-  const operandUnread = (word: string, at: number): boolean => {
-    if (equalsExpansionOf(shapes[at], word) !== null) return true;
-    const resolved = resolveWriteWord(word, at, line);
-    if ("unreadable" in resolved) return true;
-    return spellingsOf(resolved) === null;
-  };
+  const singlePlainChmod = ((): boolean => {
+    if (top.length !== 1 || units.length !== 1) return false;
+    const only = top[0] as CommandSegmentShape;
+    return (
+      only.bin !== null &&
+      basename(only.bin) === "chmod" &&
+      only.assignments.length === 0 &&
+      only.writes.length === 0 &&
+      (only.clobberBashWrites?.length ?? 0) === 0 &&
+      only.substitutions.length === 0 &&
+      only.script === null &&
+      !only.opaqueShell &&
+      only.text.trim() === command.trim() &&
+      // No redirect (`2>/dev/null` included), pipe, list, background, group
+      // or newline anywhere in the text: kept simple, fails closed on a
+      // quoted one too.
+      !/[<>|&;()\n\r`]/u.test(command)
+    );
+  })();
 
   /**
-   * A plain chmod's unread operand keeps main's class (lead ruling L62656),
-   * except where its literal part alone names a guarded place ("a guarded
-   * literal still asks"): the segments before its first unread one
-   * (`~/.ssh/$X`, `.git/hooks/$H`), judged where they land, or the segments
-   * after its last unread one, judged under a root no list entry names, so
-   * only the entries matched anywhere can hit (`$D/.git/hooks/pre-push`, or
-   * `.claude/hooks/x.sh` after an unread `cd`). Only the list's own rule
-   * counts: a part this pass cannot read either adds nothing.
+   * Lead ruling L62656 (the seat's whitelist): is this plain chmod operand one
+   * the pass cannot read that keeps main's class? Only on a line that is one
+   * plain chmod segment, and only (a) one plain parameter (`$SCRIPT`,
+   * `"$f"`, `$1`), or (b) a literal prefix with no expansion character, `/`,
+   * and one such parameter (`scripts/$NAME`, `./$NAME`), whose prefix,
+   * judged as a TREE, is not at, under or above a guarded entry nor a pair's
+   * first half (`.git`, `.claude`, a config folder), and is read from the
+   * disk. The parameter is a positional or an ordinary name, never one the
+   * shell or this hook gives a meaning ({@link SHELL_SPECIAL_NAMES}). Every
+   * other unread word stays guarded.
    */
-  const metadataUnreadGuard = (word: string, at: number): (WriteLanding & { kind: "guarded" }) | null => {
-    const parts = word.split("/");
-    const unreadPart = (part: string, first: boolean): boolean =>
-      /[$`{}*?[\]]/u.test(part) || part.includes(SUBSTITUTION_SENTINEL) || (first && (part.startsWith("=") || (part.startsWith("~") && part !== "~")));
-    const firstUnread = parts.findIndex((part, index) => unreadPart(part, index === 0));
-    const lastUnread = parts.length - 1 - [...parts].reverse().findIndex((part, index) => unreadPart(part, index === parts.length - 1));
-    const literal: Array<{ judged: string; shown: string }> = [];
-    if (firstUnread > 0) {
-      const prefix = parts.slice(0, firstUnread).join("/");
-      if (prefix.length > 0) literal.push({ judged: prefix, shown: prefix });
-    }
-    // A word with no unread part (`firstUnread` -1) is unread through an
-    // unfollowed `cd`: all of it is the tail.
-    const tail = parts.slice(firstUnread === -1 ? 0 : lastUnread + 1).filter((part) => part.length > 0);
-    if (tail.length > 0) literal.push({ judged: `/${METADATA_UNREAD_ROOT}/${tail.join("/")}`, shown: `…/${tail.join("/")}` });
-    for (const { judged: each, shown } of literal) {
-      const judged = judgeWord(each, at);
-      if (judged.kind === "guarded" && judged.rule === WRITE_GUARDED_RULE) {
-        return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: word, why: `${word} is not read, but its literal part ${shown} lands on the guarded list (${judged.why})` };
-      }
-    }
-    return null;
+  const metadataRelaxed = (word: string, at: number): boolean => {
+    if (!singlePlainChmod) return false;
+    const shape = chmodRelaxedShape(word);
+    if (shape === null || shellSpecialName(shape.name)) return false;
+    if (shape.prefix === null) return true;
+    return judgeWord(shape.prefix, at, true).kind !== "guarded";
   };
 
   /** A move or delete at (or above) a named hook script, as a guarded landing, or `null` (S2). */
@@ -5406,13 +5455,13 @@ export function refineWriteLandings(
     /**
      * A plain (not recursive) chmod's operands (lead ruling L62656): judged
      * as writes when readable; an operand this pass cannot read keeps main's
-     * class (see {@link metadataUnreadGuard}).
+     * class only in the shapes {@link chmodRelaxedShape} reads.
      */
     metadata: string[];
     intoDirs: IntoDir[];
     trees: string[];
     unreadable: string | null;
-    changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS; metadata?: true }[];
+    changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[];
   } => {
     // A zsh clobber redirect (`>!`) writes zsh's target, in `shape.writes`,
     // and in bash a file named `!` in the segment's directory: both are judged.
@@ -5422,7 +5471,7 @@ export function refineWriteLandings(
     const trees: string[] = [];
     const metadata: string[] = [];
     let unreadable: string | null = null;
-    const changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS; metadata?: true }[] = writes.map((word) => ({ word, kind: "write" as const }));
+    const changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[] = writes.map((word) => ({ word, kind: "write" as const }));
     const bin = shape.bin === null ? null : basename(shape.bin);
     if (bin === null) return { writes, metadata, intoDirs, trees, unreadable, changes };
     // Every word not spelled as a flag, and every word after `--` (`touch --
@@ -5462,14 +5511,15 @@ export function refineWriteLandings(
         intoDirs.push({ dir: extra, sources, tree, contents });
       }
       if (bin === "mv") for (const source of sources) changes.push({ word: source, kind: "move" });
-    } else if (bin === "chmod" && !chmodRecursive(shape.args)) {
+    } else if (bin === "chmod" && chmodPlainArgv(shape.args)) {
       // Lead ruling L62656: a plain chmod changes metadata only (it makes no
       // entry and no link), so an operand this pass cannot read keeps main's
-      // class (`chmod +x $SCRIPT`, `chmod u+x $1`); a readable one is judged
-      // as before (`chmod 600 ~/.ssh/config` is guarded). Every operand, the
-      // mode included (over-included).
+      // class in the two shapes `metadataRelaxed` allows (`chmod +x $SCRIPT`,
+      // `chmod +x scripts/$NAME`); a readable one is judged as before
+      // (`chmod 600 ~/.ssh/config` is guarded). Every operand, the mode
+      // included (over-included).
       metadata.push(...operands);
-      for (const word of operands) changes.push({ word, kind: "write", metadata: true });
+      for (const word of operands) changes.push({ word, kind: "write" });
     } else if (bin === "chmod" || bin === "chown" || bin === "chgrp" || (bin === "sed" && (segment === null || segment.rule === "sed-in-place"))) {
       // Every operand, the mode and the script included (over-included). A
       // recursive chmod of a word this pass cannot read stays guarded (lead
@@ -5645,16 +5695,11 @@ export function refineWriteLandings(
       if (settled()) break;
       take(judgeWord(word, index));
     }
-    // Lead ruling L62656: a plain chmod's operand this pass cannot read keeps
-    // main's class; a readable one is judged as any write is.
+    // Lead ruling L62656: a plain chmod's operand in a relaxed shape keeps
+    // main's class; every other one is judged as any write is.
     for (const word of metadata) {
       if (settled()) break;
-      if (!operandUnread(word, index)) {
-        take(judgeWord(word, index));
-        continue;
-      }
-      const kept = metadataUnreadGuard(word, index);
-      if (kept !== null) take(kept);
+      if (!metadataRelaxed(word, index)) take(judgeWord(word, index));
     }
     for (const word of trees) {
       if (settled()) break;
@@ -5770,9 +5815,6 @@ export function refineWriteLandings(
         treeChangedUnknown ??= why;
         if (counted) changedUnknown ??= why;
       };
-      // A plain chmod makes no entry and no link (lead ruling L62656): an
-      // operand it cannot read leaves every later landing as the disk shows it.
-      if (change.metadata === true && operandUnread(change.word, index)) continue;
       const resolved = resolveWriteWord(change.word, index, line);
       if ("unreadable" in resolved) {
         unknown(`an earlier segment (\`${shape.text}\`) changes ${change.word}, which cannot be read, so no later landing on the disk is trusted`);

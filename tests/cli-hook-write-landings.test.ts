@@ -39,7 +39,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
-import { classifyForHook, hookSettingsReads, HOOK_SETTINGS_MAX_BYTES, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, memoDiskReads, writeLandingJudgements, writeLandingMemo, type WriteScopeContext } from "../src/cli/hook.js";
+import { chmodPlainArgv, chmodRelaxedShape, classifyForHook, hookSettingsReads, HOOK_SETTINGS_MAX_BYTES, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, memoDiskReads, writeLandingJudgements, writeLandingMemo, type WriteScopeContext } from "../src/cli/hook.js";
 import { classifyCommandInThisReading } from "../src/core/command-class.js";
 import { withNamesAsSpelled } from "../src/core/name-fold.js";
 import { commandGate } from "../src/cli/gate-window.js";
@@ -2105,24 +2105,78 @@ function landingEntries(seen: Seen): Array<[string, string]> {
   return seen.segments.filter(([, rule]) => ["write-guarded", "write-unreadable"].includes(rule));
 }
 
-test("lead ruling L62656: a plain chmod's unread operand keeps main's class; a readable guarded one, a recursive one and every other program stay strict", () => {
+test("lead ruling L62656: a plain chmod's unread operand keeps main's class in two shapes only; every other word, a readable guarded one, a recursive one and every other program stay strict", () => {
   mkdirSync(join(ws, ".git", "hooks"), { recursive: true });
+  mkdirSync(join(ws, ".claude"), { recursive: true });
   mkdirSync(join(home, ".claude", "hooks"), { recursive: true });
   // Main's test (cli-glob-listing, L62435): each is allowed on main, and the
-  // pass adds nothing to it.
-  for (const command of ['chmod +x "$f"', "chmod +x ./$NAME", "chmod u+x $1", "chmod 755 $DIR", "chmod +x $SCRIPT", "chmod +x scripts/$NAME"]) {
-    const seen = see(command);
-    assert.equal(seen.ok, true, command);
-    assert.deepEqual(landingEntries(seen), [], `${command}: ${seen.notes}`);
-    assert.deepEqual(seen.segments, [[WORKSPACE, "workspace-write"]], command);
-  }
-  // Any other word the pass cannot read, and an unfollowed cd, keep main's answer too.
-  for (const command of ["chmod +x $(cat list)", "chmod +x =tool", 'cd "$D" && chmod +x x.sh', "chmod 600 ~root/x", "chmod -v 755 $X", "chmod --verbose 755 $X", "chmod +x -- $X"]) {
-    const seen = see(command);
+  // pass adds nothing to it. Shape (a), one plain parameter; shape (b), a
+  // literal prefix judged as a tree and one plain parameter. A folder that is
+  // no checkout (a tree at a checkout is guarded, so `./$NAME` there is not
+  // relaxed).
+  const plain = join(base, "l62656-plain");
+  mkdirSync(join(plain, "scripts"), { recursive: true });
+  for (const command of ['chmod +x "$f"', "chmod +x ./$NAME", "chmod u+x $1", "chmod 755 $DIR", "chmod +x $SCRIPT", "chmod +x scripts/$NAME", "chmod +x ${SCRIPT}", "chmod -v 755 $X", "chmod --verbose 755 $X", "chmod +x -- $X", "chmod +x a $X"]) {
+    const seen = see(command, WRITE_SCOPE_OFF, plain);
     assert.equal(seen.ok, true, command);
     assert.deepEqual(landingEntries(seen), [], `${command}: ${seen.notes}`);
   }
-  // A readable operand on the list is guarded, beside an unread one too, and
+  assert.deepEqual(see("chmod +x $SCRIPT").segments, [[WORKSPACE, "workspace-write"]]);
+  // In a checkout, `./$NAME` is a tree at the checkout: strict.
+  assert.ok(landingEntries(see("chmod +x ./$NAME")).some(([cls]) => cls === GUARDED));
+  // Every other unread word keeps decision B: a parameter inside or before a
+  // segment, a prefix at, under or above a guarded entry or a pair's first
+  // half, a brace, a glob, a substitution, =name, ~user, two parameters, a
+  // name the line sets (twice here) or may set, an unfollowed cd.
+  for (const command of [
+    "chmod +x .git/$H/pre-push",
+    "chmod +x .git/$H",
+    "chmod +x .claude/$H",
+    "chmod 600 ~/.ssh/$K",
+    "chmod +x $D/hooks/pre-push",
+    "chmod 600 ~/.ss$X/k",
+    "chmod +x {a,b}/$X",
+    "chmod +x scripts/*$X",
+    "chmod +x scripts/x$X",
+    "chmod +x ~/$X",
+    "chmod +x .git/hooks/$H",
+    "chmod +x ~/.claude/hooks/$H",
+    'chmod +x "$DIR/$F"',
+    "chmod +x $(pick)",
+    "chmod +x =tool",
+    "chmod 600 ~root/x",
+    "X=a; X=b; chmod +x $X",
+    "set -- a; chmod +x $1",
+    "eval X=a; chmod +x $X",
+    "f() { chmod +x $1; }; f ~/.ssh/k",
+    "for f in a b; do chmod +x $f; done",
+    'cd "$D" && chmod +x x.sh',
+    'cd "$D" && chmod +x scripts/$X',
+    // The fourth review: names set with no assignment, and any line that is
+    // more than one plain chmod segment.
+    "read X; chmod +x $X",
+    "cd ~/.ssh && chmod 600 $OLDPWD",
+    "for X in ~/.ssh/*; do chmod 600 $X; done",
+    "[[ a =~ (.*) ]] && chmod +x ${BASH_REMATCH[1]}",
+    "chmod +x $_",
+    "chmod +x $REPLY",
+    "chmod +x $OPTARG",
+    "chmod +x $PATH",
+    "chmod +x $BASH_SOURCE",
+    "true; chmod +x $X",
+    "chmod +x $X; true",
+    "true && chmod +x $X",
+    "(chmod +x $X)",
+    "X=a chmod +x $X",
+    "chmod +x $X 2>/dev/null",
+    "bash -lc 'chmod +x $X'",
+    "echo | chmod +x $X",
+  ]) {
+    const seen = see(command);
+    if (!seen.ok) continue; // refused outright is stricter still
+    assert.ok(landingEntries(seen).some(([cls]) => cls === GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+  // A readable operand on the list is guarded, beside a relaxed one too, and
   // so is the segment's own redirect.
   for (const command of ["chmod 600 ~/.ssh/config", "chmod +x ~/.claude/hooks/x.sh", "chmod +x .git/hooks/pre-push", "chmod +x $S ~/.ssh/config", "chmod +x $S > ~/.zshrc"]) {
     const seen = see(command);
@@ -2130,38 +2184,58 @@ test("lead ruling L62656: a plain chmod's unread operand keeps main's class; a r
   }
   // A redirect onto an unread word writes its content: unreadable, as before.
   assert.deepEqual(landingEntries(see("chmod +x $X > $X")), [[GUARDED, "write-unreadable"]]);
-  // A guarded literal part of an unread word still asks: the part before the
-  // first unread segment where it lands, the part after the last one by the
-  // entries matched anywhere.
-  for (const command of ["chmod 600 ~/.ssh/$X", "chmod +x .git/hooks/$H", "chmod +x ~/.claude/hooks/$H", "chmod +x $D/.git/hooks/pre-push", 'cd "$D" && chmod +x .git/hooks/pre-push']) {
+  // A chmod that is or may become recursive stays strict (L62511 S-D): any
+  // spelling of -R, an unknown long option (`--rec`, an abbreviation GNU's
+  // getopt takes), and any word before the mode the text cannot read, a
+  // variable the line sets to -R included.
+  for (const command of [
+    "chmod -R +x $X",
+    "chmod -Rv 755 $X",
+    "chmod -fR 755 $X",
+    "chmod --recursive 755 $X",
+    "chmod --rec 755 $X",
+    "chmod 755 $X -R",
+    'chmod -R 755 "$OUT"',
+    "chmod {-R,-v} 755 $D",
+    "chmod $R 755 $D",
+    "R=-R; chmod $R 755 $D",
+    "chmod $OPTS +x $X",
+    "chmod -$F 755 $X",
+    'chmod "$@"',
+    "chmod $MODE $X",
+    "chmod 755 $X -$F",
+  ]) {
     const seen = see(command);
-    assert.deepEqual(landingEntries(seen), [[GUARDED, "write-guarded"]], `${command}: ${JSON.stringify(seen.segments)}`);
-    assert.match(seen.notes, /its literal part .* lands on the guarded list/u, command);
-  }
-  // A literal part off the list adds nothing.
-  for (const command of ["chmod +x $D/scripts/run.sh", "chmod 755 $DIR/sub", "chmod +x sub/$X/one.sh"]) {
-    assert.deepEqual(landingEntries(see(command)), [], command);
-  }
-  // A recursive chmod of an unread word stays strict (L62511 S-D), however it
-  // is spelled, `--rec` included (an abbreviation GNU's getopt takes).
-  for (const command of ["chmod -R +x $X", "chmod -Rv 755 $X", "chmod -fR 755 $X", "chmod --recursive 755 $X", "chmod --rec 755 $X", "chmod 755 $X -R", 'chmod -R 755 "$OUT"']) {
-    const seen = see(command);
-    assert.deepEqual(landingEntries(seen), [[GUARDED, "write-unreadable"]], `${command}: ${JSON.stringify(seen.segments)}`);
+    if (!seen.ok) continue;
+    assert.ok(landingEntries(seen).some(([cls]) => cls === GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
   }
   // A pattern operand is read through the pattern rule, match by match.
   assert.deepEqual(landingEntries(see("chmod +x scripts/*")), []);
   assert.deepEqual(landingEntries(see("chmod 600 ~/.ss?/*")), [[GUARDED, "write-guarded"]]);
   // Every other program keeps decision B: touch makes a file, a redirect
   // writes one, sed -i rewrites one.
-  for (const command of ["touch $X", "echo x > $X", "sed -i s/a/b/ $X", "truncate -s 0 $X", "tee $X"]) {
+  for (const command of ["touch $X", "echo x > $X", "sed -i s/a/b/ $X", "truncate -s 0 $X", "tee $X", "touch scripts/$X"]) {
     const seen = see(command);
     assert.deepEqual(landingEntries(seen), [[GUARDED, "write-unreadable"]], `${command}: ${JSON.stringify(seen.segments)}`);
   }
 });
 
-test("lead ruling L62656: a plain chmod of an unread word makes no entry and no link, so a later tree is read from the disk; a recursive one does not change that rule", () => {
+test("lead ruling L62656: the argv and operand shapes, read from the text", () => {
+  for (const args of [["+x", "$X"], ["-v", "755", "$X"], ["u+x", "scripts/$N", "--", "$Y"], ["--changes", "+x", "a"]]) assert.equal(chmodPlainArgv(args), true, args.join(" "));
+  for (const args of [["-R", "+x", "$X"], ["$R", "755", "$D"], ["-$F", "x"], ["{-R,-v}", "755", "$D"], ["--rec", "755", "$D"], ["755", "$D", "-R"], ["$M", "a"], ["--", "755", "a"]]) assert.equal(chmodPlainArgv(args), false, args.join(" "));
+  assert.deepEqual(chmodRelaxedShape("$X"), { name: "X", prefix: null });
+  assert.deepEqual(chmodRelaxedShape("${X}"), { name: "X", prefix: null });
+  assert.deepEqual(chmodRelaxedShape("$1"), { name: "1", prefix: null });
+  assert.deepEqual(chmodRelaxedShape("./$N"), { name: "N", prefix: "." });
+  assert.deepEqual(chmodRelaxedShape("a/b/$N"), { name: "N", prefix: "a/b" });
+  for (const word of ["$X/y", "x$X", "$X$Y", "$D/$F", "~/$X", "{a,b}/$X", "a*/$X", "/$X", "a/$X/", "$@", "${X:-a}", "=x", "$(x)"]) assert.equal(chmodRelaxedShape(word), null, word);
+});
+
+test("lead ruling L62656: only a one-segment chmod is relaxed, so a later segment's tree is never read past an unread chmod word", () => {
   mkdirSync(join(ws, "tree-src"), { recursive: true });
-  assert.deepEqual(landingEntries(see("chmod +x $S && cp -r tree-src tree-out")), []);
+  // Two segments: the chmod is not relaxed (the fourth review), so its unread
+  // word is guarded and no later landing is read from the disk, as before.
+  assert.deepEqual(landingEntries(see("chmod +x $S && cp -r tree-src tree-out")), [[GUARDED, "write-unreadable"], [GUARDED, "write-unreadable"]]);
   assert.deepEqual(landingEntries(see("chmod -R +x $S && cp -r tree-src tree-out")), [[GUARDED, "write-unreadable"], [GUARDED, "write-unreadable"]]);
   assert.deepEqual(landingEntries(see("touch $S && cp -r tree-src tree-out")), [[GUARDED, "write-unreadable"], [GUARDED, "write-unreadable"]]);
 });
@@ -2170,7 +2244,10 @@ test("lead ruling L62656, through the real hook under the agent-village classes:
   const lab = join(base, "l62656-av");
   const dir = join(lab, "proj");
   const labHome = join(lab, "home");
-  for (const sub of ["src", "scripts", join(".git", "hooks"), "../home/.ssh", "../home/.claude/hooks"]) mkdirSync(join(dir, sub), { recursive: true });
+  // As main's lab: no checkout (a tree at a checkout is guarded, so `./$NAME`
+  // is relaxed only outside one), a .claude folder with settings.
+  for (const sub of ["src", "scripts", ".claude", "../home/.ssh", "../home/.claude/hooks"]) mkdirSync(join(dir, sub), { recursive: true });
+  writeFileSync(join(dir, ".claude", "settings.json"), "made-up\n");
   writeFileSync(join(dir, "scripts", "run.sh"), "made-up\n");
   writeFileSync(
     join(dir, "APPROVAL.md"),
@@ -2194,7 +2271,7 @@ test("lead ruling L62656, through the real hook under the agent-village classes:
     assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
     assert.match(decision.reason, /files\.write\.guarded/u, command);
   }
-  for (const command of ["chmod -R +x $X", 'chmod -R 755 "$OUT"']) {
+  for (const command of ["chmod -R +x $X", 'chmod -R 755 "$OUT"', "R=-R; chmod $R 755 $D", "chmod +x $(pick)", "X=a; X=b; chmod +x $X", "chmod +x .claude/$H", "chmod 600 ~/.ssh/$K"]) {
     assert.equal(decide(command).permission, "deny", command);
   }
 });
