@@ -545,3 +545,71 @@ test("review-b A686-FOLD7 S2 (lead ruling L62219), through the real hook: a long
   assert.equal(finished.permission, "deny", finished.reason);
   assert.match(finished.reason, /^hook-timeout: .*policy\.edit\.r[0-3]/u);
 });
+
+test("review-b A686-FOLD7 S1 (lead ruling L62219), through the real hook after #690: naming a routed file first no longer clears the folder", () => {
+  // Review-b's policy R4, made up: the CI and agent routes human-only, the
+  // SPEC.md route and policy.edit autonomous. Before main's #690 the first
+  // routed operand answered for the segment, so `rm -rf SPEC.md .github` was
+  // allowed on SPEC.md's terms while `rm -rf .github` was denied.
+  const dir = join(scratch, "s1-lab");
+  for (const [sub, file] of [[".github/workflows", "ci.yml"], [".claude/agents", "a.md"], ["", "SPEC.md"], ["", "README.md"]] as const) {
+    mkdirSync(join(dir, sub), { recursive: true });
+    writeFileSync(join(dir, sub, file), "made-up\n");
+  }
+  const home = join(scratch, "s1-home");
+  mkdirSync(home, { recursive: true });
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    [
+      "# Policy",
+      "",
+      "```yaml approval-policy",
+      'version: "0.1"',
+      "defaults:",
+      "  autonomy: human-only",
+      '  approval_ttl: "1h"',
+      "  on_expiry: reject",
+      "protected_paths:",
+      '  - { path: ".github/workflows/", class: policy.edit.ci }',
+      '  - { path: ".claude/agents/", class: policy.edit.agents }',
+      '  - { path: "SPEC.md", class: policy.edit.spec }',
+      "classes:",
+      "  read.*:",
+      "    autonomy: autonomous",
+      "  files.write.workspace:",
+      "    autonomy: autonomous",
+      "  files.delete.out_of_scope:",
+      "    autonomy: autonomous",
+      "  policy.edit:",
+      "    autonomy: autonomous",
+      "  policy.edit.ci:",
+      "    autonomy: human-only",
+      "  policy.edit.agents:",
+      "    autonomy: human-only",
+      "  policy.edit.spec:",
+      "    autonomy: autonomous",
+      "```",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(runCliIn(["policy", "attest", "--as", "human:alice"], dir).code, 0);
+  // The control: the SPEC.md route alone is allowed, so a deny below is the folder's.
+  assert.equal(decideIn(dir, home, "rm -rf SPEC.md").permission, "allow");
+  assert.equal(decideIn(dir, home, "rm -rf .github").permission, "deny");
+  for (const command of [
+    "rm -rf SPEC.md .github",
+    "rm -rf .github SPEC.md",
+    "rm -rf SPEC.md README.md .github",
+    "rm -rf SPEC.md .github .claude",
+    "rm -rf SPEC.md .github/workflows",
+    "rm -rf SPEC.md ./.github/",
+    "rm -rf SPEC.md .GitHub",
+    "chmod -R 000 SPEC.md .github",
+    "mv SPEC.md .github x/",
+    "echo x > SPEC.md > .github",
+  ]) {
+    const decided = decideIn(dir, home, command);
+    assert.equal(decided.permission, "deny", `${command}: ${decided.reason}`);
+    assert.match(decided.reason, /^hook-class-human-only: class policy\.(edit\.ci|edit\.agents|core) /u, command);
+  }
+});
