@@ -378,8 +378,22 @@ const FIXTURES: readonly Fixture[] = [
   { command: "rm dist/stale.js", class: "files.write.workspace", rule: "rm-workspace", row: "rm" },
   { command: "rm -rf /etc/hosts", class: "files.delete.out_of_scope", rule: "rm-absolute", row: "rm" },
   { command: "rm ../sibling/file", class: "files.delete.out_of_scope", rule: "rm-parent", row: "rm" },
-  { command: "rm -rf .", class: "files.delete.out_of_scope", rule: "rm-recursive-root", row: "rm" },
+  // Lead ruling L61587 (organ parents): the working directory may hold an
+  // organ directory; with no listing that is the strict answer, and with one
+  // that shows none it is main's.
+  { command: "rm -rf .", class: "policy.core", rule: "protected-path", row: "rm" },
+  {
+    command: "rm -rf .",
+    class: "files.delete.out_of_scope",
+    rule: "rm-recursive-root",
+    row: "rm",
+    context: { globDisk: { cwd: "/w", home: "/h", listings: new Map([["/w", ["src", "dist"]]]) } },
+  },
+  // An ordinary variable alone keeps main's class (lead ruling L62435, S7;
+  // it was policy.core); below a proven parent it may be the workspace.
   { command: "rm -rf $TARGET", class: "files.delete.out_of_scope", rule: "rm-unreadable-path", row: "rm" },
+  { command: "rm -rf ../$TARGET", class: "policy.core", rule: "protected-path", row: "rm" },
+  { command: "rm -rf $TARGET/x", class: "files.delete.out_of_scope", rule: "rm-unreadable-path", row: "rm" },
   { command: "rm -rf node_modules", class: "files.write.workspace", rule: "rm-workspace", row: "rm" },
 
   // -- scratch deletes (APRV-267) -------------------------------------------
@@ -432,11 +446,13 @@ const FIXTURES: readonly Fixture[] = [
     row: "rm",
     context: SCRATCH_ROOTS,
   },
-  // A `..` segment: the text says one place, the kernel goes to another.
+  // A `..` segment: the text says one place, the kernel goes to another
+  // (after a symlink it may follow: the parents rule fails closed, L61587
+  // security review 7).
   {
     command: "rm -rf /private/tmp/claude-501/sess/scratchpad/../../../etc",
-    class: "files.delete.out_of_scope",
-    rule: "rm-absolute",
+    class: "policy.core",
+    rule: "protected-path",
     row: "rm",
     context: SCRATCH_ROOTS,
   },
@@ -458,8 +474,18 @@ const FIXTURES: readonly Fixture[] = [
     context: SCRATCH_ROOTS,
   },
   // Unreadable values: an unexpanded variable and a glob could name anything.
+  // An ordinary variable below a directory that holds neither the working
+  // directory nor the home keeps main's class (lead ruling L62435, S7). With
+  // a readable name after it, still not scratch.
   {
     command: "rm -rf /private/tmp/$SESSION",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
+    row: "rm",
+    context: SCRATCH_ROOTS,
+  },
+  {
+    command: "rm -rf /private/tmp/$SESSION/out",
     class: "files.delete.out_of_scope",
     rule: "rm-absolute",
     row: "rm",
@@ -720,11 +746,15 @@ const FIXTURES: readonly Fixture[] = [
   { command: "grep -l TODO src/a.ts", class: "read.shell", rule: "read-shell" },
   { command: "grep -o TODO src/a.ts", class: "read.shell", rule: "read-shell" },
   // …and the primaries that make `find` act.
+  // A find that deletes under a parent of an organ directory (lead ruling
+  // L62013): with no listing, fail closed; main's class rides beside. A name
+  // test narrows it (lead ruling L62435, S7): main's class.
   {
     command: "find . -type f -delete",
-    class: "files.delete.out_of_scope",
-    rule: "find-delete",
+    class: "policy.core",
+    rule: "protected-path",
   },
+  { command: "find . -name '*.tmp' -delete", class: "files.delete.out_of_scope", rule: "find-delete" },
   { command: "find . -name x -fprint out.txt", class: "files.write.workspace", rule: "find-write" },
 
   // -- the overrides, split three ways (APRV-198) ---------------------------
@@ -925,7 +955,9 @@ test("APRV-283: a find that deletes is not a read, with or without the discard",
     const result = classifyCommand(command);
     assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
     if (!result.ok) return;
-    assert.deepEqual(result.classes, ["files.delete.out_of_scope"], command);
+    // Lead ruling L62013: `.` may hold an organ directory (no listing here),
+    // so the parents rule's class rides beside main's.
+    assert.deepEqual(result.classes, ["policy.core", "files.delete.out_of_scope"], command);
   }
 });
 
