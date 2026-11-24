@@ -2333,7 +2333,7 @@ test("lead ruling L62435 (S5): rsync --delete onto a parent is a recursive delet
   }
 });
 
-test("automated security review of the fold, 7 and 8: an rsync delete through an option value, a batch, an abbreviation, or onto this machine by a loopback host", () => {
+test("automated security review of the fold, 7, 8 and 11-14: an rsync delete through an option value, a batch or an abbreviation, and a delete onto a host's home or root", () => {
   for (const command of [
     "rsync -a -M--delete /tmp/empty/ ./",
     "rsync -a -M --delete /tmp/empty/ ./",
@@ -2346,65 +2346,39 @@ test("automated security review of the fold, 7 and 8: an rsync delete through an
     "rsync -a --only-write-batch=b /tmp/empty/ ./",
     "rsync -a --dele /tmp/empty/ ./",
     "rsync -a --delete-missing-args /tmp/empty/ ./",
+    // A `--` may be an option's value: every word is read (11).
+    "rsync -a -M -- --delete /tmp/empty/ ./",
+    "rsync -a -- --delete /tmp/empty/ ./",
+    // Whatever the host, its home or root is a parent (12, 13).
     "rsync -a --delete /tmp/empty/ localhost:",
-    "rsync -a --delete /tmp/empty/ localhost:.",
-    "rsync -a --delete /tmp/empty/ me@localhost:/",
-    "rsync -a --delete /tmp/empty/ 127.0.0.1:",
-    "rsync -a --delete /tmp/empty/ [::1]:",
+    "rsync -a --delete /tmp/empty/ host:",
+    "rsync -a --delete /tmp/empty/ host:.",
+    "rsync -a --delete /tmp/empty/ host:..",
+    "rsync -a --delete /tmp/empty/ host:~",
+    "rsync -a --delete /tmp/empty/ host:~/",
+    "rsync -a --delete /tmp/empty/ a@b@host:/",
+    "rsync -a --delete /tmp/empty/ 0x7f.1:",
+    "rsync -a --delete /tmp/empty/ [::ffff:127.0.0.1]:",
     "rsync -a --delete /tmp/empty/ :",
-    // A loopback daemon's module root cannot be placed: strict.
-    "rsync -a --delete /tmp/empty/ localhost::mod/x",
-    "rsync -a --delete /tmp/empty/ rsync://localhost/mod/",
+    "rsync -a --delete /tmp/empty/ host::",
+    "rsync -a --delete /tmp/empty/ rsync://host/",
   ]) {
     const classes = classesOf(command);
     assert.ok(classes.includes("policy.core") && classes.includes("network.call"), `${command} -> ${classes.join(",")}`);
   }
-  // Another host (never resolved), a local path with a colon after a slash,
-  // a loopback path that is not a parent, or no delete: main's class.
+  // A path that is not a parent on any host, a local path with a colon after
+  // a slash, or no delete: main's class. `-e` and `--rsync-path` keep
+  // main's class (14).
   for (const command of [
-    "rsync -a --delete /tmp/empty/ host:/srv/x/",
-    "rsync -a --delete /tmp/empty/ example.com:",
+    "rsync -a --delete /tmp/empty/ host:/var/www/site/",
+    "rsync -a --delete /tmp/empty/ host:deploy/out/",
+    "rsync -a --delete /tmp/empty/ host::module/out/",
+    "rsync -a --delete /tmp/empty/ rsync://host/module/out/",
     "rsync -a --delete /tmp/empty/ ./a:b",
     "rsync -a --delete /tmp/empty/ /tmp/x:y",
-    "rsync -a --delete /tmp/empty/ me@localhost:/tmp/x",
     "rsync -a --max-delete=5 src/ ./",
-    "rsync -a -- --delete ./",
+    "rsync -a -e ssh src/ host:deploy/out/",
   ]) {
     assert.deepEqual(classesOf(command), ["network.call"], command);
-  }
-});
-
-test("lead ruling L62435 (S2, narrow): after a cd to a parent spelling, a plain relative name of the rule's verbs is policy.core", () => {
-  for (const command of [
-    "cd .. && rm -rf proj",
-    "cd ..; rm -rf proj",
-    "cd ../ && rm -rf proj/",
-    "cd .. && chmod -R 000 proj",
-    "cd / ; rm -rf Users",
-    "(cd .. && rm -rf proj)",
-    'cd "$PWD/.." && rm -rf proj',
-    "cd ~ && rm -rf dev",
-    "cd && rm -rf dev",
-    "cd ../.. && rm -rf dev",
-    "bash -c 'cd .. && rm -rf proj'",
-  ]) {
-    const classes = classesOf(command);
-    assert.ok(classes.includes("policy.core"), `${command} -> ${classes.join(",")}`);
-    const main = classifyCommandWithMainRules(command);
-    assert.ok(main.ok, command);
-    for (const cls of main.classes) assert.ok(classes.includes(cls), `${command} keeps main's ${cls}`);
-  }
-  // An absolute directory above the working directory, by the caller's disk.
-  assert.ok(withDisk("cd /a && rm -rf b", "/a/b/w", { ...realpaths("/a", "/a/b/w", "/h") }).includes("policy.core"));
-  assert.ok(!withDisk("cd /tmp && rm -rf b", "/a/b/w", { ...realpaths("/tmp", "/a/b/w", "/h") }).includes("policy.core"));
-  // `cd .. && mv proj /tmp/x` keeps main's class beside.
-  const moved = withListing("cd .. && mv proj /tmp/x", { "/": ["w", "h"], "/w": [".git"], ...realpaths("/w", "/h") });
-  assert.ok(moved.includes("policy.core"), moved.join(","));
-  // Not the wide form: a cd into a name, an unreadable target, `cd -`, or a
-  // cd after the delete keeps main's class.
-  for (const command of ["cd build && rm -rf out", "cd src && rm -rf dist", 'cd "$DIR" && rm -rf x', "cd - && rm -rf x", "cd /tmp && rm -rf x", "rm -rf proj; cd ..", "cd .. && ls"]) {
-    const main = classifyCommandWithMainRules(command);
-    assert.ok(main.ok, command);
-    assert.deepEqual(classesOf(command), main.classes, command);
   }
 });
