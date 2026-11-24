@@ -249,6 +249,167 @@ path under it. Not covered, a follow-up: a parent of an organ directory
 `find . -name .claude -exec rm …` stays refused (opaque); case variants
 (`rm -rf .Claude`) as for every guarded path.
 
+**Deleting, moving or locking a PARENT of an organ directory is that
+directory's class (lead ruling L61587).** `rm -rf "$PWD"`, `rm -rf ~`, `chmod
+-R 000 .` and `mv "$PWD" ../x` remove or lock every organ directory under
+them, and were `files.delete.out_of_scope` or an ordinary write. A recursive
+`rm`, a `mv` source, or a `chmod` (with or without `-R`: `chmod 000 .` locks
+every organ directory below too) whose operand is the working directory (`.`,
+`./`, `$PWD`, `"$PWD"`, `${PWD}`, `"$PWD/"`, `$(pwd)`, `$(pwd -P)`, `sub/..`,
+`../<this directory>`), an ancestor of it (`..`, `../..`, `sub/../..`, `/`),
+the home (`~`, `~/`, `$HOME`) or an ancestor of the home now takes the
+strictest class among the guarded names the hook's listing shows there: an
+organ directory (`.claude`, `.cursor`, `.grok`, `.muse`: `policy.core`;
+`.github`: `policy.edit`), `.approval`, `.codex`, `.hermes`, `APPROVAL.md` and
+the other guarded files, or `.git` (`vcs.history.rewrite`), in any case
+(`.Claude` is `.claude` on a case-insensitive volume). An ancestor is read
+together with every directory from it down to the working directory and the
+home. A path that holds neither as written, through `..` (`../other-project`)
+or absolute (`/tmp/build`), is compared with them by the canonical paths the
+hook resolves (symlinks followed, letter case as on disk): one that reaches
+either by another spelling (`/tmp/x` for /private/tmp/x, `/Users/Me/Proj` for
+/Users/me/proj) is `policy.core`, one that is provably elsewhere is read by
+its own listing, and one the hook could not resolve fails closed. A `..` after
+a name (`link/..`, `sub/../x`) is placed as the kernel reads it, after any
+symlink it follows: by the hook's resolution of the operand as written, and
+fails closed without it. A directory that holds none keeps its class,
+unchanged from main (`rm -rf .` in a tree of sources is
+`files.delete.out_of_scope`). The rule adds its class and never takes one
+away: the class the segment takes without it (main's, an ordinary write
+included) rides beside, so under a policy that holds `files.write.workspace`
+stricter than `policy.edit` main's answer stands. The rule is one of the
+GLOB-WRITE family the seam switches off for main's pass (lead ruling
+L61926), so main's answer for the whole line joins it too. Lead ruling
+L62013: a parent takes the classes of every organ folder it holds, each by
+the folder rule (the folder's contents and the policy's routed entries under
+it included: `rm -rf .` holding `.github` is `policy.edit` and
+`policy.edit.ci` where `.github/workflows/` is routed there, holding
+`.approval` it carries `log.mutate`). Lead ruling L62483: every guarded
+target below the parent is counted, never only the first or the strictest:
+`.git` beside an organ directory adds `vcs.history.rewrite`, a word that
+cannot be placed (`cd .. && rm -rf proj`, `"$PWD"` on a line that moves a
+directory) carries what the working directory, the session's directory and
+the home hold beside `policy.core`, and `mv "$PWD" /tmp/x` carries them
+(and `vcs.history.rewrite` where `.git` is all there is) beside its own
+`policy.core`. Besides `rm -r`, `mv` and `chmod`, the
+tools that delete what they read or find count, fail closed: `find P` with
+`-exec` or `-delete` (`find . -delete`, `find . -type f -delete`), `git rm -r`
+(not `--cached`), `tar` with `--remove-files` (any unique prefix) or
+`TAR_OPTIONS=` before it, `rsync` with `--remove-source-files`, and `chown`,
+`chgrp`, `git clean` and `zip -m`, which are refused today. Lead ruling
+L62435: `rsync` with `--delete` or any `--del…` spelling, `-M` or
+`--remote-option` (its value runs on the receiving side), or a batch option,
+removes what is below its destination, which is read the same way (`rsync -a
+--delete <empty>/ ./`, `~/`, `..`, `"$PWD"`; a `host:` path whatever the
+host, a relative one under the home, so `host:` and `host:/` count too; a
+daemon module, `host::module` or `rsync://`, and a `~user` path fail closed);
+`rsync -a --delete src/ build/out/` keeps main's class. A `find … -delete`
+that a `-name`/`-iname` test narrows keeps main's class (`find . -name
+'*.tmp' -delete`) when every `-delete` follows the test in a plain AND (no
+`!`, `-not`, `-o`, `,` or parenthesis), the pattern is passed exactly as
+written (quoted, no backslash or bracket), and the classifier's own matcher
+shows it can match no organ directory, no guarded name (`APPROVAL.md`,
+`CLAUDE.md`, `auth.json`, `.env`, ...), no `.git`, no part of a protected
+path and (unless it is exactly `*.<letters or digits>`, by the ruling) no
+guarded prefix (`settings*`, `.env.*`, `vault*`, `hooks*`), and (lead ruling
+L62511) when nothing inside a guarded folder below the start path matches
+it: the hook walks each organ directory, guarded name and `.git` it lists
+there (64 directories, 4,000 names, a 2-second timeout and the hook's
+deadline; symlinks not followed; breadth-first, in the order each
+directory returns its entries, with no other ordering, so what a limit
+leaves unread is whatever came later; `.git/objects` not walked but
+judged by git's own name shapes there, two-hex directories, hashes,
+`pack-*.pack` and the rest; `packed-refs` contents never read), and a folder a
+match may reach (`find . -name x.js -delete` and
+`.cursor/hooks/x.js`, `-name ci.yml` and `.github/workflows/ci.yml`, `-name
+HEAD` and `.git/HEAD`, `-name '*.pack'`, a branch name) or a routed folder
+it does not walk gives its class. With no listing (every caller but the
+hook), and for a folder whose walk a limit cut short, only `*.<ext>` with
+an extension guarded folders do not ordinarily hold stays narrowed
+(`*.tmp`, `*.pyc`, `*.log`; not `js mjs cjs ts py sh bash zsh json jsonc
+yml yaml toml md mdc txt lock env ini cfg conf xml`, nor for `.git` `pack
+idx rev bitmap keep mtimes promisor lock sample graph orig`; no plain
+name but the junk names `.DS_Store`, `Thumbs.db`, `desktop.ini` (exactly;
+any case under `-iname`) and the pattern `._*`, read as `*.tmp` is: lead
+ruling L62546). `-path`, `-regex`, `-type` or `-empty` alone narrow nothing.
+Nothing is released:
+`mkdir .` and `touch .` never reach the folders below. Names compare through
+#688's fold in the folded reading and exactly as spelled in the other, so a
+listed `.Claude` is `policy.core` with the segment's own class beside. A
+chmod mode that starts with `-` (`chmod -R -w .`) is the mode, not an
+option. A brace word is judged word by word (`rm -rf {../proj,x}` is `rm -rf
+../proj x`); past 64 words, one with a `.`, `~`, `/`, `$` or backtick is
+`policy.core`. Lead ruling L62435 (S2, narrow): after a `cd`, `chdir` or
+`pushd` to `..`, `/`, `~`, `$HOME`, `"$PWD/.."`, the home (no target) or an
+absolute directory above the working directory, a plain relative name of the
+rule's verbs (`cd .. && rm -rf proj`, `(cd .. && rm -rf proj)`) is
+`policy.core`; with the token `CDPATH` anywhere on the line, so is one after
+a `cd` to any target not led by `/`, `./` or `../`. `cd build && rm -rf
+out` keeps main's class. Words the text cannot read (lead ruling L62435,
+which reverses the earlier answer for an ordinary variable): an ordinary
+variable (`$X`, `"$OUT"`, `${X}`, `$1`, `$@`, `build-$ID`, `$NAME.log`;
+not `.$X`, `$X.`, `$X$Y`) places as a parent only where its readable part
+proves it may be one: below `..`, `~`,
+`/`, `$PWD/..`, or (by the hook's disk) an absolute directory above the
+working directory or the home (`rm -rf ../$X`, `~/$X`, `/$X` are
+`policy.core`); alone, below the working directory (`./$X`,
+`scripts/$NAME`) or below a directory that holds neither (`/tmp/$name`,
+`/private/tmp/$SESSION`) it keeps main's class, so `chmod +x "$f"` and `rm
+-rf $BUILD_DIR` answer as on main; a recursive `chmod` (`-R`,
+`--recursive`, `-Rv`) of one is `policy.core` (lead ruling L62511: `chmod
+-R 755 "$OUT"`, `chmod -R 000 ./$X`). A variable the line itself sets is read
+as written and as each value it is given, through chains to a fixpoint, the
+strictest answering (`X=. ; rm -rf $X`
+and `A=..; B=$A; rm -rf $B` are `policy.core`; `printf -v` with a plain
+format too, and `${X:=word}` or `${X=word}` in any word of the line (lead
+ruling L62511: `echo ${X:=..}; rm -rf $X`); a reading that names a guarded
+target takes that target's classes, as the word spelled so does (`D=.claude;
+rm -rf $D` is `rm -rf .claude`); partial readings are judged as well;
+one `read` or `mapfile`
+binds, a self-reference, a cycle, a nameref (`declare -n`), an indirect
+expansion (`${!X}`), `$_`, and positionals on a line that runs `set`, `shift`,
+`eval` or `source` with arguments, defines a function, or assigns `argv` or a
+numeric name are strict); after a `cd` to a parent, any variable below the
+shell's directory is strict.
+`$PWD`, `$OLDPWD`, `$HOME`, `$CLAUDE_PROJECT_DIR`, `$INIT_CWD`, `$(pwd)`,
+any other `$(...)`, any operator expansion (`${PWD%/*}`, `${X:-dist}`), `~user`,
+`~+` and `~-` stay strict, as does a word a later `..` removes
+(`$(echo sub)/..`, `$X/a/../..`). Where Claude Code's envelope names a
+session directory other than the hook's own (a `cd` in an earlier call), the
+hook lists from it too and a word is placed from both, a parent from either
+being a parent, so `rm -rf /tmp/x` and `rm -rf ../plain` keep main's class.
+Fail closed, `policy.core`: no listing (every caller but the hook), a
+directory over the listing's 2,000-entry cap, unreadable, or missing where
+an earlier segment of the line may make it, a relative or absolute parent
+spelling on a line that may change directory (as opposed to the narrow `cd`
+rule above) or that names `HOME`, and a chain of more than 8 directories to
+list. Not a parent, and unchanged: `rm -rf ./dist`, `rm -rf "$TMPDIR"/x`,
+`rm -rf $TARGET/x`, `rm -rf $X/dist`. `mv .`, `mv ./` and `mv sub/..` move
+nothing (rename(2) refuses them) and keep their class; `rm -rf $(builtin
+pwd)` and `$(command pwd)` stay refused, as on main. Not covered (follow-up;
+each equal on main): a symlink name inside the workspace that points at a
+parent (`rm -rf uplink/`), a glob after a parent (`rm -rf ../pr*`), the wide
+`cd` case (a `cd` into a name or an unreadable target, then a plain name: `cd
+"$DIR" && rm -rf x`; a parent spelled after any `cd`, `cd sub && rm -rf ..`,
+is covered), a `CDPATH` (or a variable) set only in the environment or
+inside `eval`, a sourced file, a function or an alias, an alias or function
+named `cd` or `rsync`, an ordinary variable whose value (set
+in an earlier call) is a parent, organ directories nested below a subdirectory
+(`rm -rf packages` holding `packages/a/.claude`), `rsync`'s
+`-e`/`--rsync-path` value (a command on the receiving side), an absolute
+path for a caller with no listing, `rmdir .`, `chown`/`chgrp` (refused), and
+organ directories in a sibling tree under an ancestor (`rm -rf ..` lists
+only the chain to the working directory and the home). On macOS (and GNU) `rm
+-rf .`, `./`, `..` and `sub/..` refuse to run;
+they are judged by the rule anyway, as the ruling says.
+One follow-up PR after 0.4.9 (lead ruling L62546), each equal on main: a
+name in the part of a guarded folder a cut walk left unread that a
+`*.<ext>` pattern outside the lists or a junk name matches (S-F); guarded
+folders nested below the start path's own entries or reached through a
+symlink (S-G); zsh's `${X::=..}` (S-J); and a brace or an assigned reading
+past its cap carrying `policy.core` without the classes the working
+directory and the home hold (S-E part 1, with #682's fix).
+
 **GLOB-WRITE names fold with the shared fold (#688; lead ruling 04:11Z).**
 Listing names, organ-directory names, the `.git` check on a listing and the
 glob matcher's characters compare through `foldNameExact`, so they fold what
