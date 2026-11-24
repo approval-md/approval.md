@@ -5141,9 +5141,11 @@ function attachedOptionValues(word: string): string[] {
  * credential tier's refusal branch reads one by one ({@link
  * attachedOptionValues}; build-1's S2 on #701, the seat's ruling on its
  * cost). Every tail is scanned, so the work is quadratic in the word: past
- * this bound the word is not scanned tail by tail but reported as an unknown
- * write target (`policy.core`, `copy-target-unknown`), which is stricter and
- * linear. main's own readers of attached values are not bounded here.
+ * this bound the word is not scanned tail by tail, and the line is refused,
+ * as a short attached value that outranks the credential class refuses it
+ * (`-oAPPROVAL.md`, `-o.approval/log/x`): a word too long to read must not
+ * get a lighter answer than that. Linear. main's own readers of attached
+ * values are not bounded here.
  */
 const ATTACHED_TAIL_SCAN_BYTES = 256;
 
@@ -11823,8 +11825,8 @@ function classifySegmentWithVerb(
   // the text cannot settle, by the flags the copy family's test reads
   // (`splits`, `expands`), the lexer's `exact` (a `$` inside double quotes,
   // an unquoted `~`) and its substitutions (`"$(…)"`). An option word over
-  // {@link ATTACHED_TAIL_SCAN_BYTES} is not scanned tail by tail: it is such
-  // a target too (the scan is quadratic in the word). Every word counts,
+  // {@link ATTACHED_TAIL_SCAN_BYTES} is not scanned tail by tail (the scan is
+  // quadratic in the word): the line is refused. Every word counts,
   // `--` or not: nobody knows this program's operands, and a secret-named
   // variable is a word the shell builds like any other. Only a literal
   // credential path is left out as the read ({@link isCredentialArgWord});
@@ -11841,10 +11843,14 @@ function classifySegmentWithVerb(
         const value = arg.slice(equals + 1);
         return value.length === 0 || isCredentialReadWord(value, protectedPaths) ? [] : [value];
       });
-      const attached = args
-        .filter((arg) => !isLongAttachedOption(arg))
-        .flatMap(attachedOptionValues)
-        .filter((value) => !isCredentialReadWord(value, protectedPaths));
+      // An option word too long to scan tail by tail may carry any path, one
+      // that outranks the credential among them: the line is refused, as a
+      // short one that outranks it is (below).
+      if (args.some(isLongAttachedOption)) {
+        refused.outcome = rest;
+        return [];
+      }
+      const attached = args.flatMap(attachedOptionValues).filter((value) => !isCredentialReadWord(value, protectedPaths));
       const optionHit = strictestProtected(optionValues, protectedPaths);
       const attachedHit = strictestProtected(attached, protectedPaths);
       if ([optionHit, attachedHit].some((hit) => hit !== null && outranksCredential(hit.surface))) {
@@ -11855,9 +11861,8 @@ function classifySegmentWithVerb(
         .slice(cursor + 1)
         .find(
           (word) =>
-            isLongAttachedOption(word.text) ||
-            ((word.splits || word.expands || !word.exact || word.substitutions.length > 0) &&
-              !isCredentialArgWord(word, protectedPaths)),
+            (word.splits || word.expands || !word.exact || word.substitutions.length > 0) &&
+            !isCredentialArgWord(word, protectedPaths),
         );
       const named = [sideScan?.found ?? null, optionHit, attachedHit];
       const unknown: ProtectedBeside[] =

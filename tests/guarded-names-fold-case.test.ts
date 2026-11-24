@@ -1555,50 +1555,43 @@ test("a credential read through a wrapper reads the path attached to a short opt
   if (classified.ok) assert.deepEqual(classified.segments.map((segment) => segment.path), [".approval/env", ".github/workflows/ci.yml"]);
 });
 
-/** A `-o` option word of exactly `bytes` UTF-8 bytes whose last tail is the workflow. */
-function attachedWorkflowWord(bytes: number): string {
-  const tail = ".github/workflows/ci.yml";
+/** A `-o` option word of exactly `bytes` UTF-8 bytes: `a/` repeated, then `tail`. */
+function attachedWord(bytes: number, tail = ".github/workflows/ci.yml"): string {
   const fill = bytes - 2 - tail.length;
   const word = `-o${"a/".repeat(Math.floor(fill / 2))}${fill % 2 === 1 ? "b" : ""}${tail}`;
   assert.equal(Buffer.byteLength(word), bytes);
   return word;
 }
 
-test("an attached option word over 256 bytes is an unknown target, not scanned tail by tail", () => {
+test("an attached option word over 256 bytes behind a wrapper refuses the line", () => {
   for (const program of BUILT_TARGET_PROGRAMS) {
     // At 200 bytes, and at the bound itself, every tail is read: the workflow.
     for (const bytes of [200, 256]) {
-      const line = `${program} .approval/env ${attachedWorkflowWord(bytes)}`;
+      const line = `${program} .approval/env ${attachedWord(bytes)}`;
       assert.deepEqual(pure(line, TWO_ROUTES), [CRED, "policy.edit.ci protected-path"], `${program} ${bytes}`);
     }
-    // One byte past it, and at 300: the word is the unknown target, the word as its path.
-    for (const bytes of [257, 300]) {
-      const word = attachedWorkflowWord(bytes);
-      const classified = classifyCommand(`${program} .approval/env ${word}`, TWO_ROUTES);
-      assert.equal(classified.ok, true, `${program} ${bytes}`);
-      if (classified.ok) {
-        assert.deepEqual(
-          classified.segments.map((segment) => [segment.class, segment.rule, segment.path]),
-          [
-            ["account.credential", "credential-path", ".approval/env"],
-            ["policy.core", "copy-target-unknown", word],
-          ],
-          `${program} ${bytes}`,
-        );
+    // One byte past it, and at 300, whatever the word ends in: refused, as a
+    // short attached value that outranks the credential is (`-o.approval/log/x`).
+    for (const word of [attachedWord(257), attachedWord(300), attachedWord(300, ".approval/log/x"), attachedWord(300, "a/")]) {
+      for (const line of [`${program} .approval/env ${word}`, `${program} ${word} .approval/env`]) {
+        assert.deepEqual(pure(line, TWO_ROUTES), ["refused unclassified"], `${program} ${word.length}`);
+        // As spelled: main's answer.
+        assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], `${program} ${word.length}`);
       }
-      // As spelled: main's answer.
-      assert.deepEqual(spelledPure(`${program} .approval/env ${word}`, TWO_ROUTES), [CRED], `${program} ${bytes}`);
     }
+    assert.deepEqual(pure(`${program} .approval/env -o.approval/log/x`, TWO_ROUTES), ["refused unclassified"], program);
   }
   // The bound counts UTF-8 bytes, not code units: `-o` and 128 two-byte letters
   // are 130 units and 258 bytes; with 127 letters, 256 bytes, the tails are read.
   const wide = `-o${"é".repeat(128)}`;
   assert.equal(Buffer.byteLength(wide), 258);
-  assert.deepEqual(pure(`frobnicate .approval/env ${wide}`, TWO_ROUTES), [CRED, UNKNOWN]);
+  assert.deepEqual(pure(`frobnicate .approval/env ${wide}`, TWO_ROUTES), ["refused unclassified"]);
   assert.deepEqual(pure(`frobnicate .approval/env -o${"é".repeat(127)}`, TWO_ROUTES), [CRED]);
   // A long `--` option and a long positional are not attached options.
   assert.deepEqual(pure(`frobnicate .approval/env --${"x".repeat(300)}`, TWO_ROUTES), [CRED]);
   assert.deepEqual(pure(`frobnicate .approval/env ${"x".repeat(300)}`, TWO_ROUTES), [CRED]);
+  // Where the walk answers, the bound plays no part.
+  assert.deepEqual(pure(`cat .approval/env ${attachedWord(300)}`, TWO_ROUTES), [CRED]);
 });
 
 test("a long attached option word behind a wrapper costs about what the same word as an operand costs", () => {
