@@ -3011,6 +3011,10 @@ export interface ClassifierContext {
   organCdParent?: boolean;
   /** The line (or one it sits in) assigns `CDPATH` (security review of the fold, 15). Internal. */
   organCdpath?: boolean;
+  /** The line (or one it sits in) runs `set`, `shift` or `eval` (security review of the fold, 27). Internal. */
+  organPositionalsSet?: boolean;
+  /** The line (or one it sits in) declares a nameref (`declare -n`; security review of the fold, 28). Internal. */
+  organNameref?: boolean;
   /**
    * The segments whose words, targets and substitution bodies the line's own
    * reading for {@link lineNamesGit} already went through (review of the
@@ -10010,7 +10014,9 @@ const PARENT_VARIABLES = new Set(["PWD", "OLDPWD", "HOME", "CLAUDE_PROJECT_DIR",
  * `$PWD`, `$OLDPWD`, `$HOME`, `$CLAUDE_PROJECT_DIR`, `$INIT_CWD`: those stay
  * read as a parent may be.
  */
-function ordinaryVariablePart(part: string): boolean {
+function ordinaryVariablePart(part: string, positionalsSet = false, nameref = false): boolean {
+  // A nameref on the line may alias any name (security review of the fold, 28).
+  if (nameref) return false;
   if (part.includes(SUBSTITUTION_SENTINEL) || part.includes(PARAMETER_MARK) || part.includes("`")) return false;
   const names: string[] = [];
   const left = part.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*)|([0-9@*#?!_-]))/gu, (_whole: string, braced?: string, bare?: string, special?: string) => {
@@ -10018,6 +10024,11 @@ function ordinaryVariablePart(part: string): boolean {
     return "";
   });
   if (names.length === 0 || /[$`]/u.test(left) || names.some((name) => PARENT_VARIABLES.has(name))) return false;
+  // `$_` is the last word of the command before, which the line itself sets;
+  // positionals where the line runs `set`, `shift` or `eval` (security
+  // review of the fold, 27).
+  if (names.includes("_")) return false;
+  if (positionalsSet && names.some((name) => /^[0-9@*]$/u.test(name))) return false;
   if (left.length === 0) return names.length === 1;
   return !/^\.+$/u.test(left);
 }
@@ -10097,7 +10108,13 @@ function unreadableBelowParent(base: "cwd" | "home" | "root", prefix: readonly s
  * working directory or home it holds), or `"unplaced"` when the caller cannot
  * place or list them.
  */
-function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | undefined, cdParent = false): string[] | "unplaced" | null {
+function organParentDirs(
+  operand: string,
+  pwdWord: boolean,
+  disk: GlobDisk | undefined,
+  cdParent = false,
+  lineFlags: { positionalsSet?: boolean; nameref?: boolean } = {},
+): string[] | "unplaced" | null {
   let base: "cwd" | "home" | "root";
   let rest: string;
   const home = /^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/u.exec(operand);
@@ -10143,7 +10160,7 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
     // ({@link unreadableBelowParent}). `$PWD`-, `$HOME`- and `$(pwd)`-led
     // words are read above; any other unreadable part (a substitution,
     // `${X%/*}`, `$OLDPWD`, `~user`) fails closed, as before.
-    if (!stack.every((part) => !unreadable(part) || ordinaryVariablePart(part))) return "unplaced";
+    if (!stack.every((part) => !unreadable(part) || ordinaryVariablePart(part, lineFlags.positionalsSet === true, lineFlags.nameref === true))) return "unplaced";
     // After a `cd` to a parent (the narrow cd rule), a word below the shell's
     // directory names something in that parent (security review, 23).
     if (cdParent && base === "cwd") return "unplaced";
@@ -10321,6 +10338,7 @@ function organParentClass(
   disk: GlobDisk | undefined,
   assigned: ReadonlyMap<string, readonly string[]> | undefined = undefined,
   cdParent = false,
+  lineFlags: { positionalsSet?: boolean; nameref?: boolean } = {},
 ): { named: { surface: string; path: string } | null; git: Set<string> } {
   let named: { surface: string; path: string } | null = null;
   const git = new Set<string>();
@@ -10368,7 +10386,7 @@ function organParentClass(
       continue;
     }
     for (const reading of readings) {
-      const dirs = organParentDirs(reading, reading === operand && pwdWords.has(operand), disk, cdParent);
+      const dirs = organParentDirs(reading, reading === operand && pwdWords.has(operand), disk, cdParent, lineFlags);
       if (dirs === null) continue;
       if (dirs === "unplaced" || disk === undefined) {
         offer("policy.core", operand);
@@ -10440,6 +10458,9 @@ function segmentCdsToParent(segment: LexSegment, disk: GlobDisk | undefined, cdp
   // the fold, 21): `x/$(pwd)` is a relative target.
   const anchored = home !== null || pwd !== null || (pwdWord && word.startsWith(SUBSTITUTION_SENTINEL)) || word.startsWith("/") || /^\.{1,2}(?:\/|$)/u.test(word);
   if (cdpath && !anchored) return true;
+  // An indirect expansion (`${!NAME}`) may name any variable's value: a
+  // possible parent (security review of the fold, 28).
+  if (word.includes("${!")) return true;
   if (/[$`*?[\]{}~]/u.test(tail) || tail.includes(SUBSTITUTION_SENTINEL) || tail.includes(PARAMETER_MARK)) return false;
   const stack: string[] = [];
   for (const part of tail.split("/")) {
@@ -10500,7 +10521,13 @@ const ASSIGNED_READINGS_CAP = 16;
 function assignedReadings(operand: string, assigned: ReadonlyMap<string, readonly string[]> | undefined): string[] | null {
   if (assigned === undefined || assigned.size === 0 || !operand.includes("$")) return [operand];
   const reference = /\$\{?([A-Za-z_][A-Za-z0-9_]*)(\}?)/gu;
-  const done = new Set<string>();
+  // Every reading is kept: the word as written (security review of the fold,
+  // 24: an assignment may not reach the use, `(X=dist); rm -rf ../$X`), each
+  // partial one (26: `A=..; (B=x); rm -rf $A/$B` is also `../$B`), each
+  // variable substituted on its own in every order, and the full ones; the
+  // strictest answers. A reading that never stops naming an assigned
+  // variable (a cycle, a self-reference) runs out the rounds: strict.
+  const all = new Set<string>([operand]);
   let pending = [operand];
   for (let round = 0; pending.length > 0; round += 1) {
     if (round > ASSIGNED_READINGS_CAP) return null;
@@ -10508,24 +10535,18 @@ function assignedReadings(operand: string, assigned: ReadonlyMap<string, readonl
     for (const reading of pending) {
       const found = [...reading.matchAll(reference)].filter((match) => assigned.has(match[1] as string));
       if (found.some((match) => match[0].startsWith("${") && match[2] !== "}")) return null;
-      const first = found[0];
-      if (first === undefined) {
-        done.add(reading);
-        continue;
-      }
-      const name = first[1] as string;
-      for (const value of assigned.get(name) ?? []) {
-        if (value === UNREAD_BINDING || value.includes("`") || value.includes(SUBSTITUTION_SENTINEL) || value.includes(PARAMETER_MARK)) return null;
-        next.push(reading.replace(new RegExp(`\\$(?:\\{${name}\\}|${name}(?![A-Za-z0-9_]))`, "gu"), () => value));
+      for (const name of new Set(found.map((match) => match[1] as string))) {
+        for (const value of assigned.get(name) ?? []) {
+          if (value === UNREAD_BINDING || value.includes("`") || value.includes(SUBSTITUTION_SENTINEL) || value.includes(PARAMETER_MARK)) return null;
+          next.push(reading.replace(new RegExp(`\\$(?:\\{${name}\\}|${name}(?![A-Za-z0-9_]))`, "gu"), () => value));
+        }
       }
     }
     pending = [...new Set(next)];
-    if (pending.length + done.size > ASSIGNED_READINGS_CAP) return null;
+    for (const reading of pending) all.add(reading);
+    if (all.size > ASSIGNED_READINGS_CAP) return null;
   }
-  // The word as written is judged too (security review of the fold, 24): an
-  // assignment may not reach the use (`(X=dist); rm -rf ../$X`, `false &&
-  // X=dist; …`), so the strictest of every reading answers.
-  return [...new Set([operand, ...done])];
+  return [...all];
 }
 
 /** The value {@link lineAssignments} records for a variable the line binds in a way the text cannot read. */
@@ -10553,18 +10574,27 @@ function bindsUnreadableName(segment: LexSegment): boolean {
 
 /**
  * The index of the word a segment runs, past its assignments and any
- * `command` / `builtin` wrapper with its flags (`command -p declare X=..`;
- * security review of the fold, 25), or -1. `eval`, `source` and `.` are not
- * looked through.
+ * wrapper that runs the next word in this shell ({@link SAME_SHELL_WRAPPERS}:
+ * `command -p declare X=..`, `time -p read CDPATH`, `noglob declare -n R=X`;
+ * security review of the fold, 25), with its flags, or -1. `eval`, `source`
+ * and `.` are not looked through.
  */
 function builtinWordAt(words: readonly LexWord[]): number {
   let at = words.findIndex((word) => !word.assignment);
-  while (at !== -1 && at < words.length && ["command", "builtin"].includes(words[at]?.text ?? "")) {
+  while (at !== -1 && at < words.length && SAME_SHELL_WRAPPERS.has(words[at]?.text ?? "")) {
+    const wrapper = words[at]?.text;
     at += 1;
-    while (at < words.length && (words[at]?.text ?? "").startsWith("-")) at += 1;
+    while (at < words.length && (words[at]?.text ?? "").startsWith("-") && words[at]?.text !== "-") {
+      // `exec -a NAME`: the value is not the command.
+      if (wrapper === "exec" && words[at]?.text === "-a") at += 1;
+      at += 1;
+    }
   }
   return at < words.length ? at : -1;
 }
+
+/** Words that run the next word in the current shell (security review of the fold, 25 and its follow-up). */
+const SAME_SHELL_WRAPPERS = new Set(["command", "builtin", "time", "noglob", "nocorrect", "-", "exec", "nohup"]);
 
 /** Builtins that bind the variables they name (automated security review of the fold, 3b). */
 const BINDING_BUILTINS = new Set(["read", "mapfile", "readarray", "getopts", "declare", "typeset", "local", "export", "readonly"]);
@@ -12870,7 +12900,10 @@ function classifySegmentWithVerb(
   const organParent =
     context.organParentsOff === true || mainRulesOnly
       ? { named: null, git: new Set<string>() }
-      : organParentClass(parentOperands, segment.words, protectedPaths, glob.disk, context.lineAssigned, context.organCdParent === true);
+      : organParentClass(parentOperands, segment.words, protectedPaths, glob.disk, context.lineAssigned, context.organCdParent === true, {
+          positionalsSet: context.organPositionalsSet === true,
+          nameref: context.organNameref === true,
+        });
   if (organParent.named !== null || organParent.git.size > 0) {
     // A GLOB-WRITE-family rule (main has none): the main pass joins the line
     // (lead ruling L61926), as it does for #686's rules.
@@ -13608,11 +13641,41 @@ function classifyCommandAsReadWithRules(
   // (`C"D"PATH=..`), or a binding builtin that names a variable the text
   // cannot read (`read "$v"`), counts as setting it.
   const cdpathToken = /(?:^|[^A-Za-z0-9_])CDPATH(?![A-Za-z0-9_])/u;
+  // Security review of the fold, 27 and 28: `set`, `shift` or `eval` may set
+  // the positionals; a `declare`/`typeset`/`local` nameref may alias any
+  // variable, CDPATH included.
+  const runs = (segment: LexSegment): string => {
+    const at = builtinWordAt(segment.words);
+    return at === -1 ? "" : (segment.words[at]?.text.split("/").pop() ?? "");
+  };
+  // 28b: any word of the segment the text cannot read may be `-n`.
+  const declaresNameref = (segment: LexSegment): boolean => {
+    const at = builtinWordAt(segment.words);
+    const opaque = (text: string): boolean => /[$`]/u.test(text) || text.includes(SUBSTITUTION_SENTINEL) || text.includes(PARAMETER_MARK);
+    return ["declare", "typeset", "local"].includes(runs(segment)) && segment.words.slice(at + 1).some((word) => /^[-+][A-Za-z]*n/u.test(word.text) || opaque(word.text));
+  };
+  const lineNameref = context.organNameref === true || lexed.segments.some(declaresNameref);
+  // 27b: a function definition, `source`/`.` with arguments, a zsh `argv`
+  // assignment or a numeric name assigned also set the positionals.
+  const setsPositionals = (segment: LexSegment): boolean => {
+    const name = runs(segment);
+    if (["set", "shift", "eval", "function"].includes(name)) return true;
+    const at = builtinWordAt(segment.words);
+    return (name === "source" || name === ".") && segment.words.length > at + 2;
+  };
+  const linePositionals =
+    context.organPositionalsSet === true ||
+    lexed.segments.some(setsPositionals) ||
+    /(?:^|[^A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_-]*\s*\(\s*\)/u.test(command) ||
+    /(?:^|[\s;&|(])function\s/u.test(command) ||
+    /(?:^|[^A-Za-z0-9_])argv(?:\[[^\]]*\])?\+?=/u.test(command) ||
+    /(?:^|[\s;&|(])[0-9]+\+?=/u.test(command);
   const lineSetsCdpath =
     context.organCdpath === true ||
+    lineNameref ||
     cdpathToken.test(command) ||
     lexed.segments.some((segment) => segment.words.some((word) => cdpathToken.test(word.text)) || bindsUnreadableName(segment));
-  execContext = { ...execContext, organCdpath: lineSetsCdpath };
+  execContext = { ...execContext, organCdpath: lineSetsCdpath, organPositionalsSet: linePositionals, organNameref: lineNameref };
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };

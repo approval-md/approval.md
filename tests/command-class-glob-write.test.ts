@@ -2264,8 +2264,9 @@ test("lead ruling L62435 (S7): a variable the line itself sets is read as what i
     assert.equal(classifyCommand(command).ok, false, command);
     assert.equal(classifyCommandWithMainRules(command).ok, false, command);
   }
-  // `$@`, `$*` and `$_` alone are unknown: main's class (lead ruling L62435).
-  for (const command of ['rm -rf "$@"', "rm -rf $*", "rm -rf $_"]) {
+  // `$@` and `$*` alone are unknown: main's class (lead ruling L62435);
+  // `$_` is strict (security review of the fold, 27, below).
+  for (const command of ['rm -rf "$@"', "rm -rf $*"]) {
     assert.deepEqual(classesOf(command), mainClasses(command), command);
   }
 });
@@ -2461,4 +2462,31 @@ test("automated security review of the fold, 15: with CDPATH set on the line, a 
     assert.ok(main.ok, command);
     assert.deepEqual(classesOf(command), main.classes, command);
   }
+});
+
+test("automated security review of the fold, 26-28: partial assigned readings, positionals the line sets, `$_`, namerefs and indirect expansion are strict", () => {
+  const strict = (command: string): void => {
+    const result = classifyCommand(command);
+    assert.ok(!result.ok || result.classes.includes("policy.core"), `${command} -> ${result.ok ? result.classes.join(",") : result.code}`);
+  };
+  // 26: a partial reading (`../$B`) is judged too.
+  for (const command of ["A=..; (B=x); rm -rf $A/$B", 'A=..; B=x true; rm -rf "$A/$B"']) strict(command);
+  // 27: `$_` always; positionals where the line runs set, shift or eval.
+  for (const command of ['set -- ..; rm -rf "$1"', 'set -- ~ x; rm -rf "$@"', "shift; rm -rf $1", ": ..; rm -rf $_", 'true ..; rm -rf "$_"', "rm -rf $_", 'eval x; rm -rf "$1"']) strict(command);
+  // 28: a nameref, and an indirect expansion.
+  for (const command of ["declare -n R=CDPATH; R=..; cd proj && rm -rf x", "local -n R=X; rm -rf $X", "typeset -n R=X; rm -rf $X", "rm -rf ${!X}", "cd ${!D} && rm -rf proj"]) strict(command);
+  // Controls: as ruled, main's class.
+  for (const command of ["chmod u+x $1", 'rm -rf "$1"', "rm -rf $BUILD_DIR", "find . -name '*.tmp' -delete", "OUT=dist; rm -rf $OUT", "D=build; T=$D/tmp; rm -rf $T"]) {
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    assert.deepEqual(classesOf(command), main.classes, command);
+  }
+  // A cycle still never settles: strict.
+  strict("A=$B; B=$A; rm -rf $A");
+  // 27b: a function, `source`/`.` with arguments, `argv`, a numeric name.
+  for (const command of ['f(){ rm -rf "$1"; }; f ..', 'function f { rm -rf "$1"; }; f ..', 'source x.sh ..; rm -rf "$1"', '. x.sh ..; rm -rf "$1"', 'argv=(..); rm -rf "$1"', 'argv[1]=..; rm -rf "$1"', '1=..; rm -rf "$1"']) strict(command);
+  // 28b: a declare word the text cannot read may be `-n`.
+  for (const command of ['declare "$F" R=X; rm -rf $X', "typeset $(echo -n) R=X; rm -rf $X"]) strict(command);
+  // Wrappers that run the next word in this shell are looked through.
+  for (const command of ['time read "$v"; cd proj && rm -rf x', "noglob declare -n R=X; rm -rf $X", 'time -p printf -v "$n" .. && cd proj && rm -rf x', 'nohup printf -v "$n" .. && cd proj && rm -rf x']) strict(command);
 });

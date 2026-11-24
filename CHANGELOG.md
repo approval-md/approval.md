@@ -300,9 +300,12 @@ working directory or the home (`rm -rf ../$X`, `~/$X`, `/$X` are
 as written and as each value it is given, through chains to a fixpoint, the
 strictest answering (`X=. ; rm -rf $X`
 and `A=..; B=$A; rm -rf $B` are `policy.core`; `printf -v` with a plain
-format too; one `read` or `mapfile` binds, a self-reference or a cycle is
-strict); after a `cd` to a parent, any variable below the shell's directory
-is strict.
+format too; partial readings are judged as well; one `read` or `mapfile`
+binds, a self-reference, a cycle, a nameref (`declare -n`), an indirect
+expansion (`${!X}`), `$_`, and positionals on a line that runs `set`, `shift`,
+`eval` or `source` with arguments, defines a function, or assigns `argv` or a
+numeric name are strict); after a `cd` to a parent, any variable below the
+shell's directory is strict.
 `$PWD`, `$OLDPWD`, `$HOME`, `$CLAUDE_PROJECT_DIR`, `$INIT_CWD`, `$(pwd)`,
 any other `$(...)`, any operator expansion (`${PWD%/*}`, `${X:-dist}`), `~user`,
 `~+` and `~-` stay strict, as does a word a later `..` removes
