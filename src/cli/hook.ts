@@ -9634,6 +9634,13 @@ function* runBypass(
    * 15 s whatever the ceiling was).
    */
   harnessCapMs: number | null,
+  /**
+   * GLOB-WRITE (L61167): the listings made before the steps ran, or `null`
+   * (strict). The window describes the call as the closed path does, and the
+   * listing pass's time comes out of this read's deadline as it does there
+   * (review-b A686-FOLD7 N2).
+   */
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): GateSteps<number> {
   const codexCommand =
     adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
@@ -9677,6 +9684,7 @@ function* runBypass(
     // policy statement, and the window suspends the policy; an opaque program is
     // the case this path already names as one nothing here can vouch for.
     closedExecCodeGate("window"),
+    globListings,
   );
   if (described.kind === "deny" || (described.kind === "gated" && described.abstain !== undefined)) {
     const refused = described.kind === "deny" ? described : (described.abstain as { code: string; detail: string });
@@ -10247,6 +10255,7 @@ function* runHarnessHook(
       // verdict and the record are one read of the log.
       looked.records === null ? null : { records: looked.records, head: looked.head },
       harnessCapMs,
+      globListings,
     );
   }
 

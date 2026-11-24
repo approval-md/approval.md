@@ -1513,3 +1513,24 @@ test("cost (L62090): a word already judged on a line is not walked again, and st
   assert.deepEqual(classesOf(cp(1000)).sort(), ["files.write.workspace"]);
   assert.deepEqual(classesOf(cp(2000)).sort(), ["files.write.workspace", "log.mutate"]);
 });
+
+test("review-b A686-FOLD7 N3: a folder takes EVERY routed entry inside it, two under one folder included", () => {
+  // p3 (the folder's own class and the first content claim only) dropped the
+  // second route: `.github` lost policy.edit.owners, `.claude` policy.edit.cmds.
+  const routes = [
+    { path: ".github/workflows/", class: "policy.edit.ci" },
+    { path: ".github/CODEOWNERS", class: "policy.edit.owners" },
+    { path: ".claude/agents/", class: "policy.edit.agents" },
+    { path: ".claude/commands/", class: "policy.edit.cmds" },
+  ];
+  assert.deepEqual([...classesOf("rm -rf .github", routes)].sort(), ["files.write.workspace", "policy.edit", "policy.edit.ci", "policy.edit.owners"]);
+  assert.deepEqual([...classesOf("rm -rf .claude", routes)].sort(), ["files.write.workspace", "policy.core", "policy.edit.agents", "policy.edit.cmds"]);
+});
+
+test("review-b A686-FOLD7 N3: two different words of the same length are each judged (the repeat memo keys on the text)", () => {
+  // p4 (the memo keyed on a word's length) judged `.c*/settings.json` as the
+  // `.z*/settings.json` before it, which reaches nothing guarded.
+  assert.deepEqual([...classesOf("tee .z*/settings.json < x")].sort(), ["files.write.workspace"]);
+  assert.deepEqual([...classesOf("tee .z*/settings.json .c*/settings.json < x")].sort(), ["files.write.workspace", "policy.core"]);
+  assert.deepEqual([...classesOf("tee .c*/settings.json .z*/settings.json < x")].sort(), ["files.write.workspace", "policy.core"]);
+});
