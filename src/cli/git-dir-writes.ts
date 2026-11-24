@@ -293,7 +293,17 @@ export function expandOnDisk(
    * by its own name; `deadline` (a `Date.now()` value) gives up once passed.
    * Absent, this step behaves exactly as the git-directory pass has it.
    */
-  options: { keepFiles?: boolean; deadline?: number } = {},
+  options: {
+    keepFiles?: boolean;
+    deadline?: number;
+    /**
+     * The listing of one directory, or the error code reading it gave: the
+     * write pass's per-call memo ({@link listDirectory} by default). A memo
+     * keeps only what the disk said; the entries are matched here, in the
+     * current name reading, every time.
+     */
+    list?: (path: string) => Dirent[] | string;
+  } = {},
 ): Expansion {
   const words = word.includes("{") ? expandBraces(word) : [word];
   if (words === null) return { giveUp: "more brace alternatives than this hook expands" };
@@ -313,14 +323,12 @@ export function expandOnDisk(
       const next: Placed[] = [];
       for (const place of places) {
         if (place.from !== "match") continue;
-        let entries: Dirent[];
-        try {
-          entries = readdirSync(place.path, { withFileTypes: true });
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException).code ?? "an error";
-          if (code === "ENOENT" || code === "ENOTDIR") continue;
-          return { giveUp: `${place.path} cannot be listed (${code})` };
+        const listed = (options.list ?? listDirectory)(place.path);
+        if (typeof listed === "string") {
+          if (listed === "ENOENT" || listed === "ENOTDIR") continue;
+          return { giveUp: `${place.path} cannot be listed (${listed})` };
         }
+        const entries = listed;
         visited += entries.length;
         if (visited > ENTRY_LIMIT) return { giveUp: `more than ${String(ENTRY_LIMIT)} entries to read` };
         if (options.deadline !== undefined && Date.now() > options.deadline) {
@@ -339,6 +347,15 @@ export function expandOnDisk(
     found.push(...places);
   }
   return { paths: found };
+}
+
+/** A directory's entries, or the error code reading it gave ("an error" when it has none). */
+export function listDirectory(path: string): Dirent[] | string {
+  try {
+    return readdirSync(path, { withFileTypes: true });
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code ?? "an error";
+  }
 }
 
 /** Does anything exist at `path` itself (a link counts, followed or not)? */

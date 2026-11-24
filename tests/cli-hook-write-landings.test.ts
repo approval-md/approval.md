@@ -36,7 +36,9 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
-import { classifyForHook, hookSettingsReads, HOOK_SETTINGS_MAX_BYTES, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, type WriteScopeContext } from "../src/cli/hook.js";
+import { classifyForHook, hookSettingsReads, HOOK_SETTINGS_MAX_BYTES, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, writeLandingJudgements, writeLandingMemo, type WriteScopeContext } from "../src/cli/hook.js";
+import { classifyCommandInThisReading } from "../src/core/command-class.js";
+import { withNamesAsSpelled } from "../src/core/name-fold.js";
 import { commandGate } from "../src/cli/gate-window.js";
 import { classifyCommand } from "../src/core/command-class.js";
 import type { Streams } from "../src/cli/main.js";
@@ -1934,4 +1936,77 @@ test("the write pass reads a segment by main's own row, not by #686's raise: a p
   // A row main tightens to files.delete.out_of_scope stays exactly as main has it (decision A).
   const deleted = see("chmod +x scripts/* ../outside/x", optedIn());
   assert.ok(deleted.classes.includes(DELETE_OUT) && !deleted.classes.includes(OUT), JSON.stringify(deleted.segments));
+});
+
+// ---------------------------------------------------------------------------
+// Cost: one call's landings are judged once, for all its name readings (COST686)
+// ---------------------------------------------------------------------------
+
+test("cost: a second name reading of the write pass answers from the call's memo, a fraction of the first", () => {
+  // #686's cost test `glob_sources` went over its bound on CI with this pass:
+  // the chain, this pass with it, runs once in each name reading, and each
+  // landing walked its ancestors again. One call now judges each landing once
+  // and asks the disk each path once. CPU time, the same process: the pass
+  // with a fresh memo (the first reading) against the pass again, as spelled,
+  // with that memo (the second reading of the same call).
+  const dir = join(ws, "cost", "a", "b", "c", "d");
+  mkdirSync(dir, { recursive: true });
+  // A line of plain words: its cost is the landings (a `~` or a pattern adds
+  // the classifier's re-read of the line, which each reading asks again).
+  const line = `touch ${Array.from({ length: 1500 }, (_, i) => `cost/a/b/c/d/p${String(i)}.txt`).join(" ")} ${join(home, ".zshrc")}`;
+  assert.ok(Buffer.byteLength(line) < 100 * 1024);
+  const classified = classifyCommandInThisReading(line);
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  refineWriteLandings(classified, line, [ws], WRITE_SCOPE_OFF);
+  let first = Infinity;
+  let second = Infinity;
+  for (let round = 0; round < 5; round += 1) {
+    const memo = writeLandingMemo();
+    let one: unknown = null;
+    let two: unknown = null;
+    first = Math.min(first, cpu(() => { one = refineWriteLandings(classified, line, [ws], WRITE_SCOPE_OFF, process.env, [], memo).result; }));
+    second = Math.min(second, cpu(() => { two = withNamesAsSpelled(() => refineWriteLandings(classified, line, [ws], WRITE_SCOPE_OFF, process.env, [], memo).result); }));
+    assert.deepEqual(two, one, "the same answer from the memo");
+  }
+  assert.ok((first as number) > 0);
+  // About 0.4 here with the memo, and about 0.9 with a fresh one.
+  assert.ok(second < first * 0.6, `first reading ${first.toFixed(3)} CPU s, second ${second.toFixed(3)} CPU s`);
+  assert.ok(see(line).classes.includes(GUARDED));
+});
+
+test("the call's memo is the call's: each call judges its landings once, whatever its readings, and the next call again", () => {
+  const words = Array.from({ length: 40 }, (_, i) => `memo/w${String(i)}.txt`).join(" ");
+  // `ß` folds to `ss` and lowers to itself, so `straße` runs the as-spelled
+  // reading too; `strasse` does not. The same landings either way (and the
+  // same classes: no rule reads either name), so the same count.
+  const judged = (command: string): number => {
+    const before = writeLandingJudgements();
+    classifyForHook(command, [], ws, [], false, [], false, WRITE_SCOPE_OFF);
+    return writeLandingJudgements() - before;
+  };
+  const two = judged(`touch ${words} memo/straße.txt`);
+  const one = judged(`touch ${words} memo/strasse.txt`);
+  assert.ok(one > 0);
+  assert.equal(two, one, "a second reading judges nothing again");
+  // The next call reads the disk again: nothing outlives a call.
+  assert.equal(judged(`touch ${words} memo/strasse.txt`), one);
+  mkdirSync(join(ws, "memo-link-target"), { recursive: true });
+  symlinkSync(join(ws, "memo-link-target"), join(ws, "memo-link"));
+  assert.ok(!see("echo x > memo-link/authorized_keys").classes.includes(GUARDED));
+  rmSync(join(ws, "memo-link"));
+  symlinkSync(join(home, ".ssh"), join(ws, "memo-link"));
+  assert.ok(see("echo x > memo-link/authorized_keys").classes.includes(GUARDED), "the link moved between two calls");
+  // One landing judged as a file and as a tree in one line: two answers.
+  mkdirSync(join(ws, "memo-checkout", ".git"), { recursive: true });
+  assert.ok(see("echo x > memo-checkout; cp -r a.d/. memo-checkout").classes.includes(GUARDED), "a tree at a checkout after a plain write there");
+  // Two landings of the same name in two folders.
+  assert.ok(see("echo a > sub/.zshrc; echo b > ~/.zshrc").classes.includes(GUARDED));
+  // A class the second reading gives that the first does not is still reported (the synthetic lines are not shared).
+  const both = see("x=.approval; echo y >> $x/LOG/z");
+  assert.ok(both.classes.includes("log.mutate") && both.classes.includes("policy.core"), JSON.stringify(both.segments));
 });

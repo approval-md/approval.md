@@ -82,6 +82,7 @@ import {
   realpathSync,
   statSync,
   writeSync,
+  type Dirent,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -241,7 +242,7 @@ import {
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
-import { expandOnDisk, refineGitDirWrites } from "./git-dir-writes.js";
+import { expandOnDisk, listDirectory, refineGitDirWrites } from "./git-dir-writes.js";
 import { refinePushRepo } from "./push-repo.js";
 import { jsonStringLeaves, readJsonDocument } from "./settings-json.js";
 import { HOOK_GROK_HELP, HOOK_HELP, HOOK_HERMES_HELP, HOOK_MUSE_HELP } from "./help.js";
@@ -4167,6 +4168,8 @@ export function judgeWriteLanding(
   scope: WriteScopeContext,
   guard: LandingGuard = currentGuard(process.env, scope.gateRoot),
   tree: boolean | "listed" = false,
+  /** The disk lookups one hook call shares ({@link memoDiskReads}); each asks the disk when absent. */
+  disk: DiskReads = DIRECT_DISK,
 ): WriteLanding {
   const { homes, configDirs } = guard;
   // Longer than any path the kernel opens (PATH_MAX is 1024 on macOS and 4096
@@ -4176,13 +4179,13 @@ export function judgeWriteLanding(
     return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: spelled.slice(0, 80), why: `a path of ${String(spelled.length)} bytes is longer than any the kernel opens, so where it lands cannot be placed` };
   }
   const text = resolvePathSegments(spelled);
-  const landing = landingPaths(spelled);
+  const landing = landingPaths(spelled, null, disk);
   const forms = [text, ...landing.paths];
   const name = basename(text);
-  if (name.length > 0) forms.push(join(canonicalPath(dirname(text)), name));
+  if (name.length > 0) forms.push(join(canonicalPath(dirname(text), disk), name));
   const tail = basename(spelled);
   if (tail !== ".." && tail !== "." && tail.length > 0) {
-    const parent = kernelLanding(dirname(spelled));
+    const parent = kernelLanding(dirname(spelled), null, disk);
     if (parent !== null) forms.push(join(parent, tail));
   }
   for (const form of forms) {
@@ -4669,6 +4672,47 @@ function listWords(shape: CommandSegmentShape): string[] {
 }
 
 /**
+ * What the write pass has read of the disk during ONE `classifyForHook` call,
+ * kept for every name reading of that call (cost: the chain, this pass with
+ * it, runs once per reading, and #686's pattern reading makes a pattern line
+ * run two or three of them).
+ *
+ * Only answers that cannot depend on the reading are kept:
+ * - `landings`: `judgeWriteLanding`'s answer per landing and tree mode. It
+ *   reads names through `foldFileName` (`write-scope.ts`, `foldedPathKey`),
+ *   which folds the same way in both readings, and none of the reading's
+ *   helpers (`foldNameExact`, `foldNameLower`, `nameListIncludes`,
+ *   `takeAmongEqual`); its other inputs (the scope, the guard from the
+ *   environment and the gate root) are the call's own.
+ * - `disk`: each path's realpath and lstat ({@link memoDiskReads}).
+ *
+ * The classifier's answers this pass asks for (`ownAnswer`, the synthetic
+ * lines) and `expandOnDisk` (whose entry test lowers or folds by the reading)
+ * are NOT kept: they are asked again in each reading. Made by
+ * {@link classifyForHook} for one call and dropped with it, so nothing here
+ * reaches another command, directory, home or policy.
+ */
+export interface WriteLandingMemo {
+  readonly landings: Map<string, WriteLanding>;
+  /** `landingPaths` per spelling: the lexical and the kernel landing, from the disk alone. */
+  readonly paths: Map<string, { paths: string[]; unknown: boolean }>;
+  readonly disk: DiskReads;
+}
+
+/** A fresh {@link WriteLandingMemo}, for one `classifyForHook` call. */
+export function writeLandingMemo(): WriteLandingMemo {
+  return { landings: new Map(), paths: new Map(), disk: memoDiskReads() };
+}
+
+/** How many landings the write pass has judged in this process (not answered from a memo): for tests. */
+let landingJudgements = 0;
+
+/** {@link landingJudgements}, for tests: one count per distinct landing and tree mode in a call. */
+export function writeLandingJudgements(): number {
+  return landingJudgements;
+}
+
+/**
  * Judge every write a command line makes, and attach what it finds.
  *
  * ## No second option parser (coordinator, review of 90b809fe)
@@ -4705,6 +4749,11 @@ export function refineWriteLandings(
   scope: WriteScopeContext,
   env: NodeJS.ProcessEnv = process.env,
   protectedPaths: readonly ProtectedPathEntry[] = [],
+  /**
+   * What the calling `classifyForHook` call has already judged in another
+   * name reading ({@link writeLandingMemo}); a fresh one when absent.
+   */
+  memo: WriteLandingMemo = writeLandingMemo(),
 ): RefinedClassification {
   if (!result.ok) return { result, notes: [] };
   const top = commandSegmentShapes(command);
@@ -4756,11 +4805,11 @@ export function refineWriteLandings(
   const guard = currentGuard(env, scope.gateRoot);
   // One disk reading per spelling per line (a cost bound: the disk does not
   // change within the pass, and a line names the same target many times).
-  const landingMemo = new Map<string, { paths: string[]; unknown: boolean }>();
+  const landingMemo = memo.paths;
   const landingPathsOnce = (spelled: string): { paths: string[]; unknown: boolean } => {
     const known = landingMemo.get(spelled);
     if (known !== undefined) return known;
-    const landing = landingPaths(spelled);
+    const landing = landingPaths(spelled, null, memo.disk);
     landingMemo.set(spelled, landing);
     return landing;
   };
@@ -5110,7 +5159,7 @@ export function refineWriteLandings(
             // Each pattern is a listing of its own: a segment of very many
             // patterns is not read one by one (a cost bound).
             if ((listings += 1) > PATTERN_LISTINGS) return "is one of more patterns than this hook reads in one segment";
-            const expanded = expandOnDisk("/", spelled, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS });
+            const expanded = expandOnDisk("/", spelled, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS, list: memo.disk.list });
             if ("giveUp" in expanded) return `could not be read from the disk (${expanded.giveUp})`;
             for (const each of expanded.paths) {
               if (each.from !== "match") continue;
@@ -5176,14 +5225,18 @@ export function refineWriteLandings(
     return out;
   };
 
-  // One landing per spelling per line: the disk is read once for a target the
-  // line names many times (a cost bound; the disk does not change within it).
-  const landed = new Map<string, WriteLanding>();
+  // One landing per spelling per call: the disk is read once for a target the
+  // line names many times, and once for all the name readings of the call (a
+  // cost bound; the disk does not change within it). `judgeWriteLanding`
+  // compares names through `foldFileName` alone, which folds the same way in
+  // both readings, so its answer is the same in each (see `WriteLandingMemo`).
+  const landed = memo.landings;
   const landOnce = (spelled: string, tree: boolean | "listed"): WriteLanding => {
     const key = `${tree === true ? "T" : tree === false ? "F" : "L"}${spelled}`;
     const known = landed.get(key);
     if (known !== undefined) return known;
-    const judged = judgeWriteLanding(spelled, scope, guard, tree);
+    landingJudgements += 1;
+    const judged = judgeWriteLanding(spelled, scope, guard, tree, memo.disk);
     landed.set(key, judged);
     return judged;
   };
@@ -5213,12 +5266,12 @@ export function refineWriteLandings(
         // it did not keep, and the word as written for no match at all.
         const unsure = volatilePattern(each);
         if (unsure !== null) return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: unsure };
-        const expanded = expandOnDisk("/", each, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS });
+        const expanded = expandOnDisk("/", each, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS, list: memo.disk.list });
         if ("giveUp" in expanded) {
           return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: `${each} could not be read from the disk: ${expanded.giveUp}` };
         }
         for (const placed of expanded.paths) {
-          verdict = stricter(verdict, judgeWriteLanding(placed.path, scope, guard, tree));
+          verdict = stricter(verdict, landOnce(placed.path, tree));
           if (verdict.kind === "guarded") return verdict;
         }
         continue;
@@ -5414,7 +5467,7 @@ export function refineWriteLandings(
       if (spelled === null) return [null];
       for (const each of spelled) {
         if (volatilePattern(each) !== null) return [null];
-        const expanded = expandOnDisk("/", each, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS });
+        const expanded = expandOnDisk("/", each, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS, list: memo.disk.list });
         if ("giveUp" in expanded) return [null];
         for (const placed of expanded.paths) names.push(basename(placed.path));
       }
@@ -5442,7 +5495,7 @@ export function refineWriteLandings(
             placed.push(each);
             continue;
           }
-          const expanded = volatilePattern(each) === null ? expandOnDisk("/", each, { deadline: Date.now() + GLOB_TIME_LIMIT_MS }) : null;
+          const expanded = volatilePattern(each) === null ? expandOnDisk("/", each, { deadline: Date.now() + GLOB_TIME_LIMIT_MS, list: memo.disk.list }) : null;
           if (expanded === null || "giveUp" in expanded) {
             spelled = null;
             break;
@@ -6006,8 +6059,11 @@ export function classifyForHook(
    */
   globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): RefinedClassification {
+  // The write pass's landings and disk lookups, shared by this call's name
+  // readings and by nothing else (cost: the COST686 lines).
+  const landings = writeLandingMemo();
   const [folded, ...others] = eachNameReading(() =>
-    classifyForHookAsRead(command, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments, writeScope, globListings),
+    classifyForHookAsRead(command, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments, writeScope, globListings, landings),
   );
   if (others.length === 0) return folded;
   const notes = [...folded.notes];
@@ -6033,6 +6089,7 @@ function classifyForHookAsRead(
   noRuleSegments: boolean,
   writeScope: WriteScopeContext,
   globListings: ReadonlyMap<string, GlobListing> | null,
+  landings: WriteLandingMemo,
 ): RefinedClassification {
   const roots = resolveScratchRoots(cwd);
   const classified = classifyCommandInThisReading(command, protectedPaths, {
@@ -6078,7 +6135,7 @@ function classifyForHookAsRead(
   // Design v4. Last of all, and it only ever adds an entry beside a segment:
   // every write judged where it lands, from the hook's directory and the
   // envelope's.
-  const landed = refineWriteLandings(credentialed.result, command, [cwd, ...credentialCwds], writeScope, process.env, protectedPaths);
+  const landed = refineWriteLandings(credentialed.result, command, [cwd, ...credentialCwds], writeScope, process.env, protectedPaths, landings);
   return {
     result: landed.result,
     notes: [
@@ -11158,7 +11215,7 @@ const RECURSIVE_READERS: ReadonlySet<string> = new Set([
  * symlinked parent is judged by where it lands and a path that does not exist
  * yet is judged by where it would be created (APRV-445 recheck SF2(e)).
  */
-export function canonicalPath(path: string): string {
+export function canonicalPath(path: string, disk: DiskReads = DIRECT_DISK): string {
   let current = path;
   const tail: string[] = [];
   for (let climbed = 0; ; climbed += 1) {
@@ -11167,21 +11224,104 @@ export function canonicalPath(path: string): string {
     // Each climb resolved the whole remaining path, so a word of n components
     // cost n squared; this is the same answer in about log n resolutions.
     if (climbed === CANONICAL_CLIMBS) {
-      const found = deepestExisting(current);
+      const found = deepestExisting(current, disk);
       if (found !== null) {
         tail.reverse();
         return resolvePathSegments(found.real, [...found.rest, ...tail].join(sep));
       }
     }
-    try {
-      return resolvePathSegments(realpathSync(current), ...tail.reverse());
-    } catch {
-      const parent = dirname(current);
-      if (parent === current) return resolvePathSegments(path);
-      tail.push(basename(current));
-      current = parent;
-    }
+    const real = disk.realpath(current);
+    if (real !== null) return resolvePathSegments(real, ...tail.reverse());
+    const parent = dirname(current);
+    if (parent === current) return resolvePathSegments(path);
+    tail.push(basename(current));
+    current = parent;
   }
+}
+
+/**
+ * The two disk lookups the landing readers make ({@link canonicalPath},
+ * {@link kernelLanding}): a path's realpath (`null` where `realpathSync`
+ * throws), and what `lstat` says of it (`undefined` where it, or the
+ * `readlink` after it, throws; `null`, not a link; else the link's target).
+ */
+export interface DiskReads {
+  realpath(path: string): string | null;
+  link(path: string): string | null | undefined;
+  /** A directory's entries, or the error code reading it gave ({@link listDirectory}). */
+  list(path: string): Dirent[] | string;
+}
+
+/** Every lookup asks the disk: what every caller but the write pass uses. */
+const DIRECT_DISK: DiskReads = {
+  realpath(path) {
+    try {
+      return realpathSync(path);
+    } catch {
+      return null;
+    }
+  },
+  link(path) {
+    try {
+      const stat = lstatSync(path);
+      return stat.isSymbolicLink() ? readlinkSync(path) : null;
+    } catch {
+      return undefined;
+    }
+  },
+  list: listDirectory,
+};
+
+/**
+ * Each path asked once (cost, #686's COST686 lines): the write pass lands
+ * thousands of words that share their parents, and each landing walked the
+ * same ancestors again. Made for one `classifyForHook` call and dropped with
+ * it, under the pass's own premise that the disk does not change within one
+ * call ("one disk reading per spelling per line").
+ */
+export function memoDiskReads(): DiskReads {
+  const reals = new Map<string, string | null>();
+  const links = new Map<string, string | null | undefined>();
+  const link = (path: string): string | null | undefined => {
+    if (links.has(path)) return links.get(path);
+    const found = DIRECT_DISK.link(path);
+    links.set(path, found);
+    return found;
+  };
+  const realpath = (path: string): string | null => {
+    if (reals.has(path)) return reals.get(path) as string | null;
+    let real: string | null;
+    const parent = dirname(path);
+    const leaf = basename(path);
+    const normal = path.startsWith("/") && !path.endsWith("/") && !/\/\.{0,2}\//u.test(`${path}/`.slice(1));
+    if (parent === path || !normal || leaf.length === 0 || leaf === "." || leaf === "..") {
+      real = DIRECT_DISK.realpath(path);
+    } else {
+      // A path resolves only through its parent: the parent's realpath, read
+      // once for all its entries, then this one entry. Where the parent does
+      // not resolve, neither does the path; a plain entry is the parent's
+      // realpath and its own name, as `realpathSync` spells it; a link is
+      // resolved whole, as before.
+      const up = realpath(parent);
+      if (up === null) real = null;
+      else {
+        const joined = up === "/" ? `/${leaf}` : `${up}/${leaf}`;
+        const entry = link(joined);
+        real = entry === undefined ? null : entry === null ? joined : DIRECT_DISK.realpath(path);
+      }
+    }
+    reals.set(path, real);
+    return real;
+  };
+  const lists = new Map<string, Dirent[] | string>();
+  const list = (path: string): Dirent[] | string => {
+    const known = lists.get(path);
+    if (known !== undefined) return known;
+    const found = listDirectory(path);
+    lists.set(path, found);
+    return found;
+  };
+  return { realpath, link, list };
 }
 
 /** How many components {@link canonicalPath} climbs one at a time before it halves. */
@@ -11201,18 +11341,12 @@ const CANONICAL_CLIMBS = 32;
  * (`realpathSync` cancels it textually, so `a/x/../b` can resolve where `a/x`
  * does not), which is why such a path is left to the climb.
  */
-function deepestExisting(path: string): { real: string; rest: string[] } | null {
+function deepestExisting(path: string, disk: DiskReads): { real: string; rest: string[] } | null {
   if (sep !== "/" || !path.startsWith("/")) return null;
   const names = path.slice(1).split("/");
   if (path.length > 1 && names.some((name) => name.length === 0 || name === "." || name === "..")) return null;
   if (path.length === 1) names.length = 0;
-  const resolves = (count: number): string | null => {
-    try {
-      return realpathSync(`/${names.slice(0, count).join("/")}`);
-    } catch {
-      return null;
-    }
-  };
+  const resolves = (count: number): string | null => disk.realpath(`/${names.slice(0, count).join("/")}`);
   let real = resolves(0);
   if (real === null) return null;
   let low = 0;
@@ -11265,7 +11399,7 @@ function spelledAbsolute(from: string, text: string): string {
  * `ln -s ~/.hermes/skills k && cat k/../.op.env` plants the link this hook
  * cannot see, and `..` out of it lands wherever the link will point.
  */
-function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | null = null): string | null {
+function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | null = null, disk: DiskReads = DIRECT_DISK): string | null {
   const queue = spelled.split("/").filter((part) => part.length > 0 && part !== ".");
   if (
     queue[0] === "proc" &&
@@ -11293,11 +11427,8 @@ function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | 
       resolved = next;
       continue;
     }
-    let link: string | null = null;
-    try {
-      const stat = lstatSync(next);
-      if (stat.isSymbolicLink()) link = readlinkSync(next);
-    } catch {
+    const link = disk.link(next);
+    if (link === undefined) {
       // Absent, unreadable (a 0700 home under co-location), or under a file:
       // the rest of the spelling is applied lexically.
       missing = true;
@@ -11328,9 +11459,10 @@ function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | 
 function landingPaths(
   spelled: string,
   volatile: ((path: string) => boolean) | null = null,
+  disk: DiskReads = DIRECT_DISK,
 ): { paths: string[]; unknown: boolean } {
-  const lexical = canonicalPath(resolvePathSegments(spelled));
-  const kernel = kernelLanding(spelled, volatile);
+  const lexical = canonicalPath(resolvePathSegments(spelled), disk);
+  const kernel = kernelLanding(spelled, volatile, disk);
   if (kernel === null) return { paths: [lexical], unknown: true };
   return { paths: kernel === lexical ? [lexical] : [lexical, kernel], unknown: false };
 }
