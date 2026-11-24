@@ -323,6 +323,9 @@ test("a pattern takes the class its matches take written out: the directory is l
     "x=*.md; sed -i s/a/b/ $x",
     "cd plain && echo x > ../*.md",
     "true && tee *.md < a.txt",
+    // From the second directory a `cd` adds (a variable's value, which main
+    // does not read as a pattern): ../*.md from plain/ is APPROVAL.md.
+    "x='../*.md'; cd plain && echo hi > $x",
   ];
   // Since main 9122cb3e (#686), main's classifier reads a pattern in a write
   // target, or in a write's argv, itself: with no listing it gives the strict
