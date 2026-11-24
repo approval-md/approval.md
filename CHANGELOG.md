@@ -514,6 +514,17 @@ other segments, and the hook judges each.
 - **A copy whose destination the text cannot know** (`cp .approval/env $X`)
   reports `policy.core` (`copy-target-unknown`) beside the credential class,
   as `cp notes.txt $X` answers.
+- **With the glob write rules below (#686),** the segment's other words are
+  judged beside the credential class as the same line with an ordinary file
+  judges them: a glob or a `${…}` default in a target, a copy's landings and
+  guarded destinations, a read's own output. `cp .approval/env
+  .gith*/workflows/ci.yml` is the credential class, then `policy.edit.ci`
+  and `policy.edit`; `sort -o .github/workflows/ci.yml .approval/env` names
+  the workflow. The credential read is not a place a copy lands: `cp
+  notes.txt .approval/env` is the credential class alone. Through a wrapper
+  or a program with no rule (next) the words are read as written, so a
+  pattern there is not judged (`command cp .approval/env
+  .gith*/workflows/ci.yml` is the credential class alone).
 - **A wrapper or a program with no rule** (`command cp .approval/env
   .github/workflows/ci.yml`, `nice cp …`, `ditto …`, `python3 x.py …`):
   the credential class answers, as before, and nobody can say what such a
@@ -532,7 +543,7 @@ other segments, and the hook judges each.
 - The segment is still walked once: the walk goes on from the credential
   answer, and its protected scan is the one the credential tier already
   made.
-- Conformance: four new `command-class` vectors; the 398 before them are
+- Conformance: four new `command-class` vectors; the 400 before them are
   byte-identical.
 
 **Every protected path a command writes is judged.** A segment that named

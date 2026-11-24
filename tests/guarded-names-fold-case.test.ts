@@ -1537,6 +1537,85 @@ test("a credential read is walked once: it costs about what the same line with a
 });
 
 // ---------------------------------------------------------------------------
+// With #686 (GLOB-WRITE) in: beside a credential answer, the segment's other
+// words are judged by #686's write rules (a glob or a `${…}` default in a
+// target, a copy's landings and guarded destinations, a read's own output),
+// and the words that are the credential read stay out of those scans as they
+// stay out of the text scan. So a credential line answers the credential
+// class, then the protected classes the same line with an ordinary file
+// takes; as spelled, the credential class alone, as main 9122cb3e answers.
+// ---------------------------------------------------------------------------
+
+/** `[line, what the folded reading adds after the credential class]`. */
+const CREDENTIAL_GLOB_WRITE: readonly (readonly [string, readonly string[]])[] = [
+  // A glob in the copy's destination, and in a writer's operand.
+  ["cp .approval/env .gith*/workflows/ci.yml", ["policy.edit.ci protected-path", "policy.edit protected-path"]],
+  ["tee .gith?b/workflows/ci.yml < .approval/env", ["policy.edit.ci protected-path"]],
+  ["cp .approval/env d*/x", ["policy.edit.design protected-path"]],
+  ["cp .approval/env APPROVAL.m?", ["policy.core protected-path"]],
+  ["cp .approval/env ~/.hermes/[!Z]uth.json", ["policy.core protected-path"]],
+  ["cp -t .gith*/workflows/ .approval/env", ["policy.edit.ci protected-path", "policy.edit protected-path"]],
+  // A `${…}` default the shell may substitute: the copy-unknown answer reads it.
+  ["cp .approval/env ${X:-.github/workflows/ci.yml}", ["policy.core copy-target-unknown", "policy.edit.ci protected-path"]],
+  ["tee ${Y:-design/x} < .approval/env", ["policy.edit.design protected-path"]],
+  // A copy into a guarded directory: its landings and the directory's own class.
+  ["cp .approval/env .github/workflows/", ["policy.edit.ci protected-path"]],
+  ["cp .approval/env .github/", ["policy.edit protected-path", "policy.edit.ci protected-path"]],
+  ["cp .approval/env evil/settings.json .cl*/", ["policy.core protected-path"]],
+  ["rsync -a .approval/env .github/", ["policy.edit protected-path", "policy.edit.ci protected-path"]],
+  // A read-class command's own output.
+  ["sort -o .github/workflows/ci.yml .approval/env", ["policy.edit.ci protected-path"]],
+];
+
+test("beside a credential read, #686's write rules judge the other words: the credential class, then the ordinary file's protected classes", () => {
+  for (const [line, added] of CREDENTIAL_GLOB_WRITE) {
+    assert.deepEqual(pure(line, TWO_ROUTES), [CRED, ...added], line);
+    // The same line copying an ordinary file: the same protected classes, in
+    // the same order, each once.
+    const ordinary = pure(line.replaceAll(".approval/env", "notes.txt"), TWO_ROUTES).filter(
+      (entry) => entry.endsWith(" protected-path") || entry.endsWith(" copy-target-unknown"),
+    );
+    assert.deepEqual(added, ordinary.filter((entry, at) => ordinary.indexOf(entry) === at), line);
+    // As spelled: the credential class alone, as main answers.
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);
+  }
+});
+
+test("beside a credential read, the read is not a place a copy lands: a copy into it names no class of the gate's directory", () => {
+  for (const [line, want] of [
+    ["cp notes.txt .approval/env", [CRED]],
+    ["cp evil/settings.json .approval/env", [CRED]],
+    ["cp -r evil/x .approval/env", [CRED]],
+    ["cp .gith*/workflows/ci.yml .approval/env", [CRED]],
+    // A protected SOURCE is still named, by the text scan.
+    ["cp design/x .approval/env", [CRED, "policy.edit.design protected-path"]],
+    ["cp .github/workflows/ci.yml .approval/env", [CRED, "policy.edit.ci protected-path"]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);
+  }
+});
+
+test("through the real hook, a credential read that writes a workflow by a pattern or into its folder waits for the workflow's tap", { skip }, () => {
+  const dir = attestedLab(POLICY_CREDENTIAL_LIGHT);
+  // The checkout has the workflow folder, so a listing finds what the pattern names.
+  mkdirSync(join(dir, ".github", "workflows"), { recursive: true });
+  for (const command of [
+    "cp .approval/env .gith*/workflows/ci.yml",
+    "tee .gith?b/workflows/ci.yml < .approval/env",
+    "cp .approval/env .github/workflows/",
+  ]) {
+    const decision = decide(dir, bash(command));
+    assert.equal(strictness(decision), 1, `${command}: ${decision.permission} ${decision.reason}`);
+    assert.match(decision.reason, /:policy\.edit\.ci[ ,]/u, command);
+  }
+  for (const command of ["cp .approval/env d*/x", "cp .approval/env notes.txt"]) {
+    const decision = decide(dir, bash(command));
+    assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // The placeholder a `$(…)` leaves in a word is not a name: it is not folded,
 // and a word that differs from its folded form only there runs one reading.
 // ---------------------------------------------------------------------------
