@@ -1433,15 +1433,19 @@ for (const fixture of SPLIT_FIXTURES) {
 
 test("the strictest surface answers a command naming more than one (APRV-198)", () => {
   // The check order in `protectedPathClass` is the precedence, and a segment
-  // naming several protected paths takes the most consequential of them: a
-  // command that moves the policy file INTO the log directory is a log write.
+  // naming several protected paths is named by the most consequential of
+  // them: a command that moves the policy file INTO the log directory is a
+  // log write. The other path's class is reported after it (every protected
+  // target of a segment is judged; the precedence is not a policy's order).
   const intoLog = classifyCommand("mv APPROVAL.md .approval/log/APPROVAL.md");
   assert.ok(intoLog.ok);
-  assert.deepEqual(intoLog.classes, ["log.mutate"]);
+  assert.deepEqual(intoLog.classes, ["log.mutate", "policy.core"]);
+  assert.equal(intoLog.segments[0]?.class, "log.mutate");
 
   const coreOverPolicy = classifyCommand("cp CLAUDE.md APPROVAL.md");
   assert.ok(coreOverPolicy.ok);
-  assert.deepEqual(coreOverPolicy.classes, ["policy.core"]);
+  assert.deepEqual(coreOverPolicy.classes, ["policy.core", "policy.edit"]);
+  assert.equal(coreOverPolicy.segments[0]?.class, "policy.core");
 });
 
 test("no protected touch reaches an autonomous class (APRV-198 AC4)", () => {
@@ -1874,21 +1878,22 @@ test("APRV-503: a quoted < is data, never a redirection", () => {
 test("APRV-503: a protected file fed to an effectful command takes the protected class", () => {
   // The positional scan's rule, extended to the input redirection it stands in
   // for, with the strictest surface winning and the target bound as the path.
-  const rows: ReadonlyArray<[string, string, string]> = [
+  const rows: ReadonlyArray<[string, string, string, string?]> = [
     ["npm test < APPROVAL.md", "policy.core", "APPROVAL.md"],
     ["node x.js < .approval/QUEUE.md", "policy.core", ".approval/QUEUE.md"],
     ["node x.js < .approval/log/events.jsonl", "log.mutate", ".approval/log/events.jsonl"],
     ["node x.js < CLAUDE.md", "policy.edit", "CLAUDE.md"],
-    // The stricter of a positional and a redirection answers.
-    ["node CLAUDE.md < .approval/log/events.jsonl", "log.mutate", ".approval/log/events.jsonl"],
+    // The stricter of a positional and a redirection answers; the other one's
+    // class is reported after it (every protected target is judged).
+    ["node CLAUDE.md < .approval/log/events.jsonl", "log.mutate", ".approval/log/events.jsonl", "policy.edit"],
     // Equal rank: the positional is named, as it was before this task.
     ["node APPROVAL.md < .approval/QUEUE.md", "policy.core", "APPROVAL.md"],
   ];
-  for (const [command, cls, path] of rows) {
+  for (const [command, cls, path, beside] of rows) {
     const result = classifyCommand(command);
     assert.ok(result.ok, command);
     if (!result.ok) continue;
-    assert.deepEqual(result.classes, [cls], command);
+    assert.deepEqual(result.classes, beside === undefined ? [cls] : [cls, beside], command);
     assert.equal(result.segments[0]?.rule, "protected-path", command);
     assert.equal(result.segments[0]?.path, path, command);
   }
@@ -2014,14 +2019,16 @@ test("APRV-503 fix round 2: a NAMED credential never displaces log.mutate or pol
     // the credential touch rides beside it as a second entry over the same
     // text (APRV-503 recheck, SHOULD-FIX-R1), unless the binary only writes
     // what it names, in which case there is no credential read to carry.
+    // A write-only binary WRITES the credential path it names, and that path
+    // is in the approval home: its own protected class (`policy.core`) is
+    // reported beside the answer, as every protected target of a segment is.
     const carried = !WRITE_ONLY_CREDENTIAL_ROWS.has(withCredential);
-    assert.deepEqual(a.classes, carried ? [cls, "account.credential"] : [cls], withCredential);
+    const second = carried ? "account.credential" : "policy.core";
+    assert.deepEqual(a.classes, [cls, second], withCredential);
     assert.deepEqual(a.segments[0], { ...b.segments[0], text: withCredential }, withCredential);
-    assert.equal(a.segments.length, carried ? 2 : 1, withCredential);
-    if (carried) {
-      assert.equal(a.segments[1]?.class, "account.credential", withCredential);
-      assert.equal(a.segments[1]?.text, withCredential, withCredential);
-    }
+    assert.equal(a.segments.length, 2, withCredential);
+    assert.equal(a.segments[1]?.class, second, withCredential);
+    assert.equal(a.segments[1]?.text, withCredential, withCredential);
     assert.equal(a.segments[0]?.rule, "protected-path", withCredential);
     assert.equal(a.segments[0]?.path, path, withCredential);
   }

@@ -542,6 +542,45 @@ on the change above.
   and 10,000 levels of nesting each take under half a second of CPU through
   the hook.
 
+**Every protected path a command writes is judged.** A segment that named
+two protected paths took the class of one of them: the stricter by the
+classifier's own precedence (`log.mutate`, `policy.core`, then `policy.edit`
+and every routed sub-class together), and on equal rank the first named. So
+with `design/` routed to a class a policy runs lightly and
+`.github/workflows/` routed to one it stops for, `tee design/x
+.github/workflows/ci.yml` was the design class alone and wrote the workflow
+with no tap; `tee .github/workflows/ci.yml > design/x`, `cp design/x
+.github/workflows/ci.yml`, `echo x > design/a > .github/workflows/ci.yml` and
+`tee {design/x,.github/workflows/ci.yml}` did the same. The classifier's
+precedence is not a policy's order of strictness, so it now reports every
+protected class the segment's targets take, each as its own entry over the
+same text (the answer it gave before comes first), and the hook judges each
+and the strictest decision answers.
+
+- **Which words count is unchanged.** The other classes come from the same
+  words the classifier already scanned: the write redirections, a download's
+  outputs, a copy's target directory, the positionals and `<` targets of an
+  effectful command. A writer in front of a protected redirection is asked
+  for its own answer too. A reader's arguments are still not targets:
+  `cat SPEC.md > design/x` is the design class alone.
+- **Built-in paths too:** `tee CLAUDE.md APPROVAL.md` is `policy.core` and
+  `policy.edit`. Under a policy that holds `policy.core` the strictest, as
+  the shipped ones do, the decision is the same as before.
+- **A command naming paths of several classes a policy stops for asks once
+  per class.**
+- **One word that brace expansion makes several files of** reports each
+  file's class, and where two of them each match tied routes, every tied
+  class of both.
+- **Not changed:** a segment whose answer is a credential read alone
+  (`cp .approval/env design/x`) reports no protected class beside it, as
+  before.
+- The load note for a routed entry spelled like a built-in path in another
+  case is worded by tier: beside a built-in `policy.edit` path the route is
+  judged too; a built-in `policy.core` or `log.mutate` path is answered by
+  its built-in class and the route never lightens it.
+- Conformance: three new `command-class` vectors; the 392 before them are
+  byte-identical.
+
 **The hook answers before the harness stops listening.** A hook the harness
 kills at its timeout is a tool call that proceeds, and reading one long word
 could take that long: `cat b/b/b/…/env`, a path of 100 KB that names nothing
