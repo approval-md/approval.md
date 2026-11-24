@@ -9223,9 +9223,18 @@ function strictestProtectedWrite(
   if (glob.off || mainRulesOnly) return best;
   const offer = (surface: string | null, word: string): void => {
     if (surface !== null && (best === null || protectedRank(surface) < protectedRank(best.surface))) {
-      // Main's text answer and its other classes ride beside the raise (#690:
-      // every protected class the words take, as main reports them).
-      best = { surface, path: word, others: foldedOnly(() => (text === null ? [] : distinctOthers(surface, [text, ...text.others]))) };
+      // Every class the words took so far rides beside the raise (#690: every
+      // protected class a command writes is judged): main's text answer and
+      // its others, and the answer this one replaces and its others
+      // (automated security review of 79150dc4, b).
+      const before = best;
+      best = {
+        surface,
+        path: word,
+        others: foldedOnly(() =>
+          distinctOthers(surface, [...(text === null ? [] : [text, ...text.others]), ...(before === null ? [] : [before, ...before.others])]),
+        ),
+      };
     }
   };
   // The matcher steps each word already judged here took. The same word again
@@ -12404,18 +12413,13 @@ function classifySegmentWithVerb(
             });
             return plainHit === null || (patternHit !== null && protectedRank(patternHit.surface) < protectedRank(plainHit.surface)) ? patternHit : plainHit;
           })();
-    // A landing answers only where it is stricter than the operands' answer,
-    // and the parents rule only where it is stricter than both, as before
-    // #690; the answer it replaces then rides beside it ({@link strongerProtected}).
-    const namedOperand =
-      landedNamed !== null && (operandNamed === null || protectedRank(landedNamed.surface) < protectedRank(operandNamed.surface))
-        ? strongerProtected({ ...landedNamed, others: [] }, operandNamed)
-        : operandNamed;
+    // The operands', the landing's and the parents rule's answers, as one
+    // answer: a landing or a parent answers only where it is stricter, and
+    // every other class always rides beside (#690; automated security review
+    // of 79150dc4, a).
+    const namedOperand = strongerProtected(operandNamed, landedNamed === null ? null : { ...landedNamed, others: [] });
     const parentNamed = organParent.named;
-    const named =
-      parentNamed !== null && (namedOperand === null || protectedRank(parentNamed.surface) < protectedRank(namedOperand.surface))
-        ? strongerProtected({ ...parentNamed, others: [] }, namedOperand)
-        : namedOperand;
+    const named = strongerProtected(namedOperand, parentNamed === null ? null : { ...parentNamed, others: [] });
     const touched = strongerProtected(named, strictestProtected(readTargets, protectedPaths));
     if (touched !== null) {
       return {

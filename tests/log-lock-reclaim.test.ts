@@ -737,13 +737,23 @@ test("six writers, three appends each, over one stale lock: exactly one reclaim 
   const WRITERS = 6;
   const EACH = 3;
   const script = join(scratch, "racer.mjs");
+  // The barrier is an event, not a clock. Every racer's first wait is the full
+  // 1500 ms on the dead holder, so all six judge it within milliseconds of each
+  // other and the losers of the claim wait again. A racer that reached the
+  // barrier late would judge the lock after the winner's take, find a running
+  // holder and refuse lock-timeout, which is the writer's contract, not a fault:
+  // so `go` is written only once every racer has said it is ready, however long
+  // their start takes on a loaded machine, and the barrier naps rather than
+  // spins, so six waiting racers do not starve the ones still starting.
   writeFileSync(
     script,
     [
       `import { appendEvent } from ${JSON.stringify(LOG_MODULE)};`,
-      `import { existsSync } from "node:fs";`,
+      `import { existsSync, writeFileSync } from "node:fs";`,
       `const [logPath, go, id] = process.argv.slice(2);`,
-      `while (!existsSync(go)) { /* spin to the barrier */ }`,
+      `writeFileSync(go + ".ready-" + id, "");`,
+      `const nap = new Int32Array(new SharedArrayBuffer(4));`,
+      `while (!existsSync(go)) Atomics.wait(nap, 0, 0, 1);`,
       `let failed = 0;`,
       `for (let n = 0; n < ${String(EACH)}; n += 1) {`,
       `  const result = appendEvent(logPath, { ts: "2026-10-05T07:00:02Z", event: "approval.granted", actor: "human:carter", task: "task-479", action_key: "task-479:racer:" + id + ":" + n, channel: "cli" }, { lockTimeoutMs: 1500 });`,
@@ -769,8 +779,12 @@ test("six writers, three appends each, over one stale lock: exactly one reclaim 
           child.on("exit", (code) => resolve({ code, stderr }));
         }),
     );
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    writeFileSync(go, "go");
+    try {
+      await waitFor(() => Array.from({ length: WRITERS }, (_, id) => existsSync(`${go}.ready-${String(id)}`)).every(Boolean), 20_000);
+    } finally {
+      // Written on a failed wait too, so no racer is left polling for it.
+      writeFileSync(go, "go");
+    }
     const results = await Promise.all(outcomes);
     for (const result of results) assert.equal(result.code, 0, `a racer failed: ${result.stderr}`);
     const log = records(logPath);
@@ -1118,14 +1132,33 @@ test("`approval policy amend` waiting on its prompt dies of SIGINT at once, not 
   writeFileSync(join(dir, "APPROVAL.md"), WITH_CHANNEL("supervised"));
 
   const logPath = join(dir, ".approval", "log", "events.jsonl");
-  const child = spawn(
-    process.execPath,
-    [CLI_ENTRY, "policy", "amend", "--as", "agent:planner", "--wait", "12s", "--interval", "200ms", "--json"],
-    { cwd: dir, env, stdio: "ignore" },
+  // The signal is sent once the verb is in its wait, which is an event, not a
+  // clock. A signal that lands while the proposal's append holds the log lock
+  // (through its fsync and release, and the first read of the log after it) is
+  // caught by the lock's guard and, this verb being synchronous, dropped when
+  // the wait settles the guard: the known cost `guardTerminationWhileLocked`
+  // names. A fixed sleep after the record appeared left that window to the
+  // machine's load. The wait's poll sleeps in `Atomics.wait` only after it has
+  // settled the guard (`cli/amend.ts` sleepSync), so the wrapper marks the first
+  // such call made with the proposal in the log and the lock released.
+  const waiting = join(dir, "waiting");
+  const wrapper = join(scratch, `amend-wrapper-${String(counter)}.mjs`);
+  writeFileSync(
+    wrapper,
+    [
+      `import { existsSync, readFileSync, writeFileSync } from "node:fs";`,
+      `const wait = Atomics.wait.bind(Atomics);`,
+      `Atomics.wait = (...args) => {`,
+      `  if (!existsSync(${JSON.stringify(waiting)}) && !existsSync(${JSON.stringify(`${logPath}.lock`)}) && existsSync(${JSON.stringify(logPath)}) && readFileSync(${JSON.stringify(logPath)}, "utf8").includes('"policy.proposed"')) writeFileSync(${JSON.stringify(waiting)}, "x");`,
+      `  return wait(...args);`,
+      `};`,
+      `const { main } = await import(${JSON.stringify(pathToFileURL(CLI_ENTRY).href)});`,
+      `process.exitCode = await main(${JSON.stringify(["policy", "amend", "--as", "agent:planner", "--wait", "12s", "--interval", "200ms", "--json"])});`,
+    ].join("\n"),
   );
+  const child = spawn(process.execPath, [wrapper], { cwd: dir, env, stdio: "ignore" });
   const exited = exitOf(child);
-  await waitFor(() => existsSync(logPath) && readFileSync(logPath, "utf8").includes('"policy.proposed"'), 15_000);
-  await new Promise((resolve) => setTimeout(resolve, 400));
+  await waitFor(() => existsSync(waiting), 15_000);
   const sentAt = Date.now();
   child.kill("SIGINT");
   const { signal } = await exited;

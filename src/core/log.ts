@@ -574,10 +574,20 @@ const MAX_RECLAIM_ROUNDS = 3;
  * whole wait has passed does the writer judge the lock, once
  * ({@link reclaimStaleLock}): a holder that is provably gone loses the lock to
  * one atomic claim and take, and this writer then holds it with the reclaim to
- * record first; a lock that moved, or that another writer is reclaiming, sends
- * it back to wait again (at most {@link MAX_RECLAIM_ROUNDS} times); anything
- * else is `lock-timeout`, whose message names the holder, why its lock was
- * kept, and the human command.
+ * record first; a lock found released, one seen to change hands while this
+ * writer judges or claims it, an empty one that is not the file the wait began
+ * on, or one whose reclaim another writer has claimed sends it back to wait
+ * again (at most {@link MAX_RECLAIM_ROUNDS} times); anything else is
+ * `lock-timeout`, whose message names the holder, why its lock was kept, and
+ * the human command.
+ *
+ * The lock is judged as it stands when the wait ends, not as it stood when the
+ * wait began. A change of hands earlier in the wait is not seen as one: when a
+ * sibling writer took the lock, by a reclaim or after a release, and is still
+ * running under it, this writer is refused, and the holder its message names
+ * may have held the lock for milliseconds. That fails closed, a refusal and
+ * never a shared `seq`. Waiting again there would stretch every contended wait
+ * to as many as {@link MAX_RECLAIM_ROUNDS} more timeouts.
  *
  * The termination-signal guard ({@link guardTerminationWhileLocked}) is
  * installed BEFORE each create, so a lockfile never exists in this process

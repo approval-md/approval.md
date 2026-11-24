@@ -2654,10 +2654,16 @@
             "class": "policy.core",
             "rule": "protected-path",
             "path": ".github/workflows/sub dir/APPROVAL.md"
+          },
+          {
+            "class": "policy.edit",
+            "rule": "protected-path",
+            "path": ".github/workflows/sub dir/APPROVAL.md/a.md"
           }
         ],
         "classes": [
-          "policy.core"
+          "policy.core",
+          "policy.edit"
         ]
       }
     },

@@ -477,9 +477,20 @@ test("the skip needs the head to answer the SAME surface, so a deeper match is k
   // match therefore needed a segment the head does not carry, and the word
   // stays a path — which is the policy file itself, in a directory named with
   // a space.
-  const segment = onePathSegment(`cp a.md ".github/workflows/sub dir/APPROVAL.md"`, ROUTED_PATHS);
-  assert.equal(segment.class, "policy.core");
-  assert.equal(segment.rule, "protected-path");
+  //
+  // GLOB-WRITE (#686): `cp` into a directory also writes `<dir>/a.md`, under
+  // the routed workflows, so that class rides beside the word's (#690's
+  // "every protected path a command writes"). The word's answer is the first.
+  const result = classifyCommand(`cp a.md ".github/workflows/sub dir/APPROVAL.md"`, ROUTED_PATHS);
+  assert.ok(result.ok);
+  const [segment, ...beside] = result.segments;
+  assert.equal(segment?.class, "policy.core");
+  assert.equal(segment?.rule, "protected-path");
+  assert.equal(segment?.path, ".github/workflows/sub dir/APPROVAL.md");
+  assert.deepEqual(
+    beside.map((each) => `${each.class} ${each.path ?? ""}`),
+    ["policy.edit.ci .github/workflows/sub dir/APPROVAL.md/a.md"],
+  );
 });
 
 test("a path inside a sentence rather than at its head is unmoved: it never matched", () => {
