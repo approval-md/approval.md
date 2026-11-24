@@ -10360,6 +10360,23 @@ function organParentClass(
   // What each listed directory gives, read once (review N3: a repeated
   // parent was operands x entries). The same classes in the same order.
   const held = new Map<string, { classes: string[]; git: boolean }>();
+  const readDir = (dir: string): { classes: string[]; git: boolean } | undefined => {
+    if (disk === undefined) return undefined;
+    disk.collect?.add(dir);
+    let entry = held.get(dir);
+    if (entry !== undefined) return entry;
+    // A directory that is not there holds nothing, on a line where nothing before it may make it.
+    const listing = diskListing(disk, dir, true);
+    if (listing === undefined) return undefined;
+    entry = { classes: [], git: false };
+    for (const name of listing) {
+      const guarded = guardedEntryClass(name, protectedPaths, dir);
+      for (const cls of guarded.classes) if (!entry.classes.includes(cls)) entry.classes.push(cls);
+      if (guarded.git) entry.git = true;
+    }
+    held.set(dir, entry);
+    return entry;
+  };
   const seen = new Set<string>();
   for (const operand of operands) {
     if (seen.has(operand)) continue;
@@ -10390,31 +10407,36 @@ function organParentClass(
       if (dirs === null) continue;
       if (dirs === "unplaced" || disk === undefined) {
         offer("policy.core", operand);
+        // Lead ruling L62483 (true class): a word that cannot be placed may
+        // be the working directory or the home, so the classes of what they
+        // hold ride beside policy.core (`mv "$PWD" /tmp/x` on a line that
+        // moves, `cd .. && rm -rf proj`), never only the first one found.
+        if (disk !== undefined) {
+          const home = disk.homeOk === false || disk.home === null ? [] : [disk.home];
+          for (const dir of [disk.cwd, ...(disk.sessionCwds ?? []), ...home].filter((at) => at.startsWith("/"))) {
+            const entry = readDir(dir);
+            if (entry === undefined) continue;
+            for (const cls of entry.classes) offer(cls, operand);
+            if (entry.git) git.add(operand);
+          }
+        }
         continue;
       }
       for (const dir of dirs) {
-        disk.collect?.add(dir);
-        let entry = held.get(dir);
+        const entry = readDir(dir);
         if (entry === undefined) {
-          // A directory that is not there holds nothing, on a line where nothing before it may make it.
-          const listing = diskListing(disk, dir, true);
-          if (listing === undefined) {
-            offer("policy.core", operand);
-            continue;
-          }
-          entry = { classes: [], git: false };
-          for (const name of listing) {
-            const guarded = guardedEntryClass(name, protectedPaths, dir);
-            for (const cls of guarded.classes) if (!entry.classes.includes(cls)) entry.classes.push(cls);
-            if (guarded.git) entry.git = true;
-          }
-          held.set(dir, entry);
+          offer("policy.core", operand);
+          continue;
         }
         for (const cls of entry.classes) offer(cls, operand);
         if (entry.git) git.add(operand);
       }
     }
   }
+  // Lead ruling L62483 (true class): `.git` beside an organ directory is
+  // claimed too (vcs.history.rewrite), not left to the git-dir rule the
+  // protected class answers before.
+  if (git.size > 0 && claims.length > 0 && !claims.includes("vcs.history.rewrite")) claims.push("vcs.history.rewrite");
   const strictest = named as { surface: string; path: string } | null;
   if (strictest === null || claims.length <= 1) return { named: strictest, git };
   const ordered = [strictest.surface, ...claims.filter((cls) => cls !== strictest.surface)];
@@ -12969,7 +12991,8 @@ function classifySegmentWithVerb(
         class: named.surface,
         rule: "protected-path",
         path: named.path,
-        ...besideProtected(named.surface, [named]),
+        // Lead ruling L62483 (true class): the parents rule's classes ride beside.
+        ...besideProtected(named.surface, [named, organParent.named]),
       };
     }
     return {
@@ -12977,7 +13000,7 @@ function classifySegmentWithVerb(
       class: "policy.core",
       rule: "copy-target-unknown",
       path: copyUnknown,
-      ...besideProtected("policy.core", [named]),
+      ...besideProtected("policy.core", [named, organParent.named]),
     };
   }
 

@@ -592,7 +592,10 @@ test("listings: which directories the hook lists, and none it cannot place", () 
   assert.deepEqual(globWriteListingDirs("cd x && rm -rf dist/*", "/w", "/h"), []);
   assert.deepEqual(globWriteListingDirs("rm -rf ../dist/*", "/w", "/h"), []);
   assert.deepEqual(globWriteListingDirs("rm -rf $D/*", "/w", "/h"), []);
-  assert.deepEqual(globWriteListingDirs("rm -rf ~root/*", "/w", "/h"), []);
+  // `~root` places nothing either; since lead ruling L62483 (true class) the
+  // working directory and the home it may be are listed so their classes ride
+  // beside policy.core.
+  assert.deepEqual(globWriteListingDirs("rm -rf ~root/*", "/w", "/h"), ["/w", "/h"]);
   // A read is not a write target: nothing is listed for it.
   assert.deepEqual(globWriteListingDirs("cat dist/*", "/w", "/h"), []);
   // Unplaceable stays strict even with a listing for the lexical directory.
@@ -2489,4 +2492,22 @@ test("automated security review of the fold, 26-28: partial assigned readings, p
   for (const command of ['declare "$F" R=X; rm -rf $X', "typeset $(echo -n) R=X; rm -rf $X"]) strict(command);
   // Wrappers that run the next word in this shell are looked through.
   for (const command of ['time read "$v"; cd proj && rm -rf x', "noglob declare -n R=X; rm -rf $X", 'time -p printf -v "$n" .. && cd proj && rm -rf x', 'nohup printf -v "$n" .. && cd proj && rm -rf x']) strict(command);
+});
+
+test("lead ruling L62483 (true class): a parent takes the class of EVERY guarded target below it, not only the first or strictest", () => {
+  const tree = { "/": ["w", "h"], "/w": [".claude", ".git", ".github", ".approval", "src"], "/h": [".hermes"], ...realpaths("/w", "/h") };
+  const routes = [{ path: ".github/workflows/", class: "policy.edit.ci" }];
+  const classesWith = (command: string): string[] => {
+    const result = classifyCommand(command, routes, { globDisk: { cwd: "/w", home: "/h", listings: new Map(Object.entries(tree)) } });
+    assert.ok(result.ok, command);
+    return result.classes;
+  };
+  for (const command of ["rm -rf .", 'rm -rf "$PWD"', "chmod -R 000 .", "find . -delete", "rm -rf {.,x}", "rsync -a --delete /tmp/empty/ ./", 'rm -rf "."', "rm -rf ..", "cd .. && rm -rf proj", 'mv "$PWD" /tmp/x']) {
+    const classes = classesWith(command);
+    for (const cls of ["policy.core", "vcs.history.rewrite", "policy.edit", "policy.edit.ci", "log.mutate"]) {
+      assert.ok(classes.includes(cls), `${command} -> ${classes.join(",")} lacks ${cls}`);
+    }
+  }
+  // `.git` alone keeps the git-dir rule's answer (no organ beside it).
+  assert.ok(classesWith("rm -rf src/..").includes("policy.core"));
 });

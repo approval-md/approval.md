@@ -232,6 +232,12 @@ test("lead ruling L61587, parents, through the hook: `rm -rf .` where the direct
   assert.deepEqual(await hookClasses("rm -rf ./dist", plain), ["files.write.workspace"]);
   const checkout = project({ ".git": ["config"], src: ["a.ts"] });
   assert.ok((await hookClasses("rm -rf .", checkout)).includes("vcs.history.rewrite"));
+  // Lead ruling L62483 (true class): every guarded target below, not the first only.
+  const full = project({ ".git": ["config"], ".claude": ["settings.json"], ".github/workflows": ["ci.yml"], ".approval/log": ["made-up.jsonl"], src: ["a.ts"] });
+  for (const command of ["rm -rf .", "chmod -R 000 .", "find . -delete", 'mv "$PWD" /tmp/b2-l62483-x']) {
+    const classes = await hookClasses(command, full);
+    for (const cls of ["policy.core", "vcs.history.rewrite", "policy.edit", "log.mutate"]) assert.ok(classes.includes(cls), `${command} -> ${classes.join(",")} lacks ${cls}`);
+  }
   // Lead ruling L62435 (S1): a brace word is judged word by word.
   for (const command of ["rm -rf {.,x}", "chmod -R 000 {.,x}", "rm -rf {..,.}/sub/..", "find {.,x} -delete"]) {
     assert.ok((await hookClasses(command, organ)).includes("policy.core"), command);
