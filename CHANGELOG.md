@@ -17,6 +17,216 @@ before a tag.
 
 ### Security
 
+**A glob in a write target to a guarded path stays guarded (GLOB-WRITE).**
+`echo x > ~/.hermes/auth.json` was `policy.core`, and the same write with a
+glob in any component (`~/.hermes/[!Z]uth.json`, `~/.[!Z]ermes/auth.json`,
+`~/.hermes/?uth.json`, `~/.h*/auth.json`, `.appr*/env`, `APPROVAL.m?`) was an
+ordinary `files.write.workspace`, while bash and zsh write through a glob in a
+redirect target that matches one file and every shell writes through one in a
+`cp`, `mv`, `tee`, `ln` or `install` operand. A write target the shell may
+still glob is now judged by every guarded path its pattern could match, over-
+approximated (each construct matches anything it could in any shell under any
+option, case folded), and takes the strictest class among them.
+
+- **Which words (fail closed):** redirect targets (`>`, `>>`, `>|`, `&>`,
+  `n>`), download outputs and `-t` directories, every operand of a command
+  that is not a read (`tar -C`, `rsync`, `scp`, `gunzip`, `git add`,
+  `git checkout --`, `rm`, `chmod`), and a
+  read-class command's own outputs (`sort -o F`, `uniq in F`, sed's `w F`),
+  which were judged by nothing before, plain or not. `cp`, `ln` and `install`
+  are the one narrow row: their destination only, since a glob in a copy's
+  SOURCE is a read and is left to the read jail (`cp ./*.md docs/` stays a
+  workspace write).
+- **`${X:-WORD}` defaults:** the WORD of `:-`, `-`, `:=`, `=`, `:+`, `+`,
+  `:?`, `?` is a reading of its own, since the shell substitutes it and then
+  globs it (`echo x > ${X:-.approval/env}` was a workspace write). More than
+  eight such spans in one word, or a default nested three deep, is
+  `log.mutate`. zsh's `braceccl` class (`{a-z}`) is read as a class of its
+  characters, and a variable beside a glob construct may name anything.
+- **Dot-names, setter or not (lead rulings L60846, L61492, L61497):** bash's
+  `dotglob` and zsh's `globdots` may be set in the user's own start-up file,
+  where no setter on the line shows, so a write whose `*`, `?` or `[...]`
+  (or a whole `**`) would match a guarded dot-name under them is that name's
+  class: `echo x > ~/*/auth.json`, `cp README.md ~/?hermes/hermes-agent/.env`,
+  `echo x > [.]approval/env` and `echo x > ~/**/auth.json` are human-only.
+  A pattern is read with dot-names hidden and matched, and the stricter
+  answer stands. `.` and `..` are matched only by an explicit leading `.`
+  (or on a line that may set an option, as before), never by `*` or `?`.
+  The same reading covers `.git` for the git-dir write rule (a leading `*` or
+  `?` in a write target), and a copy or sync destination's globbed component
+  against the organ directories (`rsync -a pkg/ ?grok/`). The cost the lead
+  accepted: `rm -f *` or `chmod 644 *` in a directory that holds `.git` is
+  `vcs.history.rewrite`; in one holding no guarded dot-name (`rm -rf dist/*`
+  beside `dist/.cache`) the class is what it was. Case folding stays: `*` and
+  `*.md` reach `APPROVAL.md` as bash does on a case-insensitive APFS volume.
+- **Decided by what is there (lead ruling L61167):** before it classifies, the
+  hook lists the directory each write-target pattern's first globbed component
+  sits in (`src/cli/glob-listing.ts`: `fs.promises.opendir`, 2,000 entries, a
+  2 s deadline per directory, 16 directories, all at once) and the classifier
+  matches the pattern against those names (case folded, dot-names by the rule
+  above). `rm -rf dist/*`, `chmod +x scripts/*`, `git add src/*` and
+  `npx prettier --write src/*` keep main's class in a directory holding no
+  guarded name, and are `policy.core` in one holding `APPROVAL.md` (any case).
+  A directory that cannot be listed in full, a prefix the text cannot place
+  (`..`, a variable, `~user`, a line that changes directory), a deeper globbed
+  component, and every caller without listings (the core itself, `approval
+  serve`, the codex bridge) keep the strict answer. So does a line where
+  anything else may create, move, link or extract a file (only a plain `ls`,
+  `cat`, `echo`, `pwd`, `true`, `test`, `head`, `tail`, `wc`, `grep`, `date`
+  or `whoami` may keep the pattern company; no substitution, subshell or
+  heredoc), a `~` prefix on a line that names `HOME`, and a relative prefix
+  when the shell may start in another directory than the one listed. A file
+  created by another process between the listing and the run is not seen.
+- **Stricter than before, without a listing:** a write pattern that COULD name a guarded file is
+  human-only even when no such file exists. `APPROVAL.md` is guarded at any
+  depth, so a pattern for a file straight inside a directory stays strict:
+  `rm -rf dist/*`, `chmod +x scripts/*`, `git add *`, `git add src/*`,
+  `npx prettier --write src/*`, `echo x > dist/*.md`, `sed -i … *.md`. A
+  pattern that cannot reach a guarded name (`out/*.log`, `src/*.ts`,
+  `rm -rf assets/*.png`) keeps its class. More than 4,096
+  candidate paths, 32 segments or two million matcher steps is `log.mutate`;
+  the worst words measured cost about 0.05 CPU s.
+- **One budget (review-b M1):** the two million matcher steps are one budget
+  for the whole command line, shared by every segment, word and reading.
+  A word judged once in a list is not walked again: `rsync -aR s0/*/./a*
+  s1/*/./a* …` lands every source as the last word's `<dest>/a*`, and at
+  7 KB the repeated walks took about 50 CPU s (now about 2). Each repeat
+  still draws the steps the first walk drew, so the budget runs out where
+  it did.
+- **The listing pass is held to the hook's own deadline (#693):** the hook
+  classifies a command once to find the directories its write patterns glob
+  in, before it describes the call. That pass now runs under the same
+  deadline, for the harness ceiling the call runs under, and its time comes
+  out of the deadline and counts as reading time. Stopped at the deadline,
+  the call is refused `hook-deadline` (it ran unbounded before: a 40 KB
+  `rsync -aR` answered a 500 ms deadline after 5.5 s).
+  An open window describes the call with the same listings, so its read is
+  cut by the pass's time too (review-b A686-FOLD7 N2).
+- **Main's class is carried beside every raise (lead ruling L61926):** a line
+  any GLOB-WRITE rule fires on is classified a second time with every
+  GLOB-WRITE rule off (main's answer), and the two join: every class of each
+  rides on the line, and a refusal in either refuses. So no line's decision is
+  looser than main's under any policy: `cp a.js .github/README` is
+  `policy.edit` AND `files.write.workspace`, `mv a .gi*/config` keeps
+  `vcs.history.rewrite` beside `policy.edit`, and a line main refuses stays
+  refused. This supersedes review-b S1's reading, which left an ordinary
+  write or read class off a raised segment.
+- **Quoting (review of 3230ecb6):** only an UNQUOTED glob character, or an
+  unquoted `$` whose value or `${…}` default the shell may still glob, makes a
+  word a pattern (`"exit-$?.txt"`, `"$f[1,4]/out"` are their text), and the
+  character after `$` in `$?`, `$#`, `$*`, `$@`, `$!`, `$$`, `$-` and `$0`-`$9`
+  is a parameter's name only where every `$` in the word is a real
+  expansion (`'$'*` and `\$*` are a literal `$` and a live `*`). zsh's `^`
+  and `#` count where the line may set options.
+- **zsh's clobbering redirects (lead ruling L61195 (a); L62319 after
+  main's #700):** `>!`, `>>!`, `>|`, `>&!`, `&>|` and `&>>!` write the next
+  word, as `>` does, and the file bash writes (`!`, or `!word` when joined)
+  rides beside. Main refuses `>!`, `>>!` and `>&!` (#700, below); this
+  reading lifts that refusal only where the word is the file zsh writes, and
+  any other refusal main has for the line still stands. Kept refused, because
+  zsh writes another file there or none: inside a `bash -c` or `sh -c`
+  script, a descriptor of two or more digits (`10>!x`, where zsh reads `10`
+  as an argument), joined to a dup's word (`2>&1>!x`) or after a line
+  continuation, a target opening `=` or `#`, and one carrying `$'…'`.
+  `>>|`, `>&|`, `>>&!`, `>>&|` and a spaced `&>! x`, which main refused
+  before #700, stay refused (lead ruling L61926).
+- **Copies, moves, links, syncs and extractions INTO a guarded directory
+  (L61195 (b); reviews of b402adec, 039b840a and e6b7bf97; the split ruling,
+  L61320):** a `cp`, `mv`, `ln`, `install`, `rsync`, `scp` or `tar -x -C`
+  whose destination IS `.claude`, `.cursor`, `.grok`, `.muse` or `.github`,
+  or a path under one, takes that directory's class by its name alone, after
+  lexical normalisation (`.claude/x/..`, `./.claude/.`, `.claude/sub/`), with
+  no listing: `cp evil/settings.json .claude/`, `cp a.txt .claude/`, `cp -r
+  x/. .claude/`, `tar -xf a.tar -C .claude`, `rsync -a src/ .claude/hooks/`.
+  `.git` keeps #683's git-dir rule. A destination is a path by construction,
+  whitespace and all (`cp x ".claude/my file"`). A copy into another
+  directory is judged by the file it lands (`cp evil/* out/` with
+  `evil/APPROVAL.md`); a copy that may keep its source's path (`cp
+  --parents`, rsync `-R`/`--relative` anywhere on the line, a `/./` cutting
+  the kept path) is judged at `<dest>/<the source's path>` beside the
+  basename landing, the stricter answering (`cp --parents
+  .claude/settings.json .`, `rsync -R .approval/env backup/..`), normalised
+  lexically; and a source
+  landing AS a guarded directory is one (`cp -r evil/.claude .`, `ln -s
+  ../evil/.claude`, which links into `.`). With no destination read, every
+  operand is judged, as before. `cp`, `mv`, `ln`, `install`, `rsync` and `scp`
+  are read by per-tool option tables, so an option's value is never the
+  destination (`rsync -a src/ .claude/ --exclude x`), and an option a table
+  does not know makes every operand a possible destination. tar's directory
+  is read in every spelling (`-C X`, `-CX`, a cluster, `--directory`/`--cd` by
+  any prefix, the dashless bundle `tar xCf .claude a.tar`). `unzip`, `ditto`,
+  `cpio`, `pax`, `bsdtar`, `gtar` and `7z` have no rule and stay refused; an
+  archive or copy tool with no table whose operand names a guarded directory
+  is that write. A contents copy or extraction into an ordinary directory or
+  an ancestor of a guarded one (`tar -xf a.tar`, `cp -r src/. .`) keeps its
+  class here; that is a follow-up. A directory the hook finds not there is
+  empty only to a glob on a one-segment line. Two `command-class` conformance
+  vectors move to the stricter answer and are regenerated:
+  `cp-dot-slash-glob-is-unmoved` (`cp ./*.md docs/`, `policy.core`: the
+  landing `docs/*.md` may be `docs/APPROVAL.md`) and
+  `prose-opening-with-a-protected-path-under-cp` (a destination under
+  `.github`, `policy.edit`); the suite's `vectors_version` is left for the
+  release seat.
+
+**Deleting, moving or locking an organ directory is that directory's class
+(lead ruling L61587; review-b A686-FOLD3 M1).** `rm -rf .claude` was an
+ordinary `files.write.workspace` on 0.4.8 and main, and it removes the hook's
+own registration (`.claude/settings.json`): an agent could switch the gate off
+in one command. The bare organ directories now take their strictest class
+exactly as bare `.approval`, `.codex` and `.hermes` already did:
+`.claude`, `.cursor`, `.grok` and `.muse` are `policy.core`, `.github` is
+`policy.edit`. Fail closed (lead ruling L62013, S2; security review of
+e9956c84): every command naming the bare folder keeps its class, a redirect
+onto it, a plain `rm`/`unlink` (the name may be a symlink) and any tool or
+option the classifier does not know included, except a short release list
+of commands that cannot remove, replace, move or change access to it. The
+spellings
+`.claude/`, `./.claude`, `.claude/.` and `.claude/x/..`, and with the glob
+readings `rm -rf .cl*`, `rm -rf .c?aude`, `rm -rf .*` and, where the hook's
+listing shows one, `rm -rf *`. An ordinary directory (`rm -rf dist`,
+`rm -rf node_modules`, `rm -rf build/`, `rm -rf .cache`) and a directory
+inside an organ that guards no file (`rm -rf .claude/commands`) keep their
+class. Released to main's class: `mkdir` (with `-p`/`-v`; not `-m`, which
+creates a missing folder with that mode) and `touch`, and only in the plain
+form: the bare command name first in its segment (no assignment such as
+`PATH=` or `TAR_OPTIONS=` before it, no wrapper, no path), every word exactly
+its text (no parameter, substitution, glob, brace or tilde), every option
+known and spelled in full, each valued option's value present. Held, for
+example: `rm -f .claude`, `unlink .claude`, `rm --r .claude`,
+`tar -czf out.tgz -C .claude .`, `tee .claude`, `> .claude`,
+`truncate -s 0 .claude`, `mkdir $X .claude`, `./mkdir .claude`. A write INTO the folder stays
+strict by the destination rule above (`cp -r evil/ .claude`,
+`rsync -a x/ .claude/`, `ln -s x .claude`, `tar -xf a.tar -C .claude`), as
+does a copy that lands one (`cp -r .claude backup/` writes
+`backup/.claude/settings.json`). Bare `.approval`, `.codex` and `.hermes`
+keep main's class for every verb.
+**The folder's contents go with it (lead ruling L62013, S1).** A command the
+rule holds on an organ folder ITSELF also takes the class of every guarded
+path inside it, the policy's routed entries included: `rm -rf .github` is
+`policy.edit` AND `policy.edit.ci` where `.github/workflows/` is routed
+there, `rm -rf .approval` is `policy.core` AND `log.mutate`, and
+`rm -rf ~/.hermes` carries `cron.manage` for its scheduled scripts. The
+classifier cannot rank routed classes (it has the policy's paths, not their
+autonomy), so each is a claim and the strictest decides under the policy in
+force. Each path inside is classified as a file under the folder would be:
+one built-in representative per organ, and one per policy entry naming a
+path under it. Not covered, a follow-up: a parent of an organ directory
+(`rm -rf .`, `rm -rf $PWD`, `rm -rf ..`, `rm -rf ~`) keeps its class;
+`chown`, `chgrp`, `unlink`, `rename` and `git clean` stay refused (no rule);
+`find . -name .claude -exec rm …` stays refused (opaque); case variants
+(`rm -rf .Claude`) as for every guarded path.
+
+**GLOB-WRITE names fold with the shared fold (#688; lead ruling 04:11Z).**
+Listing names, organ-directory names, the `.git` check on a listing and the
+glob matcher's characters compare through `foldNameExact`, so they fold what
+APFS folds (long s, the Kelvin sign, ligatures, sharp s, NFD) in the folded
+reading and compare exactly in the as-spelled one, as main does; there is one
+fold, and a case variant keeps the class main gives that spelling beside the
+guarded one (`cp a.js .gItHuB/WoRkFlOwS/Ci.yMl` is `policy.edit` and
+`files.write.workspace`; review-b A686-FOLD5 M1). The
+glob matcher folds each whole name before it matches, and reads a pattern
+character whose fold is not one character as any run (strict).
+
 **Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),
 and the `git push m` after it read as an implicit `vcs.push.main` while it was
@@ -479,6 +689,11 @@ Bash tool runs on macOS, a line that wrote a protected file was
   overlay recipe and no earlier conformance vector carries the form.
   Conformance: three new `command-class` vectors (two refusals and `>|`);
   the 395 before them are byte-identical.
+- **With GLOB-WRITE (lead ruling L62319):** the forms above are read at the
+  word zsh writes, with bash's file beside, where that word is the file zsh
+  writes; the rest keep this refusal (the GLOB-WRITE entry lists them). The
+  two refusal vectors read `policy.core` beside `files.write.workspace`, and
+  two refused controls are added (`bash -c`, a two-digit descriptor).
 
 ### Added
 
