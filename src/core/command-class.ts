@@ -915,6 +915,69 @@ function zshClobberRefusal(spelled: string): { ok: false; detail: string } {
   };
 }
 
+// ===========================================================================
+// Dollar-quoted words: read as the shell reads them, main's reading beside
+// ===========================================================================
+//
+// `$'…'` (ANSI-C quoting) and `$"…"` (locale quoting) are quotes to the shell:
+// `echo x > $'\x41PPROVAL.md'` writes the policy file. Main's lexer kept the
+// `$` and read the quote after it, so the word was the unknown variable
+// `$\x41PPROVAL.md` and the line a workspace write. The lexer now reads each
+// as the shell does ({@link readDollarQuoted}): `$"…"` as a double-quoted
+// string, `$'…'` decoded where bash and zsh decode it alike, and a part it
+// cannot read for both shells left as an unknown, the way `$X` is.
+//
+// A decoded word can be LIGHTER than main's unknown one (`cp a $'b'` is a
+// workspace write; main answered `policy.core` for a copy to a target it could
+// not read). So wherever the lexer decoded a dollar quote, the line is
+// classified again with dollar quotes kept as main kept them, and that answer
+// joins the first as a name reading does ({@link unionNameReadings}): main's
+// classes ride beside, and a line main refuses stays refused. The switch is
+// module state, set only by {@link withDollarQuotesKept}.
+
+let dollarQuotesKept = false;
+let dollarQuoteRead = false;
+
+/** Run `run` with dollar quotes kept as main's lexer kept them, and restore the mode afterwards. */
+function withDollarQuotesKept<T>(run: () => T): T {
+  const saved = dollarQuotesKept;
+  dollarQuotesKept = true;
+  try {
+    return run();
+  } finally {
+    dollarQuotesKept = saved;
+  }
+}
+
+/** {@link classifyCommand} with dollar quotes kept as main's lexer kept them: the answer that rides beside. */
+export function classifyCommandWithDollarQuotesKept(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[] = [],
+  context: ClassifierContext = {},
+): CommandClassification {
+  return withDollarQuotesKept(() => classifyCommand(command, protectedPaths, context));
+}
+
+/**
+ * `run`'s answer with dollar quotes read as the shell reads them, and, where
+ * the lexer read one during that run, its answer with them kept as main kept
+ * them: `[decoded]` or `[decoded, asMain]`. Callers join the answers as they
+ * join the name readings. Inside the kept mode this is `[run()]`.
+ */
+export function eachDollarQuoteReading<T>(run: () => T): [T] | [T, T] {
+  if (dollarQuotesKept) return [run()];
+  const outer = dollarQuoteRead;
+  dollarQuoteRead = false;
+  let read = false;
+  try {
+    const decoded = run();
+    read = dollarQuoteRead;
+    return read ? [decoded, withDollarQuotesKept(run)] : [decoded];
+  } finally {
+    dollarQuoteRead = outer || read;
+  }
+}
+
 /** A GLOB-WRITE rule changed this line's answer: the main pass must run. */
 function markGlobWriteFired(): void {
   if (!mainRulesOnly) globWriteFired = true;
@@ -2238,6 +2301,10 @@ interface PendingHeredoc {
  * are kept verbatim in the word text, and every rule that reads a path or a
  * refspec treats a word containing `$` as unknown, which resolves stricter.
  *
+ * Dollar quotes are read as the shell reads them: `$"…"` as `"…"`, `$'…'`
+ * decoded where bash and zsh agree ({@link readDollarQuoted}), with main's
+ * reading of the line beside wherever one was ({@link eachDollarQuoteReading}).
+ *
  * ## Quoted text is DATA, and that is a contract (APRV-353)
  *
  * The command boundary this tokenizer honours is the shell's own. A quoted
@@ -2319,6 +2386,8 @@ function lex(command: string): LexResult {
     let exact = true;
     const substitutions: string[] = [];
     const start = index;
+    // Where a dollar quote ended the word's text (`endsWord`, see `readDollarQuoted`).
+    let cut: number | null = null;
 
     for (; index < command.length; index += 1) {
       const ch = command[index] as string;
@@ -2373,6 +2442,45 @@ function lex(command: string): LexResult {
         continue;
       }
 
+      if (ch === "$" && !dollarQuotesKept) {
+        const next = command[index + 1];
+        // `$$` is the shell's pid: its second `$` opens no quote (`$$'x'`).
+        if (next === "$") {
+          text += "$$";
+          splits = true;
+          exact = false;
+          index += 1;
+          continue;
+        }
+        if (next === '"') {
+          // `$"…"`: a double-quoted string (bash translates it through a
+          // message catalog, the identity without one). Expansions in it stay
+          // as they are in `"…"`.
+          dollarQuoteRead = true;
+          const scan = readDoubleQuoted(command, index + 1);
+          if (scan === null) return null;
+          text += scan.text;
+          substitutions.push(...scan.substitutions);
+          if (scan.opaque !== null) opaque = scan.opaque;
+          quoted = true;
+          exact = false;
+          index = scan.end;
+          continue;
+        }
+        if (next === "'") {
+          dollarQuoteRead = true;
+          const scan = readDollarQuoted(command, index + 1);
+          if (scan === null) return null;
+          text += scan.text;
+          if (scan.unread) splits = true;
+          if (scan.endsWord && cut === null) cut = text.length;
+          quoted = true;
+          exact = false;
+          index = scan.end;
+          continue;
+        }
+      }
+
       if (ch === "$" && command[index + 1] === "(") {
         if (command[index + 2] === "(") {
           const end = command.indexOf("))", index + 3);
@@ -2411,6 +2519,7 @@ function lex(command: string): LexResult {
     // word that consumed characters and produced no text is still a word (`''`,
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
+    if (cut !== null) text = text.slice(0, cut);
     const assignment = ASSIGNMENT.test(command.slice(start, index));
     const paramNames = specialParametersOnly(command.slice(start, index));
     return { text, quoted, substitutions, splits, expands, zshGlob, paramNames, exact, assignment };
@@ -2499,8 +2608,8 @@ function lex(command: string): LexResult {
       // - joined to a dup's word (`2>&1>!x`), or after a line continuation
       //   (`>\` newline `>!x`): zsh refuses the line and writes nothing;
       // - a target opening `=` (zsh's command lookup) or `#` (a comment in
-      //   zsh, so no target), or carrying `$'…'`, which zsh decodes and this
-      //   lexer does not.
+      //   zsh, so no target), or carrying `$'…'`, which main's lexer did not
+      //   decode (the refusal is kept where it now does).
       const clobber = op === ">!" || op === ">>!" || op === ">&!";
       if (clobber) {
         const start = index - (redirect[0] as string).length;
@@ -2764,6 +2873,19 @@ function readSubstitution(command: string, start: number): { inner: string; end:
     const ch = command[index] as string;
     if (ch === "\\") {
       index += 1;
+      continue;
+    }
+    // A `$'…'` ends at its own closing quote: `\'` inside it is a quote
+    // character, not the end (`$(echo $'\'')` closes at the `)`).
+    if (ch === "$" && command[index + 1] === "$" && !dollarQuotesKept) {
+      index += 1;
+      continue;
+    }
+    if (ch === "$" && command[index + 1] === "'" && !dollarQuotesKept) {
+      dollarQuoteRead = true;
+      const close = ansiCQuoteEnd(command, index + 1);
+      if (close === null) return null;
+      index = close;
       continue;
     }
     if (ch === "'") {
@@ -5638,6 +5760,112 @@ function decodeBackslashEscapes(text: string, zeroOctal: boolean): string {
     at += used;
   }
   return out;
+}
+
+/**
+ * The index of the quote closing the ANSI-C string whose opening quote is at
+ * `open` (the `'` of `$'`), or `null` when it does not close: a backslash
+ * takes the character after it, so `\'` does not end it.
+ */
+function ansiCQuoteEnd(command: string, open: number): number | null {
+  let close = open + 1;
+  while (close < command.length && command[close] !== "'") close += command[close] === "\\" ? 2 : 1;
+  return close < command.length ? close : null;
+}
+
+/** The letter escapes bash and zsh decode alike inside `$'…'` (measured on bash 3.2 and zsh 5.9). */
+const ANSI_C_SHARED_LETTERS = new Set(["a", "b", "e", "E", "f", "n", "r", "t", "v", "\\", "'", '"', "?"]);
+
+/**
+ * The `$'…'` whose opening quote is at `open` (the `'` after the `$`), read as
+ * the shells the hook stands beside read it: bash (3.2, as macOS ships it, and
+ * 5) and zsh 5.9, each measured. Its text is the decoded string where they
+ * agree: the letter escapes ({@link ANSI_C_SHARED_LETTERS}), `\xH` and
+ * `\xHH`, `\uHHHH` (exactly four digits), and octal `\N`, `\NN`, `\NNN` (a
+ * byte: `\777` is 0xFF and `\400` a NUL to both), each decoded by
+ * {@link decodeBackslashEscapes} on its own text.
+ *
+ * What it cannot read for every shell is UNREAD (`unread`), and stands in the
+ * text as {@link SUBSTITUTION_SENTINEL}, an unknown value the way `$X` is:
+ *
+ * - a decoded character outside ASCII (`\x80` to `\xFF` and octal above
+ *   `\177` are bytes, `\u00E9` a character the locale encodes);
+ * - an escape bash keeps whole and zsh drops the backslash of (`\q`, `\8`,
+ *   `\-`, any other letter or sign): the backslash and that character;
+ * - a decoded NUL, and an escape after which one shell may decode a NUL or
+ *   take more characters (`\cX` in bash; `\C-X`, `\M-X`, `\UHHHHHHHH`, `\u`
+ *   with fewer than four digits, `\x` with none in zsh): bash ends the quote's
+ *   text at a NUL and keeps the word going after it, zsh keeps the NUL and a
+ *   path ends there, so the rest of the WORD is unknown (`endsWord`: the
+ *   caller drops whatever the word holds after this string).
+ *
+ * `null` when the quote does not close (the line is unparseable). Linear in
+ * the body: each escape is read once.
+ */
+function readDollarQuoted(
+  command: string,
+  open: number,
+): { text: string; end: number; unread: boolean; endsWord: boolean } | null {
+  const close = ansiCQuoteEnd(command, open);
+  if (close === null) return null;
+  let text = "";
+  let unread = false;
+  let endsWord = false;
+  const unknown = (): void => {
+    if (!text.endsWith(SUBSTITUTION_SENTINEL)) text += SUBSTITUTION_SENTINEL;
+    unread = true;
+  };
+  const hexRun = (from: number, most: number): number => {
+    let end = from;
+    while (end < close && end - from < most && /[0-9A-Fa-f]/u.test(command[end] as string)) end += 1;
+    return end - from;
+  };
+  for (let at = open + 1; at < close; at += 1) {
+    const char = command[at] as string;
+    if (char !== "\\") {
+      text += char;
+      continue;
+    }
+    const next = command[at + 1] as string;
+    let length: number;
+    if (ANSI_C_SHARED_LETTERS.has(next)) length = 2;
+    else if (next === "x") length = hexRun(at + 2, 2) === 0 ? 0 : 2 + hexRun(at + 2, 2);
+    else if (next === "u") length = hexRun(at + 2, 4) === 4 ? 6 : 0;
+    else if (/[0-7]/u.test(next)) {
+      length = 2;
+      while (length < 4 && at + length < close && /[0-7]/u.test(command[at + length] as string)) length += 1;
+    } else length = 0;
+    if (length === 0) {
+      // Unread. Where one shell may decode a NUL here (`\c@` in bash; `\C-@`,
+      // `\U0`, `\u0`, `\x` with no digit in zsh) or take characters after it
+      // (`\cX`, `\M-X`, `\UHHHHHHHH`), the rest of the word is unknown, as
+      // after a NUL. Any other letter or sign is the backslash and itself to
+      // bash, itself alone to zsh.
+      unknown();
+      if (/[cCMUux]/u.test(next)) {
+        endsWord = true;
+        break;
+      }
+      at += 1;
+      continue;
+    }
+    const escape = command.slice(at, at + length);
+    let decoded = decodeBackslashEscapes(escape, false);
+    // An octal escape is a byte: `\777` is 0xFF and `\400` a NUL to both shells.
+    if (/^\\[0-7]/u.test(escape)) decoded = String.fromCharCode(Number.parseInt(escape.slice(1), 8) & 0xff);
+    at += length - 1;
+    if (decoded === "\0") {
+      unknown();
+      endsWord = true;
+      break;
+    }
+    if ((decoded.codePointAt(0) ?? 0) > 0x7f) {
+      unknown();
+      continue;
+    }
+    text += decoded;
+  }
+  return { text, end: close, unread, endsWord };
 }
 
 /**
@@ -12569,6 +12797,16 @@ export function unionNameReadings(readings: readonly CommandClassification[]): C
 }
 
 function classifyCommandAsRead(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  context: ClassifierContext,
+): CommandClassification {
+  // Dollar quotes read, and where one was, main's reading beside (see `withDollarQuotesKept`).
+  const readings = eachDollarQuoteReading(() => classifyCommandAsReadBeside(command, protectedPaths, context));
+  return readings.length === 1 ? readings[0] : unionNameReadings(readings);
+}
+
+function classifyCommandAsReadBeside(
   command: string,
   protectedPaths: readonly ProtectedPathEntry[],
   context: ClassifierContext,
