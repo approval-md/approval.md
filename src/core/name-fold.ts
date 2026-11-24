@@ -261,20 +261,20 @@ export function foldedOnly<T>(make: () => readonly T[]): readonly T[] {
 /**
  * `make()` in the folded reading, `null` as spelled: an answer only the folded
  * reading reports, as {@link foldedOnly} is, made QUIETLY: a name compare
- * inside it that would differ as spelled, and a set of equal claims it meets,
- * do not make {@link eachNameReading} run another reading. For a reading that
- * walks the guarded names themselves (the spliced write-target reading in
- * `command-class.ts`), where every walk meets a name that folds; inside it
- * the folded reading's current claim stands for its equal claims.
+ * inside it that would differ as spelled does not make {@link eachNameReading}
+ * run the as-spelled reading, which has no such answer to compare (for a
+ * reading that walks the guarded names themselves, the spliced reading in
+ * `command-class.ts`, where every walk meets a name that folds). A set of
+ * equal claims it meets still counts (automated security review of the
+ * spliced reading, c): the folded reading then takes each claim in turn.
  */
 export function foldedOnlyQuietly<T>(make: () => T): T | null {
   if (spelledReading) return null;
-  const outer = { diverged: readingsDiverged, widest: widestEqual };
+  const diverged = readingsDiverged;
   try {
     return refusePromise(make());
   } finally {
-    readingsDiverged = outer.diverged;
-    widestEqual = outer.widest;
+    readingsDiverged = diverged;
   }
 }
 

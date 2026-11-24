@@ -333,7 +333,9 @@ test("cost: review-b's M2 on 2f4100fc, brace groups beside outputs to 1 MB, is b
   for (const n of [5000, 20000]) {
     bounded(`${P}echo x > "$(printf '${"\\x7ba..a\\x7d".repeat(n)}*')"`, `a printed glob of one-alternative groups, n=${String(n)}`);
   }
-  assert.deepEqual(pure("echo x >> .g{i..i}$(pwd)t/config"), [DIR_WRITE]);
+  // (Build-6 round two, L62568: the output may hold a `/`, so the word may
+  // also be `.g…/hooks/…t/config`; that class rides beside the `.git` one.)
+  assert.deepEqual(pure("echo x >> .g{i..i}$(pwd)t/config"), ["policy.core redirect-protected", DIR_WRITE]);
   // The step bound: 63 groups of one alternative finish, 64 count; in a word
   // an outputs' join reads, and in a word a default rewrites (bash 3.2 reads
   // `${a:-out}/{a..a}{a..a}.log` as `out/aa.log`).
@@ -342,7 +344,7 @@ test("cost: review-b's M2 on 2f4100fc, brace groups beside outputs to 1 MB, is b
   assert.deepEqual(pure(`echo x > out/${"{a..a}".repeat(63)}$(pwd).log`), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure(`echo x > out/${"{a..a}".repeat(64)}$(pwd).log`), [DIR_WRITE]);
   // Under the bound the expansion answers as before; past 16 alternatives, the strict side.
-  assert.deepEqual(pure("echo x >> .g{i,}$(pwd)t/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> .g{i,}$(pwd)t/config"), ["policy.core redirect-protected", DIR_WRITE]);
   assert.deepEqual(pure(`echo x > out/${"{a,b}".repeat(4)}$(pwd).log`), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure(`echo x > out/${"{a,b}".repeat(5)}$(pwd).log`), [DIR_WRITE]);
 });

@@ -293,7 +293,9 @@ test("review 2: a ${X:-WORD} default (and := :+ - = +) is a reading of its own, 
 test("review 2b: more ${…} operator spans than the cap, or a default nested too deep, is log.mutate", () => {
   const spans = (n: number): string => Array.from({ length: n }, (_, k) => `\${X${String(k)}:-a}`).join("");
   // At the cap (8) the readings are judged; one past it fails closed.
-  assert.deepEqual(classesOf(`echo x > out/${spans(8)}.log`), ["files.write.workspace"]);
+  // (The spliced reading, L62568, build-6: `out/${X0}a${X1}…` may be
+  // `out/.approval/log/…`, a part holding `/` beside the literal `a`.)
+  assert.deepEqual(classesOf(`echo x > out/${spans(8)}.log`), ["log.mutate", "files.write.workspace"]);
   assert.equal(strictest(`echo x > out/${spans(9)}.log`), "log.mutate");
   // The guarded default past the cap is not lost.
   assert.equal(strictest(`echo x > ${spans(8)}\${Y:-.approval/env}`), "log.mutate");
@@ -327,7 +329,9 @@ test("review 5: the parameter placeholder cannot be forged, and $ beside a glob 
   // A word holding the private-use mark fails closed.
   assert.equal(strictest("echo x > ab*"), "log.mutate");
   // `$1`, `$9` are variables (their value is unseen, as on main); no collision.
-  assert.deepEqual(classesOf("echo x > ~/.hermes/$1uth.json.bak"), andMain(["files.write.workspace"], "echo x > ~/.hermes/$1uth.json.bak"));
+  // (The spliced reading, L62568, build-6: `$1` may hold a `/`, so the word
+  // may be `~/.hermes/plugins/auth.json.bak`.)
+  assert.deepEqual(classesOf("echo x > ~/.hermes/$1uth.json.bak"), andMain(["policy.core", "files.write.workspace"], "echo x > ~/.hermes/$1uth.json.bak"));
   assert.deepEqual(classesOf('echo x > "$9"'), andMain(["files.write.workspace"], 'echo x > "$9"'));
   // A variable beside a glob construct may hold a `/`: it may name anything.
   assert.equal(strictest("echo x > ${X}*"), "log.mutate");
@@ -1496,7 +1500,9 @@ test("security review of the parents rule (L61587), 5: a tail after an unreadabl
   // Lead ruling L62435 (S7): an ordinary variable below the working
   // directory, or after another, keeps main's class (it was policy.core).
   // (`$X/*` keeps #686's pattern answer, main's since 9122cb3e.)
-  assert.deepEqual(classesOf("rm -rf $X/*"), ["policy.core", "files.delete.out_of_scope", "log.mutate"]);
+  // The spliced reading (L62568, build-6) leads with the log: `$X/*` may be
+  // `.approval/log/*`. The classes are main's, in another order.
+  assert.deepEqual(classesOf("rm -rf $X/*"), ["log.mutate", "policy.core", "files.delete.out_of_scope"]);
   // Lead ruling L62511 (S-D): a recursive chmod of one is policy.core again.
   for (const command of ["chmod -R 000 ./$X", "chmod -R 000 sub/$X", "chmod -R 000 $X/$Y"]) assert.ok(classesOf(command).includes("policy.core"), command);
   for (const command of ['rm -rf "$X/$Y"']) {
@@ -2208,9 +2214,16 @@ test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary varia
   // An ordinary variable alone, below the working directory, or below a
   // directory that holds neither the working directory nor the home.
   const tmp = { "/w": [".claude"], "/tmp": ["x"], "/private/tmp": ["x"], ...realpaths("/w", "/h", "/private/tmp"), [realpathKey("/tmp")]: ["/private/tmp"] };
-  for (const command of ["rm -rf $TARGET", "rm -rf $BUILD_DIR", 'rm -rf "$OUT"', 'rm -rf "$TMPDIR"', "rm -rf ./$X", "rm -rf /tmp/$name", "rm -rf /private/tmp/$SESSION", "rm -rf build-$ID", "rm -rf dist/$X.tmp", "rm -rf v$A.$B"]) {
+  for (const command of ["rm -rf $TARGET", "rm -rf $BUILD_DIR", 'rm -rf "$OUT"', 'rm -rf "$TMPDIR"', "rm -rf ./$X", "rm -rf /tmp/$name", "rm -rf /private/tmp/$SESSION", "rm -rf build-$ID", "rm -rf dist/$X.tmp"]) {
     assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
     assert.deepEqual(withListing(command, tmp), ["files.delete.out_of_scope"], `${command} (listing)`);
+  }
+  // Lead ruling L62568 (build-6, spliced words): `v$A.$B` may be `v…/.git`
+  // (B=`git`, A ending in `/`): an unread part counts as any text, `/`
+  // included, and the literal `.` takes part. Main's class rides beside.
+  {
+    const spliced = classesOf("rm -rf v$A.$B");
+    for (const cls of ["vcs.history.rewrite", ...mainClasses("rm -rf v$A.$B")]) assert.ok(spliced.includes(cls), `rm -rf v$A.$B: ${spliced.join(",")}`);
   }
   // Below a proven parent: may be the workspace itself, strict.
   for (const command of ["rm -rf ../$X", "rm -rf ~/$X", "rm -rf /$X", "rm -rf $PWD/../$X", "rm -rf ../../$X", "rm -rf ~/../$X", 'rm -rf "../$X/$Y"']) {

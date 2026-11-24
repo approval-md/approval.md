@@ -609,7 +609,11 @@ test("the hook's own passes fold: a home or key folder spelled with the long s",
   try {
     for (const [canonical, spelled] of volumeFolds ? [...byText, ...onDisk] : byText) {
       const want = hook(canonical);
-      assert.ok(want.includes(RESOLVED), `${canonical}: ${want.join(" ; ")}`);
+      // Build-6 round two (L62542): the pure classifier now reads
+      // `$X/.hermes/$F` as a possible credential file itself, before the
+      // hook's pass resolves it; the class is the same.
+      const pureDecides = canonical === "cat $X/.hermes/$F";
+      assert.ok(pureDecides ? want.includes("account.credential credential-path") : want.includes(RESOLVED), `${canonical}: ${want.join(" ; ")}`);
       // The canonical line's answer, then what main gave the spelling.
       const got = hook(spelled);
       for (const entry of want) assert.ok(got.includes(entry), `${spelled}: ${entry} in ${got.join(" ; ")}`);
@@ -1658,17 +1662,23 @@ test("a word with a substitution runs one reading unless a name in it folds, and
   // Only the placeholder would differ: one reading. Each of these ran two.
   for (const command of [
     'echo x > "$(echo a)"',
-    "echo x > .approval/$(echo a)",
-    "echo x > .git/$(echo a)",
     'git push origin "$(echo main)"',
     "cat $(echo a)/.env",
     "cat .approval/$(echo a)",
   ]) {
     assert.equal(readings(command), 1, command);
   }
-  // A name beside the substitution that does fold still runs both.
-  assert.equal(readings("echo x > .APPROVAL/$(echo a)"), 2);
-  assert.equal(readings("echo x > Approval.MD$(echo a)"), 2);
+  // Build-6 round two (automated security review of the spliced reading, c):
+  // the spliced reading of an output inside a guarded folder meets a folder
+  // that takes several classes (`.approval/log`, `.git/hooks`), and the
+  // folded reading takes each in turn, as it does for the folder spelled
+  // plain: one more reading, never the as-spelled one.
+  assert.equal(readings("echo x > .approval/$(echo a)"), 2);
+  assert.equal(readings("echo x > .git/$(echo a)"), 2);
+  // A name beside the substitution that does fold still runs the as-spelled
+  // reading too.
+  assert.equal(readings("echo x > .APPROVAL/$(echo a)"), 3);
+  assert.equal(readings("echo x > Approval.MD$(echo a)"), 3);
   // The answers, in both readings, are what they were, except that lead ruling
   // L62568 reads the substitution's output after a guarded folder as any text,
   // `log/x` too: the log's class answers, the folder's rides beside (the
@@ -1676,8 +1686,11 @@ test("a word with a substitution runs one reading unless a name in it folds, and
   const LOG = "log.mutate redirect-protected";
   for (const [command, want] of [
     ['echo x > "$(echo a)"', ["files.write.workspace redirect-write"]],
-    ["echo x > .approval/$(echo a)", [LOG, WRITE_CORE]],
-    ["echo x > .APPROVAL/$(echo a)", [LOG, WRITE_CORE, "files.write.workspace redirect-write"]],
+    // Build-6 round two (automated security review, c): the spliced raise no
+    // longer skips the segment's plain pass, whose class rides beside again
+    // (#690's `patternAlso`), here the folder's own.
+    ["echo x > .approval/$(echo a)", [LOG, WRITE_CORE, WRITE_CORE]],
+    ["echo x > .APPROVAL/$(echo a)", [LOG, WRITE_CORE, WRITE_CORE, "files.write.workspace redirect-write"]],
     ["cat $(echo a)/.env", ["account.credential credential-path"]],
   ] as const) {
     assert.deepEqual(pure(command), want, command);
