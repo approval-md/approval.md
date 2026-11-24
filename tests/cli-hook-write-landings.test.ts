@@ -38,6 +38,7 @@ import { fileURLToPath } from "node:url";
 import { listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
 import { classifyForHook, hookSettingsReads, HOOK_SETTINGS_MAX_BYTES, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, type WriteScopeContext } from "../src/cli/hook.js";
 import { commandGate } from "../src/cli/gate-window.js";
+import { classifyCommand } from "../src/core/command-class.js";
 import type { Streams } from "../src/cli/main.js";
 import type { Prompter, SecretRead } from "../src/cli/prompt.js";
 
@@ -1778,4 +1779,82 @@ test("S2.2: a quoted word and a word through a symlink name the script as given 
     }
     assert.ok(!see(`echo x > ${h}/realdir/y.sh`).classes.includes(GUARDED));
   });
+});
+
+// ---------------------------------------------------------------------------
+// After main 9122cb3e (#686): zsh's clobber forms, and main's beside entries
+// ---------------------------------------------------------------------------
+
+test("zsh clobber: >!, >>!, >&! and 2>! are read at zsh's target (#686), and that target meets the write pass", () => {
+  mkdirSync(join(home, ".claude-x"), { recursive: true });
+  // The lead's first read named this hole (S1): `>!` writes the word after
+  // it, and the write pass must judge that word. Main's own classes stay, first.
+  for (const [command, mainClass] of [
+    ["echo x >! ~/.zshrc", WORKSPACE],
+    ["echo x >>! ~/.ssh/authorized_keys", WORKSPACE],
+    ["echo x >&! ~/.claude-x/settings.json", "policy.core"],
+    ["echo x 2>! .git/hooks/pre-push", "vcs.history.rewrite"],
+    // Joined to the target, after a descriptor, and later on the line.
+    ["echo x >!~/.zshrc", WORKSPACE],
+    ["echo x 1>>! $HOME/.ssh/k", WORKSPACE],
+    ["echo x 2>&! ~/.zshrc", WORKSPACE],
+    ["true; echo x >! ~/.zshrc", WORKSPACE],
+  ] as const) {
+    const seen = see(command);
+    assert.ok(seen.ok, `${command}: ${seen.notes}`);
+    assert.ok(seen.segments.some(([cls, rule]) => cls === GUARDED && rule === "write-guarded"), `${command}: ${JSON.stringify(seen.segments)}`);
+    assert.ok(withoutLandingEntries(seen).some(([cls]) => cls === mainClass), `${command}: ${JSON.stringify(seen.segments)}`);
+    assert.notEqual(seen.segments[0]?.[0], GUARDED, `${command}: main's entry is first`);
+  }
+  // Controls: the same forms onto an ordinary file, and a file really named
+  // `!` (quoted, escaped or set apart: both shells write `!`, and ~/.zshrc is
+  // an argument to echo).
+  for (const command of ["echo x >! notes.txt", "echo x >>! notes.txt", "echo x >&! out.log", "echo x > '!'", "echo x >'!' ~/.zshrc", "echo x >\\! ~/.zshrc", "echo x > ! ~/.zshrc"]) {
+    const seen = see(command);
+    assert.ok(seen.ok, `${command}: ${seen.notes}`);
+    assert.ok(!seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+  // Main's refusals stand: inside a bash script `>!` is bash's, and `&>!`
+  // lexes as `&` and a segment that is only a redirect.
+  for (const command of ["bash -c 'echo x >! ~/.zshrc'", "echo x &>! ~/.zshrc", "echo x &>>! ~/.ssh/k"]) assert.equal(see(command).ok, false, command);
+  // Opted in: a clobber target outside the roots is out of scope.
+  assert.ok(see("echo x >! ../outside/n", optedIn()).classes.includes(OUT));
+  assert.ok(!see("echo x >! n.txt", optedIn()).classes.includes(OUT));
+});
+
+test("zsh clobber through the real hook: echo x >! ~/.zshrc is denied where the guarded class is human-only; >! notes.txt is allowed", () => {
+  const dir = gate([`  ${GUARDED}: { autonomy: human-only }`, "  files.*: { autonomy: autonomous }"]);
+  for (const command of ["echo x >! ~/.zshrc", "echo x >>! ~/.ssh/authorized_keys", "echo x 2>! .git/hooks/pre-push"]) {
+    const denied = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Bash", { command })));
+    assert.equal(denied.permission, "deny", `${command}: ${denied.reason}`);
+    assert.match(denied.reason, /files\.write\.guarded/u, command);
+  }
+  const allowed = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Bash", { command: "echo x >! notes.txt" })));
+  assert.equal(allowed.permission, "allow", allowed.reason);
+});
+
+test("main's entries beside a raise (#686) are all kept, and the write pass's entry lands on its own segment", () => {
+  // #686 joins main's class beside every raise (lead ruling L61926), so the
+  // classifier's list holds more entries than the line has segments, and not
+  // in segment order. The write pass places its entries by its own segment
+  // positions, so none of the classifier's is lost and its own lands on the
+  // segment that writes the guarded place.
+  const key = (segment: { class: string; rule: string; text: string }): string => `${segment.class}\0${segment.rule}\0${segment.text}`;
+  for (const [command, guardedTexts] of [
+    ["echo x > *.md; echo y > ~/.zshrc", ["echo y > ~/.zshrc"]],
+    ["echo y > ~/.zshrc; echo x > *.md", ["echo y > ~/.zshrc"]],
+    ["echo y >! ~/.ssh/k; echo x > *.md", ["echo y >! ~/.ssh/k"]],
+    ["cp a.d/* docs/; touch ~/.zshrc", ["touch ~/.zshrc"]],
+    ["echo x > *.md; echo y > notes.txt", []],
+  ] as const) {
+    const pure = classifyCommand(command);
+    const { result } = classifyForHook(command, [], ws, [], false, [], false, WRITE_SCOPE_OFF);
+    assert.ok(pure.ok && result.ok, command);
+    if (!pure.ok || !result.ok) continue;
+    const held = result.segments.map(key);
+    for (const segment of pure.segments) assert.ok(held.includes(key(segment)), `${command}: main's ${key(segment)} is kept`);
+    assert.ok(result.segments.length >= pure.segments.length, command);
+    const guarded = result.segments.filter((segment) => segment.class === GUARDED).map((segment) => segment.text);
+    assert.deepEqual(guarded, [...guardedTexts], `${command}: ${JSON.stringify(result.segments)}`);
+  }
 });
