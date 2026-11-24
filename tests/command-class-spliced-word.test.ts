@@ -198,6 +198,10 @@ test("round two (L62542, for reads too): a word that could be a credential file 
   for (const command of ['grep -n "build.py\\" \\"\\$S\\"|-I build.py|build.py \\$" w/*.sh', 'node q.mjs "echo x > \\$\'A\'*\\$?"']) {
     assert.deepEqual(classesOf(command), mainClasses(command), command);
   }
+  // A `$` in single quotes, or escaped, is text: a file named so. The same
+  // text unquoted on a later line is read again, not remembered.
+  for (const command of ["cat '.approval/$F'", "cat .approval/\\$F", "echo x > 'APPROVAL$E.md'"]) assert.deepEqual(classesOf(command), mainClasses(command), command);
+  assert.ok(classesOf("cat .approval/$F").includes("account.credential"));
   // As the plain spelling: `source .approval/env` is refused, and so is this.
   for (const command of ["source .approval/$F", ". .approval/$F"]) assert.equal(classifyCommand(command, []).ok, false, command);
   // No credential reading, or a glob (judged against the listing by the hook, as main judges it).
@@ -232,6 +236,25 @@ test("round two (automated security review, c): every equal claim a spliced word
     assert.ok(plain.classes.includes(cls), `plain: ${plain.classes.join(",")}`);
     assert.ok(spliced.classes.includes(cls), `spliced: ${spliced.classes.join(",")}`);
   }
+});
+
+test("round two (security reviews of e0586131): a whole unread last component may hold a `/`, and past the bound fails closed", () => {
+  // Each keeps a protected or credential class (an unread tail may be one or
+  // two guarded names: `.claude/hooks/x`, `.github/workflows/ci.yml`).
+  for (const [command, cls] of [
+    ["echo x > .claude/$F", "policy.core"],
+    ["echo x > .github/$F", "policy.edit"],
+    ["echo x > .git/$F", "vcs.history.rewrite"],
+    ["cat .approval/$F", "account.credential"],
+    ["cat ~/.hermes/$F", "account.credential"],
+  ] as const) {
+    const head = classesOf(command);
+    assert.ok(head.includes(cls), `${command}: ${head.join(",")}`);
+    for (const each of mainClasses(command)) assert.ok(head.includes(each), `${command}: main's ${each}`);
+  }
+  // An unread directory before an unread tail is past the candidate bound:
+  // the word could be any path, never the one-name reading.
+  assert.ok(classesOf("echo x > out/$X/$F").includes("log.mutate"));
 });
 
 test("through the hook: a spliced write is not allowed alone, and a spliced credential read is the credential's", () => {
@@ -275,6 +298,7 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
     assert.ok(seconds < scaledBound(0.4), `${command.slice(0, 20)}: ${seconds.toFixed(3)} CPU s (${runner().line})`);
   }
   // Nine parts are past the bound: the word could be any path, the log included.
-  assert.ok(classesOf(`echo x > a${"$E".repeat(9)}b`).includes("log.mutate"));
-  assert.ok(!classesOf(`echo x > a${"$E".repeat(8)}b`).includes("log.mutate"));
+  // (Braced, so the `b` is literal text: `$Eb` would be a parameter of its own.)
+  assert.ok(classesOf(`echo x > a${"${E}".repeat(9)}b`).includes("log.mutate"));
+  assert.ok(!classesOf(`echo x > a${"${E}".repeat(8)}b`).includes("log.mutate"));
 });
