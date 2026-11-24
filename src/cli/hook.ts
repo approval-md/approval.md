@@ -4263,6 +4263,34 @@ export function judgeWriteLanding(
 const LANDING_WRITE_EVERY: ReadonlySet<string> = new Set(["touch", "truncate", "mkdir", "tee"]);
 /** The deletes: never judged as writes, but each changes the paths after it. */
 const LANDING_DELETE_EVERY: ReadonlySet<string> = new Set(["rm", "rmdir", "shred", "unlink"]);
+
+/** chmod's long options that do not recurse (GNU's; BSD chmod has none). */
+const CHMOD_PLAIN_LONG_OPTIONS: ReadonlySet<string> = new Set(["--changes", "--silent", "--quiet", "--verbose", "--reference", "--preserve-root", "--no-preserve-root", "--help", "--version"]);
+
+/**
+ * Is this chmod recursive, or may it be (lead rulings L62511 S-D and L62656)?
+ * A short bundle holding `R` anywhere on the line (`-R`, `-Rv`, `-fR`; main's
+ * own test), or a long option this hook does not know as plain: `--recursive`
+ * and every abbreviation GNU's getopt accepts (`--rec`) fail closed so.
+ */
+export function chmodRecursive(args: readonly string[]): boolean {
+  return args.some((arg) => {
+    if (arg === "--") return false;
+    if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      return !CHMOD_PLAIN_LONG_OPTIONS.has(equals === -1 ? arg : arg.slice(0, equals));
+    }
+    return arg.startsWith("-") && arg.slice(1).includes("R");
+  });
+}
+
+/**
+ * The root a plain chmod's unread operand's literal tail is judged under
+ * ({@link refineWriteLandings}): no list entry names it, so only the entries
+ * matched anywhere (`.git/hooks`, `.claude/settings*` ...) can hit.
+ */
+const METADATA_UNREAD_ROOT = "__approval_unread_root__";
+
 /** The packaging rows APRV-402 re-reads, whose candidates over-include on purpose. */
 const LANDING_PACKAGING_RULES: ReadonlySet<string> = new Set([
   "tar-extract",
@@ -5282,6 +5310,55 @@ export function refineWriteLandings(
     return verdict;
   };
 
+  /**
+   * Is this word one the pass cannot read as a path (lead ruling L62656)?
+   * zsh's `=name`, a word {@link resolveWriteWord} gives up on (a variable the
+   * line does not set, a substitution, `~user` ...), or a relative word after
+   * a `cd` this pass cannot follow. A word that reads but whose landing an
+   * earlier segment changes, or a pattern the disk listing gives up on, is
+   * NOT unread here: those stay guarded.
+   */
+  const operandUnread = (word: string, at: number): boolean => {
+    if (equalsExpansionOf(shapes[at], word) !== null) return true;
+    const resolved = resolveWriteWord(word, at, line);
+    if ("unreadable" in resolved) return true;
+    return spellingsOf(resolved) === null;
+  };
+
+  /**
+   * A plain chmod's unread operand keeps main's class (lead ruling L62656),
+   * except where its literal part alone names a guarded place ("a guarded
+   * literal still asks"): the segments before its first unread one
+   * (`~/.ssh/$X`, `.git/hooks/$H`), judged where they land, or the segments
+   * after its last unread one, judged under a root no list entry names, so
+   * only the entries matched anywhere can hit (`$D/.git/hooks/pre-push`, or
+   * `.claude/hooks/x.sh` after an unread `cd`). Only the list's own rule
+   * counts: a part this pass cannot read either adds nothing.
+   */
+  const metadataUnreadGuard = (word: string, at: number): (WriteLanding & { kind: "guarded" }) | null => {
+    const parts = word.split("/");
+    const unreadPart = (part: string, first: boolean): boolean =>
+      /[$`{}*?[\]]/u.test(part) || part.includes(SUBSTITUTION_SENTINEL) || (first && (part.startsWith("=") || (part.startsWith("~") && part !== "~")));
+    const firstUnread = parts.findIndex((part, index) => unreadPart(part, index === 0));
+    const lastUnread = parts.length - 1 - [...parts].reverse().findIndex((part, index) => unreadPart(part, index === parts.length - 1));
+    const literal: Array<{ judged: string; shown: string }> = [];
+    if (firstUnread > 0) {
+      const prefix = parts.slice(0, firstUnread).join("/");
+      if (prefix.length > 0) literal.push({ judged: prefix, shown: prefix });
+    }
+    // A word with no unread part (`firstUnread` -1) is unread through an
+    // unfollowed `cd`: all of it is the tail.
+    const tail = parts.slice(firstUnread === -1 ? 0 : lastUnread + 1).filter((part) => part.length > 0);
+    if (tail.length > 0) literal.push({ judged: `/${METADATA_UNREAD_ROOT}/${tail.join("/")}`, shown: `…/${tail.join("/")}` });
+    for (const { judged: each, shown } of literal) {
+      const judged = judgeWord(each, at);
+      if (judged.kind === "guarded" && judged.rule === WRITE_GUARDED_RULE) {
+        return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: word, why: `${word} is not read, but its literal part ${shown} lands on the guarded list (${judged.why})` };
+      }
+    }
+    return null;
+  };
+
   /** A move or delete at (or above) a named hook script, as a guarded landing, or `null` (S2). */
   const hookScriptMovedOrRemoved = (word: string, at: number): (WriteLanding & { kind: "guarded" }) | null => {
     // A word this pass cannot place keeps the answer it had (parity ruling).
@@ -5326,10 +5403,16 @@ export function refineWriteLandings(
   /** What this shape writes (judged) and what it changes (for the snapshot rule). */
   const targetsOf = (shape: CommandSegmentShape, segment: ClassifiedSegment | null): {
     writes: string[];
+    /**
+     * A plain (not recursive) chmod's operands (lead ruling L62656): judged
+     * as writes when readable; an operand this pass cannot read keeps main's
+     * class (see {@link metadataUnreadGuard}).
+     */
+    metadata: string[];
     intoDirs: IntoDir[];
     trees: string[];
     unreadable: string | null;
-    changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[];
+    changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS; metadata?: true }[];
   } => {
     // A zsh clobber redirect (`>!`) writes zsh's target, in `shape.writes`,
     // and in bash a file named `!` in the segment's directory: both are judged.
@@ -5337,10 +5420,11 @@ export function refineWriteLandings(
     const intoDirs: IntoDir[] = [];
     /** Words a tree is written at (judged with {@link guardedEntryBelow} too). */
     const trees: string[] = [];
+    const metadata: string[] = [];
     let unreadable: string | null = null;
-    const changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[] = writes.map((word) => ({ word, kind: "write" as const }));
+    const changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS; metadata?: true }[] = writes.map((word) => ({ word, kind: "write" as const }));
     const bin = shape.bin === null ? null : basename(shape.bin);
-    if (bin === null) return { writes, intoDirs, trees, unreadable, changes };
+    if (bin === null) return { writes, metadata, intoDirs, trees, unreadable, changes };
     // Every word not spelled as a flag, and every word after `--` (`touch --
     // -x` writes `-x`).
     const ended = shape.args.indexOf("--");
@@ -5378,8 +5462,18 @@ export function refineWriteLandings(
         intoDirs.push({ dir: extra, sources, tree, contents });
       }
       if (bin === "mv") for (const source of sources) changes.push({ word: source, kind: "move" });
+    } else if (bin === "chmod" && !chmodRecursive(shape.args)) {
+      // Lead ruling L62656: a plain chmod changes metadata only (it makes no
+      // entry and no link), so an operand this pass cannot read keeps main's
+      // class (`chmod +x $SCRIPT`, `chmod u+x $1`); a readable one is judged
+      // as before (`chmod 600 ~/.ssh/config` is guarded). Every operand, the
+      // mode included (over-included).
+      metadata.push(...operands);
+      for (const word of operands) changes.push({ word, kind: "write", metadata: true });
     } else if (bin === "chmod" || bin === "chown" || bin === "chgrp" || (bin === "sed" && (segment === null || segment.rule === "sed-in-place"))) {
-      // Every operand, the mode and the script included (over-included).
+      // Every operand, the mode and the script included (over-included). A
+      // recursive chmod of a word this pass cannot read stays guarded (lead
+      // ruling L62511, S-D; L62656).
       writes.push(...operands);
       for (const word of operands) changes.push({ word, kind: "write" });
     } else if (bin === "curl" || bin === "wget") {
@@ -5446,7 +5540,7 @@ export function refineWriteLandings(
     }
     // What git writes is a checkout: a tree.
     if (bin === "git") trees.push(...gitWriteTargets(shape.args).filter((word) => word.length > 0));
-    return { writes, intoDirs, trees, unreadable, changes };
+    return { writes, metadata, intoDirs, trees, unreadable, changes };
   };
 
   /**
@@ -5534,7 +5628,7 @@ export function refineWriteLandings(
       continue;
     }
     const segment = ownAnswer(shape);
-    const { writes, intoDirs, trees, unreadable, changes } = targetsOf(shape, segment);
+    const { writes, metadata, intoDirs, trees, unreadable, changes } = targetsOf(shape, segment);
     // Both verdicts are kept (self-review of dbb980b7): a guarded landing does
     // not hide an out-of-scope one on the same segment, so a policy that sets
     // `files.write.out_of_scope` stricter than manual still decides. Judging
@@ -5550,6 +5644,17 @@ export function refineWriteLandings(
     for (const word of writes) {
       if (settled()) break;
       take(judgeWord(word, index));
+    }
+    // Lead ruling L62656: a plain chmod's operand this pass cannot read keeps
+    // main's class; a readable one is judged as any write is.
+    for (const word of metadata) {
+      if (settled()) break;
+      if (!operandUnread(word, index)) {
+        take(judgeWord(word, index));
+        continue;
+      }
+      const kept = metadataUnreadGuard(word, index);
+      if (kept !== null) take(kept);
     }
     for (const word of trees) {
       if (settled()) break;
@@ -5665,6 +5770,9 @@ export function refineWriteLandings(
         treeChangedUnknown ??= why;
         if (counted) changedUnknown ??= why;
       };
+      // A plain chmod makes no entry and no link (lead ruling L62656): an
+      // operand it cannot read leaves every later landing as the disk shows it.
+      if (change.metadata === true && operandUnread(change.word, index)) continue;
       const resolved = resolveWriteWord(change.word, index, line);
       if ("unreadable" in resolved) {
         unknown(`an earlier segment (\`${shape.text}\`) changes ${change.word}, which cannot be read, so no later landing on the disk is trusted`);
