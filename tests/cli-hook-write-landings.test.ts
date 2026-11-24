@@ -1724,3 +1724,18 @@ test("S2.5 through the real hook: a file tool's ~/ path is also read with HOME e
   const organ = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Write", { file_path: "~/s2-log/x.jsonl", content: "x" })));
   assert.match(organ.reason, /log\.mutate/u, organ.reason);
 });
+
+test("S2.2: a quoted word and a word through a symlink name the script as given and as resolved", () => {
+  const h = freshHome();
+  mkdirSync(join(h, "realdir"), { recursive: true });
+  symlinkSync(join(h, "realdir"), join(h, "linkdir"));
+  writeFileSync(join(h, "realdir", "x.sh"), "#\n", "utf8");
+  writeFileSync(join(h, ".claude", "settings.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "bash ~/linkdir/x.sh && '/opt/s2-quoted/q.sh' \"$HOME\"/dq/d.sh" }] }] } }), "utf8");
+  withHome(h, undefined, () => {
+    // The settings name ~/linkdir/x.sh; a write to the real file is the same script.
+    for (const command of [`echo x > ${h}/realdir/x.sh`, "echo x > ~/linkdir/x.sh", "echo x > /opt/s2-quoted/q.sh", "echo x > ~/dq/d.sh"]) {
+      assert.ok(see(command).classes.includes(GUARDED), command);
+    }
+    assert.ok(!see(`echo x > ${h}/realdir/y.sh`).classes.includes(GUARDED));
+  });
+});
