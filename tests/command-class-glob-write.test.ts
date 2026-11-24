@@ -2382,3 +2382,20 @@ test("automated security review of the fold, 7, 8 and 11-14: an rsync delete thr
     assert.deepEqual(classesOf(command), ["network.call"], command);
   }
 });
+
+test("automated security review of the fold, 15: with CDPATH set on the line, a cd to a bare name may land in a parent", () => {
+  for (const command of ["CDPATH=.. cd proj && rm -rf x", "CDPATH=/ cd Users && chmod -R 000 x"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // A plain or exported CDPATH assignment is refused on main and here.
+  for (const command of ["CDPATH=/ ; cd Users && rm -rf x", "CDPATH=..; cd proj; chmod -R 000 x", "export CDPATH=..; cd proj; rm -rf x"]) {
+    assert.equal(classifyCommand(command).ok, false, command);
+    assert.equal(classifyCommandWithMainRules(command).ok, false, command);
+  }
+  // Without CDPATH on the line, or a `./` target: main's class.
+  for (const command of ["cd build && rm -rf out", "CDPATH=/ cd ./build && rm -rf out"]) {
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    assert.deepEqual(classesOf(command), main.classes, command);
+  }
+});

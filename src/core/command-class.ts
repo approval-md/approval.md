@@ -3009,6 +3009,8 @@ export interface ClassifierContext {
   lineAssigned?: ReadonlyMap<string, readonly string[]>;
   /** An earlier segment of the line moved the shell to a parent spelling (`cd ..`; lead ruling L62435, S2). Internal. */
   organCdParent?: boolean;
+  /** The line (or one it sits in) assigns `CDPATH` (security review of the fold, 15). Internal. */
+  organCdpath?: boolean;
   /**
    * The segments whose words, targets and substitution bodies the line's own
    * reading for {@link lineNamesGit} already went through (review of the
@@ -10401,7 +10403,7 @@ function organParentClass(
  * target the text cannot read (`"$DIR"`, `-`), or a name below the working
  * directory (`build`, `src`), is not proven a parent: main's class after it.
  */
-function segmentCdsToParent(segment: LexSegment, disk: GlobDisk | undefined): boolean {
+function segmentCdsToParent(segment: LexSegment, disk: GlobDisk | undefined, cdpath = false): boolean {
   const at = segment.words.findIndex((word) => !word.assignment);
   const command = segment.words[at];
   if (command === undefined || !["cd", "chdir", "pushd"].includes(command.text.split("/").pop() ?? "")) return false;
@@ -10423,6 +10425,10 @@ function segmentCdsToParent(segment: LexSegment, disk: GlobDisk | undefined): bo
   else if (word.startsWith("/")) [base, tail] = ["root", word];
   else [base, tail] = ["cwd", word];
   if (/[$`*?[\]{}~]/u.test(tail) || tail.includes(SUBSTITUTION_SENTINEL) || tail.includes(PARAMETER_MARK)) return false;
+  // Security review of the fold, 15: with `CDPATH` set on the line, a
+  // relative name that does not start with `./` or `../` may land anywhere
+  // CDPATH names, a parent included.
+  if (cdpath && base === "cwd" && home === null && pwd === null && !pwdWord && !/^\.{1,2}(?:\/|$)/u.test(word)) return true;
   const stack: string[] = [];
   for (const part of tail.split("/")) {
     if (part.length === 0 || part === ".") continue;
@@ -13537,13 +13543,16 @@ function classifyCommandAsReadWithRules(
   execContext = { ...execContext, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned };
   // Lead ruling L62435 (S2, narrow): a `cd` to a parent spelling earlier on the line.
   let cdParent = context.organCdParent === true;
+  // Security review of the fold, 15: `CDPATH=`, `export CDPATH=`, `env CDPATH=` anywhere on the line.
+  const lineSetsCdpath = context.organCdpath === true || /(?:^|[^A-Za-z0-9_])CDPATH\+?=/u.test(command);
+  execContext = { ...execContext, organCdpath: lineSetsCdpath };
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };
     }
     execContext = { ...execContext, shellDir, organCdParent: cdParent };
     shellDir = nextShellDir(segment, shellDir);
-    if (!cdParent && segmentCdsToParent(segment, globDisk)) cdParent = true;
+    if (!cdParent && segmentCdsToParent(segment, globDisk, lineSetsCdpath)) cdParent = true;
     // APRV-380. A LOGIN-SHELL WRAPPER is classified by the script it runs.
     // `loginShellScript` states the exact shape and why this is not the second
     // parser `OPAQUE_BINS` refuses; the inner classification is run with
