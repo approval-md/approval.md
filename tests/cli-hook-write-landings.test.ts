@@ -1512,7 +1512,8 @@ test("S2.2 fold: removing or moving a named hook script's folder or a grandparen
       assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
       assert.match(seen.notes, /a hook script the settings name/u, command);
     }
-    for (const command of ["rm -rf ~/tools/hooks2", "mv ~/tools/hooks2 ~/old2", "rm -rf ~/other", "cp -r s2-src/. ~/tools/hooks2", "rm -rf ~/tools/hooks/guard.py.bak"]) {
+    // `~/tools/hook` and `~/tools/hoo` are string prefixes of the script's folder, not folders above it.
+    for (const command of ["rm -rf ~/tools/hooks2", "mv ~/tools/hooks2 ~/old2", "rm -rf ~/other", "cp -r s2-src/. ~/tools/hooks2", "rm -rf ~/tools/hooks/guard.py.bak", "rm -rf ~/tools/hook", "mv ~/tools/hoo ~/old3", "cp -r s2-src/. ~/tools/hook"]) {
       const seen = see(command);
       assert.ok(!seen.classes.includes(GUARDED), `${command}: ${seen.notes}`);
     }
