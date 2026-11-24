@@ -9623,7 +9623,12 @@ function strictestProtectedWrite(
   for (const word of words) {
     // Review-b M1: nothing is stricter than log.mutate, so stop there.
     if (best !== null && (best as { surface: string }).surface === "log.mutate") break;
-    if (!inexact(word)) continue;
+    if (!inexact(word)) {
+      // A substitution leaves its word `exact` to the lexer, and its output is
+      // an unread part all the same (`APPROVAL$(true).md`).
+      if (word.includes(SUBSTITUTION_SENTINEL) && !(skipProse && /\s/u.test(word))) offer(splicedGuardClass(word, protectedPaths, glob.budget, glob.options, globLive(glob, word)), word);
+      continue;
+    }
     if (skipProse && /\s/u.test(word)) continue;
     const steps = spent.get(word);
     if (steps !== undefined) {
@@ -9641,6 +9646,10 @@ function strictestProtectedWrite(
       // ONE matcher budget for the whole command line (review-b M1), shared
       // through the classifier context by every segment, word and reading.
       if (globLive(glob, word) && hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, glob.budget, glob.options, glob.disk), word);
+      // An unread part spliced into literal text (lead ruling CLAIMS L62568):
+      // `APPROVAL$E.md` is the policy file when E is empty, inside double
+      // quotes too (the value is spliced in, only not globbed).
+      offer(splicedGuardClass(reading, protectedPaths, glob.budget, glob.options, globLive(glob, word)), word);
     }
     spent.set(word, budgetBefore - glob.budget.left);
   }
@@ -9756,6 +9765,30 @@ function dotGlobNamesGitRule(word: string, inexact: (word: string) => boolean, g
   })();
   if (hit && glob.tracker !== undefined) glob.tracker.raised = true;
   return hit;
+}
+
+/**
+ * Could an unread part of this write target join its literal text into a
+ * `.git` segment (lead ruling CLAIMS L62568)? `.gi${x}t/config` is `.git/config`
+ * when x is empty. Each unread part is read as a substitution's output, any
+ * text a `/` included, by the reader that already joins literal text and
+ * outputs into `.git` ({@link wordJoinsGitAcrossSubstitution}): a `.git`
+ * window must hold at least one literal character, so `$D/config` and
+ * `out/$F` do not count. The plain (text-only) pass reads none; a hit is a
+ * raise.
+ */
+function splicedNamesGit(word: string, inexact: (word: string) => boolean, glob: GlobReading): boolean {
+  if (mainRulesOnly || glob.off || !inexact(word)) return false;
+  const read = unreadParts(word);
+  if (read === null) return false;
+  // Quoted glob characters are text, as in {@link splicedGuardClass}.
+  const text = globLive(glob, word) ? read.asOutputs : read.asOutputs.replace(/[*?[\]{}()#^<>|]|(?<=.)~/gu, SPLICED_INERT);
+  const named = read.parts > SPLICED_PARTS_CAP || wordJoinsGitAcrossSubstitution(text);
+  if (named) {
+    markGlobWriteFired();
+    if (glob.tracker !== undefined) glob.tracker.raised = true;
+  }
+  return named;
 }
 
 /** Unknown liveness is live: fail closed. */
@@ -10373,7 +10406,7 @@ const PARAMETER_MARK = "";
  * reading. A word holding {@link PARAMETER_MARK} counts, and fails closed.
  */
 function hasGlobConstruct(word: string): boolean {
-  if (word.includes(PARAMETER_MARK)) return true;
+  if (word.includes(PARAMETER_MARK) || word.includes(UNREAD_MARK)) return true;
   const outside = maskParameters(word).text;
   return /[*?[\]{}()#^<>|]/u.test(outside) || outside.slice(1).includes("~");
 }
@@ -10636,7 +10669,7 @@ function globSegmentTokens(segment: string, options = true): { tokens: GlobToken
   const lastClose = segment.lastIndexOf("}");
   for (let at = 0; at < segment.length; at += 1) {
     const ch = segment[at] as string;
-    if (ch === "*") pushRun();
+    if (ch === "*" || ch === UNREAD_MARK) pushRun();
     else if (ch === "?") tokens.push({ kind: "one" });
     else if (ch === "^" && options) tokens.push({ kind: "rest" });
     else if (ch === "#" && options) {
@@ -10763,6 +10796,136 @@ function globTokensMatch(
   return exhausted ? null : found;
 }
 
+/** The private-use character an unread part of a word stands as in a spliced pattern ({@link splicedGuardClass}). */
+const UNREAD_MARK = "\uE001";
+/** A name no guarded-path rule reads: the stand-in for literal text in the spliced reading's check. */
+const SPLICED_NEUTRAL = "__neutral__";
+/** The longest file name the filesystems the hook stands beside allow (NAME_MAX). */
+const NAME_MAX_BYTES = 255;
+/** A character no guarded name holds: a quoted glob character's stand-in in the spliced reading. */
+const SPLICED_INERT = "\uE002";
+/** Most unread parts one word is read through; past it the word could be any path, and answers `log.mutate`. */
+const SPLICED_PARTS_CAP = 8;
+
+/**
+ * The unread parts of a word's text: each parameter expansion (`$X`, `${…}`,
+ * `$1`, `$?`; a substitution's output and an unread dollar-quote escape are
+ * `${…}` placeholders too). `null` when there is none, or when the word's
+ * literal text (what is left, `/` aside) is empty: a word that is only unread
+ * parts keeps main's answer for an unknown word. Otherwise the word with each
+ * run of unread parts as one {@link UNREAD_MARK} (`marked`), and as one
+ * {@link SUBSTITUTION_SENTINEL} (`asOutputs`, for the `.git` reader), and how
+ * many parts it holds. A `$` that opens no expansion is literal.
+ */
+function unreadParts(text: string): { marked: string; asOutputs: string; parts: number } | null {
+  if (!text.includes("$")) return null;
+  let marked = "";
+  let asOutputs = "";
+  let literal = "";
+  let parts = 0;
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at] as string;
+    let end = -1;
+    if (char === "$") {
+      const next = text[at + 1];
+      if (next === "{") end = parameterEnd(text, at);
+      else if (next !== undefined && /[A-Za-z_]/u.test(next)) {
+        end = at + 1;
+        while (end + 1 < text.length && /[A-Za-z0-9_]/u.test(text[end + 1] as string)) end += 1;
+      } else if (next !== undefined && /[0-9?#*@!$-]/u.test(next)) end = at + 1;
+    }
+    if (end === -1) {
+      marked += char;
+      asOutputs += char;
+      literal += char;
+      continue;
+    }
+    parts += 1;
+    if (!marked.endsWith(UNREAD_MARK)) {
+      marked += UNREAD_MARK;
+      asOutputs += SUBSTITUTION_SENTINEL;
+    }
+    at = end;
+  }
+  if (parts === 0 || literal.split("/").join("").length === 0) return null;
+  return { marked, asOutputs, parts };
+}
+
+/**
+ * The strictest protected class a write target with an UNREAD PART spliced
+ * into literal text could reach, or `null` (lead ruling CLAIMS L62568, on
+ * review-b's FINDING L61530): `echo x > APPROVAL$E.md` writes the policy file
+ * when E is empty, and was a workspace write. Each unread part counts as any
+ * text, a `/` included, and the word is matched against every guarded path by
+ * the write-target pattern reader ({@link globGuardClass}, the `spliced`
+ * reading), through the name fold.
+ *
+ * The edge: a candidate counts only where the word's literal text takes part
+ * in it (see the walk in {@link globGuardClass}). `$D/APPROVAL.md`,
+ * `.approval/$F`, `.claude$S/settings.json`, `.appro${x}val/env` and
+ * `notes-$F.md`'s `APPROVAL.md`-shaped reading do; `$D/notes.md` (as
+ * `.approval/notes.md`) and `out/$F` (as `out/APPROVAL.md`) do not, and keep
+ * the answer they have: main's for an unknown directory or name. A word that
+ * is only unread parts (`$OUT`, `$D/$F`) is not read here at all.
+ *
+ * Readings: a run of unread parts that fills whole components is any one
+ * guarded name or nothing; one inside a component is a `*` there, and, one
+ * part at a time, also `*` then a component of its own then `*` (the part
+ * holding a `/`). Past {@link SPLICED_PARTS_CAP} parts the word could be any
+ * path: `log.mutate`, the strictest class.
+ */
+function splicedGuardClass(
+  word: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  budget: { left: number },
+  options: boolean,
+  live: boolean,
+): string | null {
+  if (mainRulesOnly) return null;
+  const read = unreadParts(word);
+  if (read === null) return null;
+  if (read.parts > SPLICED_PARTS_CAP) return "log.mutate";
+  // A word the shell does not glob (every glob character in it quoted, as in
+  // `"$f[1,4]/out"`) has those characters as text: no guarded name holds one,
+  // so each stands as a character that matches nothing guarded. A word it may
+  // glob keeps them as patterns, as the glob reading does.
+  const literal = live ? read.marked : read.marked.replace(/[*?[\]{}()#^<>|]|(?<=.)~/gu, SPLICED_INERT);
+  // A file name is at most 255 bytes (NAME_MAX): literal text longer than
+  // that in one component (no `/`, no unread part, no brace that could
+  // shorten it) names no file the write could make, guarded or not.
+  if (literal.split(/[/\uE001]/u).some((run) => run.length > NAME_MAX_BYTES && !/[{},]/u.test(run))) return null;
+  const pieces = literal.split(UNREAD_MARK);
+  // Which marks sit inside a component (literal text beside them in it).
+  const inside: number[] = [];
+  for (let at = 0; at + 1 < pieces.length; at += 1) {
+    const before = pieces[at] as string;
+    const after = pieces[at + 1] as string;
+    const whole = (before.length === 0 || before.endsWith("/")) && (after.length === 0 || after.startsWith("/"));
+    if (!whole) inside.push(at);
+  }
+  // The part at `slashed` holding a `/`: the literal text before it ends a
+  // component, a component of the part's own stands between, and the text
+  // after it begins one (on a side with no literal text beside it, no piece).
+  const slashedMark = (at: number): string => {
+    const before = pieces[at] as string;
+    const after = pieces[at + 1] as string;
+    const left = before.length === 0 || before.endsWith("/") ? "" : `${UNREAD_MARK}/`;
+    const right = after.length === 0 || after.startsWith("/") ? "" : `/${UNREAD_MARK}`;
+    return `${left}${UNREAD_MARK}${right}`;
+  };
+  const reading = (slashed: number): string =>
+    pieces.reduce((out, piece, at) => (at === 0 ? piece : `${out}${at - 1 === slashed ? slashedMark(at - 1) : UNREAD_MARK}${piece}`), "");
+  // An unread directory: the word opens with unread components.
+  const leadingDirectory = pieces[0] === "" && (pieces[1] ?? "").startsWith("/");
+  let strictest: string | null = null;
+  for (const slashed of [-1, ...inside]) {
+    const found = globGuardClass(reading(slashed), protectedPaths, budget, options, undefined, { leadingDirectory });
+    if (found !== null && (strictest === null || protectedRank(found) < protectedRank(strictest))) strictest = found;
+    if (strictest === "log.mutate") break;
+  }
+  return strictest;
+}
+
 /**
  * The strictest protected class a write-target pattern could reach, or `null`
  * when no guarded path is within its reach (`out/*.log`). FAIL CLOSED.
@@ -10799,6 +10962,7 @@ function globGuardClass(
   budget: { left: number } = { left: GLOB_GUARD_STEP_CAP },
   options = false,
   disk?: GlobDisk,
+  spliced: false | { leadingDirectory: boolean } = false,
 ): string | null {
   // zsh's extendedglob forms (`#`, `^`, the `~` exclusion) and braceccl need an
   // option; with none possibly set on the line they are literal text (lead
@@ -10862,6 +11026,12 @@ function globGuardClass(
       // against what is THERE when the caller listed its directory.
       let firstGlobSeen = false;
       const choices: string[][][] = segments.map((segment, index) => {
+        // A component made only of unread parts ({@link splicedGuardClass}):
+        // nothing, or any one guarded name. Its value is no pattern, and the
+        // disk does not bound it.
+        if (spliced !== false && segment.length > 0 && segment.split(UNREAD_MARK).join("").length === 0) {
+          return [[], ...names.map((name) => [name])];
+        }
         const listing = firstGlobSeen || !hasGlobConstruct(segment) ? undefined : listingFor(segments.slice(0, index));
         if (hasGlobConstruct(segment)) firstGlobSeen = true;
         if (segment.length === 0) return [[segment]];
@@ -10880,7 +11050,8 @@ function globGuardClass(
         const dotted =
           options ||
           /^[.(]|^[!@?*+]\(/u.test(segment) ||
-          (first?.kind === "set" && first.chars.includes("."));
+          (first?.kind === "set" && first.chars.includes(".")) ||
+          segment.includes(UNREAD_MARK);
         const test = (name: string, prefix: boolean): boolean => {
           const hit = globTokensMatch(pattern, name, prefix, budget);
           if (hit === null) exhausted = true;
@@ -10903,25 +11074,59 @@ function globGuardClass(
         }
         const out: string[][] = [[segment]];
         for (const name of dotted ? names : notDots) if (name !== segment && test(name, false)) out.push([name]);
-        for (const name of GLOB_GUARD_PREFIXES) if (test(name, true)) out.push([name]);
+        // Spliced: a component opening with an unread part reaches a name
+        // BEGINNING with a guarded prefix (`.env.`, `settings`, `vault`)
+        // through that part alone, unless its literal text opens the name
+        // with the part empty: only that reading takes part.
+        const opening = spliced !== false && segment.startsWith(UNREAD_MARK) ? globSegmentTokens(segment.replace(/^\uE001+/u, ""), options) : pattern;
+        for (const name of GLOB_GUARD_PREFIXES) {
+          const hit = globTokensMatch(opening, name, true, budget);
+          if (hit === null) exhausted = true;
+          if (hit !== false) out.push([name]);
+        }
         return out;
       });
       if (exhausted) return "log.mutate";
       let total = 1;
       for (const choice of choices) total *= choice.length;
       if (total > GLOB_GUARD_CANDIDATE_CAP) return "log.mutate";
-      const walk = (index: number, parts: string[]): boolean => {
+      // Spliced (lead ruling CLAIMS L62568): a candidate counts only where the
+      // word's LITERAL text takes part in it. The same candidate with every
+      // component that holds literal text replaced by a name no rule guards is
+      // judged too, and when that is as strict, the class came from the
+      // unread parts alone (`$D/notes.md` as `.approval/notes.md`, `out/$F` as
+      // `out/APPROVAL.md`), which a word with no literal text would reach as
+      // well: main's answer for an unknown word stands there.
+      // Where the word OPENS with unread components (`$D/tail`, an unread
+      // directory), the tail must END a guarded path by name, as the brief's
+      // edge has it (`$D/APPROVAL.md`, `$D/settings.json` count): a candidate
+      // that is just as guarded with its last name replaced (`$D/log/x.txt` as
+      // `.approval/log/x.txt`, `$L/scripts/run.sh` under a guarded `scripts`
+      // folder) comes from the directory the unread part names, not the tail.
+      const bearing = segments.map((segment) => spliced !== false && segment.length > 0 && segment.split(UNREAD_MARK).join("").length > 0);
+      const lastBearing = bearing[bearing.length - 1] === true;
+      const lighterWithout = (found: string, path: string): boolean => {
+        const without = protectedPathClass(path, protectedPaths);
+        return without === null || protectedRank(without) > protectedRank(found);
+      };
+      const walk = (index: number, parts: string[], neutral: string[]): boolean => {
         if (index === choices.length) {
           const path = unmask(parts.join("/"));
           if (lost) return consider("log.mutate");
-          return consider(protectedPathClass(path, protectedPaths));
+          const found = protectedPathClass(path, protectedPaths);
+          if (spliced !== false && found !== null) {
+            if (!lighterWithout(found, neutral.join("/"))) return false;
+            if (spliced.leadingDirectory && lastBearing && !lighterWithout(found, [...parts.slice(0, -1), SPLICED_NEUTRAL].join("/"))) return false;
+          }
+          return consider(found);
         }
         for (const choice of choices[index] as string[][]) {
-          if (walk(index + 1, [...parts, ...choice])) return true;
+          const stand = bearing[index] === true ? choice.map(() => SPLICED_NEUTRAL) : choice;
+          if (walk(index + 1, [...parts, ...choice], [...neutral, ...stand])) return true;
         }
         return false;
       };
-      if (walk(0, [])) return strictest;
+      if (walk(0, [], [])) return strictest;
     }
   }
   return strictest;
@@ -11778,7 +11983,7 @@ function classifySegmentWithVerb(
     // `.git` or a git configuration file is that write (APRV-518, S1).
     if (writeTargets.length > 0) {
       const gitWrite = gitWriteRefinement(writeTargets, [], context.shellDir, true, context.lineNamesGit === true, (word) =>
-        dotGlobNamesGit(word, inexact, glob),
+        dotGlobNamesGit(word, inexact, glob) || splicedNamesGit(word, inexact, glob),
       );
       if (gitWrite !== null) return { ok: true, ...gitWrite };
       return { ok: true, class: "files.write.workspace", rule: "redirect-write" };
@@ -12471,7 +12676,7 @@ function classifySegmentWithVerb(
           : [...positionals, ...flagValues, ...attached, ...operandValues];
     const gitWrite =
       gitWriteRefinement(writeTargets, named, context.shellDir, true, context.lineNamesGit === true, (word) =>
-        dotGlobNamesGit(word, inexact, glob),
+        dotGlobNamesGit(word, inexact, glob) || splicedNamesGit(word, inexact, glob),
       ) ??
       (sedLiteral
         ? (sedLiteralGitWrite(readOutputs, context.shellDir, context.lineNamesGit === true) ??
