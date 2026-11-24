@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import type { Dir } from "node:fs";
 import { tmpdir } from "node:os";
@@ -477,6 +477,57 @@ test("main #693 through the real hook: a call whose listing pass outlasts the ho
   // With the deadline it ships with, the same call is listed, read and allowed.
   const read = decide({});
   assert.equal(read.permission, "allow", read.reason);
+});
+
+test("review of 342f233b S1, through the real hook: a harness slow to close stdin does not spend the deadline, so a plain call held past it is still read and allowed", async () => {
+  // The listing pass's clock starts once stdin is read, as main's describe
+  // clock does. It started before the read, so a harness that held stdin open
+  // past the deadline had a plain call refused `hook-deadline` (and the
+  // Hermes race test's twenty hooks, each held on stdin while the test
+  // attested the next directories, were refused and never asked).
+  const dir = join(scratch, "stdin-lab");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "notes.txt"), "made-up\n");
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    ["# Policy", "", "```yaml approval-policy", 'version: "0.1"', "defaults:", "  autonomy: manual", '  approval_ttl: "1h"', "  on_expiry: reject", "classes:", "  read.*:", "    autonomy: autonomous", "  files.write.workspace:", "    autonomy: autonomous", "```", ""].join("\n"),
+  );
+  assert.equal(runCliIn(["policy", "attest", "--as", "human:alice"], dir).code, 0);
+  // A deadline every machine reads `cat notes.txt` well inside (the control
+  // below proves it on this one), and stdin held a second past it.
+  const deadlineMs = 2_000;
+  const decideHeld = (holdMs: number): Promise<{ permission: string; reason: string }> => {
+    decided += 1;
+    const env: NodeJS.ProcessEnv = { ...process.env, [DESCRIBE_DEADLINE_ENV]: String(deadlineMs) };
+    delete env["APPROVAL_HUMAN"];
+    const input = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "stdin", tool_use_id: `stdin-${String(decided)}`, cwd: dir, transcript_path: "/dev/null", tool_name: "Bash", tool_input: { command: "cat notes.txt" } });
+    const child = spawn(process.execPath, [CLI_ENTRY, "hook", "claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "100ms"], { cwd: dir, env });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
+    child.stdin.on("error", () => undefined);
+    const held = setTimeout(() => child.stdin.end(input), holdMs);
+    return new Promise((settle, reject) => {
+      child.on("error", reject);
+      child.on("close", (code) => {
+        clearTimeout(held);
+        try {
+          assert.equal(code, 0, stderr);
+          const output = (JSON.parse(stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+          settle({ permission: output.permissionDecision, reason: output.permissionDecisionReason });
+        } catch (error) {
+          reject(error as Error);
+        }
+      });
+    });
+  };
+  // The control: handed at once, the call is read and allowed under this deadline.
+  const control = await decideHeld(0);
+  assert.equal(control.permission, "allow", control.reason);
+  // Held on stdin a second past the deadline: still read and allowed.
+  const held = await decideHeld(deadlineMs + 1_000);
+  assert.equal(held.permission, "allow", held.reason);
 });
 
 test("review-b A686-FOLD7 S2 (lead ruling L62219), through the real hook: a long line that removes a folder holding four routed entries is never allowed, whether the read stops at the deadline or finishes", () => {

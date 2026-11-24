@@ -11013,15 +11013,21 @@ export function commandHookYielding(
     // (#693) for the ceiling this call runs under, and what it spends comes out
     // of that deadline and counts as reading time (`listingCosts`). Stopped at
     // the deadline, the call is refused `hook-deadline`.
+    //
+    // The pass's clock starts once stdin has been read, as the describe clock
+    // does on main: a harness slow to close stdin is not this hook reading the
+    // call, and charging that wait to the deadline refused a plain call
+    // `hook-deadline` (review of 342f233b, S1).
     const sub = argv[0];
     let readOnce = readStdin;
     let globListings: ReadonlyMap<string, GlobListing> | null = null;
-    const listingBegan = Date.now();
+    let listingBegan = Date.now();
     let overran = false;
     let listed = false;
     try {
       if (sub !== undefined && isHarnessKind(sub)) {
         const raw = readStdin();
+        listingBegan = Date.now();
         readOnce = () => raw;
         const adapter = HARNESS_ADAPTERS[sub];
         const parsedInput = parseHookInput(raw, adapter.camelCaseEnvelope === true);
