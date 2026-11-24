@@ -303,7 +303,8 @@ test("a spelling's answer, pinned: the folded class first, then the class main g
   // Codex's case 1: as spelled, `LOG` is not `log` and `.approval` is the
   // approval home, so main says `policy.core`; folded it is the log. Both.
   assert.deepEqual(pure("echo x > .approval/LOG/x"), ["log.mutate redirect-protected", WRITE_CORE]);
-  assert.deepEqual(pure(`cp x .approval/key${LONG_S}/k1`), ["account.credential credential-path", "policy.core protected-path"]);
+  // A copy INTO a credential path writes it (CLAIMS L62502): the write's class first, the credential beside it.
+  assert.deepEqual(pure(`cp x .approval/key${LONG_S}/k1`), ["policy.core protected-path", "account.credential credential-path"]);
   assert.deepEqual(pure(`git push origin ma${LONG_S}ter`), ["vcs.push.main git-push-main", "vcs.push.branch git-push-branch"]);
   assert.deepEqual(pure(`git push origin lane:refs/head${LONG_S}/main`)[0], "vcs.push.main git-push-main");
   // A canonical spelling, or one main already folded, stays one entry.
@@ -1300,7 +1301,6 @@ const CRED = "account.credential credential-path";
 const CREDENTIAL_BESIDE: readonly (readonly [string, readonly string[], readonly string[]])[] = [
   ["cp .approval/env .github/workflows/ci.yml", [CRED], ["policy.edit.ci protected-path"]],
   // A copy is direction-blind: either order names the workflow.
-  ["cp .github/workflows/ci.yml .approval/env", [CRED], ["policy.edit.ci protected-path"]],
   ["cp -t .github/workflows/ .approval/env", [CRED], ["policy.edit.ci protected-path"]],
   // The redirect form of the credential read.
   ["tee .github/workflows/ci.yml < .approval/env", [CRED], ["policy.edit.ci protected-path"]],
@@ -1352,9 +1352,9 @@ test("a credential read with no protected write target, or one that outranks it,
     // No protected target at all.
     ["cp .approval/env notes.txt", [CRED]],
     ["cp ~/.hermes/.env notes.txt", [CRED]],
-    // The credential word is the read: never reported as a write of the
-    // gate's directory, whichever position it takes.
-    ["cp notes.txt .approval/env", [CRED]],
+    // A copy's SOURCE credential word is the read, never a write of the
+    // gate's directory; in the destination it is a write (CLAIMS L62502, below).
+    ["cp .approval/env notes.txt", [CRED]],
     // A protected path that outranks the credential: deferred, as #690 pins.
     ["cp .approval/env APPROVAL.md design/x", ["policy.core protected-path", CRED, "policy.edit.design protected-path"]],
     // A write-only binary's credential word is a write to the gate's directory.
@@ -1867,15 +1867,94 @@ test("beside a credential read, #686's write rules judge the other words: the cr
   }
 });
 
-test("beside a credential read, the read is not a place a copy lands: a copy into it names no class of the gate's directory", () => {
+// The eleven cells of CLAIMS L62502: build-1's N3 on #701 (the true-class
+// table's six short cells, L62493) and M1 on #682 (five). A credential path in
+// a copy's destination slot was read as the credential READ, so a line that
+// writes the gate's environment map, its vault or keys, or a Hermes
+// credential file answered `account.credential` alone and never the class a
+// write of that path takes. `[line, its control without the write]`.
+const CREDENTIAL_DESTINATION_CELLS: readonly (readonly [string, string])[] = [
+  ["cp ~/.hermes/.env .approval/env", "cp ~/.hermes/.env notes.txt"],
+  ["cp ~/.hermes/.env .approval/{env,zz}", "cp ~/.hermes/.env {notes,zz}.txt"],
+  ['cp ~/.hermes/.env ".approval/env"', 'cp ~/.hermes/.env "notes.txt"'],
+  ["cp .approval/env ~/.hermes/auth.json", "cp .approval/env notes.txt"],
+  ["cp .approval/env ~/.hermes/{auth.json,zz}", "cp .approval/env {notes,zz}.txt"],
+  ['cp .approval/env ~/".hermes/auth.json"', 'cp .approval/env ~/"notes.txt"'],
+  ["cp README.md .approval/env", "cp README.md notes.txt"],
+  ["cp README.md .approval/keys/k1", "cp README.md keys/k1"],
+  ["cp README.md .approval/vault.enc", "cp README.md vault.enc"],
+  ["cp README.md ~/.hermes/auth.json", "cp README.md ~/auth.json"],
+  ["cp README.md ~/.hermes/.env", "cp README.md ~/.env"],
+];
+
+test("a copy that writes a credential path reports the class that write takes (the eleven cells of CLAIMS L62502)", () => {
+  for (const [line, control] of CREDENTIAL_DESTINATION_CELLS) {
+    const got = pure(line, TWO_ROUTES);
+    // The write's class answers first (it outranks the credential class, as
+    // `cp .approval/env APPROVAL.md` does); the credential touch rides beside it.
+    assert.deepEqual(got, ["policy.core protected-path", CRED], line);
+    // As spelled: main's answer, the credential class alone.
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);
+    // The same copy without the credential destination: as it was.
+    const want = control.includes(".approval/env") || control.includes(".hermes/.env") ? [CRED] : ["files.write.workspace workspace-write"];
+    assert.deepEqual(pure(control, TWO_ROUTES), want, control);
+  }
+  // The other copy tools and spellings of M1.
+  for (const line of [
+    "cp -f README.md ~/.hermes/.env",
+    "rsync README.md ~/.hermes/auth.json",
+    "cp README.md ~/.hermes/hermes-agent/.env",
+    "cp README.md ~/.hermes/.env.local",
+    "cp --frob README.md .approval/env",
+  ]) {
+    assert.deepEqual(pure(line, TWO_ROUTES), ["policy.core protected-path", CRED], line);
+  }
+  // Each names the destination as the written path.
+  const classified = classifyCommand("cp ~/.hermes/.env .approval/env", TWO_ROUTES);
+  assert.equal(classified.ok, true);
+  if (classified.ok) {
+    assert.deepEqual(classified.segments.map((segment) => segment.path), [".approval/env", "~/.hermes/.env"]);
+  }
+});
+
+test("a copy into a credential path keeps every class main gave it, and the forms that already reached the class are unmoved", () => {
   for (const [line, want] of [
-    ["cp notes.txt .approval/env", [CRED]],
-    ["cp evil/settings.json .approval/env", [CRED]],
-    ["cp -r evil/x .approval/env", [CRED]],
-    ["cp .gith*/workflows/ci.yml .approval/env", [CRED]],
-    // A protected SOURCE is still named, by the text scan.
-    ["cp design/x .approval/env", [CRED, "policy.edit.design protected-path"]],
-    ["cp .github/workflows/ci.yml .approval/env", [CRED, "policy.edit.ci protected-path"]],
+    // The same credential word both the only source and unknowable as a
+    // source or a destination: main gave the credential and policy.core.
+    ["cp $X .approval/env", ["policy.core protected-path", CRED]],
+    ["cp -t .approval/env notes.txt", ["policy.core protected-path", CRED]],
+    // Already the write's class on main: a redirect, tee, mv, a path that outranks.
+    ["echo x > .approval/env", ["policy.core redirect-protected"]],
+    ["tee .approval/env", ["policy.core protected-path"]],
+    ["mv a.txt .approval/env", ["policy.core protected-path"]],
+    ["mv .approval/env .github/workflows/ci.yml", ["policy.core protected-path", "policy.edit.ci protected-path"]],
+    ["cp .approval/env APPROVAL.md", ["policy.core protected-path", CRED]],
+    // A credential SOURCE is the read: unmoved.
+    ["cp .approval/env notes.txt", [CRED]],
+    ["cp .approval/vault.enc /tmp/vault.enc", [CRED]],
+    ["cp .approval/env .github/workflows/ci.yml", [CRED, "policy.edit.ci protected-path"]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+  // Main's classes, as sets, are all still there.
+  for (const line of ["cp $X .approval/env", "cp -t .approval/env notes.txt"]) {
+    const main = new Set(spelledPure(line, TWO_ROUTES).map((entry) => entry.split(" ")[0]));
+    const head = new Set(pure(line, TWO_ROUTES).map((entry) => entry.split(" ")[0]));
+    for (const cls of main) assert.ok(head.has(cls), `${line}: ${cls}`);
+  }
+});
+
+test("a copy into a credential path writes it: the write's class first, the credential beside it, no landing under it", () => {
+  // CLAIMS L62502 (build-1's N3 on #701, M1 on #682): the destination is not
+  // the read. As spelled, main's answer: the credential class alone.
+  for (const [line, want] of [
+    ["cp notes.txt .approval/env", ["policy.core protected-path", CRED]],
+    ["cp evil/settings.json .approval/env", ["policy.core protected-path", CRED]],
+    ["cp -r evil/x .approval/env", ["policy.core protected-path", CRED]],
+    ["cp .gith*/workflows/ci.yml .approval/env", ["policy.core protected-path", CRED]],
+    // A protected SOURCE is still named, by the text scan, after them.
+    ["cp design/x .approval/env", ["policy.core protected-path", CRED, "policy.edit.design protected-path"]],
+    ["cp .github/workflows/ci.yml .approval/env", ["policy.core protected-path", CRED, "policy.edit.ci protected-path"]],
   ] as const) {
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
     assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);

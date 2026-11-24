@@ -8522,12 +8522,16 @@ function credentialSideScan(
   readTargets: readonly string[],
   writesOnly: boolean,
   protectedPaths: readonly ProtectedPathEntry[],
+  written: CredentialWrites = NO_CREDENTIAL_WRITES,
 ): CredentialSideScan {
-  const isTheRead = (word: string): boolean => isCredentialReadWord(word, protectedPaths);
+  const isTheRead = (word: string): boolean => !written.words.has(word) && isCredentialReadWord(word, protectedPaths);
   const scans = (word: string): boolean => writesOnly || !isTheRead(word);
   const scannedPositionals = writesOnly ? positionals : positionals.filter((arg) => !isTheRead(arg));
   const reads = readTargets.filter((target) => !isTheRead(target));
-  const named = strictestProtected(scannedPositionals, protectedPaths, true);
+  const named = strongerProtected(
+    strictestProtected(scannedPositionals, protectedPaths, true),
+    strictestProtected(written.landings, protectedPaths),
+  );
   const fed = strictestProtected(reads, protectedPaths);
   return { positionals: scannedPositionals, reads, scans, named, fed, found: strongerProtected(named, fed) };
 }
@@ -8537,6 +8541,48 @@ function credentialSideScan(
  * chose them, and what it found (`named` from the positionals, `fed` from
  * the `<` targets, `found` the stronger of the two).
  */
+/**
+ * The credential paths a copy WRITES (build-1's N3 on #701 and M1 on #682,
+ * the lead's ruling CLAIMS L62502): a credential path in a destination slot
+ * of a copy, move, link, install or sync that has an option table ({@link
+ * copyPlan}: `cp README.md .approval/env`, `cp ~/.hermes/.env .approval/env`,
+ * `rsync README.md ~/.hermes/auth.json`, `cp -t .approval/env notes.txt`),
+ * and the paths a source lands at that are credential paths (`cp x/env
+ * .approval` writes `.approval/env`). Such a word is not the credential READ:
+ * {@link credentialSideScan} keeps it in the protected scan, so the class a
+ * write of that path takes (`policy.core` for the gate's environment map)
+ * outranks the credential class and answers first, the credential touch
+ * carried beside it, exactly as for any protected path that outranks the
+ * credential (`cp .approval/env APPROVAL.md`). An option the table does not
+ * know makes every operand a destination, which is stricter. A tool with no
+ * table is not read here (its words stay as they were).
+ */
+interface CredentialWrites {
+  words: ReadonlySet<string>;
+  landings: readonly string[];
+}
+
+const NO_CREDENTIAL_WRITES: CredentialWrites = { words: new Set(), landings: [] };
+
+function credentialWrites(basename: string, args: readonly string[]): CredentialWrites {
+  if (COPY_OPTION_TABLES[basename] === undefined) return NO_CREDENTIAL_WRITES;
+  const plan = copyPlan(basename, args);
+  if (plan === null || plan.dests.length === 0) return NO_CREDENTIAL_WRITES;
+  const words = new Set(plan.dests.filter((dest) => isCredentialPathAsRead(dest)));
+  const landings: string[] = [];
+  // Landings only where the table read the argv (an unknown option makes
+  // every operand a destination and a source: those words are kept above).
+  for (const source of plan.unknown === null ? plan.sources : []) {
+    const base = source.replace(/^[^/]*:/u, "").split("/").filter((part) => part.length > 0).pop();
+    if (base === undefined || base === "." || base === "..") continue;
+    for (const dest of plan.dests) {
+      const landing = `${dest.replace(/\/+$/u, "")}/${base}`;
+      if (isCredentialPathAsRead(landing)) landings.push(landing);
+    }
+  }
+  return words.size === 0 && landings.length === 0 ? NO_CREDENTIAL_WRITES : { words, landings };
+}
+
 interface CredentialSideScan {
   positionals: readonly string[];
   reads: readonly string[];
@@ -11768,6 +11814,12 @@ function classifySegmentWithVerb(
         ? uploadCredential
         : argCredential;
   const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets);
+  // The credential paths a copy WRITES ({@link credentialWrites}): folded
+  // reading only, as the rest of this tier's additions (as spelled, main's).
+  const written =
+    credential === null && redirectCredential === null
+      ? NO_CREDENTIAL_WRITES
+      : (foldedOnly(() => [credentialWrites(basename, args)])[0] ?? NO_CREDENTIAL_WRITES);
   const sideScan =
     credential === null && redirectCredential === null
       ? null
@@ -11776,6 +11828,7 @@ function classifySegmentWithVerb(
           readTargets,
           credentialWritesOnly(basename, args) || credentialProtectedScanKeeps(basename),
           protectedPaths,
+          written,
         );
   const outranking =
     sideScan !== null && sideScan.found !== null && outranksCredential(sideScan.found.surface) ? sideScan.found : null;
@@ -11871,6 +11924,18 @@ function classifySegmentWithVerb(
     });
     if (refused.outcome !== undefined) return refused.outcome;
     return { ok: true, ...answered, ...(more.length === 0 ? {} : { more: [...more] }) };
+  }
+  // A copy that writes a credential path defers the credential answer as any
+  // outranking path does; where the walk then answers by a branch that does
+  // not carry the credential touch beside it (`cp -t .approval/env notes.txt`,
+  // `cp $X .approval/env`), it is carried here, so the line keeps every class
+  // main gave it.
+  if (written !== NO_CREDENTIAL_WRITES && outranking !== null) {
+    const walked = restOfWalk();
+    const touch = credential ?? redirectCredential;
+    if (!walked.ok || touch === null || walked.also !== undefined) return walked;
+    const carried = walked.class === touch.class || (walked.more ?? []).some((entry) => entry.class === touch.class);
+    return carried ? walked : { ...walked, also: touch };
   }
   return restOfWalk();
 

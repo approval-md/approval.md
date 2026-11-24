@@ -558,6 +558,20 @@ other segments, and the hook judges each.
   secret variable now also waits on `policy.core`; under the policy
   `approval init` writes both classes are manual and no decision moves.
   Before, these lines were the credential class alone.
+- **A copy INTO a credential path writes it.** A credential path in a
+  copy's destination slot (by the copy tool's own option table: `cp`, `mv`,
+  `ln`, `install`, `rsync`, `scp`) was read as the credential read, so `cp
+  README.md .approval/env`, `cp ~/.hermes/.env .approval/env` and `cp
+  .approval/env ~/.hermes/auth.json`, with their brace and quoted
+  spellings, answered `account.credential` alone. The destination is now a
+  write: the class a write of that path takes (`policy.core`) outranks the
+  credential class and answers first, with the credential touch beside it,
+  as for any outranking path (`cp .approval/env APPROVAL.md`). A source
+  that lands at a credential path counts the same way. So under a policy
+  that runs `account.credential` more lightly than `policy.core`, such a
+  copy now also waits on `policy.core`. A credential source is still the
+  read (`cp .approval/env notes.txt` is the credential class alone), and
+  the redirect, `tee` and `mv` forms answered `policy.core` already.
 - **Not changed:** a protected path that outranks the credential class
   still answers first with the credential beside it, except in a copy's
   joined target-directory flag (`cp --target-directory=.approval/log
