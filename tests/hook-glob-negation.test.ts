@@ -1105,3 +1105,29 @@ test("build-1's S1 at 64c43399: a brace group the shell expands anyway, beside a
     assert.match(claude(command), /^deny: .*policy\.core/u, command);
   }
 });
+
+test("security review of 16426b38: the unknown answer is kept per reading, so neither reading reuses the other's", () => {
+  // Two entries on one path: as spelled the first declared answers alone, and
+  // the folded reading takes each (takeAmongEqual). A memo keyed on the
+  // entries alone kept whichever reading asked first, and a spelled-first
+  // line left the folded reading without policy.edit.design (fail open).
+  const tied = (): { path: string; class: string }[] => [
+    { path: "SPEC.md", class: "policy.edit.spec" },
+    { path: "SPEC.md", class: "policy.edit.design" },
+  ];
+  const pastCap = `echo x > build/${"b*/".repeat(65)}x`;
+  const classesIn = (result: ReturnType<typeof classifyCommandInThisReading>): string[] =>
+    result.ok ? [...new Set(result.classes)].sort() : [`refused ${result.code}`];
+  const spelledFresh = classesIn(withNamesAsSpelled(() => classifyCommandInThisReading(pastCap, tied())));
+  const foldedFresh = classesIn(classifyCommandInThisReading(pastCap, tied()));
+  assert.ok(foldedFresh.includes("policy.edit.design") && foldedFresh.includes("policy.edit.spec"), foldedFresh.join(", "));
+  assert.ok(!spelledFresh.includes("policy.edit.design"), spelledFresh.join(", "));
+  // Spelled first, then folded, on one entry list: the folded answer is whole.
+  const first = tied();
+  withNamesAsSpelled(() => classifyCommandInThisReading(pastCap, first));
+  assert.deepEqual(classesIn(classifyCommandInThisReading(pastCap, first)), foldedFresh);
+  // Folded first, then spelled: the spelled answer is its own.
+  const second = tied();
+  classifyCommandInThisReading(pastCap, second);
+  assert.deepEqual(classesIn(withNamesAsSpelled(() => classifyCommandInThisReading(pastCap, second))), spelledFresh);
+});

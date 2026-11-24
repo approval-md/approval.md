@@ -72,6 +72,7 @@ import {
   foldNameExact,
   foldNameLower,
   nameListIncludes,
+  namesReadAsSpelled,
   SUBSTITUTION_SENTINEL,
   takeAmongEqual,
   withNamesAsSpelled,
@@ -10578,7 +10579,18 @@ const GLOB_GUARD_UNKNOWN: readonly string[] = ["log.mutate", "policy.core"];
  * list.
  */
 function globGuardUnknown(protectedPaths: readonly ProtectedPathEntry[]): readonly string[] {
-  const known = GLOB_GUARD_UNKNOWN_MEMO.get(protectedPaths);
+  // The answer depends on the reading it is asked in, not on the entries
+  // alone (automated security review of 16426b38): as spelled, entries tied on
+  // one path answer with the first declared only, and the folded reading
+  // takes each; main's pass and the organ-verb rule change what a folder
+  // claims. One memo per reading, so no reading reuses another's answer.
+  const mode = `${namesReadAsSpelled() ? "spelled" : "folded"}|${mainRulesOnly ? "main" : "all"}|${organVerbs ? "verbs" : "released"}`;
+  let memo = GLOB_GUARD_UNKNOWN_MEMO.get(mode);
+  if (memo === undefined) {
+    memo = new WeakMap();
+    GLOB_GUARD_UNKNOWN_MEMO.set(mode, memo);
+  }
+  const known = memo.get(protectedPaths);
   if (known !== undefined) return known;
   const paths = [...CORE_FILENAMES, ...PROTECTED_FILENAMES];
   for (const [folder, tails] of Object.entries(FOLDER_CONTENTS)) for (const tail of tails) paths.push(`${folder}/${tail}`);
@@ -10588,11 +10600,12 @@ function globGuardUnknown(protectedPaths: readonly ProtectedPathEntry[]): readon
   }
   const out = [...GLOB_GUARD_UNKNOWN];
   for (const path of paths) for (const cls of protectedPathClasses(path, protectedPaths)) if (!out.includes(cls)) out.push(cls);
-  GLOB_GUARD_UNKNOWN_MEMO.set(protectedPaths, out);
+  memo.set(protectedPaths, out);
   return out;
 }
 
-const GLOB_GUARD_UNKNOWN_MEMO = new WeakMap<readonly ProtectedPathEntry[], readonly string[]>();
+/** {@link globGuardUnknown}'s answers, one memo per reading (a handful of keys). */
+const GLOB_GUARD_UNKNOWN_MEMO = new Map<string, WeakMap<readonly ProtectedPathEntry[], readonly string[]>>();
 
 /**
  * Most candidate paths one word's expansions are walked over together. Each
