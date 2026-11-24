@@ -83,9 +83,8 @@ export const GUARDED_WALK_ENTRY_CAP = 4_000;
  * Every name inside a guarded folder, at every depth, by basename (lead ruling
  * L62511, S-C): what a narrowed `find … -name P -delete` from a parent of it
  * may reach. Symlinks are not followed (find does not by default). A `.git`
- * folder's `objects` directory is not walked: its names are git's own shapes,
- * which the classifier judges by text ({@link GUARDED_WALK_CUT} aside, the
- * name `objects` is listed). `[]` for a name that is not a directory,
+ * folder's `objects` directory is listed by name and not walked: its names
+ * are git's own shapes, which the classifier judges by text. `[]` for a name that is not a directory,
  * `"missing"` for one that is gone, `"unreadable"` on any other error, and
  * the names read so far after {@link GUARDED_WALK_CUT} past
  * {@link GUARDED_WALK_DIR_CAP} or {@link GUARDED_WALK_ENTRY_CAP}, at the

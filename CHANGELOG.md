@@ -282,13 +282,18 @@ path and (unless it is exactly `*.<letters or digits>`, by the ruling) no
 guarded prefix (`settings*`, `.env.*`, `vault*`, `hooks*`), and (lead ruling
 L62511) when nothing inside a guarded folder below the start path matches
 it: the hook walks each organ directory, guarded name and `.git` it lists
-there (64 directories, 4,000 names, its deadline), and a folder a match may
-reach (`find . -name x.js -delete` and `.cursor/hooks/x.js`, `-name ci.yml`
-and `.github/workflows/ci.yml`, `-name HEAD` and `.git/HEAD`), one past the
-walk's limits, or a routed folder it does not walk gives its class. With no
-listing (every caller but the hook) only `*.<ext>` with an extension guarded
-folders do not ordinarily hold stays narrowed (`*.tmp`, `*.pyc`, `*.log`;
-not `*.js`, `*.py`, `*.json`, `*.md`, `*.yml`, `*.txt`, ..., and no plain
+there (64 directories, 4,000 names, a 2-second timeout and the hook's
+deadline; symlinks not followed; `.git/objects` not walked but judged by
+git's own name shapes there, two-hex directories, hashes, `pack-*.pack` and
+the rest), and a folder a match may reach (`find . -name x.js -delete` and
+`.cursor/hooks/x.js`, `-name ci.yml` and `.github/workflows/ci.yml`, `-name
+HEAD` and `.git/HEAD`, `-name '*.pack'`, a branch name) or a routed folder
+it does not walk gives its class. With no listing (every caller but the
+hook), and for a folder whose walk a limit cut short, only `*.<ext>` with
+an extension guarded folders do not ordinarily hold stays narrowed
+(`*.tmp`, `*.pyc`, `*.log`; not `js mjs cjs ts py sh bash zsh json jsonc
+yml yaml toml md mdc txt lock env ini cfg conf xml`, nor for `.git` `pack
+idx rev bitmap keep mtimes promisor lock sample graph orig`; no plain
 name). `-path`, `-regex`, `-type` or `-empty` alone narrow nothing.
 Nothing is released:
 `mkdir .` and `touch .` never reach the folders below. Names compare through
