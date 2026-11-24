@@ -212,6 +212,26 @@ export function withNamesAsSpelled<T>(run: () => T): T {
   }
 }
 
+/**
+ * Run `run`, whose answer already holds every name reading (it joins its own
+ * {@link eachNameReading} answers, so its folded answer contains its
+ * as-spelled one), without telling the caller's reading that names diverged
+ * inside it: a divergence `run` records is undone, and one the caller recorded
+ * before stays. So the caller is not read again as spelled for a value that
+ * has no other reading to add. The caller's own compares still mark its
+ * reading as before. #682's unknown-pattern classes: on a fresh entry list
+ * every line that reached them was classified a second time, as spelled
+ * (build-1's VERDICT on A682 queue red 3).
+ */
+export function apartFromCallerReading<T>(run: () => T): T {
+  const before = readingsDiverged;
+  try {
+    return refusePromise(run());
+  } finally {
+    readingsDiverged = before;
+  }
+}
+
 function refusePromise<T>(value: T): T {
   if (typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function") {
     throw new TypeError("a name reading runs synchronously; a promise would finish in the other reading");

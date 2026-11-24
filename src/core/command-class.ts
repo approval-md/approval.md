@@ -66,6 +66,7 @@ import {
   readTargetsOf,
 } from "./read-scope.js";
 import {
+  apartFromCallerReading,
   eachNameReading,
   equalClaims,
   foldedOnly,
@@ -12035,7 +12036,14 @@ function globGuardUnknown(protectedPaths: readonly ProtectedPathEntry[]): readon
     if (entry !== null) paths.push(`${entry.segments.join("/")}${entry.directory ? "/x" : ""}`);
   }
   const out = [...GLOB_GUARD_UNKNOWN];
-  for (const path of paths) for (const cls of protectedPathClasses(path, protectedPaths)) if (!out.includes(cls)) out.push(cls);
+  // protectedPathClasses joins each path's readings itself (its folded answer
+  // holds its as-spelled one), so a name of the list that folds is no reason
+  // to read the caller's whole line again as spelled: the list leaves the
+  // caller's reading as it found it, as a memo hit always did (build-1's
+  // VERDICT on A682 queue red 3). A line whose own names diverge still does.
+  apartFromCallerReading(() => {
+    for (const path of paths) for (const cls of protectedPathClasses(path, protectedPaths)) if (!out.includes(cls)) out.push(cls);
+  });
   memo.set(protectedPaths, out);
   return out;
 }

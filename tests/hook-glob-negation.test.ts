@@ -30,7 +30,7 @@ import {
   commandSegmentShapes,
   globSegmentMatches,
 } from "../src/core/command-class.js";
-import { withNamesAsSpelled } from "../src/core/name-fold.js";
+import { apartFromCallerReading, eachNameReading, foldNameExact, withNamesAsSpelled } from "../src/core/name-fold.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-glob-negation-")));
@@ -1130,4 +1130,50 @@ test("security review of 16426b38: the unknown answer is kept per reading, so ne
   const second = tied();
   classifyCommandInThisReading(pastCap, second);
   assert.deepEqual(classesIn(withNamesAsSpelled(() => classifyCommandInThisReading(pastCap, second))), spelledFresh);
+});
+
+test("build-1's queue red 3 on #682: the unknown answer leaves the line's own reading as it found it", () => {
+  // globGuardUnknown's list joins both readings of every guarded name itself,
+  // so a name of the list that folds (APPROVAL.md) no longer marks the CALLER's
+  // reading diverged: a line that does not diverge on main is read once, not
+  // a second time as spelled (1.5 to 1.7 times main's cost on "nested defaults
+  // with outputs", n=20000). A fresh entry list per call, as the hook and the
+  // cost tests give it, so the list's memo never answers.
+  const pastCap = `echo x > build/${"b*/".repeat(65)}x`;
+  const readings = (line: string): number => eachNameReading(() => classifyCommandInThisReading(line, [])).length;
+  const classesOf = (line: string, entries: { path: string; class: string }[] = []): string[] => {
+    const result = classifyCommandInThisReading(line, entries);
+    return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [`refused ${result.code}`];
+  };
+  // Read once, as on main (the second reading came from the list alone) ...
+  assert.equal(readings(pastCap), 1);
+  // ... and the answer is the whole unknown answer, as it was.
+  assert.deepEqual(classesOf(pastCap), [
+    "log.mutate redirect-protected",
+    "policy.core redirect-protected",
+    "policy.edit redirect-protected",
+    "cron.manage redirect-protected",
+    "files.write.workspace redirect-write",
+  ]);
+  // A line whose own names diverge is still read as spelled too, whether its
+  // own name comes before the unknown answer or after it: the list restores
+  // the reading it found, it does not clear it.
+  assert.equal(readings("echo y > APPROVAL.MD"), 2);
+  assert.equal(readings(`echo y > APPROVAL.MD; ${pastCap}`), 2);
+  assert.equal(readings(`${pastCap}; echo y > APPROVAL.MD`), 2);
+  // Tied entries: the folded reading still takes each (the memo per reading,
+  // security review of 16426b38), and as spelled the first alone.
+  const tied = (): { path: string; class: string }[] => [
+    { path: "SPEC.md", class: "policy.edit.spec" },
+    { path: "SPEC.md", class: "policy.edit.design" },
+  ];
+  const folded = classesOf(pastCap, tied());
+  assert.ok(folded.includes("policy.edit.spec redirect-protected") && folded.includes("policy.edit.design redirect-protected"), folded.join(", "));
+  const spelled = withNamesAsSpelled(() => classesOf(pastCap, tied()));
+  assert.ok(!spelled.includes("policy.edit.design redirect-protected"), spelled.join(", "));
+  // The helper itself: what runs inside is undone, what the caller recorded stays.
+  assert.equal(eachNameReading(() => apartFromCallerReading(() => foldNameExact("APPROVAL.md"))).length, 1);
+  assert.equal(eachNameReading(() => { foldNameExact("APPROVAL.md"); return apartFromCallerReading(() => foldNameExact("approval.md")); }).length, 2);
+  assert.equal(eachNameReading(() => { apartFromCallerReading(() => foldNameExact("APPROVAL.md")); return foldNameExact("APPROVAL.md"); }).length, 2);
+  assert.equal(eachNameReading(() => apartFromCallerReading(() => foldNameExact("approval.md"))).length, 1);
 });
