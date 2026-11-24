@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import type { Dir } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -224,6 +224,100 @@ test("lead ruling L61587 through the hook: `rm -rf *` where an organ directory i
   }
 });
 
+test("lead ruling L61587, parents, through the hook: `rm -rf .` where the directory holds an organ directory takes its class; elsewhere main's", async () => {
+  const organ = project({ ".claude": ["settings.json"], src: ["a.ts"], sub: ["b.ts"] });
+  for (const command of ["rm -rf .", "rm -rf ./", 'rm -rf "$PWD"', "rm -rf $(pwd)", "rm -rf sub/..", "chmod -R u+w .", 'mv "$PWD" ../moved']) {
+    assert.ok((await hookClasses(command, organ)).includes("policy.core"), command);
+  }
+  const plain = project({ src: ["a.ts"], dist: ["a.js"], ".cache": ["x"] });
+  assert.deepEqual(await hookClasses("rm -rf .", plain), ["files.delete.out_of_scope"]);
+  assert.deepEqual(await hookClasses("chmod -R u+w .", plain), ["files.write.workspace"]);
+  assert.deepEqual(await hookClasses("rm -rf ./dist", plain), ["files.write.workspace"]);
+  const checkout = project({ ".git": ["config"], src: ["a.ts"] });
+  assert.ok((await hookClasses("rm -rf .", checkout)).includes("vcs.history.rewrite"));
+  // Lead ruling L62483 (true class): every guarded target below, not the first only.
+  const full = project({ ".git": ["config"], ".claude": ["settings.json"], ".github/workflows": ["ci.yml"], ".approval/log": ["made-up.jsonl"], src: ["a.ts"] });
+  for (const command of ["rm -rf .", "chmod -R 000 .", "find . -delete", 'mv "$PWD" /tmp/b2-l62483-x']) {
+    const classes = await hookClasses(command, full);
+    for (const cls of ["policy.core", "vcs.history.rewrite", "policy.edit", "log.mutate"]) assert.ok(classes.includes(cls), `${command} -> ${classes.join(",")} lacks ${cls}`);
+  }
+  // Lead ruling L62435 (S1): a brace word is judged word by word.
+  for (const command of ["rm -rf {.,x}", "chmod -R 000 {.,x}", "rm -rf {..,.}/sub/..", "find {.,x} -delete"]) {
+    assert.ok((await hookClasses(command, organ)).includes("policy.core"), command);
+  }
+  assert.deepEqual(await hookClasses("rm -rf {dist,build}", plain), ["files.write.workspace"]);
+});
+
+test("security review of the parents rule (L61587), 6, through the hook: an absolute path that reaches the working directory through a symlink or another letter case", async (t) => {
+  const savedHome = process.env["HOME"];
+  const home = join(scratch, "home6");
+  mkdirSync(home, { recursive: true });
+  process.env["HOME"] = home;
+  try {
+    const parent = join(scratch, "real6");
+    const proj = join(parent, "proj");
+    for (const [dir, file] of [[join(proj, ".claude"), "settings.json"], [join(proj, "src"), "a.ts"]] as const) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, file), "made-up\n");
+    }
+    const alias = join(scratch, "alias6");
+    symlinkSync(parent, alias);
+    for (const command of [`rm -rf ${alias}/`, `chmod -R 000 ${alias}/proj`, `rm -rf ${alias}/proj/`]) {
+      assert.ok((await hookClasses(command, proj)).includes("policy.core"), command);
+    }
+    // The temp root's own alias on macOS (/var is /private/var).
+    if (proj.startsWith("/private/var/")) {
+      assert.ok((await hookClasses(`chmod -R 000 ${proj.slice("/private".length)}`, proj)).includes("policy.core"));
+    }
+    // Provably elsewhere, holding no guarded name: main's class.
+    const build = join(scratch, "elsewhere6", "build");
+    mkdirSync(build, { recursive: true });
+    writeFileSync(join(build, "a.o"), "made-up\n");
+    assert.deepEqual(await hookClasses(`rm -rf ${build}`, proj), ["files.delete.out_of_scope"]);
+    writeFileSync(join(scratch, "CaseProbe6"), "made-up\n");
+    if (!existsSync(join(scratch, "caseprobe6"))) {
+      t.diagnostic("case-sensitive volume: the letter-case half is skipped");
+      return;
+    }
+    assert.ok((await hookClasses(`rm -rf ${join(scratch, "REAL6")}/`, proj)).includes("policy.core"));
+    assert.ok((await hookClasses(`chmod -R 000 ${join(parent, "PROJ")}`, proj)).includes("policy.core"));
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});
+
+test("security review of the parents rule (L61587), 7, through the hook: `link/..` is the directory above the symlink's target", async () => {
+  const savedHome = process.env["HOME"];
+  const home = join(scratch, "home7");
+  mkdirSync(home, { recursive: true });
+  process.env["HOME"] = home;
+  try {
+    const root = join(scratch, "f7");
+    for (const [dir, file] of [
+      [join(root, "proj", "src"), "a.ts"],
+      [join(root, "other", ".claude"), "settings.json"],
+      [join(root, "other", "deep"), "x.txt"],
+      [join(root, "plain", "deep"), "x.txt"],
+    ] as const) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, file), "made-up\n");
+    }
+    const proj = join(root, "proj");
+    symlinkSync(join(root, "other", "deep"), join(proj, "link"));
+    symlinkSync(join(root, "plain", "deep"), join(proj, "link2"));
+    // The kernel's reading: link/.. is f7/other, which holds .claude.
+    assert.equal(realpathSync.native(join(proj, "link") + "/.."), realpathSync.native(join(root, "other")));
+    assert.ok((await hookClasses("chmod -R 000 link/..", proj)).includes("policy.core"));
+    assert.ok((await hookClasses("rm -rf link/../.claude", proj)).includes("policy.core"));
+    // link2/.. is f7/plain, which holds no guarded name: main's class.
+    assert.deepEqual(await hookClasses("chmod -R 000 link2/..", proj), ["files.write.workspace"]);
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Review-b A686-FOLD5 M1: #688's as-spelled reading compares EXACTLY, so a
 // case variant keeps main's ordinary class beside the folded protected one,
@@ -315,6 +409,50 @@ test("review-b A686-FOLD5 M1, through the real hook with policy W: a case varian
   }
   // Controls: the canonical spelling keeps the policy's answer for policy.edit.
   assert.equal(decideW(dir, "cp a.js .github/workflows/ci.yml").permission, "allow");
+});
+
+test("review-b A686-FOLD5 M1 for the parents rule, through the hook's listing: a listed organ directory in another case keeps the segment's own class", async () => {
+  // In process: through the real hook a decision cannot isolate this, since
+  // the hook's own directory holds APPROVAL.md (guarded as spelled), and a
+  // shell elsewhere fails closed. With the class set, both readings show:
+  // folded `.Claude` is `.claude` (policy.core); as spelled it is another
+  // name, so main's class rides beside, and a policy that holds
+  // files.write.workspace stricter still sees it.
+  const savedHome = process.env["HOME"];
+  const home = join(scratch, "home-m1p");
+  mkdirSync(home, { recursive: true });
+  process.env["HOME"] = home;
+  try {
+    const sub = project({ ".Claude": ["settings.json"], src: ["a.ts"] });
+    for (const command of ["chmod -R 000 .", "chmod 000 .", "chmod -R -w ."]) {
+      const classes = await hookClasses(command, sub);
+      assert.ok(classes.includes("policy.core") && classes.includes("files.write.workspace"), `${command} -> ${classes.join(",")}`);
+    }
+    const deleted = await hookClasses('rm -rf "$PWD"', sub);
+    assert.ok(deleted.includes("policy.core") && deleted.includes("files.delete.out_of_scope"), deleted.join(","));
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});
+
+test("lead ruling L61587, parents, through the real hook with policy W: the rule adds its class and never takes the segment's own away", () => {
+  // The lab holds `.github` (policy.edit, autonomous under W) and the policy
+  // file. Main 324d87dc answers files.write.workspace, human-only under W;
+  // the parents rule's class rides beside it, so main's refusal stands.
+  const dir = join(scratch, "parents-w-lab");
+  for (const [sub, file] of [["src", "a.ts"], [".github/workflows", "ci.yml"]] as const) {
+    mkdirSync(join(dir, sub), { recursive: true });
+    writeFileSync(join(dir, sub, file), "made-up\n");
+  }
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY_W);
+  const attested = runCliIn(["policy", "attest", "--as", "human:alice"], dir);
+  assert.equal(attested.code, 0, attested.stderr);
+  for (const command of ["chmod -R 000 .", "chmod 000 .", "chmod -R -w ."]) {
+    const decision = decideW(dir, command);
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+    assert.match(decision.reason, /^hook-class-human-only: /u, `${command}: ${decision.reason}`);
+  }
 });
 
 /**
@@ -726,4 +864,185 @@ test("lead ruling L62319, through the real hook after main's #700: a zsh clobber
     assert.equal(decided.permission, "deny", `${command}: ${decided.reason}`);
     assert.match(decided.reason, /^hook-unparseable: redirection /u, command);
   }
+});
+
+/** The `examples/agent-village` classes and defaults (its channels left out so the loader takes it alone). */
+const POLICY_AV = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: autonomous",
+  "  approval_ttl: 72h",
+  "  on_expiry: reject",
+  "classes:",
+  "  policy.core:",
+  "    autonomy: human-only",
+  "  log.mutate:",
+  "    autonomy: human-only",
+  "  account.credential:",
+  "    autonomy: human-only",
+  "```",
+  "",
+].join("\n");
+
+let decidedAv = 0;
+/** The real hook's decision with the hook process in `dir` and the envelope's session `cwd` set to `session`. */
+function decideAv(dir: string, home: string, session: string, command: string): { permission: string; reason: string } {
+  decidedAv += 1;
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+  delete env["APPROVAL_HUMAN"];
+  const input = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "l62435", tool_use_id: `l62435-${decidedAv}`, cwd: session, transcript_path: "/dev/null", tool_name: "Bash", tool_input: { command } });
+  const ran = spawnSync(process.execPath, [CLI_ENTRY, "hook", "claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "100ms"], { cwd: dir, encoding: "utf8", env, input });
+  assert.equal(ran.status, 0, ran.stderr);
+  const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+  return { permission: output.permissionDecision, reason: output.permissionDecisionReason };
+}
+
+test("lead ruling L62435 (S6, S7), through the real hook under the agent-village classes: the over-asks are back at main's allow; a parent still denies", () => {
+  const lab = join(scratch, "l62435-av");
+  const dir = join(lab, "proj");
+  const home = join(lab, "home");
+  for (const [sub, file] of [["src", "a.ts"], ["scripts", "run.sh"], ["sub", "b.ts"], [".claude", "settings.json"], ["../home/.claude", "settings.json"], ["../plain", "x"]] as const) {
+    mkdirSync(join(dir, sub), { recursive: true });
+    writeFileSync(join(dir, sub, file), "made-up\n");
+  }
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY_AV);
+  // A place provably not above the lab on any OS (CI's temp root is /tmp, which
+  // IS above it there; macOS's is /private/var/folders, which is not /tmp).
+  const other = join(scratch, "l62435-other");
+  mkdirSync(other, { recursive: true });
+  const attested = spawnSync(process.execPath, [CLI_ENTRY, "policy", "attest", "--as", "human:alice"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home } });
+  assert.equal(attested.status, 0, attested.stderr);
+  // Main 9122cb3e allows each of these under these classes.
+  for (const command of [
+    'chmod +x "$f"',
+    "chmod +x ./$NAME",
+    "chmod u+x $1",
+    "chmod 755 $DIR",
+    "chmod +x $SCRIPT",
+    "chmod +x scripts/$NAME",
+    "find . -name '*.tmp' -delete",
+    "find . -name '*.pyc' -delete",
+    "find . -name .DS_Store -delete",
+    "rm -rf $TARGET",
+    "rm -rf $BUILD_DIR",
+    'rm -rf "$OUT"',
+    `rm -rf ${other}/$name`,
+    "rm -rf ./$X",
+    `rm -rf ${other}/$SESSION`,
+    "rsync -a --delete src/ build/out/",
+    "cd src && rm -rf dist",
+  ]) {
+    const decision = decideAv(dir, home, dir, command);
+    assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
+  }
+  // A parent, or an unreadable word below one: human-only.
+  for (const command of ["cd .. && rm -rf proj", "(cd .. && rm -rf proj)", "rsync -a --delete /tmp/b2-l62435-empty/ ./", "rsync -a --delete /tmp/b2-l62435-empty/ ~/", "find . -delete", "find . -empty -delete", "find . -name settings.json -delete", "find . -delete -name '*.tmp'", "rm -rf ../$X", "rm -rf ~/$X", "rm -rf $CLAUDE_PROJECT_DIR", "chmod 000 .", "X=. ; rm -rf $X"]) {
+    const decision = decideAv(dir, home, dir, command);
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+  }
+  // Lead ruling L62511: an assigned organ name (S-A, `D=.claude; rm -rf $D` was
+  // pinned to allow here before), `${X:=..}` (S-B), a find whose name reaches
+  // inside a guarded folder (S-C) and a recursive chmod of an unreadable word
+  // (S-D, `chmod -R 755 "$OUT"` was in the allow list before): human-only.
+  writeFileSync(join(dir, ".claude", "hook.js"), "made-up\n");
+  for (const command of ["D=.claude; rm -rf $D", "D=.cl; rm -rf ${D}aude", "echo ${X:=..}; rm -rf $X", "find . -name hook.js -delete", "find . -name 'hook.*' -delete", 'chmod -R 755 "$OUT"', "chmod -R 000 $X"]) {
+    const decision = decideAv(dir, home, dir, command);
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+  }
+  for (const command of ["OUT=dist; rm -rf $OUT", "find . -name '*.tmp' -delete", "chmod u+x $1"]) {
+    const decision = decideAv(dir, home, dir, command);
+    assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
+  }
+  writeFileSync(join(dir, ".claude", "made-up.tmp"), "made-up\n");
+  assert.equal(decideAv(dir, home, dir, "find . -name '*.tmp' -delete").permission, "deny");
+  rmSync(join(dir, ".claude", "made-up.tmp"));
+  rmSync(join(dir, ".claude", "hook.js"));
+  // The opposite: an unreadable word below the lab's own parent (or the lab) may
+  // be the workspace's parent, so it denies on every OS.
+  for (const command of [`rm -rf ${scratch}/$name`, `rm -rf ${lab}/$name`]) {
+    const decision = decideAv(dir, home, dir, command);
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+  }
+  // `/tmp/$name` keeps main's allow only when /tmp is not above the workspace.
+  for (const [root, command] of [["/tmp", "rm -rf /tmp/$name"], ["/private/tmp", "rm -rf /private/tmp/$SESSION"]] as const) {
+    const above = existsSync(root) && dir.startsWith(`${realpathSync(root)}/`);
+    const decision = decideAv(dir, home, dir, command);
+    assert.equal(decision.permission, above ? "deny" : "allow", `${command} (${root} above the lab: ${above}): ${decision.reason}`);
+  }
+  // The session's directory differs from the hook's (a `cd` in an earlier
+  // call): a word is placed from both, so a place that holds neither keeps
+  // main's allow, and a parent from either still denies.
+  const session = join(dir, "sub");
+  for (const command of ["rm -rf /tmp/b2-l62435-not-there", "rm -rf ../plain", `rm -rf ${join(lab, "plain")}`]) {
+    const decision = decideAv(dir, home, session, command);
+    assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
+  }
+  for (const command of ["rm -rf ..", "rm -rf ../..", `rm -rf ${dir}`, "chmod -R 000 ."]) {
+    const decision = decideAv(dir, home, session, command);
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+  }
+});
+
+test("lead ruling L62511 (S-C), through the real hook in a checkout with a realistic .git: git's object store by its name shapes, the rest by the walk, and a walk cut short by the rule used with no listing", () => {
+  const lab = join(scratch, "l62511-git");
+  const dir = join(lab, "proj");
+  const home = join(lab, "home");
+  const put = (rel: string): void => {
+    mkdirSync(join(dir, rel, ".."), { recursive: true });
+    writeFileSync(join(dir, rel), "made-up\n");
+  };
+  // Made-up contents in git's layout: 256 object directories, packs, refs, logs, hooks.
+  for (let index = 0; index < 256; index += 1) put(`.git/objects/${index.toString(16).padStart(2, "0")}/${"0123456789abcdef".repeat(3).slice(0, 38)}`);
+  for (const ext of ["pack", "idx", "rev"]) put(`.git/objects/pack/pack-${"0123456789abcdef".repeat(3).slice(0, 40)}.${ext}`);
+  for (const rel of [".git/HEAD", ".git/config", ".git/index", ".git/refs/heads/main", ".git/refs/heads/fix/login", ".git/logs/HEAD", ".git/logs/refs/heads/main", ".git/hooks/pre-commit.sample", ".claude/settings.json", "src/a.ts"]) put(rel);
+  mkdirSync(home, { recursive: true });
+  // The agent-village classes, with history rewrites human-only so a reach into `.git` shows.
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY_AV.replace("  account.credential:\n", "  vcs.history.rewrite:\n    autonomy: human-only\n  account.credential:\n"));
+  const attested = spawnSync(process.execPath, [CLI_ENTRY, "policy", "attest", "--as", "human:alice"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home } });
+  assert.equal(attested.status, 0, attested.stderr);
+  const decide = (command: string): string => decideAv(dir, home, dir, command).permission;
+  for (const command of ["find . -name '*.tmp' -delete", "find . -name '*.pyc' -delete", "find . -name .DS_Store -delete"]) assert.equal(decide(command), "allow", command);
+  for (const command of ["find . -name HEAD -delete", "find . -name config -delete", "find . -name '*.pack' -delete", "find . -name main -delete", "find . -name 'pack-*' -delete"]) assert.equal(decide(command), "deny", command);
+  // The walk is breadth-first in the order each directory returns its
+  // entries (no other order): a ref shallower than the bulk (`refs/heads`,
+  // depth 2, against `logs/refs/heads`, depth 3) is read before a limit cuts it.
+  for (let index = 0; index < 4_100; index += 1) put(`.git/logs/refs/heads/r${String(index)}`);
+  put(".git/refs/heads/zz.tmp");
+  assert.equal(decide("find . -name '*.tmp' -delete"), "deny");
+  rmSync(join(dir, ".git", "refs", "heads", "zz.tmp"));
+  assert.equal(decide("find . -name '*.tmp' -delete"), "allow");
+  // A `.claude` past the walk's limits (4,000 names): `*.<ext>` outside the
+  // list and a junk name (L62546) keep main's class, a plain name or `x.*`
+  // takes the folder's.
+  for (let index = 0; index < 4_100; index += 1) put(`.claude/cache/f${String(index)}.json`);
+  for (const command of ["find . -name '*.tmp' -delete", "find . -name .DS_Store -delete"]) assert.equal(decide(command), "allow", command);
+  for (const command of ["find . -name x.js -delete", "find . -name 'x.*' -delete"]) assert.equal(decide(command), "deny", command);
+});
+
+test("lead ruling L62546, through the real hook under the agent-village classes: a junk name is read as `*.tmp` is", () => {
+  const labFor = (name: string, folder: string, count: number, extra: readonly string[] = []): { dir: string; home: string } => {
+    const lab = join(scratch, name);
+    const dir = join(lab, "proj");
+    const home = join(lab, "home");
+    for (const rel of [`${folder}/settings.json`, "src/a.ts", ...extra, ...Array.from({ length: count }, (_, index) => `${folder}/cache/f${String(index)}.json`)]) {
+      mkdirSync(join(dir, rel, ".."), { recursive: true });
+      writeFileSync(join(dir, rel), "made-up\n");
+    }
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(dir, "APPROVAL.md"), POLICY_AV);
+    const attested = spawnSync(process.execPath, [CLI_ENTRY, "policy", "attest", "--as", "human:alice"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home } });
+    assert.equal(attested.status, 0, attested.stderr);
+    return { dir, home };
+  };
+  // A `.claude` and a `.cursor` past the walk's limits: main's class for a junk name, strict for another plain name.
+  for (const { dir, home } of [labFor("l62546-claude", ".claude", 4_100), labFor("l62546-cursor", ".cursor", 4_100)]) {
+    for (const command of ["find . -name .DS_Store -delete", "find . -name Thumbs.db -delete"]) assert.equal(decideAv(dir, home, dir, command).permission, "allow", command);
+    assert.equal(decideAv(dir, home, dir, "find . -name x.js -delete").permission, "deny");
+  }
+  // A full walk that shows the junk name inside a guarded folder: strict.
+  const small = labFor("l62546-inside", ".claude", 0, [".claude/.DS_Store"]);
+  assert.equal(decideAv(small.dir, small.home, small.dir, "find . -name .DS_Store -delete").permission, "deny");
 });
