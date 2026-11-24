@@ -1568,22 +1568,30 @@ test("an attached or = value that outranks the credential class leaves the line 
   }
 });
 
-test("a word is the credential read only when nothing else in it can vary", () => {
+const ENV = "account.credential credential-env";
+
+test("only a literal credential path is left out as the read; every variable is a target the shell builds", () => {
   for (const program of ["command cp", "frobnicate"]) {
     for (const [words, want] of [
-      // Exempt: exactly a secret reference, a credential path (a leading home
-      // may vary), or one of those after a literal `key=` or `--opt=`.
-      ["$APPROVAL_TG_TOKEN notes.txt", ["account.credential credential-env"]],
-      ['"${APPROVAL_TG_TOKEN}" notes.txt', ["account.credential credential-env"]],
-      ["--token=$APPROVAL_TG_TOKEN notes.txt", ["account.credential credential-env"]],
+      // Left out: a credential path literal (a leading `~/` is its home), alone
+      // or after a literal `key=` or `--opt=` prefix.
+      [".approval/env notes.txt", [CRED]],
       ["~/.hermes/.env notes.txt", [CRED]],
-      ["$HOME/.hermes/.env notes.txt", [CRED]],
-      ["--in=$HOME/.hermes/.env notes.txt", [CRED]],
+      ["--in=.approval/env notes.txt", [CRED]],
+      ["--in=~/.hermes/.env notes.txt", [CRED]],
       ["if=~/.hermes/.env notes.txt", [CRED]],
-      // Not exempt: a secret reference or a credential path with anything
-      // else the shell may change in the same word is a built target.
-      ["$APPROVAL_TG_TOKEN-$X notes.txt", ["account.credential credential-env", UNKNOWN]],
-      ["{a,$APPROVAL_TG_TOKEN} notes.txt", ["account.credential credential-env", UNKNOWN]],
+      // A secret-named variable is a word the shell builds, as plain `cp`
+      // counts it: the variable's credential rule answers first, then the
+      // unknown target. The name is the agent's to choose and to assign.
+      ["$APPROVAL_TG_TOKEN notes.txt", [ENV, UNKNOWN]],
+      ['"${APPROVAL_TG_TOKEN}" notes.txt', [ENV, UNKNOWN]],
+      ["--token=$APPROVAL_TG_TOKEN notes.txt", [ENV, UNKNOWN]],
+      ["--token $APPROVAL_TG_TOKEN", [ENV, UNKNOWN]],
+      ["$APPROVAL_TG_TOKEN-$X notes.txt", [ENV, UNKNOWN]],
+      ["{a,$APPROVAL_TG_TOKEN} notes.txt", [ENV, UNKNOWN]],
+      // A credential path with a variable, a glob or a brace in it is built too.
+      ["$HOME/.hermes/.env notes.txt", [CRED, UNKNOWN]],
+      ["--in=$HOME/.hermes/.env notes.txt", [CRED, UNKNOWN]],
       ["--out=$X/.approval/env notes.txt", [CRED, UNKNOWN]],
       [".approval/env --out=$X/.approval/env", [CRED, UNKNOWN]],
       ["~/.hermes/.env ~/.hermes/.env*", [CRED, UNKNOWN]],
@@ -1596,6 +1604,18 @@ test("a word is the credential read only when nothing else in it can vary", () =
       const line = `${program} ${words}`;
       assert.deepEqual(pure(line, TWO_ROUTES), want, line);
     }
+  }
+  // A secret-looking name the line itself assigns a workflow path to.
+  assert.deepEqual(pure("X_TOKEN=.github/workflows/ci.yml; command cp .approval/env $X_TOKEN", TWO_ROUTES), [
+    "read.shell assignment",
+    CRED,
+    UNKNOWN,
+  ]);
+  // An `export` of that path is refused on its own (no rule), so the line is.
+  assert.deepEqual(pure("export X_TOKEN=.github/workflows/ci.yml; command cp .approval/env $X_TOKEN", TWO_ROUTES), ["refused unclassified"]);
+  // As spelled: main's answer, the credential rule alone.
+  for (const line of ["command cp $APPROVAL_TG_TOKEN notes.txt", "frobnicate --token $APPROVAL_TG_TOKEN"]) {
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [ENV], line);
   }
 });
 
@@ -1610,11 +1630,9 @@ test("a target the shell builds beside a credential read: the order, one entry p
     // A value that outranks the credential class: refused, as its own word is.
     ["frobnicate --out=APPROVAL.md .approval/env $X", ["refused unclassified"]],
     ["frobnicate -oAPPROVAL.md .approval/env $X", ["refused unclassified"]],
-    // The words that are the credential read are not an unknown target.
-    ["frobnicate $APPROVAL_TG_TOKEN notes.txt", ["account.credential credential-env"]],
-    ['frobnicate "$APPROVAL_TG_TOKEN" $X', ["account.credential credential-env", UNKNOWN]],
+    // A literal credential path is the read, not an unknown target.
     ["command cp ~/.hermes/.env notes.txt", [CRED]],
-    ["frobnicate --in=$HOME/.hermes/.env notes.txt", [CRED]],
+    ["frobnicate --in=.approval/env notes.txt", [CRED]],
     // Where the rest of the walk answers, its answer stands.
     ["cp .approval/env $X", [CRED, UNKNOWN]],
     ["cp .approval/env .gith*/workflows/ci.yml", [CRED]],

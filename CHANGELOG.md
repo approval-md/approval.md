@@ -322,11 +322,17 @@ other segments, and the hook judges each.
   An attached or `=` value that outranks the credential class
   (`-oAPPROVAL.md`, `--out=APPROVAL.md`, `-t.approval/log`) leaves the line
   refused, as the same path as its own word does. A quoted `'$X'` is a
-  literal, and a word that is the credential read and nothing else
-  (`$APPROVAL_TG_TOKEN`, `~/.hermes/.env`, `--in=.approval/env`) is the
-  read; with anything else the shell may change in it
-  (`$APPROVAL_TG_TOKEN-$X`) it is a built target. Before, these lines were
-  the credential class alone.
+  literal, and only a literal credential path (`.approval/env`,
+  `~/.hermes/.env`, `--in=.approval/env`) is left out as the read. A
+  secret-named variable is a word the shell builds like any other, as plain
+  `cp` counts it, since the name is the agent's to choose and to assign:
+  `command cp $APPROVAL_TG_TOKEN notes.txt` and `frobnicate --token
+  $APPROVAL_TG_TOKEN` are `account.credential` (`credential-env`), then
+  `policy.core`. So under a policy that runs `account.credential` more
+  lightly than `policy.core`, a program with no rule that is handed a
+  secret variable now also waits on `policy.core`; under the policy
+  `approval init` writes both classes are manual and no decision moves.
+  Before, these lines were the credential class alone.
 - **Not changed:** a protected path that outranks the credential class
   still answers first with the credential beside it, except in a copy's
   joined target-directory flag (`cp --target-directory=.approval/log

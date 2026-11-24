@@ -8135,28 +8135,22 @@ function isCredentialReadWord(word: string, protectedPaths: readonly ProtectedPa
 }
 
 /**
- * Is this argument word the credential read and nothing else (build-1's S2
- * on #701, the seat's ruling on the review of the first cut)? Only then is
- * it left out of the rule that a word the shell still builds is an unknown
- * write target. The word, or its value after a LITERAL `key=` or `--opt=`
- * prefix, must be exactly one of: a secret-named variable reference
- * (`$APPROVAL_TG_TOKEN`, `${APPROVAL_TG_TOKEN}`, quoted or not), or a
- * credential file path ({@link isCredentialReadWord}) in which nothing can
- * vary but a leading `~`, `$HOME` or `${HOME}`, the home the credential rows
- * read themselves. A word with any other expansion, glob, brace or
- * substitution beside the credential (`$APPROVAL_TG_TOKEN-$X`,
- * `--out=$X/.approval/env`, `{a,$APPROVAL_TG_TOKEN}`, `.approval/env*`) is a
- * built target like any other. A program with no rule handed a secret as an
- * argument is the ordinary credential use; the ruling is about targets.
+ * Is this argument word a LITERAL credential read (build-1's S2 on #701, the
+ * seat's ruling on the review)? Only then is it left out of the rule that a
+ * word the shell still builds is an unknown write target: a credential file
+ * path ({@link isCredentialReadWord}) in which nothing can vary but a
+ * leading `~/`, alone or after a literal `key=` or `--opt=` prefix
+ * (`.approval/env`, `~/.hermes/.env`, `--in=.approval/env`). Nothing with a
+ * `$`, a backtick, a glob or a brace in it is ever left out, a secret-named
+ * variable included: the name is the agent's to choose and to assign
+ * (`X_TOKEN=.github/workflows/ci.yml; command cp .approval/env $X_TOKEN`),
+ * and plain `cp` counts every variable word as an unknown target.
  */
 function isCredentialArgWord(word: LexWord, protectedPaths: readonly ProtectedPathEntry[]): boolean {
-  if (word.substitutions.length > 0) return false;
+  if (word.substitutions.length > 0 || word.splits || word.expands) return false;
   const prefix = /^(?:--?[A-Za-z0-9][A-Za-z0-9_-]*|[A-Za-z_][A-Za-z0-9_]*)=/u.exec(word.text);
   const value = prefix === null ? word.text : word.text.slice(prefix[0].length);
-  const reference = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$/u.exec(value);
-  if (reference !== null) return isSecretEnvName((reference[1] ?? reference[2]) as string);
-  const rest = value.replace(/^(?:~|\$HOME|\$\{HOME\})(?=\/)/u, "");
-  return !/[$`~*?[\]{}]/u.test(rest) && isCredentialReadWord(value, protectedPaths);
+  return !/[$`~*?[\]{}]/u.test(value.replace(/^~(?=\/)/u, "")) && isCredentialReadWord(value, protectedPaths);
 }
 
 /**
@@ -9753,9 +9747,10 @@ function classifySegment(
   // the text cannot settle, by the flags the copy family's test reads
   // (`splits`, `expands`), the lexer's `exact` (a `$` inside double quotes,
   // an unquoted `~`) and its substitutions (`"$(…)"`). Every word counts,
-  // `--` or not: nobody knows this program's operands. A word that is the
-  // credential read and nothing else is left out ({@link
-  // isCredentialArgWord}); `'$X'` is a literal.
+  // `--` or not: nobody knows this program's operands, and a secret-named
+  // variable is a word the shell builds like any other. Only a literal
+  // credential path is left out as the read ({@link isCredentialArgWord});
+  // `'$X'` is a literal.
   const answered = outranking === null && !fetchOutranksCredential ? (credential ?? redirectCredential) : null;
   if (answered !== null) {
     const refused: { outcome?: SegmentOutcome } = {};
