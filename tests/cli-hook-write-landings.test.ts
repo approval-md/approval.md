@@ -1021,12 +1021,18 @@ test("rule A fails closed for a tree copier; find's writes are read whatever rul
   for (const command of ["find . -delete -fprint ~/.zshrc", "find . -name x -fls ~/.ssh/k -delete"]) {
     assert.ok(see(command).classes.includes(GUARDED), command);
   }
-  // Main answers this line with its delete row (files.delete.out_of_scope):
-  // a delete row takes no out-of-scope entry beside it (decision A is not
+  // Main answers this line with its delete row (files.delete.out_of_scope),
+  // and since #689 (main 03931ea2), with no directory listing handed in, a
+  // `find -delete` the hook has not listed also takes policy.core first.
+  // A delete row takes no out-of-scope entry beside it (decision A is not
   // built), but its write primary is read, so a listed one is guarded.
-  assert.deepEqual(see("find . -name x -fls ../out -delete", optedIn()).segments, [[DELETE_OUT, "find-delete"]]);
-  // The main row stays exactly as main gave it.
-  assert.equal(see("find . -name x -fls ../out -delete").segments[0]?.[1], "find-delete");
+  const MAIN_FIND_DELETE = [
+    ["policy.core", "protected-path"],
+    [DELETE_OUT, "find-delete"],
+  ];
+  assert.deepEqual(see("find . -name x -fls ../out -delete", optedIn()).segments, MAIN_FIND_DELETE);
+  // The main rows stay exactly as main gave them.
+  assert.deepEqual(see("find . -name x -fls ../out -delete").segments, MAIN_FIND_DELETE);
   // A guarded landing does not hide an out-of-scope one on the same segment.
   const both = see("echo x > ~/.zshrc 2> ../x", optedIn());
   assert.ok(both.classes.includes(GUARDED) && both.classes.includes(OUT), JSON.stringify(both.segments));
