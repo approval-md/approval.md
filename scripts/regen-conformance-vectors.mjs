@@ -2976,6 +2976,26 @@ const commandClassVectors = [
     input: { command: "echo x > $D/$F" },
   },
   {
+    id: "spliced-unread-directory-after-a-literal-folder",
+    description: "an unread directory below a literal guarded folder, with a literal tail, may be .github/workflows/ci.yml: the workflow's class (the literal text takes part)",
+    input: { command: "echo x > .github/$W/ci.yml" },
+  },
+  {
+    id: "spliced-dot-is-literal-text",
+    description: "a `.` in a component is literal text: .$X may be .approval, and the write asks with the strictest class it could reach",
+    input: { command: "echo x > .$X" },
+  },
+  {
+    id: "spliced-credential-read",
+    description: "a read of .approval/$F may read the environment map, as cat .approval/env does: the credential's class (lead ruling L62542, for reads too)",
+    input: { command: "cat .approval/$F" },
+  },
+  {
+    id: "spliced-read-of-an-ordinary-name-is-unmoved",
+    description: "a read whose literal text no credential file holds keeps main's answer",
+    input: { command: "cat out/$F.txt" },
+  },
+  {
     id: "redirect-read-of-an-ordinary-file-is-a-read",
     description: "an ordinary file on stdin is the read it always was",
     input: { command: "cat < ./notes.md" },
