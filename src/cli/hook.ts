@@ -3946,9 +3946,20 @@ export const WRITE_LANDING_RULES: readonly string[] = [
   WRITE_RESOLVED_RULE,
 ];
 
+/**
+ * The names of this hook's own location variables, in ONE place: the home
+ * (`currentHomes`), the Claude Code config folder (`currentConfigDirs`) and
+ * the project folder (`currentProjectDirs`). Lead ruling L62656 (the seat's
+ * sixth review): a chmod operand reading one is never relaxed.
+ */
+const HOME_NAME = "HOME";
+const CONFIG_DIR_NAME = "CLAUDE_CONFIG_DIR";
+const PROJECT_DIR_NAME = "CLAUDE_PROJECT_DIR";
+const HOOK_LOCATION_NAMES: readonly string[] = [HOME_NAME, CONFIG_DIR_NAME, PROJECT_DIR_NAME];
+
 /** The homes the guarded list is anchored on: `HOME` as given and resolved. */
 function currentHomes(env: NodeJS.ProcessEnv = process.env): string[] {
-  return givenAndResolved(env["HOME"]);
+  return givenAndResolved(env[HOME_NAME]);
 }
 
 /**
@@ -3963,7 +3974,7 @@ function currentHomes(env: NodeJS.ProcessEnv = process.env): string[] {
  * environment variable, so `~/x` is a folder named `~` under the cwd.
  */
 function currentConfigDirs(env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): string[] {
-  const value = env["CLAUDE_CONFIG_DIR"];
+  const value = env[CONFIG_DIR_NAME];
   if (value === undefined || value.length === 0) return [];
   const lexical = isAbsolute(value) ? resolvePathSegments(value) : resolvePathSegments(cwd, value);
   if (!isAbsolute(lexical)) return [];
@@ -4008,7 +4019,7 @@ function currentGuard(env: NodeJS.ProcessEnv = process.env, gateRoot?: string): 
  */
 function currentProjectDirs(env: NodeJS.ProcessEnv, gateRoot: string | undefined): string[] {
   const out: string[] = [];
-  for (const each of [gateRoot, env["CLAUDE_PROJECT_DIR"]]) {
+  for (const each of [gateRoot, env[PROJECT_DIR_NAME]]) {
     if (each === undefined || each.length === 0 || !isAbsolute(each)) continue;
     const normal = resolvePathSegments(each);
     if (!out.includes(normal)) out.push(normal);
@@ -4268,19 +4279,23 @@ const LANDING_DELETE_EVERY: ReadonlySet<string> = new Set(["rm", "rmdir", "shred
 const CHMOD_PLAIN_LONG_OPTIONS: ReadonlySet<string> = new Set(["--changes", "--silent", "--quiet", "--verbose", "--reference", "--preserve-root", "--no-preserve-root", "--help", "--version"]);
 
 /**
- * Names the shell, the hook or the harness gives a meaning (lead ruling
- * L62656, the seat's fourth review): a chmod operand that reads one is never
- * relaxed. Every `BASH*`, `ZSH*` and `COMP*` name too.
+ * Names the shell sets or gives a meaning, and names that locate a guarded
+ * place by convention (lead ruling L62656, the seat's fourth and sixth
+ * reviews): a chmod operand that reads one is never relaxed. The hook's own
+ * location names ({@link HOOK_LOCATION_NAMES}) and the names this pass reads
+ * from its environment ({@link STEERING_NAMES}) come from their own lists;
+ * every `BASH*`, `ZSH*`, `COMP*`, `XDG_*` and `GIT_*` name too.
  */
 const SHELL_SPECIAL_NAMES: ReadonlySet<string> = new Set([
-  "_", "REPLY", "BASH_REMATCH", "PWD", "OLDPWD", "OPTARG", "OPTIND", "IFS", "PATH", "HOME", "CDPATH", "TMPDIR", "HERMES_HOME",
-  "CLAUDE_PROJECT_DIR", "INIT_CWD", "MAPFILE", "PIPESTATUS", "FUNCNAME", "LINENO", "RANDOM", "SECONDS", "PPID", "SHLVL",
+  "_", "REPLY", "BASH_REMATCH", "PWD", "OLDPWD", "OPTARG", "OPTIND", "IFS", "PATH", "CDPATH",
+  "INIT_CWD", "MAPFILE", "PIPESTATUS", "FUNCNAME", "LINENO", "RANDOM", "SECONDS", "PPID", "SHLVL",
   "UID", "EUID", "HOSTNAME", "COPROC", "argv", "status", "path", "cdpath", "fpath", "psvar", "match", "MATCH", "MBEGIN", "MEND", "mbegin", "mend",
+  "ZDOTDIR", "GNUPGHOME",
 ]);
 
 /** Is this a name the shell, the hook or the harness gives a meaning? */
 function shellSpecialName(name: string): boolean {
-  return SHELL_SPECIAL_NAMES.has(name) || STEERING_NAMES.includes(name) || /^(?:BASH|ZSH|COMP)/u.test(name);
+  return SHELL_SPECIAL_NAMES.has(name) || HOOK_LOCATION_NAMES.includes(name) || STEERING_NAMES.includes(name) || /^(?:BASH|ZSH|COMP|XDG_|GIT_)/u.test(name);
 }
 
 /** One plain parameter and nothing else (`$X`, `${X}`, `$1`): its name, or `null`. */
@@ -5404,8 +5419,20 @@ export function refineWriteLandings(
     if (!singlePlainChmod) return false;
     const shape = chmodRelaxedShape(word);
     if (shape === null || shellSpecialName(shape.name)) return false;
-    if (shape.prefix === null) return true;
-    return judgeWord(shape.prefix, at, true).kind !== "guarded";
+    if (shape.prefix !== null && judgeWord(shape.prefix, at, true).kind === "guarded") return false;
+    // The seat's fifth review: a name set in this hook's own environment is
+    // read, as HOME is. Its value split as the shell splits an unquoted word:
+    // more than one word, a word that may be an option (`-R ~/.ssh`), or a
+    // character the shell would still glob (or this pass would expand) keeps
+    // the operand strict; one plain word is judged where it lands, and a
+    // guarded landing keeps it strict too.
+    const value = env[shape.name];
+    if (value === undefined) return true;
+    const words = value.split(/[ \t\n]+/u).filter((each) => each.length > 0);
+    if (words.length === 0) return true;
+    if (words.length > 1 || words.some((each) => each.startsWith("-") || /[$`~{}*?[\]\\]/u.test(each))) return false;
+    const landing = shape.prefix === null ? (words[0] as string) : `${shape.prefix}/${words[0] as string}`;
+    return judgeWord(landing, at).kind !== "guarded";
   };
 
   /** A move or delete at (or above) a named hook script, as a guarded landing, or `null` (S2). */

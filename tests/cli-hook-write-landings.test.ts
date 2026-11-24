@@ -2220,6 +2220,48 @@ test("lead ruling L62656: a plain chmod's unread operand keeps main's class in t
   }
 });
 
+test("lead ruling L62656, the fifth and sixth reviews: a name set in the hook's own environment is read; location and convention names are never relaxed", () => {
+  const plain = join(base, "l62656-env");
+  mkdirSync(join(plain, "scripts"), { recursive: true });
+  writeFileSync(join(plain, "scripts", "run.sh"), "");
+  mkdirSync(join(home, ".gnupg"), { recursive: true });
+  mkdirSync(join(home, ".config", "git"), { recursive: true });
+  // Set, run, put back: no value is printed (each message names the line only).
+  const withEnv = <T,>(values: Record<string, string | undefined>, body: () => T): T => {
+    const before = Object.fromEntries(Object.keys(values).map((name) => [name, process.env[name]]));
+    for (const [name, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    try {
+      return body();
+    } finally {
+      for (const [name, value] of Object.entries(before)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  };
+  const strict = (command: string): boolean => landingEntries(see(command, WRITE_SCOPE_OFF, plain)).some(([cls]) => cls === GUARDED);
+  withEnv({ SCRIPT: undefined, GNUPGHOME: join(home, ".gnupg"), XDG_CONFIG_HOME: join(home, ".config"), CLAUDE_CONFIG_DIR: undefined, L62656_KEYS: join(home, ".ssh"), L62656_RUN: join(plain, "scripts", "run.sh"), L62656_SPLIT: `-R ${plain}`, L62656_TWO: `${plain}/a ${plain}/b`, L62656_GLOB: "scripts/*", L62656_NAME: "run.sh", L62656_EMPTY: "" }, () => {
+    assert.equal(strict("chmod +x $SCRIPT"), false, "an unset parameter keeps main's class");
+    assert.equal(strict("chmod 700 $GNUPGHOME"), true, "chmod 700 $GNUPGHOME");
+    assert.equal(strict("chmod 600 $XDG_CONFIG_HOME/git/config"), true, "two parts after the parameter: not shape (b)");
+    assert.equal(strict("chmod 600 $XDG_CONFIG_HOME"), true, "an XDG_ name");
+    assert.equal(strict("chmod 600 $GIT_DIR"), true, "a GIT_ name");
+    assert.equal(strict("chmod 600 $ZDOTDIR"), true, "ZDOTDIR");
+    assert.equal(strict("chmod 600 $CLAUDE_CONFIG_DIR"), true, "CLAUDE_CONFIG_DIR, unset here");
+    assert.equal(strict("chmod 600 $CLAUDE_PROJECT_DIR"), true, "CLAUDE_PROJECT_DIR");
+    assert.equal(strict("chmod 700 $L62656_KEYS"), true, "a value that lands on the list");
+    assert.equal(strict("chmod 755 $L62656_SPLIT"), true, "a value that splits into an option");
+    assert.equal(strict("chmod 755 $L62656_TWO"), true, "a value that splits into two words");
+    assert.equal(strict("chmod 755 $L62656_GLOB"), true, "a value the shell would glob");
+    assert.equal(strict("chmod +x $L62656_RUN"), false, "a value that lands off the list");
+    assert.equal(strict("chmod +x scripts/$L62656_NAME"), false, "shape (b) with a value off the list");
+    assert.equal(strict("chmod +x $L62656_EMPTY"), false, "an empty value");
+  });
+});
+
 test("lead ruling L62656: the argv and operand shapes, read from the text", () => {
   for (const args of [["+x", "$X"], ["-v", "755", "$X"], ["u+x", "scripts/$N", "--", "$Y"], ["--changes", "+x", "a"]]) assert.equal(chmodPlainArgv(args), true, args.join(" "));
   for (const args of [["-R", "+x", "$X"], ["$R", "755", "$D"], ["-$F", "x"], ["{-R,-v}", "755", "$D"], ["--rec", "755", "$D"], ["755", "$D", "-R"], ["$M", "a"], ["--", "755", "a"]]) assert.equal(chmodPlainArgv(args), false, args.join(" "));
