@@ -283,9 +283,12 @@ guarded prefix (`settings*`, `.env.*`, `vault*`, `hooks*`), and (lead ruling
 L62511) when nothing inside a guarded folder below the start path matches
 it: the hook walks each organ directory, guarded name and `.git` it lists
 there (64 directories, 4,000 names, a 2-second timeout and the hook's
-deadline; symlinks not followed; `.git/objects` not walked but judged by
-git's own name shapes there, two-hex directories, hashes, `pack-*.pack` and
-the rest), and a folder a match may reach (`find . -name x.js -delete` and
+deadline; symlinks not followed; each directory read whole, names sorted,
+breadth-first; in a `.git`, `refs` whole first, then `hooks`, `info`,
+`worktrees`, `modules`, the rest, `logs` last; `.git/objects` not walked but
+judged by git's own name shapes there, two-hex directories, hashes,
+`pack-*.pack` and the rest; `packed-refs` contents never read), and a folder a
+match may reach (`find . -name x.js -delete` and
 `.cursor/hooks/x.js`, `-name ci.yml` and `.github/workflows/ci.yml`, `-name
 HEAD` and `.git/HEAD`, `-name '*.pack'`, a branch name) or a routed folder
 it does not walk gives its class. With no listing (every caller but the
@@ -362,7 +365,10 @@ in an earlier call) is a parent, organ directories nested below a subdirectory
 organ folder a narrowed `find` reaches (`find . -name '*.tmp' -delete` and
 `.claude/x.tmp`), `rsync`'s `-e`/`--rsync-path` value (a command on the
 receiving side), an absolute path for a caller with no listing, `rmdir .`,
-`chown`/`chgrp` (refused), a brace past its cap or an assigned reading past
+`chown`/`chgrp` (refused), a name in the unread part of a guarded folder whose
+walk a limit cut short that a `*.<ext>` pattern outside the lists matches (a
+reflog file or a deep file in a large `.claude` named `x.tmp`), a brace past
+its cap or an assigned reading past
 its cap carrying `policy.core` without the classes the working directory and
 the home hold (with #682's fix), and organ directories in a sibling tree
 under an
