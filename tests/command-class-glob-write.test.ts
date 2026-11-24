@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyCommand, classifyCommandWithMainRules, containedInAny, gitRemovedPaths, globWriteListingDirs, guardedContentsKey, realpathKey } from "../src/core/command-class.js";
+import { classifyCommand, classifyCommandWithMainRules, containedInAny, gitRemovedPaths, globWriteListingDirs, GUARDED_WALK_CUT, guardedContentsKey, realpathKey } from "../src/core/command-class.js";
 
 const HUMAN_ONLY = new Set(["policy.core", "log.mutate", "account.credential"]);
 
@@ -2601,6 +2601,28 @@ test("lead ruling L62511: an assigned guarded name, `${X:=…}`, a find that rea
   for (const command of ["find . -name '*.js' -delete", "find . -name '*.py' -delete", "find . -name '*.txt' -delete", "find . -name x.tmp -delete", "find . -name 'x.*' -delete"]) {
     assert.ok(classesOf(command).includes("policy.core"), `${command} (pure)`);
   }
+  // S-C in a real checkout: `.git/objects` is judged by git's own name shapes,
+  // the rest of `.git` by its walk; a walk cut short falls back, for that
+  // folder, to the rule used with no listing.
+  const checkout = { ...tree, [guardedContentsKey("/w/.git")]: ["HEAD", "config", "objects", "refs", "heads", "main", "hooks", "pre-commit.sample"] };
+  for (const command of ["find . -name '*.tmp' -delete", "find . -name '*.pyc' -delete", "find . -name .DS_Store -delete", "find . -name '*.orig' -delete"]) {
+    assert.deepEqual(run(command, checkout), ["files.delete.out_of_scope"], command);
+  }
+  for (const command of ["find . -name '*.pack' -delete", "find . -name 'pack-*' -delete", "find . -name '*.idx' -delete", "find . -name main -delete", "find . -name 'ab*' -delete", "find . -name '??' -delete", "find . -name 'tmp_obj_*' -delete", "find . -name '*.sample' -delete"]) {
+    assert.ok(run(command, checkout).includes("vcs.history.rewrite"), command);
+  }
+  const cut = { ...checkout, [guardedContentsKey("/w/.claude")]: [GUARDED_WALK_CUT, "settings.json"] };
+  for (const command of ["find . -name '*.tmp' -delete", "find . -name '*.pyc' -delete"]) assert.deepEqual(run(command, cut), ["files.delete.out_of_scope"], `${command} (cut)`);
+  for (const command of ["find . -name .DS_Store -delete", "find . -name 'x.*' -delete", "find . -name '*.json' -delete"]) assert.ok(run(command, cut).includes("policy.core"), `${command} (cut)`);
+  const gitCut = { ...checkout, [guardedContentsKey("/w/.git")]: [GUARDED_WALK_CUT, "HEAD", "objects"] };
+  assert.deepEqual(run("find . -name '*.tmp' -delete", gitCut), ["files.delete.out_of_scope"]);
+  for (const command of ["find . -name '*.lock' -delete", "find . -name '*.orig' -delete", "find . -name x.tmp -delete"]) assert.ok(run(command, gitCut).includes("vcs.history.rewrite"), `${command} (.git cut)`);
+  // Coordinator's B: a credential source synced with --delete onto a parent
+  // carries the credential class and the parent's classes; a copy INTO a
+  // parent is not a parents-rule verb (main's credential answer).
+  const synced = run("rsync -a --delete .approval/env ./");
+  for (const cls of ["account.credential", "policy.core", "log.mutate", "vcs.history.rewrite"]) assert.ok(synced.includes(cls), `${synced.join(",")} lacks ${cls}`);
+  assert.deepEqual(run("cp .approval/env .."), mainClasses("cp .approval/env .."));
   // S-E part 2: `.git` alone below a moved parent rides beside policy.core.
   const gitOnly = { "/": ["w", "h"], "/w": [".git", "src"], "/h": [], ...realpaths("/w", "/h") };
   const moved = run('mv "$PWD" /tmp/zz', gitOnly);

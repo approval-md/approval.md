@@ -9266,6 +9266,13 @@ export function guardedContentsKey(path: string): string {
 }
 
 /**
+ * The first entry of a guarded folder's walk the hook cut short (lead ruling
+ * L62511, S-C: past its limits, its timeout or the hook's deadline); the
+ * names read before the cut follow it.
+ */
+export const GUARDED_WALK_CUT = "\u0000cut";
+
+/**
  * Is a listed name one whose contents the hook walks for a narrowed `find …
  * -delete` (lead ruling L62511, S-C)? An organ directory, a guarded name or
  * `.git`, as {@link guardedEntryClass} reads a listing (any case it folds).
@@ -10013,16 +10020,87 @@ const FIND_GUARDED_EXTENSIONS: ReadonlySet<string> = new Set([
   "js", "mjs", "cjs", "ts", "py", "sh", "bash", "zsh", "json", "jsonc", "yml", "yaml", "toml", "md", "mdc", "txt", "lock", "env", "ini", "cfg", "conf", "xml",
 ]);
 
+/** git's own extensions, added to {@link FIND_GUARDED_EXTENSIONS} for a `.git` folder (lead ruling L62511, S-C). */
+const FIND_GIT_EXTENSIONS: ReadonlySet<string> = new Set(["pack", "idx", "rev", "bitmap", "keep", "mtimes", "promisor", "lock", "sample", "graph", "orig"]);
+
+/**
+ * The names git's object store holds, by shape (lead ruling L62511, S-C): the
+ * hook does not walk `.git/objects`, so a find name reaches it where it may
+ * match one of these. `H` is one lower-case hex digit, `A` one letter or
+ * digit (git's temporary names, mkstemp's `XXXXXX`), every other character
+ * itself.
+ */
+const GIT_OBJECT_SHAPES: readonly string[] = (() => {
+  const hex = (count: number): string => "H".repeat(count);
+  const packs = ["pack", "idx", "rev", "bitmap", "keep", "mtimes", "promisor"];
+  return [
+    hex(2),
+    hex(38),
+    hex(62),
+    ...[40, 64].flatMap((count) => packs.map((ext) => `pack-${hex(count)}.${ext}`)),
+    ...[40, 64].flatMap((count) => ["bitmap", "rev"].map((ext) => `multi-pack-index-${hex(count)}.${ext}`)),
+    ...[40, 64].map((count) => `graph-${hex(count)}.graph`),
+    `tmp_obj_${"A".repeat(6)}`,
+    `tmp_objdir-incoming-${"A".repeat(6)}`,
+    `tmp_pack_${"A".repeat(6)}`,
+    `tmp_idx_${"A".repeat(6)}`,
+    "multi-pack-index",
+    "commit-graph",
+    "commit-graphs",
+    "commit-graph-chain",
+    "info",
+    "pack",
+    "packs",
+    "alternates",
+    "http-alternates",
+  ];
+})();
+
+/**
+ * May a find name pattern (literals, `*`, `?`: brackets and backslashes never
+ * narrow) match a name of this shape ({@link GIT_OBJECT_SHAPES})? A literal
+ * matches `H` where it is a hex digit (any case under `-iname`), `A` where it
+ * is a letter or digit, and any other shape character where it is that
+ * character.
+ */
+function findPatternMatchesShape(pattern: string, caseless: boolean, shape: string): boolean {
+  const lower = (char: string): string => (caseless ? char.toLowerCase() : char);
+  const fits = (char: string, at: string): boolean =>
+    at === "A" ? /^[A-Za-z0-9]$/u.test(char) : at === "H" ? /^[0-9a-f]$/u.test(lower(char)) : lower(char) === lower(at);
+  // memo[i][j]: pattern from i matches shape from j.
+  const memo = new Map<number, boolean>();
+  const match = (i: number, j: number): boolean => {
+    const key = i * (shape.length + 1) + j;
+    const known = memo.get(key);
+    if (known !== undefined) return known;
+    let result: boolean;
+    if (i === pattern.length) result = j === shape.length;
+    else if (pattern[i] === "*") result = match(i + 1, j) || (j < shape.length && match(i, j + 1));
+    else if (j === shape.length) result = false;
+    else if (pattern[i] === "?") result = match(i + 1, j + 1);
+    else result = fits(pattern[i] as string, shape[j] as string) && match(i + 1, j + 1);
+    memo.set(key, result);
+    return result;
+  };
+  return match(0, 0);
+}
+
+/** Do all of find's name tests reach a name of git's object store ({@link GIT_OBJECT_SHAPES})? */
+function findPatternsReachGitObjects(patterns: readonly FindNamePattern[]): boolean {
+  return GIT_OBJECT_SHAPES.some((shape) => patterns.every(({ pattern, caseless }) => findPatternMatchesShape(pattern, caseless, shape)));
+}
+
 /**
  * Without a listing (lead ruling L62511, S-C): narrowed only by the ruled form
  * `*.<ext>` with an extension no guarded folder ordinarily holds
  * ({@link FIND_GUARDED_EXTENSIONS}); a plain name, `x.*` or any other
  * pattern is not.
  */
-function findPatternsNarrowWithoutListing(patterns: readonly FindNamePattern[]): boolean {
+function findPatternsNarrowWithoutListing(patterns: readonly FindNamePattern[], git = false): boolean {
   return patterns.some(({ pattern }) => {
     const match = /^\*\.([A-Za-z0-9]+)$/u.exec(pattern);
-    return match !== null && !FIND_GUARDED_EXTENSIONS.has((match[1] as string).toLowerCase());
+    const ext = (match?.[1] ?? "").toLowerCase();
+    return match !== null && !FIND_GUARDED_EXTENSIONS.has(ext) && !(git && FIND_GIT_EXTENSIONS.has(ext));
   });
 }
 
@@ -10600,8 +10678,7 @@ function organParentClass(
             if (guarded.classes.length === 0 && !guarded.git && routed.length === 0) continue;
             const inside = routed.length > 0 ? undefined : disk.listings.get(guardedContentsKey(`${dir.replace(/\/+$/u, "")}/${name}`));
             const patterns = findPatterns;
-            const reached =
-              inside === undefined || inside === "unreadable" ? true : inside === "missing" ? false : inside.some((each) => findPatternsMatch(patterns, each, findBudget));
+            const reached = findReachesInside(inside, patterns, guarded.git, findBudget);
             if (!reached) continue;
             for (const cls of [...guarded.classes, ...routed]) offer(cls, operand);
             if (guarded.git) {
@@ -10629,6 +10706,30 @@ function organParentClass(
   if (strictest === null || claims.length <= 1) return { named: strictest, git };
   const ordered = [strictest.surface, ...claims.filter((cls) => cls !== strictest.surface)];
   return { named: { surface: takeAmongEqual(ordered), path: strictest.path }, git };
+}
+
+/**
+ * Does a narrowed find reach inside a guarded folder, by what the hook's walk
+ * of it shows (lead ruling L62511, S-C)? Not walked or unreadable: yes. Gone:
+ * no. Cut short by a limit: a name read before the cut that matches, or the
+ * rule used with no listing ({@link findPatternsNarrowWithoutListing}, git's
+ * own extensions too for `.git`). A `.git` whose `objects` the walk lists
+ * (it does not walk it): also where a name may match git's object store
+ * ({@link findPatternsReachGitObjects}).
+ */
+function findReachesInside(
+  inside: readonly string[] | "unreadable" | "missing" | undefined,
+  patterns: readonly FindNamePattern[],
+  git: boolean,
+  budget: { left: number },
+): boolean {
+  if (inside === undefined || inside === "unreadable") return true;
+  if (inside === "missing") return false;
+  const cut = inside[0] === GUARDED_WALK_CUT;
+  const names = cut ? inside.slice(1) : inside;
+  if (names.some((each) => findPatternsMatch(patterns, each, budget))) return true;
+  if (git && names.includes("objects") && findPatternsReachGitObjects(patterns)) return true;
+  return cut && !findPatternsNarrowWithoutListing(patterns, git);
 }
 
 /**

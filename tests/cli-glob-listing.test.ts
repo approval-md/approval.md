@@ -982,3 +982,30 @@ test("lead ruling L62435 (S6, S7), through the real hook under the agent-village
     assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
   }
 });
+
+test("lead ruling L62511 (S-C), through the real hook in a checkout with a realistic .git: git's object store by its name shapes, the rest by the walk, and a walk cut short by the rule used with no listing", () => {
+  const lab = join(scratch, "l62511-git");
+  const dir = join(lab, "proj");
+  const home = join(lab, "home");
+  const put = (rel: string): void => {
+    mkdirSync(join(dir, rel, ".."), { recursive: true });
+    writeFileSync(join(dir, rel), "made-up\n");
+  };
+  // Made-up contents in git's layout: 256 object directories, packs, refs, logs, hooks.
+  for (let index = 0; index < 256; index += 1) put(`.git/objects/${index.toString(16).padStart(2, "0")}/${"0123456789abcdef".repeat(3).slice(0, 38)}`);
+  for (const ext of ["pack", "idx", "rev"]) put(`.git/objects/pack/pack-${"0123456789abcdef".repeat(3).slice(0, 40)}.${ext}`);
+  for (const rel of [".git/HEAD", ".git/config", ".git/index", ".git/refs/heads/main", ".git/refs/heads/fix/login", ".git/logs/HEAD", ".git/logs/refs/heads/main", ".git/hooks/pre-commit.sample", ".claude/settings.json", "src/a.ts"]) put(rel);
+  mkdirSync(home, { recursive: true });
+  // The agent-village classes, with history rewrites human-only so a reach into `.git` shows.
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY_AV.replace("  account.credential:\n", "  vcs.history.rewrite:\n    autonomy: human-only\n  account.credential:\n"));
+  const attested = spawnSync(process.execPath, [CLI_ENTRY, "policy", "attest", "--as", "human:alice"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home } });
+  assert.equal(attested.status, 0, attested.stderr);
+  const decide = (command: string): string => decideAv(dir, home, dir, command).permission;
+  for (const command of ["find . -name '*.tmp' -delete", "find . -name '*.pyc' -delete", "find . -name .DS_Store -delete"]) assert.equal(decide(command), "allow", command);
+  for (const command of ["find . -name HEAD -delete", "find . -name config -delete", "find . -name '*.pack' -delete", "find . -name main -delete", "find . -name 'pack-*' -delete"]) assert.equal(decide(command), "deny", command);
+  // A `.claude` past the walk's limits (4,000 names): `*.<ext>` outside the
+  // list keeps main's class, a plain name or `x.*` takes the folder's.
+  for (let index = 0; index < 4_100; index += 1) put(`.claude/cache/f${String(index)}.json`);
+  assert.equal(decide("find . -name '*.tmp' -delete"), "allow");
+  for (const command of ["find . -name .DS_Store -delete", "find . -name 'x.*' -delete"]) assert.equal(decide(command), "deny", command);
+});

@@ -31,7 +31,7 @@ import type { Dir } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
-import { globWriteListingDirs, guardedContentsKey, guardedFolderName, realpathKey, type GlobDisk } from "../core/command-class.js";
+import { globWriteListingDirs, GUARDED_WALK_CUT, guardedContentsKey, guardedFolderName, realpathKey, type GlobDisk } from "../core/command-class.js";
 import { runUnderDeadline } from "../core/deadline.js";
 
 /** Most entries one directory is read for before it is judged unreadable. */
@@ -82,16 +82,23 @@ export const GUARDED_WALK_ENTRY_CAP = 4_000;
 /**
  * Every name inside a guarded folder, at every depth, by basename (lead ruling
  * L62511, S-C): what a narrowed `find … -name P -delete` from a parent of it
- * may reach. Symlinks are not followed (find does not by default). `[]` for a
- * name that is not a directory, `"missing"` for one that is gone, and
- * `"unreadable"` on any other error, past {@link GUARDED_WALK_DIR_CAP} or
- * {@link GUARDED_WALK_ENTRY_CAP}, or at the timeout: the classifier then
- * reads the folder as reached.
+ * may reach. Symlinks are not followed (find does not by default). A `.git`
+ * folder's `objects` directory is not walked: its names are git's own shapes,
+ * which the classifier judges by text ({@link GUARDED_WALK_CUT} aside, the
+ * name `objects` is listed). `[]` for a name that is not a directory,
+ * `"missing"` for one that is gone, `"unreadable"` on any other error, and
+ * the names read so far after {@link GUARDED_WALK_CUT} past
+ * {@link GUARDED_WALK_DIR_CAP} or {@link GUARDED_WALK_ENTRY_CAP}, at the
+ * timeout or at the hook's deadline: the classifier then falls back to the
+ * rule it uses with no listing, for that folder.
  */
 export async function walkGuardedFolder(path: string, options: GlobListingOptions = {}): Promise<GlobListing> {
   const timeoutMs = options.timeoutMs ?? GLOB_LISTING_TIMEOUT_MS;
+  const isGit = basename(path).toLowerCase() === ".git";
   let timedOut = false;
   let timer: NodeJS.Timeout | undefined;
+  const names: string[] = [];
+  const cut = (): GlobListing => [GUARDED_WALK_CUT, ...names];
   const walking = (async (): Promise<GlobListing> => {
     try {
       if (!(await fsLstat(path)).isDirectory()) return [];
@@ -99,23 +106,25 @@ export async function walkGuardedFolder(path: string, options: GlobListingOption
       const code = (error as { code?: unknown } | null)?.code;
       return code === "ENOENT" ? "missing" : "unreadable";
     }
-    const names: string[] = [];
     const queue = [path];
     let opened = 0;
     while (queue.length > 0) {
-      if (timedOut || (options.deadlineAt !== undefined && Date.now() > options.deadlineAt)) return "unreadable";
+      if (timedOut || (options.deadlineAt !== undefined && Date.now() > options.deadlineAt)) return cut();
       opened += 1;
-      if (opened > GUARDED_WALK_DIR_CAP) return "unreadable";
+      if (opened > GUARDED_WALK_DIR_CAP) return cut();
       const at = queue.shift() as string;
       const dir = await fsOpendir(at);
       try {
         for (;;) {
           const entry = await dir.read();
-          if (timedOut) return "unreadable";
+          if (timedOut) return cut();
           if (entry === null) break;
           names.push(entry.name);
-          if (names.length > GUARDED_WALK_ENTRY_CAP) return "unreadable";
-          if (entry.isDirectory()) queue.push(join(at, entry.name));
+          if (names.length > GUARDED_WALK_ENTRY_CAP) return cut();
+          if (!entry.isDirectory()) continue;
+          // git's object store: names of git's own shapes, judged by text.
+          if (isGit && at === path && entry.name === "objects") continue;
+          queue.push(join(at, entry.name));
         }
       } finally {
         dir.close().catch(() => undefined);
@@ -126,7 +135,7 @@ export async function walkGuardedFolder(path: string, options: GlobListingOption
   const deadline = new Promise<GlobListing>((settle) => {
     timer = setTimeout(() => {
       timedOut = true;
-      settle("unreadable");
+      settle(cut());
     }, timeoutMs);
   });
   try {
