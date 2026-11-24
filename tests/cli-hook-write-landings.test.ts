@@ -1878,3 +1878,38 @@ test("zsh clobber: the file bash writes for it, `!` in the segment's directory, 
   assert.ok(see("cd ../outside && echo x >! " + join(ws, "n.txt"), optedIn()).classes.includes(OUT));
   assert.ok(!see("cd sub && echo x >! " + join(ws, "n.txt"), optedIn()).classes.includes(OUT));
 });
+
+test("two glob readers on one line: main's listing (#686) narrows main's own answer, and the write pass still judges every landing", async () => {
+  const dir = join(base, "two-readers");
+  mkdirSync(join(dir, "plain"), { recursive: true });
+  writeFileSync(join(dir, "plain", "a.md"), "x", "utf8");
+  writeFileSync(join(dir, "APPROVAL.md"), "x", "utf8");
+  const classesOf = async (command: string, listed: boolean): Promise<string[]> => {
+    const listings = listed ? await listGlobWriteDirsFor(command, [dir]) : null;
+    const { result } = classifyForHook(command, [], dir, [], false, [], false, WRITE_SCOPE_OFF, listings);
+    return result.ok ? result.classes : [`refused ${result.code}`];
+  };
+  // Main's listing reads plain/ (no policy file there); the write pass judges ~/.zshrc.
+  const listed = await classesOf("touch plain/*.md ~/.zshrc", true);
+  assert.ok(!listed.includes("policy.core"), listed.join(", "));
+  assert.ok(listed.includes(GUARDED), listed.join(", "));
+  // With no listing main's answer is the strict one, and the write pass's entry is beside it.
+  const strict = await classesOf("touch plain/*.md ~/.zshrc", false);
+  assert.ok(strict.includes("policy.core") && strict.includes(GUARDED), strict.join(", "));
+  // A pattern main does not read (a variable's value) is the write pass's, listing or not.
+  for (const withListing of [true, false]) {
+    const seen = await classesOf("x='*.md'; echo hi > $x", withListing);
+    assert.ok(seen.includes("policy.core"), `${String(withListing)}: ${seen.join(", ")}`);
+  }
+});
+
+test("main's bare organ directory rule is .claude's only: a bare .claude-<suffix> keeps main's class in the classifier", () => {
+  for (const command of ["rm -rf .claude-x", "mv .claude-x y", "chmod -R 000 .claude-x", "rm -rf ~/.claude-work"]) {
+    const pure = classifyCommand(command);
+    assert.ok(pure.ok && !pure.classes.includes("policy.core"), `${command}: ${JSON.stringify(pure)}`);
+  }
+  for (const command of ["rm -rf .claude", "mv .claude x", "chmod -R 000 .claude"]) {
+    const pure = classifyCommand(command);
+    assert.ok(pure.ok && pure.classes.includes("policy.core"), `${command}: ${JSON.stringify(pure)}`);
+  }
+});
