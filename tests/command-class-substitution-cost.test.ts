@@ -175,7 +175,9 @@ test("cost: the answers of the bounded walk are the old window reading's", () =>
   // Spellings across an output's edge still count, however many outputs.
   assert.deepEqual(bounded(`echo x >> ${READ_OUT.repeat(1000)}.g${READ_OUT}it/config`, "answer 1"), [DIR_WRITE]);
   assert.deepEqual(bounded(`echo x >> .g${READ_OUT.repeat(1000)}t/config`, "answer 2"), [DIR_WRITE]);
-  assert.deepEqual(bounded(`echo x >> .${"*".repeat(500)}${READ_OUT}t/config`, "answer 3"), [DIR_WRITE]);
+  // GLOB-WRITE (22 Nov 2026): an output beside a glob construct may hold a `/`
+  // and name any directory, the approval log's among them.
+  assert.deepEqual(bounded(`echo x >> .${"*".repeat(500)}${READ_OUT}t/config`, "answer 3"), ["log.mutate redirect-protected", "vcs.history.rewrite git-dir-write"]);
   // And ordinary words do not, however many outputs.
   assert.deepEqual(bounded(`echo x > out/${`${READ_OUT}-`.repeat(1000)}.txt`, "answer 4"), ["files.write.workspace redirect-write"]);
 });
@@ -204,9 +206,12 @@ test("cost: a run of glob characters in a target is bounded", () => {
 test("cost: past 1,024 glob characters one pattern segment is judged to name .git", () => {
   assert.equal(globSegmentMatches(`.${"*".repeat(1024)}x`, ".git"), false);
   assert.equal(globSegmentMatches(`.${"*".repeat(1025)}x`, ".git"), true);
-  assert.deepEqual(pure(`echo x > .${"*".repeat(1023)}x`), ["files.write.workspace redirect-write"]);
-  assert.deepEqual(pure(`echo x > .${"*".repeat(1025)}x`), [DIR_WRITE]);
-  assert.deepEqual(bounded(`echo x > .${"*".repeat(100000)}x`, "100,000 *"), [DIR_WRITE]);
+  // The words end in `y`: `.*x` also matches `.codex`, a policy.core organ, and
+  // a glob in a write target is judged by every guarded name it could match
+  // (GLOB-WRITE, 22 Nov 2026), which would answer before the `.git` reader.
+  assert.deepEqual(pure(`echo x > .${"*".repeat(1023)}y`), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(pure(`echo x > .${"*".repeat(1025)}y`), [DIR_WRITE]);
+  assert.deepEqual(bounded(`echo x > .${"*".repeat(100000)}y`, "100,000 *"), [DIR_WRITE]);
   // Under the bound the walk answers as the expression did.
   assert.equal(globSegmentMatches(`.${"*".repeat(1000)}t`, ".git"), true);
   assert.equal(globSegmentMatches(`.${"?*".repeat(500)}`, ".git"), false);
@@ -342,7 +347,9 @@ test("cost: the bounded readers answer as before under their bounds", () => {
   const nest = (n: number, inner: string): string => `echo x > ${"${a:-".repeat(n)}${inner}${"}".repeat(n)}/f`;
   assert.deepEqual(pure(nest(32, "out")), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure(nest(32, ".git")), [DIR_WRITE]);
-  assert.deepEqual(pure(nest(33, "out")), [DIR_WRITE]);
+  // Past the depth the GLOB-WRITE reading of a write target's `${…}` defaults
+  // (22 Nov 2026) fails closed too, to the stricter `log.mutate`.
+  assert.deepEqual(pure(nest(33, "out")), ["log.mutate redirect-protected", "vcs.history.rewrite git-dir-write"]);
   // An unclosed `${` set aside is put back as text: what it prints still counts.
   assert.deepEqual(pure(`echo x > "$(printf '%s' 'a${"${".repeat(3)} .git')"`), [DIR_WRITE]);
   assert.deepEqual(pure(`echo x > "$(printf '%s' 'a\${b} c')"`), ["files.write.workspace redirect-write"]);
