@@ -2098,15 +2098,44 @@ test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary varia
     "find . -name '*.tmp' -delete",
     "find . -name '*.pyc' -delete",
     "find . -name .DS_Store -delete",
-    "find . -empty -delete",
     "find . -type f -name '*.log' -delete",
     "find .. -name '*.tmp' -delete",
+    "find . -iname '*.TMP' -delete",
+    "find . -empty -name '*.tmp' -delete",
   ]) {
     assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
     assert.deepEqual(withListing(command, organ), ["files.delete.out_of_scope"], `${command} (listing)`);
   }
   // No test narrowing it (or one that widens it): the parents rule's answer.
-  for (const command of ["find . -delete", "find .. -delete", "find . -type f -delete", "find . -depth -delete", "find . ! -name x -delete", "find . -not -name x -delete", "find . -name x -o -delete", "find . -name '*' -delete", "find . -name '.*' -delete", "find . -mtime +3 -delete", "find . \\( -name x \\) -delete"]) {
+  // Automated security review of the fold, 1 and 2: a test after -delete,
+  // an operator, a negation, a parenthesis, or a name test that can match a
+  // guarded name (or a test that cannot be read against names) narrows
+  // nothing; `-empty` alone stays the head's answer.
+  for (const command of [
+    "find . -delete",
+    "find .. -delete",
+    "find . -type f -delete",
+    "find . -depth -delete",
+    "find . -empty -delete",
+    "find . -delete -name '*.tmp'",
+    "find . ! -name x -delete",
+    "find . -not -name x -delete",
+    "find . -name x -o -delete",
+    "find . \\( -name x \\) -o -delete",
+    "find . \\( -name x \\) -delete",
+    "find . -name x -delete -o -print",
+    "find . -name '*' -delete",
+    "find . -name '.*' -delete",
+    "find . -name settings.json -delete",
+    "find . -name .claude -delete",
+    "find . -name '*.md' -delete",
+    "find . -name '*.json' -delete",
+    "find . -iname 'approval.MD' -delete",
+    "find . -name '.c*' -delete",
+    "find . -path './.claude/*' -delete",
+    "find . -regex '.*tmp' -delete",
+    "find . -mtime +3 -delete",
+  ]) {
     leads(withListing(command, organ), "policy.core");
     assert.ok(classesOf(command).includes("policy.core"), command);
   }
@@ -2128,7 +2157,7 @@ test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary varia
   // ... and one the hook could not resolve: strict.
   leads(withDisk("rm -rf /a/c/$X", "/a/b/w", { "/a/c": ["x"] }), "policy.core");
   // Words that name a working directory or the home stay read as parents.
-  for (const command of ["rm -rf $OLDPWD", 'rm -rf "$(pwd -P)"', "rm -rf $PWD", "rm -rf ${PWD%/*}", "rm -rf ~+", "rm -rf ~-", "rm -rf $X/.."]) {
+  for (const command of ["rm -rf $OLDPWD", 'rm -rf "$(pwd -P)"', "rm -rf $PWD", "rm -rf ${PWD%/*}", "rm -rf ~+", "rm -rf ~-", "rm -rf $X/..", "rm -rf $CLAUDE_PROJECT_DIR", 'rm -rf "$CLAUDE_PROJECT_DIR"', "rm -rf $INIT_CWD"]) {
     assert.ok(classesOf(command).includes("policy.core"), command);
   }
 });
@@ -2138,7 +2167,32 @@ test("lead ruling L62435 (S7): a variable the line itself sets is read as what i
     assert.ok(classesOf(command).includes("policy.core"), command);
   }
   // `.claude` is not a parent (main's own rules judge the organ by name): main's class.
-  for (const command of ["D=.claude; rm -rf $D", "X=dist; rm -rf $X"]) {
+  for (const command of ["D=.claude; rm -rf $D", "X=dist; rm -rf $X", "printf -v d dist; rm -rf $d"]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), command);
+  }
+  // Automated security review of the fold, 3b: bound another way the text
+  // cannot read (or to a parent): strict; main refuses `export`, `declare`,
+  // `local`, `typeset`, `read`, `set` and every `for` loop, and so does this.
+  for (const command of ["printf -v d ..; rm -rf $d", "printf -v d %s ..; rm -rf $d"]) {
+    assert.ok(classesOf(command).includes("policy.core"), command);
+  }
+  for (const command of [
+    "export X=..; rm -rf $X",
+    "declare X=..; rm -rf $X",
+    "local X=..; rm -rf $X",
+    "typeset X=..; rm -rf $X",
+    "read d; rm -rf $d",
+    'for d in .. ~; do rm -rf "$d"; done',
+    'for f in *.tmp; do rm -rf "$f"; done',
+    'for d in dist build; do rm -rf "$d"; done',
+    'set -- ..; rm -rf "$@"',
+    ": ..; rm -rf $_",
+  ]) {
+    assert.equal(classifyCommand(command).ok, false, command);
+    assert.equal(classifyCommandWithMainRules(command).ok, false, command);
+  }
+  // `$@`, `$*` and `$_` alone are unknown: main's class (lead ruling L62435).
+  for (const command of ['rm -rf "$@"', "rm -rf $*", "rm -rf $_"]) {
     assert.deepEqual(classesOf(command), mainClasses(command), command);
   }
 });
@@ -2184,14 +2238,20 @@ test("lead ruling L62435 (S1): each word a brace makes is judged by the parents 
     "find {../proj,x} -delete",
     "git rm -r {../proj,x}",
     "rm -rf ../{proj,x}",
-    // Past the cap, a word that spells a part of a parent: strict.
+    // Past the cap, a word that spells a part of a parent, or any expansion
+    // (automated security review of the fold, 4): strict.
     "rm -rf {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,.}",
+    "X=..; rm -rf {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,$X}",
+    "rm -rf {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,$(pwd)}",
+    "rm -rf {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,$CLAUDE_PROJECT_DIR}",
   ]) {
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
     const main = classifyCommandWithMainRules(command);
     assert.ok(main.ok, command);
     for (const cls of main.classes) assert.ok(classesOf(command).includes(cls), `${command} keeps main's ${cls}`);
   }
+  // A backtick is refused (main's answer), past the cap too.
+  assert.equal(classifyCommand("rm -rf {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,`pwd`}").ok, false);
   leads(withListing("rm -rf {.,x}", organ), "policy.core");
   leads(withListing("chmod -R 000 {..,x}", organ), "policy.core");
   // Expanded words that hold no organ directory: main's class.

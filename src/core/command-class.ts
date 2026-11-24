@@ -9620,6 +9620,7 @@ function organParentOperands(
   positionals: readonly string[],
   plan: CopyPlan | null,
   assignments: readonly LexWord[] = [],
+  protectedPaths: readonly ProtectedPathEntry[] = [],
 ): string[] {
   const recursive = (...letters: string[]): boolean => hasFlag(args, ["--recursive"]) || hasShortFlag(args, letters);
   if (basename === "rm") return recursive("r", "R") ? [...positionals] : [];
@@ -9644,7 +9645,7 @@ function organParentOperands(
   // `find . -type f -delete` are).
   if (basename === "find") {
     const runs = args.some((arg) => ["-exec", "-execdir", "-ok", "-okdir"].includes(arg));
-    return runs || (args.includes("-delete") && !findDeleteNarrowed(args)) ? findStartPaths(args) : [];
+    return runs || (args.includes("-delete") && !findDeleteNarrowed(args, protectedPaths)) ? findStartPaths(args) : [];
   }
   if (basename === "git") return gitRemovedPaths(args);
   // tar `--remove-files` (any unique prefix, `--rem` on), or an option from
@@ -9803,37 +9804,70 @@ const FIND_PRIMARY = /^-(?:[a-z]{2,}|a|o)$/u;
 
 /** find primaries that take one value, read by {@link findDeleteNarrowed}. */
 const FIND_VALUED = new Set(["-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex", "-type", "-maxdepth", "-mindepth", "-newer", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-size", "-user", "-group", "-perm", "-regextype"]);
-/** The name tests among them: the ones that narrow what `-delete` reaches. */
-const FIND_NAME_TESTS = new Set(["-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex"]);
 /** find words that take no value and widen nothing. */
-const FIND_BARE = new Set(["-delete", "-depth", "-d", "-xdev", "-mount", "-x", "-print", "-print0", "-ls", "-a", "-and", "-follow", "-empty"]);
+const FIND_BARE = new Set(["-depth", "-d", "-xdev", "-mount", "-x", "-print", "-print0", "-ls", "-a", "-and", "-follow", "-empty"]);
 
 /**
- * Does a test narrow what `find … -delete` removes (lead ruling L62435, S7)?
- * Only a plain AND of known primaries, at least one a name test with a
- * pattern that is not every name (`'*.tmp'`, `.DS_Store`; not `'*'`, `'.*'`,
- * `'./*'`) or `-empty`. An operator (`!`, `-not`, `-o`, `-or`, `,`, a
- * parenthesis), a primary outside the list, or a missing value: not narrowed,
- * so the start paths are read by the parents rule (fail closed).
+ * Does a name test narrow what `find … -delete` removes away from every
+ * guarded name (lead ruling L62435, S7; automated security review of the
+ * fold, 1 and 2)? Only a plain AND of known primaries (no `!`, `-not`, `-o`,
+ * `-or`, `,` or parenthesis anywhere, no primary outside the list), where
+ * every `-delete` comes after a `-name` or `-iname` whose pattern can match
+ * no guarded name ({@link findNameMissesGuarded}): `find . -name '*.tmp'
+ * -delete`. `-path`, `-regex`, `-type`, `-empty` and the rest narrow nothing
+ * here; `find . -delete -name x` deletes everything before the test. Anything
+ * else: not narrowed, so the start paths are read by the parents rule.
  */
-function findDeleteNarrowed(args: readonly string[]): boolean {
+function findDeleteNarrowed(args: readonly string[], protectedPaths: readonly ProtectedPathEntry[]): boolean {
   const start = args.findIndex((arg) => FIND_PRIMARY.test(arg) || arg === "!" || arg === "(");
   if (start === -1) return false;
   let narrowed = false;
+  let deletes = false;
   for (let at = start; at < args.length; at += 1) {
     const arg = args[at] as string;
     if (FIND_VALUED.has(arg)) {
       const value = args[at + 1];
       if (value === undefined) return false;
-      const everyName = /^[*?./]*$/u.test(value) || (arg.endsWith("regex") && /^[.*^$]*$/u.test(value));
-      if (FIND_NAME_TESTS.has(arg) && !everyName) narrowed = true;
+      if ((arg === "-name" || arg === "-iname") && findNameMissesGuarded(value, arg === "-iname", protectedPaths)) narrowed = true;
       at += 1;
       continue;
     }
-    if (arg === "-empty") narrowed = true;
-    else if (!FIND_BARE.has(arg)) return false;
+    if (arg === "-delete") {
+      if (!narrowed) return false;
+      deletes = true;
+    } else if (!FIND_BARE.has(arg)) return false;
   }
-  return narrowed;
+  return deletes;
+}
+
+/**
+ * Can the find `-name` pattern match no guarded name (automated security
+ * review of the fold, 2)? Matched by the classifier's own pattern reader and
+ * matcher ({@link globSegmentTokens}, {@link globTokensMatch}, folded in the
+ * folded reading) against every organ directory, every name the guarded-path
+ * rules read ({@link GLOB_GUARD_NAMES}: `APPROVAL.md`, `CLAUDE.md`,
+ * `auth.json`, `hooks.json`, `.env`, ...), `.git`, the settings files and the
+ * last part of each of the policy's own protected paths. `-iname` is matched
+ * in every letter case. A match, or a budget spent: not narrowed.
+ */
+function findNameMissesGuarded(pattern: string, caseless: boolean, protectedPaths: readonly ProtectedPathEntry[]): boolean {
+  if (pattern.length === 0 || pattern.includes("/")) return false;
+  const names = new Set<string>([...Object.keys(ORGAN_DIRECTORIES), ...GLOB_GUARD_NAMES, ".git", "settings.json", "settings.local.json"]);
+  for (const entry of protectedPaths) {
+    const last = (typeof entry === "string" ? entry : entry.path).replace(/\/+$/u, "").split("/").pop();
+    if (last !== undefined && last.length > 0) names.add(last);
+  }
+  const budget = { left: GLOB_GUARD_STEP_CAP };
+  const spellings = caseless ? [pattern, pattern.toLowerCase(), pattern.toUpperCase()] : [pattern];
+  for (const spelling of spellings) {
+    const tokens = globSegmentTokens(spelling, true);
+    for (const name of names) {
+      for (const each of caseless ? [name, name.toLowerCase(), name.toUpperCase()] : [name]) {
+        if (globTokensMatch(tokens, each, false, budget) !== false) return false;
+      }
+    }
+  }
+  return true;
 }
 
 /**
@@ -9866,8 +9900,12 @@ function chmodFiles(args: readonly string[]): string[] {
 /** The most directories on one parent's chain that are listed before the parent is judged strict. */
 const ORGAN_PARENT_CHAIN_CAP = 8;
 
-/** Variables whose value is a working directory or the home: never read as an ordinary variable. */
-const PARENT_VARIABLES = new Set(["PWD", "OLDPWD", "HOME"]);
+/**
+ * Variables whose value is a working directory, the project or the home:
+ * never read as an ordinary variable (automated security review of the fold,
+ * 3a: Claude Code's `CLAUDE_PROJECT_DIR`, npm's `INIT_CWD`).
+ */
+const PARENT_VARIABLES = new Set(["PWD", "OLDPWD", "HOME", "CLAUDE_PROJECT_DIR", "INIT_CWD"]);
 
 /**
  * Is `part` unreadable only through ordinary variables (`$X`, `${X}`, `$1`,
@@ -10269,14 +10307,17 @@ const PARENT_BRACE_CAP = 64;
 /**
  * The words brace expansion makes of `operand` (lead ruling L62435, S1), or
  * the operand alone when it has none. Past {@link PARENT_BRACE_CAP}: `null`
- * (strict) when the word spells any part of a parent (`.`, `~`, `/`, `$PWD`,
- * `$HOME`, `$OLDPWD`), else the operand alone (main's class, as before).
+ * (strict) when the word holds a `.`, `~`, `/`, `$` or backtick, else (only
+ * literal names) the operand alone (main's class, as before).
  */
 function braceReadings(operand: string): string[] | null {
   if (!operand.includes("{")) return [operand];
   const words = expandBraces(operand, PARENT_BRACE_CAP);
   if (words !== null) return words.length === 0 ? [operand] : words;
-  return /[.~/]|\$\{?(?:PWD|HOME|OLDPWD)/u.test(operand) ? null : [operand];
+  // Automated security review of the fold, 4: only a word of literal names
+  // falls back; one with a `.`, `~`, `/`, an expansion or a backtick (an
+  // assigned `$X`, `$(pwd)`, `$CLAUDE_PROJECT_DIR`) is strict.
+  return /[.~/$`]/u.test(operand) || operand.includes(SUBSTITUTION_SENTINEL) || operand.includes(PARAMETER_MARK) ? null : [operand];
 }
 
 /** Most readings one operand takes from the line's own assignments before it is judged strict. */
@@ -10299,6 +10340,7 @@ function assignedReadings(operand: string, assigned: ReadonlyMap<string, readonl
   let readings = [operand];
   for (const name of names) {
     const values = assigned.get(name) ?? [];
+    if (values.includes(UNREAD_BINDING)) return null;
     const next: string[] = [];
     for (const reading of readings) {
       next.push(reading);
@@ -10312,17 +10354,49 @@ function assignedReadings(operand: string, assigned: ReadonlyMap<string, readonl
   return readings;
 }
 
-/** `NAME=value` and `NAME+=value` words anywhere on the line, by name (for {@link assignedReadings}). */
+/** The value {@link lineAssignments} records for a variable the line binds in a way the text cannot read. */
+const UNREAD_BINDING = "\u0000unread";
+
+/** Builtins that bind the variables they name (automated security review of the fold, 3b). */
+const BINDING_BUILTINS = new Set(["read", "mapfile", "readarray", "getopts", "declare", "typeset", "local", "export", "readonly"]);
+
+/**
+ * What the line binds each variable to, by name (for {@link assignedReadings}):
+ * `NAME=value` and `NAME+=value` words, `declare`/`local`/`export`/... with
+ * `NAME=value`, and `printf -v NAME FORMAT` with a plain format, as written;
+ * a variable bound any other way (`read d`, `mapfile`, `printf -v d %s`,
+ * `declare d`) as {@link UNREAD_BINDING}, which is read strictly.
+ */
 function lineAssignments(segments: readonly LexSegment[], outer: ReadonlyMap<string, readonly string[]> | undefined): ReadonlyMap<string, readonly string[]> {
   const assigned = new Map<string, string[]>();
   for (const [name, values] of outer ?? []) assigned.set(name, [...values]);
+  const bind = (name: string, value: string): void => {
+    assigned.set(name, [...(assigned.get(name) ?? []), value]);
+  };
+  const named = /^([A-Za-z_][A-Za-z0-9_]*)(?:\+?=([\s\S]*))?$/u;
   for (const segment of segments) {
     for (const word of segment.words) {
       if (!word.assignment) continue;
       const match = /^([A-Za-z_][A-Za-z0-9_]*)\+?=([\s\S]*)$/u.exec(word.text);
-      if (match === null) continue;
-      const [name, value] = [match[1] as string, match[2] as string];
-      assigned.set(name, [...(assigned.get(name) ?? []), value]);
+      if (match !== null) bind(match[1] as string, match[2] as string);
+    }
+    const commandAt = segment.words.findIndex((word) => !word.assignment);
+    const command = commandAt === -1 ? undefined : (segment.words[commandAt]?.text.split("/").pop() ?? "");
+    const rest = commandAt === -1 ? [] : segment.words.slice(commandAt + 1).map((word) => word.text);
+    if (command !== undefined && BINDING_BUILTINS.has(command)) {
+      for (const text of rest) {
+        const match = named.exec(text);
+        if (match === null) continue;
+        bind(match[1] as string, match[2] === undefined || command === "read" ? UNREAD_BINDING : match[2]);
+      }
+    }
+    if (command === "printf") {
+      const at = rest.findIndex((text) => text === "-v" || (text.startsWith("-v") && text.length > 2));
+      if (at !== -1) {
+        const name = rest[at] === "-v" ? rest[at + 1] : rest[at]?.slice(2);
+        const format = rest[at] === "-v" ? rest[at + 2] : rest[at + 1];
+        if (name !== undefined && named.test(name)) bind(name, format !== undefined && rest.length <= at + 3 && !/[%\\$`]/u.test(format) ? format : UNREAD_BINDING);
+      }
     }
   }
   return assigned;
@@ -12583,7 +12657,7 @@ function classifySegmentWithVerb(
   // Not every command's: an operand the text cannot place is `policy.core`
   // here, fail closed, so reading every command's operands would make
   // `git push origin $BRANCH` and `rm ../sibling/file` policy.core.
-  const parentOperands = organVerbs ? organParentOperands(basename, args, positionals, plan, segment.words.slice(0, cursor)) : [];
+  const parentOperands = organVerbs ? organParentOperands(basename, args, positionals, plan, segment.words.slice(0, cursor), protectedPaths) : [];
   const organParent =
     context.organParentsOff === true || mainRulesOnly
       ? { named: null, git: new Set<string>() }

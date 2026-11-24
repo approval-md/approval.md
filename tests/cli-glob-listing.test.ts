@@ -914,7 +914,6 @@ test("lead ruling L62435 (S6, S7), through the real hook under the agent-village
     "find . -name '*.tmp' -delete",
     "find . -name '*.pyc' -delete",
     "find . -name .DS_Store -delete",
-    "find . -empty -delete",
     "rm -rf $TARGET",
     "rm -rf $BUILD_DIR",
     'rm -rf "$OUT"',
@@ -927,7 +926,7 @@ test("lead ruling L62435 (S6, S7), through the real hook under the agent-village
     assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
   }
   // A parent, or an unreadable word below one: human-only.
-  for (const command of ["find . -delete", "rm -rf ../$X", "rm -rf ~/$X", "chmod 000 .", "X=. ; rm -rf $X"]) {
+  for (const command of ["find . -delete", "find . -empty -delete", "find . -name settings.json -delete", "find . -delete -name '*.tmp'", "rm -rf ../$X", "rm -rf ~/$X", "rm -rf $CLAUDE_PROJECT_DIR", "chmod 000 .", "X=. ; rm -rf $X"]) {
     const decision = decideAv(dir, home, dir, command);
     assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
   }
