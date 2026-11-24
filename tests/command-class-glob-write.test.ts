@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyCommand, classifyCommandWithMainRules, containedInAny, globWriteListingDirs } from "../src/core/command-class.js";
+import { classifyCommand, classifyCommandWithMainRules, containedInAny, gitRemovedPaths, globWriteListingDirs, GUARDED_WALK_CUT, guardedContentsKey, realpathKey } from "../src/core/command-class.js";
 
 const HUMAN_ONLY = new Set(["policy.core", "log.mutate", "account.credential"]);
 
@@ -527,6 +527,11 @@ test("dot-names: the relaxed reading is an allowlist of plain lines (lead ruling
 // pattern's first globbed component sits in and passes the names in.
 // ---------------------------------------------------------------------------
 
+/** The hook's canonical paths for `paths`, each its own (no symlink, letter case as written). */
+function realpaths(...paths: readonly string[]): Record<string, string[]> {
+  return Object.fromEntries(paths.map((path) => [realpathKey(path), [path]]));
+}
+
 function withListing(command: string, listings: Record<string, readonly string[] | "unreadable" | "missing">): string[] {
   const result = classifyCommand(command, [], {
     globDisk: { cwd: "/w", home: "/h", listings: new Map(Object.entries(listings)) },
@@ -587,7 +592,10 @@ test("listings: which directories the hook lists, and none it cannot place", () 
   assert.deepEqual(globWriteListingDirs("cd x && rm -rf dist/*", "/w", "/h"), []);
   assert.deepEqual(globWriteListingDirs("rm -rf ../dist/*", "/w", "/h"), []);
   assert.deepEqual(globWriteListingDirs("rm -rf $D/*", "/w", "/h"), []);
-  assert.deepEqual(globWriteListingDirs("rm -rf ~root/*", "/w", "/h"), []);
+  // `~root` places nothing either; since lead ruling L62483 (true class) the
+  // working directory and the home it may be are listed so their classes ride
+  // beside policy.core.
+  assert.deepEqual(globWriteListingDirs("rm -rf ~root/*", "/w", "/h"), ["/w", "/h"]);
   // A read is not a write target: nothing is listed for it.
   assert.deepEqual(globWriteListingDirs("cat dist/*", "/w", "/h"), []);
   // Unplaceable stays strict even with a listing for the lexical directory.
@@ -1257,6 +1265,16 @@ test("lead ruling (CLAIMS L61492, L61497): a write's * or ? that would match a g
   assert.deepEqual(classesOf("rsync -a evil/ .cl*/"), andMain(["policy.core"], "rsync -a evil/ .cl*/"));
 });
 
+/**
+ * The parents rule's class answers first, and at most the segment's own class
+ * (the one it takes without the rule) rides beside: the rule never takes a
+ * class away (lead ruling L61587; review-b A686-FOLD5 M1's bar).
+ */
+function leads(classes: readonly string[], cls: string): void {
+  assert.equal(classes[0], cls, classes.join(","));
+  assert.ok(classes.length <= 2, classes.join(","));
+}
+
 test("lead ruling L61587 (review-b A686-FOLD3 M1): a delete, move or chmod of an organ directory ITSELF takes its strictest class, as bare .approval, .codex and .hermes do", () => {
   const ORGANS: readonly (readonly [string, string])[] = [
     [".claude", "policy.core"],
@@ -1272,7 +1290,6 @@ test("lead ruling L61587 (review-b A686-FOLD3 M1): a delete, move or chmod of an
       `rm -R ${dir}/`,
       `rm -rf ./${dir}`,
       `rm -rf ${dir}/.`,
-      `rm -rf ${dir}/x/..`,
       `rm -d ${dir}`,
       `rmdir ${dir}`,
       `mv ${dir} gone`,
@@ -1286,6 +1303,11 @@ test("lead ruling L61587 (review-b A686-FOLD3 M1): a delete, move or chmod of an
     ]) {
       assert.ok(classesOf(command).includes(cls), `${command} -> ${classesOf(command).join(",")}`);
     }
+    // `..` after a name: `x` may be a symlink, so the text cannot place it
+    // (parents rule, security review 7): policy.core, at least as strict.
+    assert.ok(classesOf(`rm -rf ${dir}/x/..`).includes("policy.core"), `${dir}/x/..`);
+    // ...and the organ's own class still rides beside it (review A689 N6).
+    assert.ok(classesOf(`rm -rf ${dir}/x/..`).includes(cls), `${dir}/x/.. -> ${classesOf(`rm -rf ${dir}/x/..`).join(",")}`);
   }
   // A dot-name `*` reaches by the hook's listing (L61492): where the directory holds one.
   assert.ok(withListing("rm -rf *", { "/w": [".claude", "a.js"] }).includes("policy.core"));
@@ -1304,8 +1326,263 @@ test("lead ruling L61587 (review-b A686-FOLD3 M1): a delete, move or chmod of an
   ] as const) {
     assert.deepEqual(classesOf(command), [main], command);
   }
-  // Not covered (the follow-up): a parent of an organ directory keeps main's class.
-  assert.deepEqual(classesOf("rm -rf ."), andMain(["files.delete.out_of_scope"], "rm -rf ."));
+  // A parent of an organ directory is the parent rule's (below): with no
+  // listing, strict, and main's class rides beside (review A689 N6).
+  leads(classesOf("rm -rf ."), "policy.core");
+  assert.deepEqual(classesOf("rm -rf ."), andMain(["policy.core"], "rm -rf ."));
+});
+
+test("lead ruling L61587, parents: a recursive delete, move or chmod of a directory that holds an organ directory takes its class", () => {
+  // Without the caller's listing the working directory, the home, their
+  // ancestors and `/` may hold one: strict (main: files.delete.out_of_scope or
+  // an ordinary write).
+  for (const command of [
+    "rm -rf .",
+    "rm -rf ./",
+    "rm -r ./",
+    'rm -rf "$PWD"',
+    "rm -rf ${PWD}/",
+    "rm -rf $(pwd)",
+    "rm -rf sub/..",
+    "rm -rf .claude/..",
+    "rm -rf ..",
+    "rm -rf ../..",
+    "rm -rf ~",
+    "rm -rf ~/",
+    "rm -rf $HOME",
+    "rm -rf /",
+    "chmod -R u+w .",
+    "chmod -R 000 ~",
+    "chmod -R --reference=x .",
+    'mv "$PWD" ../x',
+    // Security review: a chmod of a parent without -R locks its organ
+    // directories too; a sibling through `..` is listed before it is passed;
+    // a substitution may print the working directory.
+    "chmod 000 .",
+    "rm -rf ../other-project",
+    "rm -rf $(echo x)",
+  ]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // With a listing, by what the directory holds: the strictest guarded name.
+  leads(withListing("rm -rf .", { "/w": [".claude", "src"] }), "policy.core");
+  leads(withListing("rm -rf .", { "/w": [".github", "src"] }), "policy.edit");
+  leads(withListing("rm -rf .", { "/w": ["APPROVAL.md", "src"] }), "policy.core");
+  leads(withListing("chmod -R u+w .", { "/w": [".git", "src"] }), "vcs.history.rewrite");
+  leads(withListing("rm -rf ~", { "/h": [".claude"] }), "policy.core");
+  // An ancestor: the directories from it down to the working directory.
+  leads(withListing("rm -rf ..", { "/": ["w", "x"], "/w": [".cursor"] }), "policy.core");
+  leads(withListing("rm -rf ..", { "/": ["w", ".grok"], "/w": ["src"] }), "policy.core");
+  // None held: the segment's own class, unchanged from main.
+  assert.deepEqual(withListing("rm -rf .", { "/w": ["src", "dist", ".cache"] }), ["files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("chmod -R u+w .", { "/w": ["src", ".cache"] }), ["files.write.workspace"]);
+  // (`/` holds the home too, so its listing is read as well.)
+  assert.deepEqual(withListing("rm -rf ..", { "/": ["w", "h"], "/w": ["src"], "/h": ["notes.txt"] }), ["files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("rm -rf ~/", { "/h": ["notes.txt"] }), ["files.delete.out_of_scope"]);
+  // Not listed (over the cap, unreadable, not asked for): strict.
+  leads(withListing("rm -rf .", { "/w": "unreadable" }), "policy.core");
+  leads(withListing("rm -rf ..", { "/w": ["src"] }), "policy.core");
+  // Not a parent, or not one the text can tell: the segment's own class.
+  for (const [command, main] of [
+    ["rm -rf ./dist", "files.write.workspace"],
+    ["rm -rf dist", "files.write.workspace"],
+    ['rm -rf "$TMPDIR"/x', "files.delete.out_of_scope"],
+    ["rm -rf /tmp/x", "files.delete.out_of_scope"],
+    ["rm .", "files.write.workspace"],
+    ["rmdir .", "files.write.workspace"],
+    ["touch .", "files.write.workspace"],
+    // rename(2) refuses `.` and `..` as a source: nothing moves.
+    ["mv . x", "files.write.workspace"],
+  ] as const) {
+    assert.deepEqual(classesOf(command), [main], command);
+  }
+  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": ["x.js"], ...realpaths("/other-project", "/w", "/h") }), ["files.delete.out_of_scope"]);
+});
+
+test("security review of the parents rule (L61587), 1: a chmod mode that starts with '-', and chmod without -R", () => {
+  // A mode that starts with `-` is the mode, not an option; a chmod of a
+  //    parent without -R counts too (`chmod 000 .` locks every organ below).
+  for (const command of ["chmod -R -w .", "chmod -R -rwx ..", "chmod -R -w ~", "chmod -w .", "chmod 000 .", "chmod -R -- -w .", "chmod -fR a-w ."]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  assert.deepEqual(withListing("chmod -R -w .", { "/w": ["src", ".cache"] }), ["files.write.workspace"]);
+  leads(withListing("chmod 000 .", { "/w": [".claude"] }), "policy.core");
+});
+
+test("security review of the parents rule (L61587), 2: `..` after a name", () => {
+  // `..` after a name: a path that comes back to (or above) the working
+  //    directory or the home, or a sibling reached through `..`, is read by
+  //    the listing; with none, fail closed.
+  for (const command of ["rm -rf sub/../..", "rm -rf ~/x/../..", "rm -rf ./a/../../", "rm -rf ../w", "rm -rf ../other-project"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  leads(withListing("rm -rf ../w", { "/": ["w", "h"], "/w": [".claude"], "/h": [] }), "policy.core");
+  leads(withListing("rm -rf ../other-project", { "/other-project": [".claude"], ...realpaths("/other-project", "/w", "/h") }), "policy.core");
+  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": ["x.js"], ...realpaths("/other-project", "/w", "/h") }), ["files.delete.out_of_scope"]);
+  // A sibling that is not there holds nothing on a one-segment line; where an
+  // earlier segment may make it, or it cannot be read: strict.
+  assert.deepEqual(withListing("rm -rf ../other-project", { "/other-project": "missing", ...realpaths("/other-project", "/w", "/h") }), ["files.delete.out_of_scope"]);
+  assert.ok(withListing("true && rm -rf ../other-project", { "/other-project": "missing", ...realpaths("/other-project", "/w", "/h") }).includes("policy.core"));
+  leads(withListing("rm -rf ../other-project", { "/other-project": "unreadable", ...realpaths("/other-project", "/w", "/h") }), "policy.core");
+  // No canonical path for it (every caller but the hook): it cannot be shown to be elsewhere.
+  leads(withListing("rm -rf ../other-project", { "/other-project": ["x.js"] }), "policy.core");
+  assert.deepEqual(withListing("rm -rf ~/../other", { "/other": ["notes"], ...realpaths("/other", "/w", "/h") }), ["files.delete.out_of_scope"]);
+});
+
+test("security review of the parents rule (L61587), 3: a listed name in another letter case", () => {
+  // A listed name in another letter case is the same directory on a
+  // case-insensitive volume (the folded reading); as spelled it is another
+  // name, so the segment's own class rides beside (review-b A686-FOLD5 M1).
+  assert.deepEqual(withListing("rm -rf .", { "/w": [".Claude", "src"] }), ["policy.core", "files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("rm -rf .", { "/w": ["Approval.MD", "src"] }), ["policy.core", "files.delete.out_of_scope"]);
+  assert.ok(withListing("rm -rf .", { "/w": [".GIT", "src"] }).includes("vcs.history.rewrite"));
+  // By the shared fold (#688): the long s and the Kelvin sign open the ASCII names on APFS.
+  assert.ok(withListing("rm -rf .", { "/w": [".mu\u017Fe", "src"] }).includes("policy.core"));
+  assert.ok(withListing("rm -rf .", { "/w": [".gro\u212A", "src"] }).includes("policy.core"));
+});
+
+test("security review of the parents rule (L61587), 4: an operand the text cannot read", () => {
+  // An operand that names the working directory, the last one or the home
+  // through a word the text cannot read may be a parent: fail closed.
+  for (const command of ["rm -rf $OLDPWD", "rm -rf $(pwd -P)", "rm -rf ${PWD}", 'rm -rf "$PWD/"', "rm -rf ${PWD%/*}", "rm -rf ${X:-.}"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // Lead ruling L62435 (S6, S7) reverses this review's first answer for an
+  // ordinary variable: alone it keeps main's class (it was policy.core).
+  // Lead ruling L62511 (S-D) puts a recursive chmod of one back at policy.core.
+  assert.ok(classesOf("chmod -R 000 $X").includes("policy.core"));
+  for (const command of ["rm -rf $X", 'rm -rf "$X"', "rm -rf ${X}/", 'mv "$X" ../y']) {
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    assert.deepEqual(classesOf(command), main.classes, command);
+  }
+  // `builtin pwd` and `command pwd` are refused by main (no rule for the
+  // wrapper); a refusal is stricter than any class and stays one.
+  for (const command of ["rm -rf $(builtin pwd)", "rm -rf $(command pwd)", "rm -rf $(command pwd -P)"]) {
+    const result = classifyCommand(command);
+    assert.ok(!result.ok || classesOf(command).includes("policy.core"), command);
+  }
+  leads(withListing("rm -rf $(pwd -P)", {}), "policy.core");
+  // A variable with a named tail is not the directory itself: main's class.
+  assert.deepEqual(classesOf('rm -rf "$TMPDIR"/x'), ["files.delete.out_of_scope"]);
+  assert.deepEqual(classesOf("rm -rf $BUILD/dist"), ["files.delete.out_of_scope"]);
+  // Main refuses a substitution it cannot classify; that stays a refusal.
+  assert.equal(classifyCommand("rm -rf $(cmd)").ok, false);
+});
+
+test("security review of the parents rule (L61587), 5: a tail after an unreadable word that comes back to it", () => {
+  // The tail is normalised before it is judged: a name that a later `..`
+  // removes is no name, and a `..` that removes the unreadable word itself
+  // (or a word that may hold `..`, like `$X` in `./$X`) leaves the target
+  // unknown: fail closed.
+  for (const command of [
+    "rm -rf $X/sub/..",
+    "chmod -R 000 $(echo x)/a/../..",
+    "rm -rf $(echo x)/a/..",
+    "rm -rf $HOME/x/..",
+    'rm -rf "$X"/..',
+    "rm -rf ../$X/*",
+    "chmod -R 000 ../$X",
+    "chmod -R 000 ~/$X",
+    'rm -rf "../$X/$Y"',
+    "rm -rf ~someone",
+    "chmod -R 000 ~someone/",
+  ]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // Lead ruling L62435 (S7): an ordinary variable below the working
+  // directory, or after another, keeps main's class (it was policy.core).
+  // (`$X/*` keeps #686's pattern answer, main's since 9122cb3e.)
+  assert.deepEqual(classesOf("rm -rf $X/*"), ["policy.core", "files.delete.out_of_scope", "log.mutate"]);
+  // Lead ruling L62511 (S-D): a recursive chmod of one is policy.core again.
+  for (const command of ["chmod -R 000 ./$X", "chmod -R 000 sub/$X", "chmod -R 000 $X/$Y"]) assert.ok(classesOf(command).includes("policy.core"), command);
+  for (const command of ['rm -rf "$X/$Y"']) {
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    assert.deepEqual(classesOf(command), main.classes, command);
+  }
+  // A named tail is not the unreadable directory itself: main's class.
+  assert.deepEqual(classesOf("rm -rf $X/dist"), ["files.delete.out_of_scope"]);
+  assert.deepEqual(classesOf("rm -rf $(echo x)/build/out"), ["files.delete.out_of_scope"]);
+  assert.deepEqual(classesOf('rm -rf "$TMPDIR"/x'), ["files.delete.out_of_scope"]);
+  assert.deepEqual(classesOf("rm -rf $TARGET/x"), ["files.delete.out_of_scope"]);
+  // A glob that names what a directory holds stays #686's listing rule.
+  assert.deepEqual(withListing("rm -rf dist/*", { "/w/dist": ["a.js"] }), ["files.delete.out_of_scope"]);
+  // Main refuses a substitution it cannot classify; that stays a refusal.
+  assert.equal(classifyCommand("rm -rf $(cmd)/build/out").ok, false);
+  assert.equal(classifyCommand("rm -rf $(cmd)/a/../..").ok, false);
+});
+
+// An absolute operand, judged against the caller's disk: listings and, keyed
+// `realpath:<path>`, the canonical path the hook resolved for each one.
+function withDisk(
+  command: string,
+  cwd: string,
+  listings: Record<string, readonly string[] | "unreadable" | "missing">,
+  extra: { singleSegment?: boolean } = {},
+): string[] {
+  const result = classifyCommand(command, [], { globDisk: { cwd, home: "/h", listings: new Map(Object.entries(listings)), ...extra } });
+  assert.ok(result.ok, `${command}: ${result.ok ? "" : result.detail}`);
+  return result.classes;
+}
+
+test("security review of the parents rule (L61587), 6: an absolute operand that reaches the working directory by another spelling", () => {
+  const real = (paths: readonly string[], to: (path: string) => string = (path) => path): Record<string, string[]> =>
+    Object.fromEntries(paths.map((path) => [realpathKey(path), [to(path)]]));
+  // Another letter case (a case-insensitive volume): strict.
+  leads(withDisk("rm -rf /W", "/w/proj", { "/W": ["proj"] }), "policy.core");
+  leads(withDisk("chmod -R 000 /W/Proj", "/w/proj", { "/W/Proj": [".claude"] }), "policy.core");
+  // Even where the volume's realpath keeps the letter case as written.
+  // (As spelled, on such a volume `/W` is another directory, judged by its own listing: main's class beside.)
+  assert.deepEqual(withDisk("rm -rf /W", "/w/proj", { "/W": ["proj"], ...real(["/W", "/w/proj", "/h"]) }), ["policy.core", "files.delete.out_of_scope"]);
+  // A symlink to an ancestor (/tmp is /private/tmp on macOS): strict.
+  const alias = { "/tmp/x": ["proj"], ...real(["/tmp/x"], () => "/private/tmp/x"), ...real(["/private/tmp/x/proj", "/h"]) };
+  leads(withDisk("rm -rf /tmp/x/", "/private/tmp/x/proj", alias), "policy.core");
+  leads(
+    withDisk("chmod -R 000 /tmp/x/proj", "/private/tmp/x/proj", { "/tmp/x/proj": ["src"], ...real(["/tmp/x/proj"], () => "/private/tmp/x/proj"), ...real(["/private/tmp/x/proj", "/h"]) }),
+    "policy.core",
+  );
+  // No canonical path for it: it cannot be shown to be elsewhere: strict.
+  leads(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": ["a.o"] }), "policy.core");
+  // Provably elsewhere: judged by its own listing.
+  const elsewhere = real(["/tmp/build-xyz", "/w", "/h"], (path) => (path.startsWith("/tmp") ? `/private${path}` : path));
+  assert.deepEqual(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": ["a.o"], ...elsewhere }), ["files.delete.out_of_scope"]);
+  leads(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": [".claude"], ...elsewhere }), "policy.core");
+  assert.deepEqual(withDisk("rm -rf /tmp/build-xyz", "/w", { "/tmp/build-xyz": "missing", ...elsewhere }, { singleSegment: true }), [
+    "files.delete.out_of_scope",
+  ]);
+  // Without a disk (every caller but the hook) an absolute path is not judged here, as before.
+  assert.deepEqual(classesOf("rm -rf /tmp/x"), ["files.delete.out_of_scope"]);
+});
+
+test("security review of the parents rule (L61587), 7: `..` after a name the kernel may resolve through a symlink", () => {
+  // `link/..` is the directory above link's TARGET, not the working
+  // directory: the kernel follows the symlink before it applies `..`. The
+  // hook resolves the operand as written; without that, fail closed.
+  const written = (path: string, physical: string): Record<string, string[]> => ({ [realpathKey(path)]: [physical] });
+  const sides = { ...written("/w", "/w"), ...written("/h", "/h") };
+  // Without the hook's resolution of the operand as written: strict.
+  for (const command of ["chmod -R 000 link/..", "rm -rf link/../x", "chmod -R 000 a/b/../..", "rm -rf /tmp/a/../b"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  leads(withDisk("chmod -R 000 link/..", "/w", { "/w": ["src", "link"], ...sides }), "policy.core");
+  // Resolved: link/.. is /elsewhere, which holds an organ directory: its class.
+  leads(
+    withDisk("chmod -R 000 link/..", "/w", { "/w": ["src", "link"], "/w/link/..": [".claude", "deep"], ...written("/w/link/..", "/elsewhere"), ...sides }),
+    "policy.core",
+  );
+  // Resolved to a place that holds none: main's class.
+  assert.deepEqual(
+    withDisk("chmod -R 000 link/..", "/w", { "/w": ["src", "link"], "/w/link/..": ["deep", "notes"], ...written("/w/link/..", "/elsewhere"), ...sides }),
+    ["files.write.workspace"],
+  );
+  // Resolved to the working directory itself (`sub` a real directory): the chain, as before.
+  assert.deepEqual(withDisk("chmod -R 000 sub/..", "/w", { "/w": ["src", "sub"], ...written("/w/sub/..", "/w"), ...written("/w", "/w"), ...sides }), [
+    "files.write.workspace",
+  ]);
+  leads(withDisk("chmod -R 000 sub/..", "/w", { "/w": [".claude", "sub"], ...written("/w/sub/..", "/w"), ...sides }), "policy.core");
+  // Resolved through a symlink to an ancestor of the working directory by another road: strict.
+  leads(withDisk("chmod -R 000 link/..", "/p/w", { "/p/w": ["src"], ...written("/p/w/link/..", "/p"), ...written("/p/w", "/p/w"), ...written("/h", "/h") }), "policy.core");
 });
 
 test("one fold (#688's shared helper, lead ruling 04:11Z): listing names, organ directories and pattern characters fold as APFS does", () => {
@@ -1346,6 +1623,26 @@ test("review-b A686-FOLD5 M1: the as-spelled reading compares exactly, so a case
     const classes = withListing(command, listing);
     for (const cls of both) assert.ok(classes.includes(cls), `${command} ${JSON.stringify(listing)} -> ${classes.join(",")}`);
   }
+});
+
+test("lead ruling L61587, parents: the rule adds its class and never takes the segment's own class away", () => {
+  // The main pass (lead ruling L61926) runs without the parents rule: main
+  // 324d87dc's answer, spelled out.
+  for (const [command, main] of [
+    ["rm -rf .", "files.delete.out_of_scope"],
+    ["chmod -R 000 .", "files.write.workspace"],
+  ] as const) {
+    const mainPass = classifyCommandWithMainRules(command);
+    assert.ok(mainPass.ok, command);
+    assert.deepEqual(mainPass.classes, [main], command);
+  }
+  // Main's class rides beside the parent's (ordinary writes too), so a policy
+  // that holds files.write.workspace stricter than policy.edit keeps main's answer.
+  assert.deepEqual(withListing("chmod -R 000 .", { "/w": [".github", "src"] }), ["policy.edit", "files.write.workspace"]);
+  assert.deepEqual(withListing("rm -rf .", { "/w": [".claude", "src"] }), ["policy.core", "files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("chmod -R u+w .", { "/w": [".git", "src"] }), ["vcs.history.rewrite", "files.write.workspace"]);
+  // Where main's class is the parent's own, one class: `mv "$PWD" ../x` is policy.core on main too.
+  assert.deepEqual(classesOf('mv "$PWD" ../x'), ["policy.core"]);
 });
 
 test("lead ruling L62013 (S1): an organ folder itself takes the class of every guarded path inside it, routed ones included", () => {
@@ -1502,6 +1799,132 @@ test("lead ruling L62013 (S2), fail closed: every command naming the bare organ 
   }
 });
 
+test("lead ruling L62013 for the parents rule: a parent takes the classes of the folders it holds (S1), and the commands that delete what they read count (S2, fail closed)", () => {
+  const disk = (listings: Record<string, readonly string[]>) => ({ globDisk: { cwd: "/w", home: "/h", listings: new Map(Object.entries(listings)) } });
+  // S1: each held folder by the folder rule, routed contents included.
+  const routed = classifyCommand("rm -rf .", [{ path: ".github/workflows/", class: "policy.edit.ci" }], disk({ "/w": [".github", "src"] }));
+  assert.ok(routed.ok && ["policy.edit", "policy.edit.ci", "files.delete.out_of_scope"].every((cls) => routed.classes.includes(cls)), JSON.stringify(routed));
+  assert.deepEqual([...withListing("rm -rf .", { "/w": [".approval", "src"] })].sort(), ["files.delete.out_of_scope", "log.mutate", "policy.core"]);
+  // Two held folders: both classes, not only the higher-ranked one.
+  const both = withListing("chmod -R 000 .", { "/w": [".claude", ".github"] });
+  assert.ok(both.includes("policy.core") && both.includes("policy.edit"), both.join(","));
+  // S2: tools that delete what they read or find, by what `.` holds. (What
+  // `.claude` holds, walked by the hook: lead ruling L62511, S-C.)
+  const organ = { "/w": [".claude", "src"], [guardedContentsKey("/w/.claude")]: ["settings.json"] };
+  for (const command of [
+    "find . -delete",
+    "find . -type f -delete",
+    "git rm -r .",
+    "tar --remove-files -czf x.tgz .",
+    "tar --rem -czf x.tgz .",
+    "TAR_OPTIONS=--remove-files tar -czf x.tgz .",
+    "rsync -a --remove-source-files ./ /tmp/x/",
+    "rsync -a --remov ./ /tmp/x/",
+  ]) {
+    assert.ok(withListing(command, organ).includes("policy.core"), `${command} -> ${withListing(command, organ).join(",")}`);
+  }
+  // Nothing held: main's class.
+  for (const command of ["find . -delete", "git rm -r .", "tar --remove-files -czf x.tgz ."]) {
+    assert.ok(!withListing(command, { "/w": ["src", "dist"] }).includes("policy.core"), command);
+  }
+  // Not a removal of what is below: main's class, wherever `.claude` is.
+  for (const [command, main] of [
+    ["git rm -r --cached .", "vcs.commit.branch"],
+    ["tar -czf x.tgz .", "files.write.workspace"],
+    ["rsync -a ./ /tmp/x/", "network.call"],
+    ["mkdir -p .", "files.write.workspace"],
+    ["touch .", "files.write.workspace"],
+    ["git add .", "vcs.commit.branch"],
+    // Lead ruling L62435 (S7): a find a name test narrows is not a delete of
+    // everything below.
+    ["find . -name '*.pyc' -delete", "files.delete.out_of_scope"],
+  ] as const) {
+    assert.deepEqual(withListing(command, organ), [main], command);
+  }
+  // Refused on main and here: no rule, or opaque.
+  for (const command of ["git clean -fdx", "zip -rm x.zip .", "chown -R x .", "find . -exec rm {} +", "export TAR_OPTIONS=--remove-files; tar -czf x.tgz ."]) {
+    assert.equal(classifyCommand(command).ok, false, command);
+  }
+});
+
+test("security review of d3ecdd5e: find's leading options, rsync's remove spellings and git's pathspecs are read for the parents rule, fail closed", () => {
+  const organ = { "/w": [".claude", "src"] };
+  const plain = { "/w": ["src", "dist"], "/w/dist": ["a.o"] };
+  // 1. find: BSD's -E -X -d -s -x, -f PATH, GNU's -D OPTS and -O<n>; no start path is `.`.
+  for (const command of [
+    "find -E . -delete",
+    "find -x . -delete",
+    "find -s . -delete",
+    "find -d . -delete",
+    "find -f . -- -delete",
+    "find -D tree . -delete",
+    "find -O3 . -delete",
+    "find -delete",
+    "find -type f -delete",
+    "find -Z . -delete",
+  ]) {
+    assert.ok(withListing(command, organ).includes("policy.core"), `${command} -> ${withListing(command, organ).join(",")}`);
+  }
+  // 2. rsync: both spellings of removing what it sent, and any prefix.
+  for (const command of ["rsync -a --remove-sent-files ./ /tmp/x/", "rsync -a --remove-s ./ /tmp/x/", "rsync -a --remov ./ /tmp/x/"]) {
+    assert.ok(withListing(command, organ).includes("policy.core"), command);
+  }
+  // 3. git rm: without -r too, and a pathspec git expands itself is `.`.
+  for (const command of ["git rm .", "git rm -f .", "git rm ':(glob)**'", "git rm '.cl*'", "git rm -r -- '*'", "git rm --pathspec-from-file=list"]) {
+    assert.ok(withListing(command, organ).includes("policy.core"), `${command} -> ${withListing(command, organ).join(",")}`);
+  }
+  // git's valued global options are refused by main, before this rule.
+  for (const command of ["git -C sub rm -r .", "git -c core.x=y rm -r .", "git --git-dir=x --work-tree=. rm -r ."]) {
+    assert.equal(classifyCommand(command).ok, false, command);
+  }
+  // The not-strict side keeps main's decision.
+  assert.deepEqual(withListing("find dist -name '*.o' -delete", plain), ["files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("find . -name '*.o' -delete", plain), ["files.delete.out_of_scope"]);
+  assert.deepEqual(withListing("rsync -a src/ dst/", plain), ["network.call"]);
+  assert.deepEqual(withListing("git rm -r --cached build/", plain), ["vcs.commit.branch"]);
+  assert.deepEqual(withListing("git rm -r --cached .", organ), ["vcs.commit.branch"]);
+  assert.deepEqual(withListing("git rm src/a.ts", organ), ["vcs.commit.branch"]);
+});
+
+test("security review of cfe27ea2: git rm's --cached is an option only before --, and git clean's valued options are not paths", () => {
+  const organ = { "/w": [".claude", "src", "build"] };
+  const plain = { "/w": ["src", "build"], "/w/build": ["a.o"] };
+  // 1. After `--`, `--cached` is a pathspec: the removal is real.
+  for (const command of ["git rm -r -- . --cached", "git rm -r --cache .", "git rm -r --c .", "git rm --no-cached -r .", "git rm -r --unknown ."]) {
+    assert.ok(withListing(command, organ).includes("policy.core"), `${command} -> ${withListing(command, organ).join(",")}`);
+  }
+  // 2. git clean (refused by main today, so refused here; were it classified):
+  // -e's value is a pattern, and no pathspec is the whole tree.
+  for (const command of ["git clean -fdx -e keepme", "git clean -fd", "git clean -fd --exclude=x"]) {
+    assert.equal(classifyCommand(command).ok, false, command);
+  }
+  // The reader itself: what each removes from the disk.
+  for (const [argv, removed] of [
+    [["clean", "-fdx", "-e", "keepme"], ["."]],
+    [["clean", "-fdx", "-ekeepme"], ["."]],
+    [["clean", "-fd", "--exclude", "x"], ["."]],
+    [["clean", "-fd", "--exclude=x", "build/"], ["build/"]],
+    [["clean", "-fd"], ["."]],
+    [["clean", "-fd", "--exc", "x"], ["."]],
+    [["clean", "-n"], []],
+    [["clean", "--dry-run", "-fd"], []],
+    [["clean", "-fd", "build/"], ["build/"]],
+    [["rm", "-r", "--", ".claude", "--cached"], [".claude", "--cached"]],
+    [["rm", "-r", "--cached", "--", ".claude"], []],
+    [["rm", "--cache", "-r", ".claude"], ["."]],
+    [["rm", ".cl*"], ["."]],
+    [["rm", "--pathspec-from-file=f"], ["."]],
+    [["--no-pager", "rm", "x"], ["x"]],
+  ] as const) {
+    assert.deepEqual(gitRemovedPaths(argv), removed, argv.join(" "));
+  }
+  // The not-strict side keeps main's decision.
+  assert.deepEqual(withListing("git rm --cached -r build/", plain), ["vcs.commit.branch"]);
+  assert.deepEqual(withListing("git rm --cached -r .", organ), ["vcs.commit.branch"]);
+  assert.deepEqual(withListing("git rm -r -n .", organ), ["vcs.commit.branch"]);
+  assert.deepEqual(withListing("git rm -r build/", plain), ["vcs.commit.branch"]);
+});
+
 test("cost (L62090): a word already judged on a line is not walked again, and still pays the matcher steps it took", () => {
   // `rsync -aR s/*/./a* … d*/` lands every source as `d*/a*`; each was walked
   // again (about 50 CPU s for `s0/*/./a* s1/*/./a* …` at 7 KB). The same word now offers
@@ -1653,4 +2076,565 @@ test("lead ruling L62319: a refusal main has for another reason still refuses a 
   // main refuses still refuses the line.
   assert.equal(classifyCommand("echo x >! APPROVAL.md; cat <<< y").ok, false);
   assert.equal(classifyCommand("echo x >! out.log; python3 -c 'print(1)'").ok, classifyCommand("echo x > out.log; python3 -c 'print(1)'").ok);
+});
+
+/** The classes main's rules give `command` with the same disk (or none). */
+function mainClasses(command: string, globDisk?: Parameters<typeof classifyCommand>[2] extends infer C ? (C extends { globDisk?: infer D } ? D : never) : never): string[] {
+  const main = classifyCommandWithMainRules(command, [], globDisk === undefined ? {} : { globDisk });
+  assert.ok(main.ok, `${command}: main refuses it`);
+  return main.classes;
+}
+
+test("lead ruling L62435 (S6): a chmod of a word the text cannot read keeps main's class, with or without -R", () => {
+  const disk = { cwd: "/w", home: "/h", listings: new Map<string, readonly string[]>(Object.entries({ "/w": [".claude", "scripts"], "/w/scripts": ["run.sh"], ...realpaths("/w", "/h", "/w/scripts") })) };
+  // Lead ruling L62511 (S-D): `chmod -R 755 "$OUT"` (in this list before) is a
+  // recursive chmod of an unreadable word: policy.core, below.
+  for (const command of ['chmod +x "$f"', "chmod +x ./$NAME", "chmod u+x $1", "chmod 755 $DIR", "chmod +x $SCRIPT", "chmod +x scripts/$NAME"]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
+    const withDiskClasses = classifyCommand(command, [], { globDisk: disk });
+    assert.ok(withDiskClasses.ok, command);
+    assert.deepEqual(withDiskClasses.classes, mainClasses(command, disk), `${command} (listing)`);
+    assert.deepEqual(withDiskClasses.classes, ["files.write.workspace"], command);
+  }
+  // A readable parent spelling still counts without -R (it locks every organ below).
+  for (const command of ["chmod 000 .", "chmod 000 ..", "chmod 000 ~"]) {
+    assert.ok(classesOf(command).includes("policy.core"), command);
+  }
+  // Lead ruling L62511 (S-D): a recursive chmod reads an unreadable word as a
+  // parent may be, alone too; `$X/dist` names something below it, as on main.
+  for (const command of ["chmod -R 000 $X", 'chmod -R 000 "$X"', "chmod -R -w $X", 'chmod -R 755 "$OUT"', 'chmod -R u+w "$DIR"', "chmod -R 000 $X/", "(B=src); chmod -R 000 ./$B", "chmod --recursive 000 $X", "chmod -Rv 000 $X"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} (pure)`);
+    const withDiskClasses = classifyCommand(command, [], { globDisk: disk });
+    assert.ok(withDiskClasses.ok && withDiskClasses.classes.includes("policy.core") && withDiskClasses.classes.includes("files.write.workspace"), `${command} (listing)`);
+  }
+  assert.deepEqual(classesOf("chmod -R 755 $X/dist"), mainClasses("chmod -R 755 $X/dist"));
+  // Below a proven parent, an unreadable word may be the workspace: strict.
+  for (const command of ["chmod +x ../$X", "chmod -R 000 ~/$X", "chmod 000 /$X"]) {
+    assert.ok(classesOf(command).includes("policy.core"), command);
+  }
+});
+
+test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary variable alone or below a place that holds no workspace, keep main's class", () => {
+  // What `.claude` holds, as the hook walks it (lead ruling L62511, S-C).
+  const organ = { "/": ["w", "h"], "/w": [".claude", "src"], "/h": [], [guardedContentsKey("/w/.claude")]: ["settings.json", "agents", "a.md"], ...realpaths("/w", "/h") };
+  // A plain name narrows only by a listing (L62511, S-C): with none, strict;
+  // a junk name is read as `*.tmp` is (L62546): main's class, as before L62511.
+  assert.ok(classesOf("find . -name x.js -delete").includes("policy.core"));
+  for (const command of ["find . -name .DS_Store -delete", "find . -iname .ds_store -delete", "find . -name Thumbs.db -delete", "find . -name desktop.ini -delete", "find . -name '._*' -delete"]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
+  }
+  assert.ok(classesOf("find . -name .ds_store -delete").includes("policy.core"), "-name is exact");
+  assert.deepEqual(withListing("find . -name .DS_Store -delete", organ), ["files.delete.out_of_scope"]);
+  for (const command of [
+    "find . -name '*.tmp' -delete",
+    "find . -name '*.pyc' -delete",
+    "find . -type f -name '*.log' -delete",
+    "find .. -name '*.tmp' -delete",
+    "find . -iname '*.TMP' -delete",
+    "find . -empty -name '*.tmp' -delete",
+    // The shell's quoting removed first: find sees `*.tmp` in each.
+    "find . -name \\*.tmp -delete",
+    'find . -name "*.tmp" -delete',
+    "find . -name '*'.tmp -delete",
+  ]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
+    assert.deepEqual(withListing(command, organ), ["files.delete.out_of_scope"], `${command} (listing)`);
+  }
+  // No test narrowing it (or one that widens it): the parents rule's answer.
+  // Automated security review of the fold, 1 and 2: a test after -delete,
+  // an operator, a negation, a parenthesis, or a name test that can match a
+  // guarded name (or a test that cannot be read against names) narrows
+  // nothing; `-empty` alone stays the head's answer.
+  for (const command of [
+    "find . -delete",
+    "find .. -delete",
+    "find . -type f -delete",
+    "find . -depth -delete",
+    "find . -empty -delete",
+    "find . -delete -name '*.tmp'",
+    "find . ! -name x -delete",
+    "find . -not -name x -delete",
+    "find . -name x -o -delete",
+    "find . \\( -name x \\) -o -delete",
+    "find . \\( -name x \\) -delete",
+    "find . -name x -delete -o -print",
+    "find . -name '*' -delete",
+    "find . -name '.*' -delete",
+    "find . -name settings.json -delete",
+    "find . -name .claude -delete",
+    "find . -name '*.md' -delete",
+    "find . -name '*.json' -delete",
+    "find . -iname 'approval.MD' -delete",
+    "find . -name '.c*' -delete",
+    "find . -path './.claude/*' -delete",
+    "find . -regex '.*tmp' -delete",
+    "find . -mtime +3 -delete",
+    // Security review of the fold, 5 and 6: a guarded prefix (`settings*`,
+    // `.env.*`, `vault*`), an fnmatch escape or bracket, an unquoted glob the
+    // shell may expand first, and `\*.md` (find sees `*.md`).
+    "find . -name 'set*' -delete",
+    "find . -name 'vault-?' -delete",
+    "find . -name '.env*' -delete",
+    "find . -name '\\.claude' -delete",
+    "find . -name 'settings\\.json' -delete",
+    "find . -name '[.]claude' -delete",
+    "find . -name '.cl[a]ude' -delete",
+    "find . -name '[!x]claude' -delete",
+    "find . -name *.tmp -delete",
+    "find . -name \\*.md -delete",
+    // Security review of the fold, 9 and 10: a `*`-led pattern other than
+    // `*.<ext>` meets the prefixes; an unquoted `~`, `#` or `^`.
+    "find . -name '*env*' -delete",
+    "find . -name '*.e*' -delete",
+    "find . -name '*rc' -delete",
+    "find . -name '*.env' -delete",
+    "find . -name '*.t?p' -delete",
+    "find . -name x~ -delete",
+    "find . -name x#y -delete",
+    "find . -name x^y -delete",
+  ]) {
+    leads(withListing(command, organ), "policy.core");
+    assert.ok(classesOf(command).includes("policy.core"), command);
+  }
+  // A part of one of the policy's protected paths (routed entries included).
+  const routes = [{ path: ".github/workflows/", class: "policy.edit.ci" }, { path: ".github/CODEOWNERS", class: "policy.edit.owners" }, { path: "SPEC.md", class: "policy.edit.spec" }];
+  for (const command of ["find . -name CODEOWNERS -delete", "find . -name SPEC.md -delete", "find . -name workflows -delete"]) {
+    assert.ok(classesOf(command, routes).includes("policy.core"), command);
+  }
+  assert.ok(!classesOf("find . -name '*.tmp' -delete", routes).includes("policy.core"));
+  // An ordinary variable alone, below the working directory, or below a
+  // directory that holds neither the working directory nor the home.
+  const tmp = { "/w": [".claude"], "/tmp": ["x"], "/private/tmp": ["x"], ...realpaths("/w", "/h", "/private/tmp"), [realpathKey("/tmp")]: ["/private/tmp"] };
+  for (const command of ["rm -rf $TARGET", "rm -rf $BUILD_DIR", 'rm -rf "$OUT"', 'rm -rf "$TMPDIR"', "rm -rf ./$X", "rm -rf /tmp/$name", "rm -rf /private/tmp/$SESSION", "rm -rf build-$ID", "rm -rf dist/$X.tmp", "rm -rf v$A.$B"]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
+    assert.deepEqual(withListing(command, tmp), ["files.delete.out_of_scope"], `${command} (listing)`);
+  }
+  // Below a proven parent: may be the workspace itself, strict.
+  for (const command of ["rm -rf ../$X", "rm -rf ~/$X", "rm -rf /$X", "rm -rf $PWD/../$X", "rm -rf ../../$X", "rm -rf ~/../$X", 'rm -rf "../$X/$Y"']) {
+    leads(classesOf(command), "policy.core");
+    leads(withListing(command, tmp), "policy.core");
+  }
+  // An absolute directory above the working directory: strict; one beside it: main's.
+  leads(withDisk("rm -rf /a/$X", "/a/b/w", { "/a": ["b"], ...realpaths("/a", "/a/b/w", "/h") }), "policy.core");
+  assert.deepEqual(withDisk("rm -rf /a/c/$X", "/a/b/w", { "/a/c": ["x"], ...realpaths("/a/c", "/a/b/w", "/h") }), ["files.delete.out_of_scope"]);
+  // ... and one the hook could not resolve: strict.
+  leads(withDisk("rm -rf /a/c/$X", "/a/b/w", { "/a/c": ["x"] }), "policy.core");
+  // Words that name a working directory or the home stay read as parents.
+  for (const command of [
+    "rm -rf $OLDPWD",
+    'rm -rf "$(pwd -P)"',
+    "rm -rf $PWD",
+    "rm -rf ${PWD%/*}",
+    "rm -rf ~+",
+    "rm -rf ~-",
+    "rm -rf $X/..",
+    "rm -rf $CLAUDE_PROJECT_DIR",
+    'rm -rf "$CLAUDE_PROJECT_DIR"',
+    "rm -rf $INIT_CWD",
+    // Security review of the fold, 23: joined to dots, two references with
+    // nothing between, any operator, and after a cd to a parent.
+    "rm -rf .$X",
+    "rm -rf $X.",
+    "rm -rf ..$X",
+    "rm -rf $X..",
+    "rm -rf $X$Y",
+    "rm -rf .$1",
+    "rm -rf ${X:-..}",
+    "rm -rf ${X:=~}",
+    "rm -rf ${X:+..}",
+    "rm -rf ${OUT:-dist}",
+    "cd .. && rm -rf $X",
+  ]) {
+    assert.ok(classesOf(command).includes("policy.core"), command);
+  }
+});
+
+test("lead ruling L62435 (S7): a variable the line itself sets is read as what it sets", () => {
+  for (const command of ["X=. ; rm -rf $X", 'X=.; rm -rf "$X"', "X=.. rm -rf $X", "X=$(pwd); rm -rf $X", "X=.; rm -rf ${X:-dist}"]) {
+    assert.ok(classesOf(command).includes("policy.core"), command);
+  }
+  // Security review of the fold, 22: chained assignments to a fixpoint; a
+  // self-reference or a cycle never settles: strict.
+  for (const command of ["A=..; B=$A; rm -rf $B", 'A=..; B="$A/"; rm -rf $B', "A=..; B=${A}; rm -rf $B", "A=..; B=$A; C=$B; rm -rf $C", "A=$A/..; rm -rf $A", "A=$B; B=$A; rm -rf $A"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // Security review of the fold, 24: the word as written is judged too, so an
+  // assignment that may not reach the use hides nothing (accepted: an
+  // assigned name below a proven parent is strict whatever its value).
+  for (const command of ["(X=dist); rm -rf ../$X", "X=dist true; rm -rf ../$X", "false && X=dist; rm -rf ../$X", "X=build; rm -rf ../$X"]) {
+    const result = classifyCommand(command);
+    assert.ok(!result.ok || result.classes.includes("policy.core"), `${command} -> ${result.ok ? result.classes.join(",") : result.code}`);
+  }
+  // Lead ruling L62511 (S-A): an assigned organ name takes the organ's class,
+  // as the word spelled so does; an ordinary name keeps main's class.
+  assert.ok(classesOf("D=.claude; rm -rf $D").includes("policy.core"));
+  for (const command of ["X=dist; rm -rf $X", "printf -v d dist; rm -rf $d", "OUT=dist; rm -rf $OUT", "D=build; T=$D/tmp; rm -rf $T"]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), command);
+  }
+  // Automated security review of the fold, 3b: bound another way the text
+  // cannot read (or to a parent): strict; main refuses `export`, `declare`,
+  // `local`, `typeset`, `read`, `set` and every `for` loop, and so does this.
+  for (const command of ["printf -v d ..; rm -rf $d", "printf -v d %s ..; rm -rf $d"]) {
+    assert.ok(classesOf(command).includes("policy.core"), command);
+  }
+  for (const command of [
+    "export X=..; rm -rf $X",
+    "declare X=..; rm -rf $X",
+    "local X=..; rm -rf $X",
+    "typeset X=..; rm -rf $X",
+    "read d; rm -rf $d",
+    'for d in .. ~; do rm -rf "$d"; done',
+    'for f in *.tmp; do rm -rf "$f"; done',
+    'for d in dist build; do rm -rf "$d"; done',
+    'set -- ..; rm -rf "$@"',
+    ": ..; rm -rf $_",
+  ]) {
+    assert.equal(classifyCommand(command).ok, false, command);
+    assert.equal(classifyCommandWithMainRules(command).ok, false, command);
+  }
+  // `$@` and `$*` alone are unknown: main's class (lead ruling L62435);
+  // `$_` is strict (security review of the fold, 27, below).
+  for (const command of ['rm -rf "$@"', "rm -rf $*"]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), command);
+  }
+});
+
+test("lead ruling L62435 (S7): with a session directory that differs from the hook's own, a word is placed from both", () => {
+  const session = (command: string, listings: Record<string, readonly string[] | "unreadable" | "missing">): string[] => {
+    const result = classifyCommand(command, [], { globDisk: { cwd: "/w", home: "/h", relativeOk: false, sessionCwds: ["/w/sub"], listings: new Map(Object.entries(listings)) } });
+    assert.ok(result.ok, command);
+    return result.classes;
+  };
+  const disk = {
+    "/w": [".claude", "sub"],
+    "/w/sub": ["a"],
+    "/tmp/x": ["y"],
+    "/plain": ["x"],
+    "/other/x": ["y"],
+    "/w/plain": "missing" as const,
+    "/w/other/x": "missing" as const,
+    ...realpaths("/w", "/w/sub", "/h", "/tmp/x", "/plain", "/other/x", "/w/plain", "/w/other/x"),
+  };
+  for (const command of ["rm -rf /tmp/x", "rm -rf ../plain", "rm -rf ../other/x"]) {
+    assert.deepEqual(session(command, disk), ["files.delete.out_of_scope"], command);
+  }
+  // `..` from the session directory is the hook's own: a parent from either is a parent.
+  leads(session("rm -rf ..", disk), "policy.core");
+  leads(session("rm -rf /w", disk), "policy.core");
+  // Without the session directory's canonical path: strict, as before.
+  leads(session("rm -rf /tmp/x", { "/tmp/x": ["y"], ...realpaths("/w", "/h", "/tmp/x") }), "policy.core");
+  // A line that may change directory: a relative word is not placed (strict).
+  assert.ok(session("cd x && rm -rf ../plain", disk).includes("policy.core"));
+});
+
+test("lead ruling L62435 (S1): each word a brace makes is judged by the parents rule; a brace with no parent keeps main's class", () => {
+  const organ = { "/": ["w", "h"], "/w": [".claude", "src"], "/h": [], ...realpaths("/w", "/h") };
+  for (const command of [
+    "rm -rf {../proj,x}",
+    "rm -rf {..,.}/proj",
+    "rm -rf ..{/proj,}",
+    "chmod -R 000 {.,x}",
+    "chmod -R 000 {~,x}",
+    "chmod 000 {../proj,x}",
+    "mv {../proj,x} /tmp/zz",
+    "find {../proj,x} -delete",
+    "git rm -r {../proj,x}",
+    "rm -rf ../{proj,x}",
+    // Past the cap, a word that spells a part of a parent, or any expansion
+    // (automated security review of the fold, 4): strict.
+    "rm -rf {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,.}",
+    "X=..; rm -rf {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,$X}",
+    "rm -rf {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,$(pwd)}",
+    "rm -rf {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,$CLAUDE_PROJECT_DIR}",
+  ]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    for (const cls of main.classes) assert.ok(classesOf(command).includes(cls), `${command} keeps main's ${cls}`);
+  }
+  // A backtick is refused (main's answer), past the cap too.
+  assert.equal(classifyCommand("rm -rf {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,`pwd`}").ok, false);
+  leads(withListing("rm -rf {.,x}", organ), "policy.core");
+  leads(withListing("chmod -R 000 {..,x}", organ), "policy.core");
+  // Expanded words that hold no organ directory: main's class.
+  assert.deepEqual(withListing("rm -rf {.,x}", { "/w": ["src"], ...realpaths("/w", "/h") }), ["files.write.workspace"]);
+  for (const command of ["rm -rf {dist,build}", "rm -rf src/{a,b}", "rm -rf {a,b}/{c,d}", "rm -rf x{1..3}", "rm -rf ${X}/{a,b}", "rm -rf {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,n}"]) {
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    assert.deepEqual(classesOf(command), main.classes, command);
+  }
+});
+
+test("lead ruling L62435 (S5): rsync --delete onto a parent is a recursive delete of what is below it", () => {
+  const organ = { "/w": [".claude", "src"], "/h": [".hermes"], ...realpaths("/w", "/h") };
+  for (const command of [
+    "rsync -a --delete /tmp/empty/ ./",
+    "rsync -a --delete /tmp/empty/ .",
+    "rsync -a --delete /tmp/empty/ ~/",
+    "rsync -a --delete /tmp/empty/ ..",
+    'rsync -a --delete /tmp/empty/ "$PWD"',
+    "rsync -a --delete /tmp/empty/ $HOME",
+    "rsync -a --del /tmp/empty/ ./",
+    "rsync -a --delete-before /tmp/empty/ ./",
+    "rsync -a --delete-during /tmp/empty/ ./",
+    "rsync -a --delete-delay /tmp/empty/ ./",
+    "rsync -a --delete-after /tmp/empty/ ./",
+    "rsync -a --delete-excluded /tmp/empty/ ./",
+    "rsync -a --delete /tmp/empty/ ../$X",
+  ]) {
+    const classes = classesOf(command);
+    assert.ok(classes.includes("policy.core"), `${command} -> ${classes.join(",")}`);
+    // Main's network.call rides beside.
+    assert.ok(classes.includes("network.call"), `${command} -> ${classes.join(",")}`);
+  }
+  leads(withListing("rsync -a --delete /tmp/empty/ ./", organ), "policy.core");
+  // `~` holding `.hermes`: its folder classes ride beside (L62013).
+  assert.equal(withListing("rsync -a --delete /tmp/empty/ ~/", organ)[0], "policy.core");
+  assert.deepEqual(withListing("rsync -a --delete /tmp/empty/ ./", { "/w": ["src"], ...realpaths("/w", "/h") }), ["network.call"]);
+  // A destination that is not a parent, one the text cannot read alone, a
+  // remote one, or no --delete: main's class.
+  for (const command of ["rsync -a --delete src/ build/out/", "rsync -a --delete /tmp/empty/ $X", "rsync -a --delete src/ host:/srv/x/", "rsync -a src/ ./"]) {
+    assert.deepEqual(classesOf(command), ["network.call"], command);
+  }
+});
+
+test("automated security review of the fold, 7, 8 and 11-14: an rsync delete through an option value, a batch or an abbreviation, and a delete onto a host's home or root", () => {
+  for (const command of [
+    "rsync -a -M--delete /tmp/empty/ ./",
+    "rsync -a -M --delete /tmp/empty/ ./",
+    "rsync -aM--delete /tmp/empty/ ./",
+    "rsync -a --remote-option=--delete /tmp/empty/ ./",
+    "rsync -a --remote-option --delete-after /tmp/empty/ ./",
+    "rsync -a --remot=--delete /tmp/empty/ ./",
+    "rsync -a --read-batch=batch ./",
+    "rsync -a --write-batch=b /tmp/empty/ ./",
+    "rsync -a --only-write-batch=b /tmp/empty/ ./",
+    "rsync -a --dele /tmp/empty/ ./",
+    "rsync -a --delete-missing-args /tmp/empty/ ./",
+    // A `--` may be an option's value: every word is read (11).
+    "rsync -a -M -- --delete /tmp/empty/ ./",
+    "rsync -a -- --delete /tmp/empty/ ./",
+    // Whatever the host, its home or root is a parent (12, 13).
+    "rsync -a --delete /tmp/empty/ localhost:",
+    "rsync -a --delete /tmp/empty/ host:",
+    "rsync -a --delete /tmp/empty/ host:.",
+    "rsync -a --delete /tmp/empty/ host:..",
+    "rsync -a --delete /tmp/empty/ host:~",
+    "rsync -a --delete /tmp/empty/ host:~/",
+    "rsync -a --delete /tmp/empty/ a@b@host:/",
+    "rsync -a --delete /tmp/empty/ 0x7f.1:",
+    "rsync -a --delete /tmp/empty/ [::ffff:127.0.0.1]:",
+    "rsync -a --delete /tmp/empty/ :",
+    "rsync -a --delete /tmp/empty/ host::",
+    "rsync -a --delete /tmp/empty/ rsync://host/",
+    // A daemon module, any host, with or without a path, and a `~` that is
+    // not the home (16, 17): strict.
+    "rsync -a --delete /tmp/empty/ host::module/out/",
+    "rsync -a --delete /tmp/empty/ localhost::module",
+    "rsync -a --delete /tmp/empty/ rsync://host/module/out/",
+    "rsync -a --delete /tmp/empty/ rsync://localhost/module",
+    "rsync -a --delete /tmp/empty/ host:~user/x",
+    "rsync -a --delete /tmp/empty/ host:~+",
+    "rsync -a --delete /tmp/empty/ ~root",
+    "rsync -a --delete /tmp/empty/ ~+",
+  ]) {
+    const classes = classesOf(command);
+    assert.ok(classes.includes("policy.core") && classes.includes("network.call"), `${command} -> ${classes.join(",")}`);
+  }
+  // A path that is not a parent on any host, a local path with a colon after
+  // a slash, or no delete: main's class. `-e` and `--rsync-path` keep
+  // main's class (14).
+  for (const command of [
+    "rsync -a --delete /tmp/empty/ host:/var/www/site/",
+    "rsync -a --delete /tmp/empty/ host:deploy/out/",
+    "rsync -a --delete /tmp/empty/ ./a:b",
+    "rsync -a --delete /tmp/empty/ /tmp/x:y",
+    "rsync -a --max-delete=5 src/ ./",
+    "rsync -a -e ssh src/ host:deploy/out/",
+  ]) {
+    assert.deepEqual(classesOf(command), ["network.call"], command);
+  }
+});
+
+test("automated security review of the fold, 15: with CDPATH set on the line, a cd to a bare name may land in a parent", () => {
+  for (const command of [
+    "CDPATH=.. cd proj && rm -rf x",
+    "CDPATH=/ cd Users && chmod -R 000 x",
+    // 18: a glob, brace or expansion target with CDPATH on the line.
+    "CDPATH=.. cd pr* && rm -rf x",
+    "CDPATH=.. cd {proj,x} && rm -rf x",
+    "CDPATH=.. cd $D && rm -rf x",
+    // 19: the token anywhere on the line counts as setting it.
+    "echo $CDPATH; cd proj && rm -rf x",
+    'printf -v CDPATH .. && cd proj && rm -rf x',
+    // 20: after the shell's quoting, and a binding of a name the text cannot read.
+    'C"D"PATH=.. cd proj && rm -rf x',
+    'printf -v "$n" .. && cd proj && rm -rf x',
+    // 21: a target that only contains `$(pwd)` later is relative.
+    "CDPATH=.. cd x/$(pwd) && rm -rf y",
+    // 25: through `command` / `builtin`.
+    'command printf -v "$n" .. && cd proj && rm -rf x',
+    'builtin printf -v "$n" .. && cd proj && rm -rf x',
+  ]) {
+    const result = classifyCommand(command);
+    assert.ok(!result.ok || result.classes.includes("policy.core"), `${command} -> ${result.ok ? result.classes.join(",") : result.code}`);
+  }
+  // A plain or exported CDPATH assignment is refused on main and here.
+  for (const command of ["CDPATH=/ ; cd Users && rm -rf x", "CDPATH=..; cd proj; chmod -R 000 x", "export CDPATH=..; cd proj; rm -rf x"]) {
+    assert.equal(classifyCommand(command).ok, false, command);
+    assert.equal(classifyCommandWithMainRules(command).ok, false, command);
+  }
+  // Without CDPATH on the line, or a `./` target: main's class.
+  for (const command of ["cd build && rm -rf out", "CDPATH=/ cd ./build && rm -rf out"]) {
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    assert.deepEqual(classesOf(command), main.classes, command);
+  }
+});
+
+test("automated security review of the fold, 26-28: partial assigned readings, positionals the line sets, `$_`, namerefs and indirect expansion are strict", () => {
+  const strict = (command: string): void => {
+    const result = classifyCommand(command);
+    assert.ok(!result.ok || result.classes.includes("policy.core"), `${command} -> ${result.ok ? result.classes.join(",") : result.code}`);
+  };
+  // 26: a partial reading (`../$B`) is judged too.
+  for (const command of ["A=..; (B=x); rm -rf $A/$B", 'A=..; B=x true; rm -rf "$A/$B"']) strict(command);
+  // 27: `$_` always; positionals where the line runs set, shift or eval.
+  for (const command of ['set -- ..; rm -rf "$1"', 'set -- ~ x; rm -rf "$@"', "shift; rm -rf $1", ": ..; rm -rf $_", 'true ..; rm -rf "$_"', "rm -rf $_", 'eval x; rm -rf "$1"']) strict(command);
+  // 28: a nameref, and an indirect expansion.
+  for (const command of ["declare -n R=CDPATH; R=..; cd proj && rm -rf x", "local -n R=X; rm -rf $X", "typeset -n R=X; rm -rf $X", "rm -rf ${!X}", "cd ${!D} && rm -rf proj"]) strict(command);
+  // Controls: as ruled, main's class.
+  for (const command of ["chmod u+x $1", 'rm -rf "$1"', "rm -rf $BUILD_DIR", "find . -name '*.tmp' -delete", "OUT=dist; rm -rf $OUT", "D=build; T=$D/tmp; rm -rf $T"]) {
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    assert.deepEqual(classesOf(command), main.classes, command);
+  }
+  // A cycle still never settles: strict.
+  strict("A=$B; B=$A; rm -rf $A");
+  // 27b: a function, `source`/`.` with arguments, `argv`, a numeric name.
+  for (const command of ['f(){ rm -rf "$1"; }; f ..', 'function f { rm -rf "$1"; }; f ..', 'source x.sh ..; rm -rf "$1"', '. x.sh ..; rm -rf "$1"', 'argv=(..); rm -rf "$1"', 'argv[1]=..; rm -rf "$1"', '1=..; rm -rf "$1"']) strict(command);
+  // 28b: a declare word the text cannot read may be `-n`.
+  for (const command of ['declare "$F" R=X; rm -rf $X', "typeset $(echo -n) R=X; rm -rf $X"]) strict(command);
+  // Wrappers that run the next word in this shell are looked through.
+  for (const command of ['time read "$v"; cd proj && rm -rf x', "noglob declare -n R=X; rm -rf $X", 'time -p printf -v "$n" .. && cd proj && rm -rf x', 'nohup printf -v "$n" .. && cd proj && rm -rf x']) strict(command);
+});
+
+test("lead ruling L62483 (true class): a parent takes the class of EVERY guarded target below it, not only the first or strictest", () => {
+  const tree = { "/": ["w", "h"], "/w": [".claude", ".git", ".github", ".approval", "src"], "/h": [".hermes"], ...realpaths("/w", "/h") };
+  const routes = [{ path: ".github/workflows/", class: "policy.edit.ci" }];
+  const classesWith = (command: string): string[] => {
+    const result = classifyCommand(command, routes, { globDisk: { cwd: "/w", home: "/h", listings: new Map(Object.entries(tree)) } });
+    assert.ok(result.ok, command);
+    return result.classes;
+  };
+  for (const command of ["rm -rf .", 'rm -rf "$PWD"', "chmod -R 000 .", "find . -delete", "rm -rf {.,x}", "rsync -a --delete /tmp/empty/ ./", 'rm -rf "."', "rm -rf ..", "cd .. && rm -rf proj", 'mv "$PWD" /tmp/x']) {
+    const classes = classesWith(command);
+    for (const cls of ["policy.core", "vcs.history.rewrite", "policy.edit", "policy.edit.ci", "log.mutate"]) {
+      assert.ok(classes.includes(cls), `${command} -> ${classes.join(",")} lacks ${cls}`);
+    }
+  }
+  // `.git` alone keeps the git-dir rule's answer (no organ beside it).
+  assert.ok(classesWith("rm -rf src/..").includes("policy.core"));
+});
+
+test("lead ruling L62511: an assigned guarded name, `${X:=…}`, a find that reaches inside a guarded folder, and a recursive chmod of an unreadable word", () => {
+  const routes = [{ path: ".github/workflows/", class: "policy.edit.ci" }, { path: ".claude/agents/", class: "policy.edit.agents" }];
+  const tree: Record<string, readonly string[]> = {
+    "/": ["w", "h"],
+    "/w": [".claude", ".cursor", ".github", ".git", ".approval", "src"],
+    "/h": [".hermes", ".claude"],
+    [guardedContentsKey("/w/.claude")]: ["settings.json", "agents", "a.md"],
+    [guardedContentsKey("/w/.cursor")]: ["hooks", "x.js"],
+    [guardedContentsKey("/w/.github")]: ["workflows", "ci.yml"],
+    [guardedContentsKey("/w/.git")]: ["HEAD", "config", "objects"],
+    [guardedContentsKey("/w/.approval")]: ["env", "log", "made-up.jsonl"],
+    ...realpaths("/w", "/h"),
+  };
+  const run = (command: string, listings: Record<string, readonly string[]> = tree): string[] => {
+    const result = classifyCommand(command, routes, { globDisk: { cwd: "/w", home: "/h", listings: new Map(Object.entries(listings)) } });
+    assert.ok(result.ok, command);
+    return result.classes;
+  };
+  const guardedOnly = (classes: readonly string[]): string[] => classes.filter((cls) => !cls.startsWith("files.") && !cls.startsWith("read.")).sort();
+  // S-A: each assigned reading that names a guarded target carries that target's classes, as the literal word does.
+  for (const [assigned, literal] of [
+    ["D=.claude; rm -rf $D", "rm -rf .claude"],
+    ["D=.github; rm -rf $D", "rm -rf .github"],
+    ["D=.approval; rm -rf $D", "rm -rf .approval"],
+    ["D=~/.hermes; rm -rf $D", "rm -rf ~/.hermes"],
+    ["D=$HOME/.claude; rm -rf $D", "rm -rf $HOME/.claude"],
+    ["D=.claude; X=$D; rm -rf $X", "rm -rf .claude"],
+    ["D=.claude/agents; rm -rf $D", "rm -rf .claude/agents"],
+    ["D=.claude; find $D -delete", "find .claude -delete"],
+    ["D=.cl; rm -rf ${D}aude", "rm -rf .claude"],
+    ["D=.claude; chmod -R 000 $D", "chmod -R 000 .claude"],
+    ["D=.git; rm -rf $D", "rm -rf .git"],
+    ["D=.claude; mv $D /tmp/zz", "mv .claude /tmp/zz"],
+  ] as const) {
+    const got = guardedOnly(run(assigned));
+    for (const cls of guardedOnly(run(literal))) assert.ok(got.includes(cls), `${assigned} -> ${got.join(",")} lacks ${cls} (${literal})`);
+  }
+  for (const command of ["OUT=dist; rm -rf $OUT", "D=build; T=$D/tmp; rm -rf $T"]) assert.deepEqual(guardedOnly(run(command)), [], command);
+  // S-B: the assigning operators bind the name on the line.
+  for (const command of ["echo ${X:=..}; rm -rf ./$X", "ls ${X:=..} && rm -rf $X", "echo ${X=..}; rm -rf $X", "echo ${X:=/}; rm -rf $X/", "echo ${X:=~}; rm -rf $X", "cat ${X:=..}/f; rm -rf $X", "echo ${X:=$Y}; rm -rf $X"]) {
+    assert.ok(run(command).includes("policy.core"), command);
+    assert.ok(classesOf(command).includes("policy.core"), `${command} (pure)`);
+  }
+  assert.deepEqual(guardedOnly(run("echo ${X:=dist}; rm -rf $X")), []);
+  // S-C: a narrowed find takes the class of each guarded folder its names may reach inside.
+  for (const [command, cls] of [
+    ["find . -name x.js -delete", "policy.core"],
+    ["find . -name 'x.*' -delete", "policy.core"],
+    ["find . -name '*.js' -delete", "policy.core"],
+    ["find . -name ci.yml -delete", "policy.edit"],
+    ["find . -name 'ci.*' -delete", "policy.edit.ci"],
+    ["find . -name HEAD -delete", "vcs.history.rewrite"],
+    ["find . -name config -delete", "vcs.history.rewrite"],
+    ["find . -name made-up.jsonl -delete", "log.mutate"],
+  ] as const) {
+    assert.ok(run(command).includes(cls), `${command} -> ${run(command).join(",")} lacks ${cls}`);
+  }
+  for (const command of ["find . -name '*.tmp' -delete", "find . -name '*.pyc' -delete", "find . -name .DS_Store -delete", "find . -iname '*.TMP' -delete"]) {
+    assert.deepEqual(run(command), ["files.delete.out_of_scope"], command);
+  }
+  // ...and strict once a guarded folder holds a match, or its walk is missing or unreadable.
+  assert.ok(run("find . -name '*.tmp' -delete", { ...tree, [guardedContentsKey("/w/.claude")]: ["settings.json", "x.tmp"] }).includes("policy.core"));
+  const { [guardedContentsKey("/w/.cursor")]: _walked, ...unwalked } = tree;
+  assert.ok(run("find . -name '*.tmp' -delete", unwalked).includes("policy.core"));
+  // Pure (no listing): only `*.<ext>` with an extension no guarded folder ordinarily holds.
+  for (const command of ["find . -name '*.tmp' -delete", "find . -name '*.pyc' -delete", "find . -name '*.log' -delete"]) assert.deepEqual(classesOf(command), mainClasses(command), command);
+  for (const command of ["find . -name '*.js' -delete", "find . -name '*.py' -delete", "find . -name '*.txt' -delete", "find . -name x.tmp -delete", "find . -name 'x.*' -delete"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} (pure)`);
+  }
+  // S-C in a real checkout: `.git/objects` is judged by git's own name shapes,
+  // the rest of `.git` by its walk; a walk cut short falls back, for that
+  // folder, to the rule used with no listing.
+  const checkout = { ...tree, [guardedContentsKey("/w/.git")]: ["HEAD", "config", "objects", "refs", "heads", "main", "hooks", "pre-commit.sample"] };
+  for (const command of ["find . -name '*.tmp' -delete", "find . -name '*.pyc' -delete", "find . -name .DS_Store -delete", "find . -name '*.orig' -delete"]) {
+    assert.deepEqual(run(command, checkout), ["files.delete.out_of_scope"], command);
+  }
+  for (const command of ["find . -name '*.pack' -delete", "find . -name 'pack-*' -delete", "find . -name '*.idx' -delete", "find . -name main -delete", "find . -name 'ab*' -delete", "find . -name '??' -delete", "find . -name 'tmp_obj_*' -delete", "find . -name '*.sample' -delete"]) {
+    assert.ok(run(command, checkout).includes("vcs.history.rewrite"), command);
+  }
+  const cut = { ...checkout, [guardedContentsKey("/w/.claude")]: [GUARDED_WALK_CUT, "settings.json"] };
+  for (const command of ["find . -name '*.tmp' -delete", "find . -name '*.pyc' -delete"]) assert.deepEqual(run(command, cut), ["files.delete.out_of_scope"], `${command} (cut)`);
+  for (const command of ["find . -name 'x.*' -delete", "find . -name x.js -delete", "find . -name '*.json' -delete"]) assert.ok(run(command, cut).includes("policy.core"), `${command} (cut)`);
+  // Lead ruling L62546: a junk name is read as `*.tmp` is: not reached past a
+  // cut, strict where a full walk shows that name inside a guarded folder.
+  for (const command of ["find . -name .DS_Store -delete", "find . -name Thumbs.db -delete", "find . -name '._*' -delete"]) assert.deepEqual(run(command, cut), ["files.delete.out_of_scope"], `${command} (cut)`);
+  const junkInside = { ...checkout, [guardedContentsKey("/w/.claude")]: ["settings.json", ".DS_Store", "._a.md"] };
+  for (const command of ["find . -name .DS_Store -delete", "find . -name '._*' -delete"]) assert.ok(run(command, junkInside).includes("policy.core"), `${command} (inside)`);
+  const gitCut = { ...checkout, [guardedContentsKey("/w/.git")]: [GUARDED_WALK_CUT, "HEAD", "objects"] };
+  assert.deepEqual(run("find . -name '*.tmp' -delete", gitCut), ["files.delete.out_of_scope"]);
+  for (const command of ["find . -name '*.lock' -delete", "find . -name '*.orig' -delete", "find . -name x.tmp -delete"]) assert.ok(run(command, gitCut).includes("vcs.history.rewrite"), `${command} (.git cut)`);
+  // Coordinator's B: a credential source synced with --delete onto a parent
+  // carries the credential class and the parent's classes; a copy INTO a
+  // parent is not a parents-rule verb (main's credential answer).
+  const synced = run("rsync -a --delete .approval/env ./");
+  for (const cls of ["account.credential", "policy.core", "log.mutate", "vcs.history.rewrite"]) assert.ok(synced.includes(cls), `${synced.join(",")} lacks ${cls}`);
+  assert.deepEqual(run("cp .approval/env .."), mainClasses("cp .approval/env .."));
+  // S-E part 2: `.git` alone below a moved parent rides beside policy.core.
+  const gitOnly = { "/": ["w", "h"], "/w": [".git", "src"], "/h": [], ...realpaths("/w", "/h") };
+  const moved = run('mv "$PWD" /tmp/zz', gitOnly);
+  assert.ok(moved.includes("policy.core") && moved.includes("vcs.history.rewrite"), moved.join(","));
 });

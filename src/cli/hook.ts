@@ -6097,7 +6097,15 @@ function classifyForHookAsRead(
     // when no other directory may be the shell's (`credentialCwds` empty).
     ...(globListings === null
       ? {}
-      : { globDisk: { ...globDiskFor(cwd, globListings), relativeOk: credentialCwds.length === 0 } }),
+      : {
+          globDisk: {
+            ...globDiskFor(cwd, globListings),
+            relativeOk: credentialCwds.length === 0,
+            // Lead ruling L62435 (S7): the parents rule places a word from
+            // the session directory too, rather than failing closed.
+            ...(credentialCwds.length === 0 ? {} : { sessionCwds: credentialCwds }),
+          },
+        }),
     scratchRoots: roots,
     ...(readRoots.length === 0 ? {} : { readRoots }),
     ...(execCode ? { execCode: true } : {}),
@@ -13091,7 +13099,12 @@ export function commandHookYielding(
           const command = readString(parsedInput.input.toolInput, "command");
           const perCall =
             adapter.shellCwdKey === undefined ? null : readString(parsedInput.input.toolInput, adapter.shellCwdKey);
-          const cwds = [cwd, ...(perCall !== null && isAbsolute(perCall) ? [perCall] : [])];
+          // Lead ruling L62435 (S7): where the harness sends no per-call
+          // directory, the envelope's session `cwd` is listed too when it
+          // differs, so the parents rule can place a word from it.
+          const sessionCwd = parsedInput.input.cwd;
+          const session = (perCall === null || !isAbsolute(perCall)) && isAbsolute(sessionCwd) && sessionCwd !== cwd ? [sessionCwd] : [];
+          const cwds = [cwd, ...(perCall !== null && isAbsolute(perCall) ? [perCall] : []), ...session];
           if (command !== null) {
             listed = true;
             const deadlineAt = listingBegan + describeDeadlineMs(harnessCapOfArgv(argv.slice(1), adapter));
