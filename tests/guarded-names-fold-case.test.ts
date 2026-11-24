@@ -1534,6 +1534,15 @@ test("a credential read is walked once: it costs about what the same line with a
   const spent = least(() => classifyCommand(`cp .approval/env design/x ${words}`, TWO_ROUTES));
   assert.ok(spent <= 1.2 * control, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
   assert.deepEqual(pure(`cp .approval/env design/x ${"x ".repeat(8)}`, TWO_ROUTES), [CRED, "policy.edit.design protected-path"]);
+  // With #686 in, a copy's landings cost the control most of its time, so a
+  // second text scan no longer shows on the copy (0.92 to 1.02 with it, 0.75
+  // to 0.81 without). A program with no copy plan has no landings: there the
+  // line costs 0.91 to 1.02 of its control with one scan, and 1.32 to 1.86
+  // with the scan made twice (this Mac, merge of 9122cb3e).
+  const plainControl = least(() => classifyCommand(`node x.js notes.txt design/x ${words}`, TWO_ROUTES));
+  const plainSpent = least(() => classifyCommand(`node x.js .approval/env design/x ${words}`, TWO_ROUTES));
+  assert.ok(plainSpent <= 1.2 * plainControl, `node: ${plainSpent.toFixed(3)} s against a control of ${plainControl.toFixed(3)} s`);
+  assert.deepEqual(pure(`node x.js .approval/env design/x ${"x ".repeat(8)}`, TWO_ROUTES), [CRED, "policy.edit.design protected-path"]);
 });
 
 // ---------------------------------------------------------------------------
