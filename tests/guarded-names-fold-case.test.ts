@@ -1555,6 +1555,70 @@ test("a credential read through a wrapper reads the path attached to a short opt
   if (classified.ok) assert.deepEqual(classified.segments.map((segment) => segment.path), [".approval/env", ".github/workflows/ci.yml"]);
 });
 
+/** A `-o` option word of exactly `bytes` UTF-8 bytes whose last tail is the workflow. */
+function attachedWorkflowWord(bytes: number): string {
+  const tail = ".github/workflows/ci.yml";
+  const fill = bytes - 2 - tail.length;
+  const word = `-o${"a/".repeat(Math.floor(fill / 2))}${fill % 2 === 1 ? "b" : ""}${tail}`;
+  assert.equal(Buffer.byteLength(word), bytes);
+  return word;
+}
+
+test("an attached option word over 256 bytes is an unknown target, not scanned tail by tail", () => {
+  for (const program of BUILT_TARGET_PROGRAMS) {
+    // At 200 bytes, and at the bound itself, every tail is read: the workflow.
+    for (const bytes of [200, 256]) {
+      const line = `${program} .approval/env ${attachedWorkflowWord(bytes)}`;
+      assert.deepEqual(pure(line, TWO_ROUTES), [CRED, "policy.edit.ci protected-path"], `${program} ${bytes}`);
+    }
+    // One byte past it, and at 300: the word is the unknown target, the word as its path.
+    for (const bytes of [257, 300]) {
+      const word = attachedWorkflowWord(bytes);
+      const classified = classifyCommand(`${program} .approval/env ${word}`, TWO_ROUTES);
+      assert.equal(classified.ok, true, `${program} ${bytes}`);
+      if (classified.ok) {
+        assert.deepEqual(
+          classified.segments.map((segment) => [segment.class, segment.rule, segment.path]),
+          [
+            ["account.credential", "credential-path", ".approval/env"],
+            ["policy.core", "copy-target-unknown", word],
+          ],
+          `${program} ${bytes}`,
+        );
+      }
+      // As spelled: main's answer.
+      assert.deepEqual(spelledPure(`${program} .approval/env ${word}`, TWO_ROUTES), [CRED], `${program} ${bytes}`);
+    }
+  }
+  // The bound counts UTF-8 bytes, not code units: `-o` and 128 two-byte letters
+  // are 130 units and 258 bytes; with 127 letters, 256 bytes, the tails are read.
+  const wide = `-o${"é".repeat(128)}`;
+  assert.equal(Buffer.byteLength(wide), 258);
+  assert.deepEqual(pure(`frobnicate .approval/env ${wide}`, TWO_ROUTES), [CRED, UNKNOWN]);
+  assert.deepEqual(pure(`frobnicate .approval/env -o${"é".repeat(127)}`, TWO_ROUTES), [CRED]);
+  // A long `--` option and a long positional are not attached options.
+  assert.deepEqual(pure(`frobnicate .approval/env --${"x".repeat(300)}`, TWO_ROUTES), [CRED]);
+  assert.deepEqual(pure(`frobnicate .approval/env ${"x".repeat(300)}`, TWO_ROUTES), [CRED]);
+});
+
+test("a long attached option word behind a wrapper costs about what the same word as an operand costs", () => {
+  // Every tail of an attached value is read, so the scan of one word is
+  // quadratic in it; past 256 bytes the word is not scanned tail by tail.
+  // 100 KB of `a/`, CPU time, each side the least of three runs.
+  const fill = "a/".repeat(50 * 1024);
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  const least = (run: () => void): number => Math.min(cpu(run), cpu(run), cpu(run));
+  const control = least(() => classifyCommand(`frobnicate .approval/env o${fill}`, TWO_ROUTES));
+  const spent = least(() => classifyCommand(`frobnicate .approval/env -o${fill}`, TWO_ROUTES));
+  assert.ok(spent <= 2 * control + 0.05, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
+  assert.ok(spent < 1, `${spent.toFixed(3)} s`);
+});
+
 test("an attached or = value that outranks the credential class leaves the line refused, as the same path as its own word does", () => {
   for (const program of BUILT_TARGET_PROGRAMS) {
     for (const path of ["APPROVAL.md", ".approval/log/x"]) {

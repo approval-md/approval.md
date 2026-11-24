@@ -540,7 +540,9 @@ other segments, and the hook judges each.
   $X`, `"$(…)"`, `.gith*/workflows/ci.yml`, `{a,b}.yml`, `~bob/x`) reports
   `policy.core` (`copy-target-unknown`) beside the credential class, after
   the classes above, and every tail of a short option's attached value is
-  read as a word (`-o.github/workflows/ci.yml`, `-xo.github/workflows/ci.yml`).
+  read as a word (`-o.github/workflows/ci.yml`, `-xo.github/workflows/ci.yml`);
+  an option word over 256 bytes is not read tail by tail but is itself the
+  unknown target, so the scan stays linear.
   An attached or `=` value that outranks the credential class
   (`-oAPPROVAL.md`, `--out=APPROVAL.md`, `-t.approval/log`) leaves the line
   refused, as the same path as its own word does. A quoted `'$X'` is a

@@ -5137,6 +5137,31 @@ function attachedOptionValues(word: string): string[] {
 }
 
 /**
+ * The longest single-dash option word, in UTF-8 bytes, whose tails the
+ * credential tier's refusal branch reads one by one ({@link
+ * attachedOptionValues}; build-1's S2 on #701, the seat's ruling on its
+ * cost). Every tail is scanned, so the work is quadratic in the word: past
+ * this bound the word is not scanned tail by tail but reported as an unknown
+ * write target (`policy.core`, `copy-target-unknown`), which is stricter and
+ * linear. main's own readers of attached values are not bounded here.
+ */
+const ATTACHED_TAIL_SCAN_BYTES = 256;
+
+/** Is this an option word whose attached tails {@link ATTACHED_TAIL_SCAN_BYTES} leaves unscanned? */
+function isLongAttachedOption(word: string): boolean {
+  if (!word.startsWith("-") || word.startsWith("--") || word.length < 3) return false;
+  // A UTF-16 unit is at most three UTF-8 bytes, so a short word needs no count.
+  if (word.length * 3 <= ATTACHED_TAIL_SCAN_BYTES) return false;
+  let bytes = 0;
+  for (const char of word) {
+    const point = char.codePointAt(0) as number;
+    bytes += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+    if (bytes > ATTACHED_TAIL_SCAN_BYTES) return true;
+  }
+  return false;
+}
+
+/**
  * The files a READ-class command writes through its own words (follow-up,
  * item B), read from this Mac's manual pages: `sort -o <file>` /
  * `--output=<file>` (any prefix of one letter or more), `uniq`'s second
@@ -11797,7 +11822,9 @@ function classifySegmentWithVerb(
   // `policy.core` `copy-target-unknown`: the first argument word whose value
   // the text cannot settle, by the flags the copy family's test reads
   // (`splits`, `expands`), the lexer's `exact` (a `$` inside double quotes,
-  // an unquoted `~`) and its substitutions (`"$(…)"`). Every word counts,
+  // an unquoted `~`) and its substitutions (`"$(…)"`). An option word over
+  // {@link ATTACHED_TAIL_SCAN_BYTES} is not scanned tail by tail: it is such
+  // a target too (the scan is quadratic in the word). Every word counts,
   // `--` or not: nobody knows this program's operands, and a secret-named
   // variable is a word the shell builds like any other. Only a literal
   // credential path is left out as the read ({@link isCredentialArgWord});
@@ -11814,7 +11841,10 @@ function classifySegmentWithVerb(
         const value = arg.slice(equals + 1);
         return value.length === 0 || isCredentialReadWord(value, protectedPaths) ? [] : [value];
       });
-      const attached = args.flatMap(attachedOptionValues).filter((value) => !isCredentialReadWord(value, protectedPaths));
+      const attached = args
+        .filter((arg) => !isLongAttachedOption(arg))
+        .flatMap(attachedOptionValues)
+        .filter((value) => !isCredentialReadWord(value, protectedPaths));
       const optionHit = strictestProtected(optionValues, protectedPaths);
       const attachedHit = strictestProtected(attached, protectedPaths);
       if ([optionHit, attachedHit].some((hit) => hit !== null && outranksCredential(hit.surface))) {
@@ -11825,8 +11855,9 @@ function classifySegmentWithVerb(
         .slice(cursor + 1)
         .find(
           (word) =>
-            (word.splits || word.expands || !word.exact || word.substitutions.length > 0) &&
-            !isCredentialArgWord(word, protectedPaths),
+            isLongAttachedOption(word.text) ||
+            ((word.splits || word.expands || !word.exact || word.substitutions.length > 0) &&
+              !isCredentialArgWord(word, protectedPaths)),
         );
       const named = [sideScan?.found ?? null, optionHit, attachedHit];
       const unknown: ProtectedBeside[] =
