@@ -253,30 +253,77 @@ it included: `rm -rf .` holding `.github` is `policy.edit` and
 `policy.edit.ci` where `.github/workflows/` is routed there, holding
 `.approval` it carries `log.mutate`). Besides `rm -r`, `mv` and `chmod`, the
 tools that delete what they read or find count, fail closed: `find P` with
-`-delete` or `-exec` (any test included: `find . -type f -delete` deletes
-`.claude/settings.json`), `git rm -r` (not `--cached`), `tar` with
-`--remove-files` (any unique prefix) or `TAR_OPTIONS=` before it, `rsync`
-with `--remove-source-files`, and `chown`, `chgrp`, `git clean` and `zip -m`,
-which are refused today. Nothing is released: `mkdir .` and `touch .` never
-reach the folders below. Names compare through #688's
-fold in the folded reading and exactly as spelled in the other, so a listed
-`.Claude` is `policy.core` with the segment's own class beside. A chmod mode
-that starts with `-` (`chmod -R -w .`) is the mode, not an option. Fail
-closed, `policy.core`: no listing (every caller but the hook), a directory
-over the listing's 2,000-entry cap, unreadable, or missing where an earlier
-segment of the line may make it, a line that may change directory or names
-`HOME`, an operand with a word the text cannot read (`$X`, `"$X"`, `$OLDPWD`,
-`$(pwd)`, any other `$(...)`, `~user`) last in the path (`$X`, `./$X`,
-`sub/$X`, `/tmp/$X`), followed by a glob, or removed again by a later `..`
-(`$(echo sub)/..`, `$X/a/../..`), since such a word may itself hold `..`; and
-a chain of more than 8 directories to list. Not a parent, and unchanged: `rm
--rf ./dist`, `rm -rf "$TMPDIR"/x`, `rm -rf $TARGET/x`, `rm -rf $X/dist`. `mv
-.`, `mv ./` and `mv sub/..` move nothing (rename(2) refuses them) and keep
-their class; `rm -rf $(builtin pwd)` and `$(command pwd)` stay refused, as on
-main. Not covered (follow-up): an absolute path for a caller with no listing
-(every caller but the hook: it has no working directory to compare), `rmdir
-.`, `find . -delete`, `chown`/`chgrp` (refused), organ directories below the
-top of a sibling tree, and organ directories in a sibling tree under an
+`-exec` or `-delete` (`find . -delete`, `find . -type f -delete`), `git rm -r`
+(not `--cached`), `tar` with `--remove-files` (any unique prefix) or
+`TAR_OPTIONS=` before it, `rsync` with `--remove-source-files`, and `chown`,
+`chgrp`, `git clean` and `zip -m`, which are refused today. Lead ruling
+L62435: `rsync` with `--delete` or any `--del…` spelling, `-M` or
+`--remote-option` (its value runs on the receiving side), or a batch option,
+removes what is below its destination, which is read the same way (`rsync -a
+--delete <empty>/ ./`, `~/`, `..`, `"$PWD"`; a `host:` path whatever the
+host, a relative one under the home, so `host:` and `host:/` count too; a
+daemon module, `host::module` or `rsync://`, and a `~user` path fail closed);
+`rsync -a --delete src/ build/out/` keeps main's class. A `find … -delete`
+that a `-name`/`-iname` test narrows keeps main's class (`find . -name
+'*.tmp' -delete`) when every `-delete` follows the test in a plain AND (no
+`!`, `-not`, `-o`, `,` or parenthesis), the pattern is passed exactly as
+written (quoted, no backslash or bracket), and the classifier's own matcher
+shows it can match no organ directory, no guarded name (`APPROVAL.md`,
+`CLAUDE.md`, `auth.json`, `.env`, ...), no `.git`, no part of a protected
+path and (unless it is exactly `*.<letters or digits>`, by the ruling) no
+guarded prefix (`settings*`, `.env.*`, `vault*`, `hooks*`); `-path`,
+`-regex`, `-type` or `-empty` alone narrow nothing. Nothing is released:
+`mkdir .` and `touch .` never reach the folders below. Names compare through
+#688's fold in the folded reading and exactly as spelled in the other, so a
+listed `.Claude` is `policy.core` with the segment's own class beside. A
+chmod mode that starts with `-` (`chmod -R -w .`) is the mode, not an
+option. A brace word is judged word by word (`rm -rf {../proj,x}` is `rm -rf
+../proj x`); past 64 words, one with a `.`, `~`, `/`, `$` or backtick is
+`policy.core`. Lead ruling L62435 (S2, narrow): after a `cd`, `chdir` or
+`pushd` to `..`, `/`, `~`, `$HOME`, `"$PWD/.."`, the home (no target) or an
+absolute directory above the working directory, a plain relative name of the
+rule's verbs (`cd .. && rm -rf proj`, `(cd .. && rm -rf proj)`) is
+`policy.core`; with the token `CDPATH` anywhere on the line, so is one after
+a `cd` to any target not led by `/`, `./` or `../`. `cd build && rm -rf
+out` keeps main's class. Words the text cannot read (lead ruling L62435,
+which reverses the earlier answer for an ordinary variable): an ordinary
+variable (`$X`, `"$OUT"`, `${X}`, `$1`, `$@`, `${X:-dist}`) places as a
+parent only where its readable part proves it may be one: below `..`, `~`,
+`/`, `$PWD/..`, or (by the hook's disk) an absolute directory above the
+working directory or the home (`rm -rf ../$X`, `~/$X`, `/$X` are
+`policy.core`); alone, below the working directory (`./$X`,
+`scripts/$NAME`) or below a directory that holds neither (`/tmp/$name`,
+`/private/tmp/$SESSION`) it keeps main's class, so `chmod +x "$f"` and `rm
+-rf $BUILD_DIR` answer as on main. A variable the line itself sets is read
+as each value it is given (`X=. ; rm -rf $X` is `policy.core`; `printf -v`
+with a plain format too; one `read` or `mapfile` binds is strict).
+`$PWD`, `$OLDPWD`, `$HOME`, `$CLAUDE_PROJECT_DIR`, `$INIT_CWD`, `$(pwd)`,
+any other `$(...)`, an operator expansion (`${PWD%/*}`, `${X:-.}`), `~user`,
+`~+` and `~-` stay strict, as does a word a later `..` removes
+(`$(echo sub)/..`, `$X/a/../..`). Where Claude Code's envelope names a
+session directory other than the hook's own (a `cd` in an earlier call), the
+hook lists from it too and a word is placed from both, a parent from either
+being a parent, so `rm -rf /tmp/x` and `rm -rf ../plain` keep main's class.
+Fail closed, `policy.core`: no listing (every caller but the hook), a
+directory over the listing's 2,000-entry cap, unreadable, or missing where
+an earlier segment of the line may make it, a relative or absolute parent
+spelling on a line that may change directory (as opposed to the narrow `cd`
+rule above) or that names `HOME`, and a chain of more than 8 directories to
+list. Not a parent, and unchanged: `rm -rf ./dist`, `rm -rf "$TMPDIR"/x`,
+`rm -rf $TARGET/x`, `rm -rf $X/dist`. `mv .`, `mv ./` and `mv sub/..` move
+nothing (rename(2) refuses them) and keep their class; `rm -rf $(builtin
+pwd)` and `$(command pwd)` stay refused, as on main. Not covered (follow-up;
+each equal on main): a symlink name inside the workspace that points at a
+parent (`rm -rf uplink/`), a glob after a parent (`rm -rf ../pr*`), the
+wide `cd` case (a `cd` into a name or an unreadable target, then a plain
+name: `cd "$DIR" && rm -rf x`; a parent spelled after any `cd`, `cd sub &&
+rm -rf ..`, is covered), a `CDPATH` set only in the environment, an ordinary variable whose value (set in an earlier call) is a
+parent, organ directories nested below a subdirectory (`rm -rf packages`
+holding `packages/a/.claude`), an unguarded file inside an organ folder a
+narrowed `find` reaches (`find . -name '*.tmp' -delete` and
+`.claude/x.tmp`), `rsync`'s `-e`/`--rsync-path` value (a command on the
+receiving side), an absolute path for a caller with no listing, `rmdir .`,
+`chown`/`chgrp` (refused), and organ directories in a sibling tree under an
 ancestor (`rm -rf ..` lists only the chain to the working directory and the
 home). On macOS (and GNU) `rm -rf .`, `./`, `..` and `sub/..` refuse to run;
 they are judged by the rule anyway, as the ruling says.
