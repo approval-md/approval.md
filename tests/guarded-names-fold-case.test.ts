@@ -1919,12 +1919,21 @@ test("a copy that writes a credential path reports the class that write takes (t
 test("a copy into a credential path keeps every class main gave it, and the forms that already reached the class are unmoved", () => {
   for (const [line, want] of [
     // Which word is written is unknown (a word the shell may turn into an
-    // option, an option the table does not know): main's answer, the
-    // copy-unknown class beside the credential.
+    // option, an option the table does not know): main's whole answer, in
+    // main's order, and the class of each credential path it may write ADDED
+    // after it, fail closed. Nothing main reports is deferred or lost.
+    ["cp --frob README.md .approval/env", [CRED, "policy.core protected-path"]],
+    ["rsync --some-new-flag README.md .approval/env", [CRED, "policy.core protected-path"]],
+    // (policy.core is there already, as the copy-unknown class: one entry per class.)
     ["cp $X .approval/env", [CRED, UNKNOWN]],
     ["cp ~/.hermes/.env $X", [CRED, UNKNOWN]],
     ["cp ~/.hermes/.env ${X:-.github/workflows/ci.yml}", [CRED, UNKNOWN, "policy.edit.ci protected-path"]],
-    ["cp --frob README.md .approval/env", [CRED]],
+    // install refuses an option it does not know: the refusal stays.
+    ["install -Z README.md .approval/env", ["refused unclassified"]],
+    // A credential SOURCE behind an unreadable argv may be a destination too:
+    // the fail-closed answer. With a readable argv the source is the read.
+    ["cp --frob .approval/env notes.txt", [CRED, "policy.core protected-path"]],
+    ["cp .approval/env notes.txt", [CRED]],
     // A `-t` destination that is the credential path: main gave the
     // credential and policy.core; now the write first.
     ["cp -t .approval/env notes.txt", ["policy.core protected-path", CRED]],
@@ -1942,7 +1951,7 @@ test("a copy into a credential path keeps every class main gave it, and the form
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
   }
   // Main's classes, as sets, are all still there.
-  for (const line of ["cp $X .approval/env", "cp -t .approval/env notes.txt"]) {
+  for (const line of ["cp $X .approval/env", "cp -t .approval/env notes.txt", "cp ~/.hermes/.env ${X:-.github/workflows/ci.yml}", "cp --frob README.md .approval/env"]) {
     const main = new Set(spelledPure(line, TWO_ROUTES).map((entry) => entry.split(" ")[0]));
     const head = new Set(pure(line, TWO_ROUTES).map((entry) => entry.split(" ")[0]));
     for (const cls of main) assert.ok(head.has(cls), `${line}: ${cls}`);

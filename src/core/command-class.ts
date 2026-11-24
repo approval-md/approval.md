@@ -8560,19 +8560,35 @@ function credentialSideScan(
 interface CredentialWrites {
   words: ReadonlySet<string>;
   landings: readonly string[];
+  /**
+   * Where the argv cannot be read (an option the table does not know, a word
+   * the shell may still turn into an option): every credential path among
+   * the operands and option values may be a destination. These are not taken
+   * out of the read and defer nothing; their protected class is ADDED beside
+   * the answer main gives (fail closed, never lighter).
+   */
+  possible: readonly string[];
 }
 
-const NO_CREDENTIAL_WRITES: CredentialWrites = { words: new Set(), landings: [] };
+const NO_CREDENTIAL_WRITES: CredentialWrites = { words: new Set(), landings: [], possible: [] };
 
 function credentialWrites(basename: string, args: readonly string[], flags: readonly ArgExpansion[]): CredentialWrites {
-  if (COPY_OPTION_TABLES[basename] === undefined || copyArgvUnknown(args, flags) !== null) return NO_CREDENTIAL_WRITES;
+  if (COPY_OPTION_TABLES[basename] === undefined) return NO_CREDENTIAL_WRITES;
   const plan = copyPlan(basename, args);
   // A word the shell may still turn into an option (`cp $X .approval/env`:
   // the copy family's own test, {@link copyArgvUnknown}), or an option the
-  // table does not know, makes every operand a destination and a source
-  // alike: which word is written is unknown, and the line keeps main's answer
-  // (the copy-unknown class beside the credential).
-  if (plan === null || plan.unknown !== null || plan.dests.length === 0) return NO_CREDENTIAL_WRITES;
+  // table does not know (`cp --frob README.md .approval/env`), makes every
+  // operand a destination and a source alike: which word is written is
+  // unknown. Every credential path among the words may be written, so its
+  // class is ADDED to main's whole answer (`possible`), never deferring it.
+  if (plan === null || plan.unknown !== null || copyArgvUnknown(args, flags) !== null) {
+    const possible = args.flatMap((arg) => {
+      const equals = arg.indexOf("=");
+      return [arg, ...(equals === -1 ? [] : [arg.slice(equals + 1)])].filter((word) => isCredentialPathAsRead(word));
+    });
+    return possible.length === 0 ? NO_CREDENTIAL_WRITES : { words: new Set(), landings: [], possible };
+  }
+  if (plan.dests.length === 0) return NO_CREDENTIAL_WRITES;
   const words = new Set(plan.dests.filter((dest) => isCredentialPathAsRead(dest)));
   // A landing is read only between words the text settles: `cp ~/.hermes/.env
   // $X` lands nowhere this text can name (the copy-unknown class says so).
@@ -8587,7 +8603,7 @@ function credentialWrites(basename: string, args: readonly string[], flags: read
       if (isCredentialPathAsRead(landing)) landings.push(landing);
     }
   }
-  return words.size === 0 && landings.length === 0 ? NO_CREDENTIAL_WRITES : { words, landings };
+  return words.size === 0 && landings.length === 0 ? NO_CREDENTIAL_WRITES : { words, landings, possible: [] };
 }
 
 interface CredentialSideScan {
@@ -11930,21 +11946,40 @@ function classifySegmentWithVerb(
       return besideProtected(answered.class, named, "protected-path", unknown).more ?? [];
     });
     if (refused.outcome !== undefined) return refused.outcome;
-    return { ok: true, ...answered, ...(more.length === 0 ? {} : { more: [...more] }) };
+    return addPossible({ ok: true, ...answered, ...(more.length === 0 ? {} : { more: [...more] }) });
   }
   // A copy that writes a credential path defers the credential answer as any
   // outranking path does; where the walk then answers by a branch that does
   // not carry the credential touch beside it (`cp -t .approval/env notes.txt`,
   // `cp $X .approval/env`), it is carried here, so the line keeps every class
   // main gave it.
-  if (copyWrites !== NO_CREDENTIAL_WRITES && outranking !== null) {
+  if ((copyWrites.words.size > 0 || copyWrites.landings.length > 0) && outranking !== null) {
     const walked = restOfWalk();
     const touch = credential ?? redirectCredential;
     if (!walked.ok || touch === null || walked.also !== undefined) return walked;
     const carried = walked.class === touch.class || (walked.more ?? []).some((entry) => entry.class === touch.class);
     return carried ? walked : { ...walked, also: touch };
   }
-  return restOfWalk();
+  return addPossible(restOfWalk());
+
+  /**
+   * The answer with the protected class of each credential path an
+   * unreadable copy may write ({@link CredentialWrites.possible}) added after
+   * every class it already reports, one entry per class. A refusal stays.
+   */
+  function addPossible(outcome: SegmentOutcome): SegmentOutcome {
+    if (copyWrites.possible.length === 0 || !outcome.ok) return outcome;
+    const hit = strictestProtected(copyWrites.possible, protectedPaths);
+    if (hit === null) return outcome;
+    const have = new Set([outcome.class, ...(outcome.also === undefined ? [] : [outcome.also.class]), ...(outcome.more ?? []).map((entry) => entry.class)]);
+    const added: ProtectedBeside[] = [];
+    for (const each of [hit, ...hit.others]) {
+      if (have.has(each.surface)) continue;
+      have.add(each.surface);
+      added.push({ class: each.surface, rule: "protected-path", path: each.path });
+    }
+    return added.length === 0 ? outcome : { ...outcome, more: [...(outcome.more ?? []), ...added] };
+  }
 
   /**
    * The walk from the credential tier on. Its body keeps the indentation it

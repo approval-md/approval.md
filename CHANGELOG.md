@@ -568,8 +568,11 @@ other segments, and the hook judges each.
   credential class and answers first, with the credential touch beside it,
   as for any outranking path (`cp .approval/env APPROVAL.md`). A source
   that lands at a credential path counts the same way. Where the table
-  cannot read the argv (an option it does not know, `cp $X .approval/env`)
-  the line answers as before. So under a policy
+  cannot read the argv (an option it does not know, `cp --frob README.md
+  .approval/env`, or a word the shell may still turn into one), every
+  credential path among the words may be written: the line keeps its whole
+  answer and that path's class is added after it (a credential source there,
+  `cp --frob .approval/env notes.txt`, gains it too). So under a policy
   that runs `account.credential` more lightly than `policy.core`, such a
   copy now also waits on `policy.core`. A credential source is still the
   read (`cp .approval/env notes.txt` is the credential class alone), and
