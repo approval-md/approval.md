@@ -78,7 +78,7 @@ import {
   policyBytesHash,
   resolveHumanActor,
 } from "../core/attest.js";
-import { settleTerminationGuards } from "../core/log-lock.js";
+import { settleTerminationGuards, yieldToTerminationSignals } from "../core/log-lock.js";
 import { compareChains } from "../core/log-reconcile.js";
 import { diffPolicies, renderDiff, SPEC_NAMESPACES, type PolicyDiff } from "../core/policy-diff.js";
 import {
@@ -178,15 +178,26 @@ const DEFAULT_ATTESTATION_INTERVAL_MS = 2000;
 const AGENT_ACTOR = /^agent:.+/u;
 
 /**
- * Synchronous sleep with no dependency and no busy-spin (as `cli/execute.ts`).
- * The poll follows this verb's own append, so the log lock's signal guard is
- * settled first: Ctrl-C or a supervisor's SIGTERM during the wait ends the
- * process at once (APRV-479, S2).
+ * The agent path's pause: turn the event loop, settle the log lock's signal
+ * guard, then sleep `ms` on a timer.
+ *
+ * Called once right after the `policy.proposed` append and before each poll's
+ * sleep. A SIGTERM, SIGINT or SIGHUP that landed while that append held the log
+ * lock was caught by the lock's guard, and Node shows it to JavaScript only when
+ * the loop turns; the turn here dispatches it, and the process dies of it with
+ * the signal's own status before the wait begins. The old synchronous sleep
+ * settled the guard without that turn and dropped the signal, so the verb slept
+ * out its whole `--wait`. After the turn no guard is left, the sleep is a timer
+ * under the default disposition, and a signal during the wait ends the process
+ * at once (APRV-479, S2).
  */
-function sleepSync(ms: number): void {
+async function pauseForSignals(ms: number): Promise<void> {
+  await yieldToTerminationSignals();
   settleTerminationGuards();
   if (ms <= 0) return;
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 /** Machine-readable refusal codes. Frozen public API, printed in the help. */
@@ -1157,7 +1168,7 @@ function channelConfigured(load: PolicyLoadResult): boolean {
  * listener is configured with — the same identity, from the same configuration,
  * that every grant already lands under (SPEC.md §11, unchanged).
  */
-function collectAttestation(input: CollectInput): CollectedAttestation | CollectRefusal {
+async function collectAttestation(input: CollectInput): Promise<CollectedAttestation | CollectRefusal> {
   const { streams, json, st, logPath, policyPath, cwd } = input;
 
   if (!channelConfigured(input.liveLoad)) {
@@ -1182,6 +1193,9 @@ function collectAttestation(input: CollectInput): CollectedAttestation | Collect
     },
     input.actor,
   );
+  // The append is over and the lock released: a stop request that landed during
+  // it ends the process here, before anything waits (see `pauseForSignals`).
+  await pauseForSignals(0);
   if (!proposed.ok) {
     // A gate refusal, so exit 1 rather than 4: the command was well-formed and
     // the runtime said no. `diff-too-large` is the one a caller acts on — read
@@ -1283,12 +1297,17 @@ function collectAttestation(input: CollectInput): CollectedAttestation | Collect
       };
     }
 
-    sleepSync(Math.min(input.intervalMs, Math.max(0, deadline - Date.now())));
+    await pauseForSignals(Math.min(input.intervalMs, Math.max(0, deadline - Date.now())));
   }
 }
 
-/** `approval policy amend …` — the whole ceremony, in one verb. */
-export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string): number {
+/**
+ * `approval policy amend …` — the whole ceremony, in one verb.
+ *
+ * Asynchronous for one reason: the agent path's wait turns the event loop
+ * (`pauseForSignals`). Everything else runs synchronously, as it always has.
+ */
+export async function commandPolicyAmend(argv: string[], streams: Streams, cwd: string): Promise<number> {
   const json = argv.includes("--json");
   // Asked BEFORE anything is printed, which is what makes `--json` an absolute
   // veto on colour for this process (see `style.ts`'s header).
@@ -2040,7 +2059,7 @@ export function commandPolicyAmend(argv: string[], streams: Streams, cwd: string
     }
     seq = result.record.seq;
   } else {
-    const asked = collectAttestation({
+    const asked = await collectAttestation({
       streams,
       json,
       st,

@@ -458,7 +458,11 @@ function block(text: string, marker: string): string[] {
   return text.split("\n").map((line) => `${marker} ${line}`);
 }
 
-export function commandPolicyApply(argv: string[], streams: Streams, cwd: string): number {
+/**
+ * `approval policy apply …`. Asynchronous only because it ends in
+ * {@link commandPolicyAmend}, which is.
+ */
+export async function commandPolicyApply(argv: string[], streams: Streams, cwd: string): Promise<number> {
   const parsed = parseFlags(argv, FLAGS);
   if (!parsed.ok) return usageRefusal(streams, wantsJson(argv), parsed.message);
   const json = boolFlag(parsed.flags, "--json");
@@ -692,7 +696,7 @@ export function commandPolicyApply(argv: string[], streams: Streams, cwd: string
     // this verb's own argv is now a no-op that changes nothing.
     ...(noPublish ? ["--no-publish"] : ["--pr"]),
   ];
-  const code = commandPolicyAmend(amendArgv, streams, cwd);
+  const code = await commandPolicyAmend(amendArgv, streams, cwd);
   if (code !== EXIT_OK) {
     // The write happened and the amendment did not. Said plainly, on stderr,
     // because the operator is now holding an edited policy no attestation
