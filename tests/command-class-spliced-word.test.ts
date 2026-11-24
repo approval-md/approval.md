@@ -109,6 +109,14 @@ test("the edge: a word whose guarded reading needs no literal text keeps main's 
     "echo x > out-$$.txt",
     "echo x > 'APPROVAL$E.md'", // single-quoted: a file named so, no expansion
     "echo x > APPROVAL\\$E.md",
+    // Dots alone are no literal text: they name nothing.
+    "echo x > \"${name}.${ext}\"",
+    "echo x > .$X",
+    // A part read as holding a `/` puts an unread directory before the tail,
+    // read as `$D/tail` is (here `.g…/…/hermes-agent/config`).
+    "echo x >> .g$(printf it)/config",
+    // A part inside a brace group is read within it.
+    "echo x >> .g{x,$(printf it)}/config",
   ]) {
     assert.deepEqual(classesOf(command), mainClasses(command), command);
   }
