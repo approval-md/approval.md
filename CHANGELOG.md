@@ -252,7 +252,13 @@ L62013: a parent takes the classes of every organ folder it holds, each by
 the folder rule (the folder's contents and the policy's routed entries under
 it included: `rm -rf .` holding `.github` is `policy.edit` and
 `policy.edit.ci` where `.github/workflows/` is routed there, holding
-`.approval` it carries `log.mutate`). Besides `rm -r`, `mv` and `chmod`, the
+`.approval` it carries `log.mutate`). Lead ruling L62483: every guarded
+target below the parent is counted, never only the first or the strictest:
+`.git` beside an organ directory adds `vcs.history.rewrite`, a word that
+cannot be placed (`cd .. && rm -rf proj`, `"$PWD"` on a line that moves a
+directory) carries what the working directory, the session's directory and
+the home hold beside `policy.core`, and `mv "$PWD" /tmp/x` carries them
+beside its own `policy.core`. Besides `rm -r`, `mv` and `chmod`, the
 tools that delete what they read or find count, fail closed: `find P` with
 `-exec` or `-delete` (`find . -delete`, `find . -type f -delete`), `git rm -r`
 (not `--cached`), `tar` with `--remove-files` (any unique prefix) or
