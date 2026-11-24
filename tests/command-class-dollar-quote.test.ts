@@ -22,6 +22,7 @@ import { test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand, classifyCommandWithDollarQuotesKept } from "../src/core/command-class.js";
+import { cpuSeconds, runner, scaledBound } from "./cost-runner.js";
 
 function classesOf(command: string): string[] {
   const result = classifyCommand(command, []);
@@ -179,6 +180,36 @@ test("through the hook: the policy file spelled as a dollar quote is not a works
     }
     const read = classifyForHook("cat $'.approval/\\x65nv'", [], cwd);
     assert.ok(read.result.ok && read.result.classes.includes("account.credential"));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("cost: 100 KB of dollar quotes is read in time; past the bound the rest of the word is unknown", () => {
+  // Measured on a laptop, best of five, through the hook: 0.12 s for each of these
+  // (main 0.02 to 0.05 s); 4.7 s for the unread word with the bound removed.
+  // CPU seconds, stretched by this runner's measured factor (`tests/cost-runner.ts`).
+  const cwd = mkdtempSync(join(tmpdir(), "approval-md-dollar-quote-cost-"));
+  try {
+    const bound = scaledBound(1);
+    for (const [label, command] of [
+      ["one word of quotes", `cp a ${"$'\\x41'".repeat(14_000)}`],
+      ["one quote of escapes", `cp a $'${"\\x41".repeat(24_000)}'`],
+      ["one quote of unread escapes", `cp a $'${"a\\q".repeat(33_000)}'`],
+      ["3,000 words", `echo ${Array.from({ length: 3000 }, (_, i) => `$'w\\x41${String(i)}'`).join(" ")} > out.txt`],
+    ] as const) {
+      assert.ok(command.length <= 100_000, label);
+      let classes: string[] = [];
+      const seconds = cpuSeconds(() => {
+        const result = classifyForHook(command, [], cwd).result;
+        classes = result.ok ? result.classes : [];
+      });
+      assert.ok(seconds < bound, `${label}: ${seconds.toFixed(3)} CPU s, bound ${bound.toFixed(2)} (${runner().line})`);
+      assert.ok(classes.length > 0, label);
+    }
+    // Past the bound the word is unknown: a copy to it keeps the fail-closed class.
+    const many = `cp notes.txt $'${"\\q".repeat(40)}APPROVAL.md'`;
+    assert.ok(classesOf(many).includes("policy.core"));
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

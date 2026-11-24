@@ -2388,6 +2388,7 @@ function lex(command: string): LexResult {
     const start = index;
     // Where a dollar quote ended the word's text (`endsWord`, see `readDollarQuoted`).
     let cut: number | null = null;
+    let unreadParts = 0;
 
     for (; index < command.length; index += 1) {
       const ch = command[index] as string;
@@ -2473,7 +2474,9 @@ function lex(command: string): LexResult {
           if (scan === null) return null;
           text += scan.text;
           if (scan.unread) splits = true;
-          if (scan.endsWord && cut === null) cut = text.length;
+          unreadParts += scan.unreadParts;
+          if (unreadParts > DOLLAR_QUOTE_UNREAD_CAP && !text.endsWith(SUBSTITUTION_SENTINEL)) text += SUBSTITUTION_SENTINEL;
+          if ((scan.endsWord || unreadParts > DOLLAR_QUOTE_UNREAD_CAP) && cut === null) cut = text.length;
           quoted = true;
           exact = false;
           index = scan.end;
@@ -5773,6 +5776,13 @@ function ansiCQuoteEnd(command: string, open: number): number | null {
   return close < command.length ? close : null;
 }
 
+/**
+ * Most unread parts one word's dollar quotes may hold before the rest of the
+ * word is unknown (`endsWord`): each stands in the text as a placeholder, and
+ * a word of thousands of them made every later reader pay for each.
+ */
+const DOLLAR_QUOTE_UNREAD_CAP = 32;
+
 /** The letter escapes bash and zsh decode alike inside `$'…'` (measured on bash 3.2 and zsh 5.9). */
 const ANSI_C_SHARED_LETTERS = new Set(["a", "b", "e", "E", "f", "n", "r", "t", "v", "\\", "'", '"', "?"]);
 
@@ -5799,20 +5809,27 @@ const ANSI_C_SHARED_LETTERS = new Set(["a", "b", "e", "E", "f", "n", "r", "t", "
  *   path ends there, so the rest of the WORD is unknown (`endsWord`: the
  *   caller drops whatever the word holds after this string).
  *
+ * Past {@link DOLLAR_QUOTE_UNREAD_CAP} unread parts (`unreadParts` counts
+ * them) the rest of the word is unknown too.
+ *
  * `null` when the quote does not close (the line is unparseable). Linear in
  * the body: each escape is read once.
  */
 function readDollarQuoted(
   command: string,
   open: number,
-): { text: string; end: number; unread: boolean; endsWord: boolean } | null {
+): { text: string; end: number; unread: boolean; endsWord: boolean; unreadParts: number } | null {
   const close = ansiCQuoteEnd(command, open);
   if (close === null) return null;
   let text = "";
   let unread = false;
   let endsWord = false;
+  let unreadParts = 0;
   const unknown = (): void => {
-    if (!text.endsWith(SUBSTITUTION_SENTINEL)) text += SUBSTITUTION_SENTINEL;
+    if (!text.endsWith(SUBSTITUTION_SENTINEL)) {
+      text += SUBSTITUTION_SENTINEL;
+      unreadParts += 1;
+    }
     unread = true;
   };
   const hexRun = (from: number, most: number): number => {
@@ -5842,7 +5859,7 @@ function readDollarQuoted(
       // after a NUL. Any other letter or sign is the backslash and itself to
       // bash, itself alone to zsh.
       unknown();
-      if (/[cCMUux]/u.test(next)) {
+      if (/[cCMUux]/u.test(next) || unreadParts > DOLLAR_QUOTE_UNREAD_CAP) {
         endsWord = true;
         break;
       }
@@ -5861,11 +5878,15 @@ function readDollarQuoted(
     }
     if ((decoded.codePointAt(0) ?? 0) > 0x7f) {
       unknown();
+      if (unreadParts > DOLLAR_QUOTE_UNREAD_CAP) {
+        endsWord = true;
+        break;
+      }
       continue;
     }
     text += decoded;
   }
-  return { text, end: close, unread, endsWord };
+  return { text, end: close, unread, endsWord, unreadParts };
 }
 
 /**
