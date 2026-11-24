@@ -242,8 +242,12 @@ function runVerb(argv: string[], streams: Streams, cwd: string, helpText: string
   return EXIT_OK;
 }
 
-/** `approval policy …` — dispatch to `check` / `test`, or print the help. */
-export function commandPolicy(argv: string[], streams: Streams, cwd: string): number {
+/**
+ * `approval policy …` — dispatch to `check` / `test`, or print the help.
+ * Asynchronous because `amend` and `apply` are (the agent path's wait turns
+ * the event loop; `cli/amend.ts`, `pauseForSignals`).
+ */
+export async function commandPolicy(argv: string[], streams: Streams, cwd: string): Promise<number> {
   const sub = argv[0];
   const rest = argv.slice(1);
 
