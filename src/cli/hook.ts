@@ -215,6 +215,7 @@ import {
   TREE_AT_A_CHECKOUT_IS_GUARDED,
   guardedEntryBelow,
   guardedEntryOf,
+  HOOK_SCRIPT_ENTRY,
   isInWriteScope,
   WRITE_GUARDED_CLASS,
   WRITE_OUT_OF_SCOPE_CLASS,
@@ -241,6 +242,7 @@ import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
 import { expandOnDisk, refineGitDirWrites } from "./git-dir-writes.js";
 import { refinePushRepo } from "./push-repo.js";
+import { jsonStringLeaves, readJsonDocument } from "./settings-json.js";
 import { HOOK_GROK_HELP, HOOK_HELP, HOOK_HERMES_HELP, HOOK_MUSE_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
@@ -3890,6 +3892,12 @@ export interface WriteScopeContext {
   optedIn: boolean;
   /** The effective write roots, resolved. Read only when `optedIn`. */
   roots: readonly string[];
+  /**
+   * The gate root (the loaded policy's own directory), whatever the opt-in:
+   * where `<gate root>/.claude/settings*.json` is read for the hook scripts it
+   * names, and what `$CLAUDE_PROJECT_DIR` in a hook command means (S2).
+   */
+  gateRoot?: string | undefined;
 }
 
 /** A policy that does not opt in, or no policy at all: the list and unreadable targets only. */
@@ -3905,7 +3913,7 @@ export function resolveWriteScope(
   gateRoot: string,
   policy: Policy | null,
 ): WriteScopeContext {
-  if (policy === null || !writeScopeOptedIn(policy)) return WRITE_SCOPE_OFF;
+  if (policy === null || !writeScopeOptedIn(policy)) return { ...WRITE_SCOPE_OFF, gateRoot };
   const roots = effectiveWriteRoots({
     gateRoot: resolvedPath(gateRoot) ?? gateRoot,
     systemRoots: resolveScratchRoots(cwd),
@@ -3915,7 +3923,7 @@ export function resolveWriteScope(
   for (const root of roots) {
     for (const each of [root, resolvedPath(root) ?? root]) if (!out.includes(each)) out.push(each);
   }
-  return { optedIn: true, roots: out };
+  return { optedIn: true, roots: out, gateRoot };
 }
 
 /** The rule an entry for a write onto the guarded list reports. */
@@ -3965,11 +3973,116 @@ function givenAndResolved(path: string | undefined): string[] {
 export interface LandingGuard {
   homes: readonly string[];
   configDirs: readonly string[];
+  /** The hook scripts the settings name, folded path keys ({@link foldedPathKey}); read on first call. */
+  hookScripts: () => ReadonlySet<string>;
 }
 
-/** The guard this hook's own environment gives. */
-function currentGuard(env: NodeJS.ProcessEnv = process.env): LandingGuard {
-  return { homes: currentHomes(env), configDirs: currentConfigDirs(env) };
+/** The guard this hook's own environment gives, with the gate root the policy was loaded from. */
+function currentGuard(env: NodeJS.ProcessEnv = process.env, gateRoot?: string): LandingGuard {
+  const homes = currentHomes(env);
+  const configDirs = currentConfigDirs(env);
+  const home = homes[0] ?? null;
+  return { homes, configDirs, hookScripts: () => namedHookScripts(home, configDirs, gateRoot ?? null) };
+}
+
+/** A path as one key, each segment folded ({@link foldFileName}): how two spellings of one file compare. */
+function foldedPathKey(path: string): string {
+  return `/${path.split("/").filter((part) => part.length > 0 && part !== ".").map(foldFileName).join("/")}`;
+}
+
+// ---------------------------------------------------------------------------
+// S2: the hook scripts the settings name
+// ---------------------------------------------------------------------------
+
+/** The settings files read in each folder (Claude Code's user and local ones). */
+const HOOK_SETTINGS_FILES: readonly string[] = ["settings.json", "settings.local.json"];
+
+/** A settings file larger than this is not read (S2): the landing keeps the answer it had. */
+export const HOOK_SETTINGS_MAX_BYTES = 1024 * 1024;
+
+/**
+ * The top-level keys whose string leaves are commands Claude Code runs later
+ * without being asked: every hook command, and the status line. The helper
+ * keys beside them run a command too (an API key, AWS or OpenTelemetry
+ * header helper), so a script they name is guarded the same way.
+ */
+const HOOK_SETTINGS_COMMAND_KEYS: readonly string[] = ["hooks", "statusLine", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper"];
+
+/** Once per hook process for each set of folders: the settings do not change under one judgement. */
+const namedHookScriptsMemo = new Map<string, ReadonlySet<string>>();
+
+/** How many settings files {@link namedHookScripts} has tried to read in this process (read by the tests: the read is lazy and once). */
+export const hookSettingsReads = { count: 0 };
+
+/**
+ * Every file a settings file names as a hook command (lead, CLAIMS L62289,
+ * S2), as folded path keys, as given and as resolved. The settings read are
+ * `settings.json` and `settings.local.json` in `~/.claude`, in the folder
+ * `CLAUDE_CONFIG_DIR` names, and in `<gate root>/.claude`. Lazy: called only
+ * when a landing is judged and is not guarded already, and read at most once
+ * per hook process for the same folders. A file over
+ * {@link HOOK_SETTINGS_MAX_BYTES}, not a regular file, or not JSON is
+ * skipped, and that is not an error. No directory is walked. Nothing read is
+ * logged or printed.
+ *
+ * A word of a command is a path when it starts with `/`, `~/`, `$HOME/`,
+ * `${HOME}/` or `$CLAUDE_PROJECT_DIR/` (`${CLAUDE_PROJECT_DIR}/`), quotes
+ * removed: `~` and `$HOME` are this hook's HOME, `$CLAUDE_PROJECT_DIR` the
+ * gate root. The file itself is guarded, not its folder. A path under `/dev`
+ * is not taken.
+ */
+export function namedHookScripts(home: string | null, configDirs: readonly string[], gateRoot: string | null): ReadonlySet<string> {
+  const folders: string[] = [];
+  if (home !== null) folders.push(join(home, ".claude"));
+  for (const dir of configDirs) folders.push(dir);
+  if (gateRoot !== null && isAbsolute(gateRoot)) folders.push(join(gateRoot, ".claude"));
+  const unique = [...new Set(folders)];
+  const key = JSON.stringify([home, gateRoot, unique]);
+  const known = namedHookScriptsMemo.get(key);
+  if (known !== undefined) return known;
+  const scripts = new Set<string>();
+  for (const folder of unique) {
+    for (const name of HOOK_SETTINGS_FILES) {
+      hookSettingsReads.count += 1;
+      const document = readJsonDocument(join(folder, name), { maxBytes: HOOK_SETTINGS_MAX_BYTES });
+      if (document === null || typeof document.value !== "object" || document.value === null || Array.isArray(document.value)) continue;
+      const settings = document.value as Record<string, unknown>;
+      for (const commandKey of HOOK_SETTINGS_COMMAND_KEYS) {
+        if (!Object.prototype.hasOwnProperty.call(settings, commandKey)) continue;
+        for (const command of jsonStringLeaves(settings[commandKey])) {
+          for (const path of hookCommandPaths(command, home, gateRoot)) {
+            scripts.add(foldedPathKey(path));
+            const resolved = resolvedPath(path);
+            if (resolved !== null) scripts.add(foldedPathKey(resolved));
+          }
+        }
+      }
+    }
+  }
+  namedHookScriptsMemo.set(key, scripts);
+  return scripts;
+}
+
+/** The words of one hook command that are paths, expanded and `..`-collapsed (see {@link namedHookScripts}). */
+function hookCommandPaths(command: string, home: string | null, gateRoot: string | null): string[] {
+  const out: string[] = [];
+  for (const raw of command.split(/[\s;&|()<>`]+/u)) {
+    const word = raw.replace(/["']/gu, "");
+    let path: string | null = null;
+    if (word.startsWith("/")) path = word;
+    else if (home !== null && word.startsWith("~/")) path = `${home}${word.slice(1)}`;
+    else if (home !== null && word.startsWith("$HOME/")) path = `${home}${word.slice("$HOME".length)}`;
+    else if (home !== null && word.startsWith("${HOME}/")) path = `${home}${word.slice("${HOME}".length)}`;
+    else if (gateRoot !== null && word.startsWith("$CLAUDE_PROJECT_DIR/")) path = `${gateRoot}${word.slice("$CLAUDE_PROJECT_DIR".length)}`;
+    else if (gateRoot !== null && word.startsWith("${CLAUDE_PROJECT_DIR}/")) path = `${gateRoot}${word.slice("${CLAUDE_PROJECT_DIR}".length)}`;
+    if (path === null || !isAbsolute(path)) continue;
+    const normal = resolvePathSegments(path);
+    // A device (`2>/dev/null`, `>/dev/stderr`) is no script, and guarding it
+    // would make `tee /dev/null` a card.
+    if (normal === "/dev" || normal.startsWith("/dev/")) continue;
+    out.push(normal);
+  }
+  return out;
 }
 
 /** Where one write lands, as {@link judgeWriteLanding} reads it. */
@@ -3991,7 +4104,7 @@ export type WriteLanding =
 export function judgeWriteLanding(
   spelled: string,
   scope: WriteScopeContext,
-  guard: LandingGuard = currentGuard(),
+  guard: LandingGuard = currentGuard(process.env, scope.gateRoot),
   tree: boolean | "listed" = false,
 ): WriteLanding {
   const { homes, configDirs } = guard;
@@ -4015,6 +4128,16 @@ export function judgeWriteLanding(
     const entry = guardedEntryOf(form, homes, configDirs);
     if (entry !== null) {
       return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `${form} is on the guarded list (${entry})` };
+    }
+  }
+  // S2: a file a settings file names as a hook command, read only now, when
+  // nothing above has guarded the landing.
+  const scripts = guard.hookScripts();
+  if (scripts.size > 0) {
+    for (const form of forms) {
+      if (scripts.has(foldedPathKey(form))) {
+        return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `${form} is on the guarded list (${HOOK_SCRIPT_ENTRY})` };
+      }
     }
   }
   // A TREE written at the landing (a recursive copy, a move, a link, an
@@ -4544,7 +4667,7 @@ export function refineWriteLandings(
   });
   const units: Unit[] = primary.flatMap(({ shape, unreadable }, hostIndex) => withSubstitutions(shape, shape, hostIndex, 0, unreadable));
   const shapes = units.map((unit) => unit.shape);
-  const guard = currentGuard(env);
+  const guard = currentGuard(env, scope.gateRoot);
   // One disk reading per spelling per line (a cost bound: the disk does not
   // change within the pass, and a line names the same target many times).
   const landingMemo = new Map<string, { paths: string[]; unknown: boolean }>();

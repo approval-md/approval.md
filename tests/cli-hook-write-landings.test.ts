@@ -35,7 +35,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { classifyForHook, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, type WriteScopeContext } from "../src/cli/hook.js";
+import { classifyForHook, hookSettingsReads, HOOK_SETTINGS_MAX_BYTES, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, type WriteScopeContext } from "../src/cli/hook.js";
 import { commandGate } from "../src/cli/gate-window.js";
 import type { Streams } from "../src/cli/main.js";
 import type { Prompter, SecretRead } from "../src/cli/prompt.js";
@@ -1249,4 +1249,174 @@ test("S2.1 through the real hook: Bash and the file tools onto a config folder a
   // The variable unset in the hook: the folder it named is an ordinary place.
   const unset = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Write", { file_path: join(ccReal, "settings.json"), content: "x" }), { CLAUDE_CONFIG_DIR: undefined }));
   assert.equal(unset.permission, "allow", unset.reason);
+});
+
+// ---------------------------------------------------------------------------
+// S2, part 2: the hook scripts the live settings name (lead, CLAIMS L62289)
+// ---------------------------------------------------------------------------
+
+/** Run `body` with HOME (and CLAUDE_CONFIG_DIR) set in this process, then put both back. */
+function withHome<T>(value: string, configDir: string | undefined, body: () => T): T {
+  const before = process.env["HOME"];
+  process.env["HOME"] = value;
+  try {
+    return withConfigDir(configDir, body);
+  } finally {
+    process.env["HOME"] = before;
+  }
+}
+
+let s2Homes = 0;
+/** A fresh fixture home (the settings are read once per process for each set of folders). */
+function freshHome(settings: Record<string, string> = {}): string {
+  s2Homes += 1;
+  const dir = join(base, `s2-home-${String(s2Homes)}`);
+  mkdirSync(join(dir, ".claude"), { recursive: true });
+  for (const [name, text] of Object.entries(settings)) writeFileSync(join(dir, ".claude", name), text, "utf8");
+  return dir;
+}
+
+/** Settings fixture text: one hook per event shape, a status line, and a helper. Fixture only: no real settings are read. */
+const S2_SETTINGS = JSON.stringify({
+  hooks: {
+    PreToolUse: [{ matcher: "Bash|Write", hooks: [{ type: "command", command: "python3 ~/tools/hooks/guard.py --flag 2>/dev/null" }] }],
+    Stop: [
+      {
+        hooks: [
+          { type: "command", command: '"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh' },
+          { type: "command", command: "/opt/s2-abs/run.sh && $HOME/bin2/after.sh; ${HOME}/b3/c.sh | tee -a /tmp/s2-hook.log" },
+        ],
+      },
+    ],
+  },
+  statusLine: { type: "command", command: "~/.config/iterm2/cc-status" },
+  apiKeyHelper: "~/keys/helper.sh",
+  permissions: { allow: ["Bash(~/not-a-hook/x.sh)"] },
+});
+
+test("S2.2 Bash: a file the settings name as a hook command is guarded, exactly, through the fold; the folder beside it is not", () => {
+  const h = freshHome({ "settings.json": S2_SETTINGS });
+  mkdirSync(join(h, "tools", "hooks"), { recursive: true });
+  writeFileSync(join(h, "tools", "hooks", "guard.py"), "# hook\n", "utf8");
+  symlinkSync(join(h, "tools", "hooks", "guard.py"), join(ws, "s2-hooklink"));
+  withHome(h, undefined, () => {
+    for (const command of [
+      "echo x >> ~/tools/hooks/guard.py",
+      "sed -i '' s/a/b/ ~/tools/hooks/guard.py",
+      "echo x > ~/TOOLS/Hooks/GUARD.py",
+      `echo x > ${h}/tools/hooks/../hooks/guard.py`,
+      "echo x > s2-hooklink",
+      "cp a ~/tools/hooks/guard.py",
+      "echo x > ~/bin2/after.sh",
+      "echo x > ~/b3/c.sh",
+      "echo x > /opt/s2-abs/run.sh",
+      "echo x > ~/.config/iterm2/cc-status",
+      "echo x > ~/keys/helper.sh",
+    ]) {
+      const seen = see(command);
+      assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+      assert.match(seen.notes, /a hook script the settings name/u, command);
+    }
+    for (const command of [
+      "echo x > ~/tools/hooks/other.py",
+      "echo x > ~/tools/hooks/guard.py.bak",
+      "echo x > ~/tools/guard.py",
+      "tee /dev/null < a",
+      "echo x > ~/not-a-hook/x.sh",
+      "echo x > ~/tools/hooks/guard.py/x",
+    ]) {
+      const seen = see(command);
+      assert.ok(!seen.classes.includes(GUARDED), `${command}: ${seen.notes}`);
+    }
+  });
+});
+
+test("S2.2: the variable's folder and the gate root's .claude are read too; $CLAUDE_PROJECT_DIR is the gate root", () => {
+  const h = freshHome();
+  const cc = join(base, `s2-cc-${String(s2Homes)}`);
+  mkdirSync(cc, { recursive: true });
+  writeFileSync(join(cc, "settings.local.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "bash ~/lane/x.sh" }] }] } }), "utf8");
+  const project = join(base, `s2-project-${String(s2Homes)}`);
+  mkdirSync(join(project, ".claude"), { recursive: true });
+  writeFileSync(join(project, ".claude", "settings.json"), JSON.stringify({ hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "${CLAUDE_PROJECT_DIR}/scripts/hook.sh" }] }] } }), "utf8");
+  const scope: WriteScopeContext = { ...WRITE_SCOPE_OFF, gateRoot: project };
+  withHome(h, cc, () => {
+    assert.ok(see("echo x > ~/lane/x.sh", scope).classes.includes(GUARDED));
+    assert.ok(see(`echo x > ${project}/scripts/hook.sh`, scope).classes.includes(GUARDED));
+    assert.ok(!see(`echo x > ${project}/scripts/other.sh`, scope).classes.includes(GUARDED));
+  });
+  // The same lines with the variable unset and no gate root: neither file is named.
+  withHome(h, undefined, () => {
+    assert.ok(!see("echo x > ~/lane/x.sh").classes.includes(GUARDED));
+    assert.ok(!see(`echo x > ${project}/scripts/hook.sh`).classes.includes(GUARDED));
+  });
+  // resolveWriteScope carries the gate root whatever the opt-in.
+  assert.equal(resolveWriteScope(project, project, { version: "0.1" }).gateRoot, project);
+});
+
+test("S2.2: a settings file over 1 MiB, one that does not parse, and a FIFO are skipped, not errors", () => {
+  const big = freshHome({ "settings.json": JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "~/big/x.sh" }] }] }, pad: "x".repeat(HOOK_SETTINGS_MAX_BYTES) }) });
+  withHome(big, undefined, () => {
+    const seen = see("echo x > ~/big/x.sh");
+    assert.equal(seen.ok, true);
+    assert.ok(!seen.classes.includes(GUARDED), seen.notes);
+  });
+  const broken = freshHome({ "settings.json": '{"hooks": {"Stop": [{"hooks": [{"command": "~/broken/x.sh"}]}]}', "settings.local.json": JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "~/fine/x.sh" }] }] } }) });
+  withHome(broken, undefined, () => {
+    assert.ok(!see("echo x > ~/broken/x.sh").classes.includes(GUARDED));
+    // The other settings file in the folder is still read.
+    assert.ok(see("echo x > ~/fine/x.sh").classes.includes(GUARDED));
+  });
+  const fifo = freshHome();
+  const made = spawnSync("/usr/bin/mkfifo", [join(fifo, ".claude", "settings.json")]);
+  if (made.status === 0) {
+    withHome(fifo, undefined, () => {
+      const started = Date.now();
+      assert.ok(!see("echo x > ~/fifo/x.sh").classes.includes(GUARDED));
+      assert.ok(Date.now() - started < 10_000, "a FIFO is never waited on");
+    });
+  }
+});
+
+test("S2.2: the settings are read lazily, only for a landing not guarded already, and once per process", () => {
+  const h = freshHome({ "settings.json": S2_SETTINGS });
+  withHome(h, undefined, () => {
+    const start = hookSettingsReads.count;
+    see("ls -la");
+    see("echo x > ~/.zshrc");
+    assert.equal(hookSettingsReads.count, start, "no landing judged, or one guarded already: nothing read");
+    see("echo x > notes.txt");
+    const once = hookSettingsReads.count;
+    assert.ok(once > start, "a landing not guarded reads the settings");
+    see("echo x > other.txt");
+    see("echo x > ~/tools/hooks/guard.py");
+    assert.equal(hookSettingsReads.count, once, "read at most once per process");
+  });
+});
+
+test("S2.2 through the real hook: Bash and the file tools onto a named hook script are denied; a script beside it is allowed", () => {
+  const h = freshHome({ "settings.json": S2_SETTINGS });
+  mkdirSync(join(h, "tools", "hooks"), { recursive: true });
+  writeFileSync(join(h, "tools", "hooks", "guard.py"), "# hook\n", "utf8");
+  writeFileSync(join(h, "tools", "hooks", "other.py"), "# other\n", "utf8");
+  const dir = gate([`  ${GUARDED}: { autonomy: human-only }`, "  files.*: { autonomy: autonomous }"]);
+  mkdirSync(join(dir, ".claude"), { recursive: true });
+  writeFileSync(join(dir, ".claude", "settings.local.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "$CLAUDE_PROJECT_DIR/scripts/stop.sh" }] }] } }), "utf8");
+  const env = { HOME: h, CLAUDE_CONFIG_DIR: undefined };
+  const run = (tool: string, input: Record<string, unknown>): { permission: string; reason: string } =>
+    verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event(tool, input), env));
+  for (const command of ["echo x >> ~/tools/hooks/guard.py", `echo x > ${join(dir, "scripts", "stop.sh")}`]) {
+    const seen = run("Bash", { command });
+    assert.equal(seen.permission, "deny", `${command}: ${seen.reason}`);
+    assert.match(seen.reason, /files\.write\.guarded resolves to human-only/u, command);
+  }
+  for (const [tool, input] of FILE_TOOLS) {
+    for (const path of [join(h, "tools", "hooks", "guard.py"), join(dir, "scripts", "stop.sh")]) {
+      const seen = run(tool, input(path));
+      assert.equal(seen.permission, "deny", `${tool} ${path}: ${seen.reason}`);
+    }
+    const beside = run(tool, input(join(h, "tools", "hooks", "other.py")));
+    assert.equal(beside.permission, "allow", `${tool} beside: ${beside.reason}`);
+  }
+  assert.equal(run("Bash", { command: "echo x > ~/tools/hooks/other.py" }).permission, "allow");
 });

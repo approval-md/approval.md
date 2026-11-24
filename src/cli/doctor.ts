@@ -111,6 +111,7 @@ import { instanceFindings, instanceHomeFor, instanceIdFor } from "../core/instan
 import { describeOwners, otherOwnersOf, ownedBot } from "../core/channel-owner.js";
 import type { EventRecord } from "../core/log.js";
 import { checkLogAnchor } from "./log-anchor.js";
+import { jsonStringLeaves, readJsonDocument } from "./settings-json.js";
 import { checkLogCheckpoints, checkpointPolicyOf } from "../core/checkpoint.js";
 import { payloadIntegrity, payloadStoreCensus, type PayloadDamage } from "../core/payload-census.js";
 import { payloadStoreDirFor } from "../core/payload-store.js";
@@ -3355,7 +3356,6 @@ export function registeredHarnesses(dir: string): HarnessKind[] {
   const locations = HARNESS_KINDS.flatMap((kind) => HARNESS_SETTINGS[kind]);
   for (const location of locations) {
     for (const path of settingFiles(dir, location)) {
-      let parsed: unknown;
       if (location.text === true) {
         // A YAML document has no JSON leaves to walk, so the whole text is the
         // haystack. Only the hermes location asks for this; the three that were
@@ -3371,31 +3371,18 @@ export function registeredHarnesses(dir: string): HarnessKind[] {
         if (match !== null && isHarnessKind(match[1])) found.add(match[1]);
         continue;
       }
-      try {
-        parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
-      } catch {
-        continue;
-      }
-      const stack: unknown[] = [parsed];
-      while (stack.length > 0) {
-        const node = stack.pop();
-        if (typeof node === "string") {
-          const match = HOOK_COMMAND.exec(node);
-          if (
-            match !== null &&
-            isHarnessKind(match[1]) &&
-            (match[1] !== "codex" || isDirectCodexHookCommand(node))
-          ) {
-            found.add(match[1]);
-          }
-          continue;
-        }
-        if (Array.isArray(node)) {
-          stack.push(...node);
-          continue;
-        }
-        if (typeof node === "object" && node !== null) {
-          stack.push(...Object.values(node as Record<string, unknown>));
+      // The reader and the walk the hook's write pass uses too (S2): one
+      // reading of a settings document, never two.
+      const document = readJsonDocument(path);
+      if (document === null) continue;
+      for (const node of jsonStringLeaves(document.value)) {
+        const match = HOOK_COMMAND.exec(node);
+        if (
+          match !== null &&
+          isHarnessKind(match[1]) &&
+          (match[1] !== "codex" || isDirectCodexHookCommand(node))
+        ) {
+          found.add(match[1]);
         }
       }
     }

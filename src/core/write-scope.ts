@@ -192,6 +192,13 @@ export function isClaudeConfigFolderName(folded: string): boolean {
   return folded === ".claude" || (folded.startsWith(".claude-") && folded.length > ".claude-".length);
 }
 
+/**
+ * The name a note reports for a file a Claude Code settings file names as a
+ * hook command (S2). The list of such files is read from the disk by the hook
+ * (`src/cli/hook.ts`, `namedHookScripts`), not kept here.
+ */
+export const HOOK_SCRIPT_ENTRY = "a hook script the settings name";
+
 /** The name a note reports for a place inside a Claude Code config folder. */
 export const CLAUDE_CONFIG_FOLDER_ENTRY = "a Claude Code config folder";
 
