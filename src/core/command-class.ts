@@ -67,6 +67,8 @@ import {
 } from "./read-scope.js";
 import {
   eachNameReading,
+  equalClaims,
+  foldedOnly,
   foldNameExact,
   foldNameLower,
   nameListIncludes,
@@ -353,7 +355,7 @@ export function parseProtectedEntry(entry: ProtectedPathEntry): ProtectedEntry |
  * ({@link foldNameExact}), as the built-in names are: a policy that protects
  * `design/` protects `Design/` on a volume that opens it as the same folder.
  * `segments` must arrive through the same helper, as
- * {@link protectedPathClassOfWord}, the only caller, passes them. In the
+ * {@link protectedClassOfWord}, the only caller, passes them. In the
  * as-spelled reading both sides are exact, as they were before names folded;
  * the caller reports both readings, so a fold that makes a second entry match
  * (`SPEC/` beside `spec/`) adds its class and never replaces the old one.
@@ -842,12 +844,21 @@ export function protectedPathClass(
   // large to expand is the stricter class.
   const expansions = braceCandidates(candidate);
   if (expansions === null) return "policy.core";
-  let strictest: string | null = null;
+  // Every class any expansion claims, the strictest rank first and, within a
+  // rank, the first found: the first is the answer this gave when one class
+  // answered for the whole word. `{design/x,.github/workflows/ci.yml}` is two
+  // files and two classes, and the classifier's rank is not a policy's order,
+  // so the folded reading takes each class in turn ({@link takeAmongEqual}).
+  const claims: string[] = [];
   for (const expansion of expansions) {
-    const cls = protectedPathClassOfWord(expansion, extra);
-    if (cls !== null && (strictest === null || protectedRank(cls) < protectedRank(strictest))) strictest = cls;
+    for (const cls of protectedClaimsOfWord(expansion, extra)) if (!claims.includes(cls)) claims.push(cls);
   }
-  return strictest;
+  if (claims.length === 0) return null;
+  const ranked = claims
+    .map((cls, index) => ({ cls, index }))
+    .sort((a, b) => protectedRank(a.cls) - protectedRank(b.cls) || a.index - b.index)
+    .map((claim) => claim.cls);
+  return takeAmongEqual(ranked);
 }
 
 // ===========================================================================
@@ -1059,17 +1070,19 @@ const FOLDER_CONTENTS: Readonly<Record<string, readonly string[]>> = {
  * representative per organ ({@link FOLDER_CONTENTS}) and one per policy entry
  * that names a path under the folder.
  */
-function protectedPathClassOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): string | null {
-  const own = protectedPathClassOfWordAlone(candidate, extra);
-  if (own === null || !organVerbs || mainRulesOnly) return own;
+function protectedClaimsOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): readonly string[] {
+  const own = protectedClaimsOfWordAlone(candidate, extra);
+  if (own.length === 0 || !organVerbs || mainRulesOnly) return own;
   const claims = folderContentClaims(candidate, own, extra);
-  if (claims.length <= 1) return own;
+  if (claims.length <= own.length) return own;
   markGlobWriteFired();
-  return takeAmongEqual(claims);
+  // The folded reading takes each in turn ({@link protectedPathClass}); as
+  // spelled the word's own claims answer, as before names folded.
+  return [...own, ...foldedOnly(() => claims.slice(own.length))];
 }
 
 /** `own`, then each distinct class of a path inside the organ folder `candidate` names bare (S1). */
-function folderContentClaims(candidate: string, own: string, extra: readonly ProtectedPathEntry[]): string[] {
+function folderContentClaims(candidate: string, own: readonly string[], extra: readonly ProtectedPathEntry[]): string[] {
   const segments = pathSegments(collapseBracedVariables(candidate)).map(foldNameExact);
   let at = -1;
   for (let index = segments.length - 1; index >= 0; index -= 1) {
@@ -1078,7 +1091,7 @@ function folderContentClaims(candidate: string, own: string, extra: readonly Pro
       break;
     }
   }
-  if (at === -1) return [own];
+  if (at === -1) return [...own];
   const name = segments[at] as string;
   const prefix = (candidate.startsWith("/") ? "/" : "") + segments.slice(0, at + 1).join("/");
   const inside = (FOLDER_CONTENTS[name] ?? []).map((tail) => `${prefix}/${tail}`);
@@ -1092,10 +1105,9 @@ function folderContentClaims(candidate: string, own: string, extra: readonly Pro
       inside.push(`${prefix}/${wanted.slice(position + 1).join("/")}${entry.directory ? "/x" : ""}`);
     }
   }
-  const claims = [own];
+  const claims = [...own];
   for (const path of inside) {
-    const cls = protectedPathClassOfWordAlone(path, extra);
-    if (cls !== null && !claims.includes(cls)) claims.push(cls);
+    for (const cls of protectedClaimsOfWordAlone(path, extra)) if (!claims.includes(cls)) claims.push(cls);
   }
   return claims;
 }
@@ -1132,8 +1144,14 @@ function distinctClasses(readings: readonly (string | null)[]): string[] {
   return out;
 }
 
-/** {@link protectedPathClass} for one word that brace expansion has already made. */
-function protectedPathClassOfWordAlone(candidate: string, extra: readonly ProtectedPathEntry[]): string | null {
+/** {@link protectedClaimsOfWord} for one word alone: no class, one class, or tier 3's equal claims. */
+function protectedClaimsOfWordAlone(candidate: string, extra: readonly ProtectedPathEntry[]): readonly string[] {
+  const cls = protectedClassOfWord(candidate, extra);
+  return cls === null ? [] : typeof cls === "string" ? [cls] : cls;
+}
+
+/** {@link protectedClaimsOfWordAlone}'s answer: no class, one class, or tier 3's equal claims. */
+function protectedClassOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): string | readonly string[] | null {
   // Every guarded name below is compared with the candidate's FOLDED segments
   // ({@link foldFileName}), on every platform: APFS opens `Approval.MD`,
   // `.Claude/Settings.json` and `.APPROVAL/env` as the guarded files, and a
@@ -1340,7 +1358,7 @@ function protectedPathClassOfWordAlone(candidate: string, extra: readonly Protec
     // S1). As spelled no entry is one, so that reading answers as before.
     if (routes.some((route) => namesBuiltinOnlyFolded(route.path)) && builtinEdit()) claims.push("policy.edit");
     for (const route of routes) if (!claims.includes(route.routed)) claims.push(route.routed);
-    return takeAmongEqual(claims);
+    return equalClaims(claims);
   }
 
   // 4. The prose and configuration about the gate.
@@ -8362,7 +8380,7 @@ function outrankingProtected(
   readTargets: readonly string[],
   writesOnly: boolean,
   protectedPaths: readonly ProtectedPathEntry[],
-): { surface: string; path: string } | null {
+): ProtectedHit | null {
   // APRV-522: a credential word whose OWN protected class outranks
   // `policy.core` stays in the scan. Since `..` resolves in the credential
   // rule, a `..` spelling can name the environment map while its spelling also
@@ -8379,10 +8397,7 @@ function outrankingProtected(
     readTargets.filter((target) => !isTheRead(target)),
     protectedPaths,
   );
-  const found =
-    fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))
-      ? named
-      : fed;
+  const found = strongerProtected(named, fed);
   return found !== null && outranksCredential(found.surface) ? found : null;
 }
 
@@ -8955,17 +8970,21 @@ function strictestProtected(
   words: readonly string[],
   protectedPaths: readonly ProtectedPathEntry[],
   skipProse = false,
-): { surface: string; path: string } | null {
+): ProtectedHit | null {
   let best: { surface: string; path: string } | null = null;
+  const found: { surface: string; path: string }[] = [];
   for (const word of words) {
     const surface = protectedPathClass(word, protectedPaths);
     if (surface === null) continue;
     if (skipProse && proseNamingProtectedPath(word, surface, protectedPaths)) continue;
+    if (!found.some((hit) => hit.surface === surface)) found.push({ surface, path: word });
     if (best === null || protectedRank(surface) < protectedRank(best.surface)) {
       best = { surface, path: word };
     }
   }
-  return best;
+  if (best === null) return null;
+  const answer = best.surface;
+  return { ...best, others: foldedOnly(() => found.filter((hit) => hit.surface !== answer)) };
 }
 
 // ---------------------------------------------------------------------------
@@ -9174,14 +9193,17 @@ function strictestProtectedWrite(
   inexact: (word: string) => boolean,
   skipProse = false,
   glob: GlobReading = defaultGlobReading(),
-): { surface: string; path: string } | null {
+): ProtectedHit | null {
   let best = strictestProtected(words, protectedPaths, skipProse);
   // The text answer, for the record of whether a reading raised it.
   const text = best;
   if (glob.off || mainRulesOnly) return best;
   const offer = (surface: string | null, word: string): void => {
     if (surface !== null && (best === null || protectedRank(surface) < protectedRank(best.surface))) {
-      best = { surface, path: word };
+      // The answer it replaces, and that answer's other classes, ride beside
+      // the stricter one (#690: every protected class the words take).
+      const before = best;
+      best = { surface, path: word, others: foldedOnly(() => (before === null ? [] : distinctOthers(surface, [before, ...before.others]))) };
     }
   };
   // The matcher steps each word already judged here took. The same word again
@@ -10500,6 +10522,85 @@ function globGuardClass(
 }
 
 /**
+ * The protected word that answers for a list of words, and every OTHER
+ * protected class a word of the list takes (`others`, each with the first
+ * word that takes it). `tee design/x .github/workflows/ci.yml` writes two
+ * files, and one class answered for both: under a policy that holds the
+ * second class the stricter, the workflow was written on the first one's
+ * terms. The classifier's precedence is not a policy's order, so the other
+ * classes are reported beside the answer and the gate judges each. Reported
+ * by the folded name reading only (`name-fold.ts`): as spelled `others` is
+ * empty and the answer is exactly what it was.
+ */
+interface ProtectedHit {
+  surface: string;
+  path: string;
+  others: readonly { surface: string; path: string }[];
+}
+
+/**
+ * The positional answer and the redirect-fed one, as one answer: the stricter
+ * rank wins, the positional on equal rank, and the other one (with both
+ * lists' other classes) rides in `others`.
+ */
+function strongerProtected(named: ProtectedHit | null, fed: ProtectedHit | null): ProtectedHit | null {
+  const first = fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface)) ? named : fed;
+  if (first === null) return null;
+  const second = first === named ? fed : named;
+  if (second === null) return first;
+  return {
+    surface: first.surface,
+    path: first.path,
+    others: foldedOnly(() => distinctOthers(first.surface, [...first.others, second, ...second.others])),
+  };
+}
+
+/** `hits` without repeats of a class, and without `answer`'s. */
+function distinctOthers(
+  answer: string,
+  hits: readonly { surface: string; path: string }[],
+): { surface: string; path: string }[] {
+  const out: { surface: string; path: string }[] = [];
+  for (const hit of hits) {
+    if (hit.surface === answer || out.some((have) => have.surface === hit.surface)) continue;
+    out.push({ surface: hit.surface, path: hit.path });
+  }
+  return out;
+}
+
+/**
+ * The `more` field of a segment's protected answer: every other protected
+ * class its targets take, as `protected-path` entries (or `rule`'s). Empty
+ * as spelled, and `{}` when there is none, so an answer with one class is
+ * the object it always was.
+ */
+function besideProtected(
+  answer: string,
+  hits: readonly ({ surface: string; path: string; others?: readonly { surface: string; path: string }[] } | null)[],
+  rule = "protected-path",
+  further: readonly ProtectedBeside[] = [],
+): { more?: ProtectedBeside[] } {
+  const more = foldedOnly(() => {
+    const flat: { surface: string; path: string }[] = [];
+    for (const hit of hits) if (hit !== null) flat.push(hit, ...(hit.others ?? []));
+    const out: ProtectedBeside[] = distinctOthers(answer, flat).map((hit) => ({ class: hit.surface, rule, path: hit.path }));
+    for (const entry of further) {
+      if (entry.class !== answer && !out.some((have) => have.class === entry.class)) out.push(entry);
+    }
+    return out;
+  });
+  return more.length === 0 ? {} : { more: [...more] };
+}
+
+/** The rules under which a segment's answer is a protected path's class. */
+const PROTECTED_ANSWER_RULES: ReadonlySet<string> = new Set([
+  "redirect-protected",
+  "protected-path",
+  "copy-target-unknown",
+  "fetch-output-unknown",
+]);
+
+/**
  * The rules whose commands RUN CODE THIS RUNTIME DID NOT AUTHOR (APRV-193).
  *
  * Rule ids rather than classes, because the class does not separate them: `npm
@@ -10877,6 +10978,15 @@ type SegmentOutcome =
        * beside it as a second segment, so no class is taken away.
        */
       patternAlso?: CredentialOutcome;
+      /**
+       * Every OTHER protected class the segment's targets take, beside the one
+       * that answers ({@link ProtectedHit}): `tee design/x
+       * .github/workflows/ci.yml` is `policy.edit.design` and, here,
+       * `policy.edit.ci`. Reported like `also`, each as its own classified
+       * segment over the same text, so the gate judges every class and the
+       * strictest decision answers. Absent as spelled (`name-fold.ts`).
+       */
+      more?: readonly ProtectedBeside[];
       /** The program an `exec.code` answer runs (APRV-510). */
       execCode?: ExecCodeSource;
     }
@@ -10914,11 +11024,24 @@ function ordinaryPlainClass(cls: string): boolean {
 function besidePlain(raised: SegmentOutcome, plain: SegmentOutcome): SegmentOutcome {
   if (!plain.ok) return plain;
   if (!raised.ok) return raised;
-  if (plain.class === raised.class || ordinaryPlainClass(plain.class)) return raised;
+  // #690: the plain pass's other protected classes ride beside as well.
+  const more = [...(raised.more ?? [])];
+  for (const entry of plain.more ?? []) {
+    if (entry.class !== raised.class && !more.some((have) => have.class === entry.class)) more.push(entry);
+  }
+  const withMore: SegmentOutcome = more.length === 0 ? raised : { ...raised, more };
+  if (plain.class === raised.class || ordinaryPlainClass(plain.class)) return withMore;
   return {
-    ...raised,
+    ...withMore,
     patternAlso: { class: plain.class, rule: plain.rule, ...(plain.path === undefined ? {} : { path: plain.path }) },
   };
+}
+
+/** One further protected class of a segment: see `more` on {@link SegmentOutcome}. */
+interface ProtectedBeside {
+  class: string;
+  rule: string;
+  path?: string;
 }
 
 function classifySegment(
@@ -11052,7 +11175,7 @@ function classifySegmentWithVerb(
     cursor += found.skip;
   }
 
-  const writeTargets = segment.redirects
+  const everyWriteTarget = segment.redirects
     .filter((redirect) => redirect.op !== "<")
     .map((redirect) => redirect.target.text)
     // APRV-283: a redirection to a discard device creates nothing, so it is not
@@ -11062,10 +11185,10 @@ function classifySegmentWithVerb(
   // APRV-503: the paths this segment READS through `<`, at any descriptor. They
   // are judged where a named argument is judged, below: a credential target is
   // `account.credential` and a protected one joins the effectful scan.
-  const readTargets = segment.redirects
+  const everyReadTarget = segment.redirects
     .filter((redirect) => redirect.op === "<")
     .map((redirect) => redirect.target.text);
-  const redirectTargets = segment.redirects.map((redirect) => redirect.target.text);
+  const everyRedirectTarget = segment.redirects.map((redirect) => redirect.target.text);
   // A redirection onto a protected path is a write to that path, whatever the
   // command in front of it was going to do. The CLASS says which surface was
   // aimed at (APRV-198); the RULE stays `redirect-protected`, because the
@@ -11105,7 +11228,7 @@ function classifySegmentWithVerb(
     off: context.globPatternsOff === true,
     ...(context.globTracker === undefined ? {} : { tracker: context.globTracker }),
   };
-  const redirected = strictestProtectedWrite(writeTargets, protectedPaths, inexact, false, glob);
+  const redirected = strictestProtectedWrite(everyWriteTarget, protectedPaths, inexact, false, glob);
   const bin = words[cursor];
   if (redirected !== null) {
     // APRV-503 recheck (SHOULD-FIX-R1): a segment that writes a protected path
@@ -11118,16 +11241,47 @@ function classifySegmentWithVerb(
       (writer === null
         ? null
         : credentialTouch(writer, writerArgs)) ??
-      redirectCredentialTouch(readTargets, redirectTargets);
+      redirectCredentialTouch(everyReadTarget, everyRedirectTarget);
+    // The command in front of the redirect may write protected paths of its
+    // own (`tee .github/workflows/ci.yml > design/x`): its own answer, the
+    // write redirections set aside, is judged beside the redirect's. A reader
+    // (`cat SPEC.md > design/x`) earns no protected answer and adds nothing.
+    // The segment is still walked once: this is the walk every other segment
+    // takes ({@link commandAnswer}), not a second classification.
+    const own = foldedOnly((): ProtectedBeside[] => {
+      const answer = commandAnswer(segment.redirects.filter((redirect) => redirect.op === "<"));
+      if (!answer.ok || !PROTECTED_ANSWER_RULES.has(answer.rule)) return [];
+      return [
+        { class: answer.class, rule: answer.rule, ...(answer.path === undefined ? {} : { path: answer.path }) },
+        ...(answer.more ?? []),
+      ];
+    });
     return {
       ok: true,
       class: redirected.surface,
       rule: "redirect-protected",
       path: redirected.path,
       ...(touched === null ? {} : { also: touched }),
+      ...besideProtected(redirected.surface, [redirected], "redirect-protected", own),
     };
   }
 
+  return commandAnswer(segment.redirects);
+
+  /**
+   * The segment's answer from its command and the redirections given: every
+   * redirection of the segment, or, beside a protected redirection's answer
+   * above, the `<` ones alone (the command's own answer). One walk either way.
+   * Its body keeps the indentation it had as the tail of this function, so the
+   * change that made it a function moves no line.
+   */
+  function commandAnswer(redirects: LexSegment["redirects"]): SegmentOutcome {
+  const writeTargets = redirects
+    .filter((redirect) => redirect.op !== "<")
+    .map((redirect) => redirect.target.text)
+    .filter((target) => !isDiscardTarget(target));
+  const readTargets = redirects.filter((redirect) => redirect.op === "<").map((redirect) => redirect.target.text);
+  const redirectTargets = redirects.map((redirect) => redirect.target.text);
   // APRV-521 (review-b M1). Every spelling of bash's assignment word is read
   // past by the cursor above ({@link ASSIGNMENT}), and only the plain one is
   // judged by the rules below. An append (`NAME+=v`) or a subscripted write
@@ -11257,7 +11411,7 @@ function classifySegmentWithVerb(
     !segment.stdinFed &&
     !segment.subshell &&
     segment.words.every((word) => word.substitutions.length === 0) &&
-    segment.redirects.every((redirect) => redirect.op !== "<" && isDiscardTarget(redirect.target.text)) &&
+    redirects.every((redirect) => redirect.op !== "<" && isDiscardTarget(redirect.target.text)) &&
     (segment.words[cursor]?.exact ?? false) &&
     isExecCodeInterpreter(bin)
       ? execCodeShape(basename, args, execWords)
@@ -11434,7 +11588,7 @@ function classifySegmentWithVerb(
     // protected path or a credential home; and when no word, as written or
     // resolved against each of those cwds, names a protected path or a
     // credential. Anything else keeps the refusal.
-    const lexWords = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
+    const lexWords = [...segment.words, ...redirects.map((redirect) => redirect.target)];
     const cwds = (context.noRuleCwds ?? []).map((dir) => dir.replace(/\/+$/u, ""));
     const resolvedWords = lexWords.flatMap((word) => cwds.map((dir) => `${dir}/${word.text}`));
     const cwdRefused = cwds.some(
@@ -11449,7 +11603,7 @@ function classifySegmentWithVerb(
       segment.heredoc ||
       segment.stdinFed ||
       segment.bodySubstitutions.length > 0 ||
-      segment.redirects.some((redirect) => redirect.op === "<") ||
+      redirects.some((redirect) => redirect.op === "<") ||
       lexWords.some((word) => !word.exact || word.substitutions.length > 0 || noRuleWordRefused(word.text)) ||
       deferredCredential !== null ||
       fetched.unknown !== null ||
@@ -11548,26 +11702,59 @@ function classifySegmentWithVerb(
     false,
     glob,
   );
+  const copyUnknown = copyFamily ? copyArgvUnknown(args, argFlags) : null;
+  // What the scans below this point answer with when an earlier answer does
+  // not end the walk first: the copy-unknown scan, or the effectful scan. An
+  // earlier answer reports these classes beside its own.
+  const laterProtected = (): ProtectedHit | null => {
+    if (copyUnknown !== null) return strictestProtected([...positionals, ...readTargets], protectedPaths);
+    if (cls.startsWith("read.") || cls === GATE_SELF_CLASS) return null;
+    if (deferredCredential !== null && outranking !== null) return outranking;
+    return strongerProtected(strictestProtected(judged, protectedPaths, true), strictestProtected(readTargets, protectedPaths));
+  };
   if (fetchedProtected !== null) {
-    return { ok: true, class: fetchedProtected.surface, rule: "protected-path", path: fetchedProtected.path };
+    return {
+      ok: true,
+      class: fetchedProtected.surface,
+      rule: "protected-path",
+      path: fetchedProtected.path,
+      ...besideProtected(fetchedProtected.surface, foldedOnly(() => [fetchedProtected, laterProtected()])),
+    };
   }
   // APRV-511 review: a download whose output this table cannot know (an
   // option it does not know, an ambiguous prefix, a config file or string) is
   // a write to an unknown target, and an unknown target may be an organ.
   if (fetched.unknown !== null) {
-    return { ok: true, class: "policy.core", rule: "fetch-output-unknown", path: fetched.unknown };
+    return {
+      ok: true,
+      class: "policy.core",
+      rule: "fetch-output-unknown",
+      path: fetched.unknown,
+      ...besideProtected("policy.core", foldedOnly(() => [laterProtected()])),
+    };
   }
   // Fix round 3 (S(open)): a copy, move or link argv word the shell may still
   // turn into an option (`cp $X f`, `cp *.md d/`, `mv {-t,DIR} f`) may name
   // the destination, so the destination is unknown: `policy.core`, unless a
   // named path already earns a class at least as strict (the log).
-  const copyUnknown = copyFamily ? copyArgvUnknown(args, argFlags) : null;
   if (copyUnknown !== null) {
     const named = strictestProtectedWrite([...positionals, ...readTargets], protectedPaths, writtenInexact, false, glob);
     if (named !== null && protectedRank(named.surface) <= protectedRank("policy.core")) {
-      return { ok: true, class: named.surface, rule: "protected-path", path: named.path };
+      return {
+        ok: true,
+        class: named.surface,
+        rule: "protected-path",
+        path: named.path,
+        ...besideProtected(named.surface, [named]),
+      };
     }
-    return { ok: true, class: "policy.core", rule: "copy-target-unknown", path: copyUnknown };
+    return {
+      ok: true,
+      class: "policy.core",
+      rule: "copy-target-unknown",
+      path: copyUnknown,
+      ...besideProtected("policy.core", [named]),
+    };
   }
 
   // GLOB-WRITE: a read-class command that writes a file through its own words
@@ -11578,7 +11765,7 @@ function classifySegmentWithVerb(
     const written = strictestProtectedWrite(readWriteTargets(basename, args), protectedPaths, inexact, false, glob);
     if (written !== null) {
       markGlobWriteFired();
-      return { ok: true, class: written.surface, rule: "protected-path", path: written.path };
+      return { ok: true, class: written.surface, rule: "protected-path", path: written.path, ...besideProtected(written.surface, [written]) };
     }
   }
 
@@ -11628,6 +11815,7 @@ function classifySegmentWithVerb(
         rule: "protected-path",
         path: outranking.path,
         also: deferredCredential,
+        ...besideProtected(outranking.surface, [outranking]),
       };
     }
     // GLOB-WRITE: a word the command WRITES that the shell may still glob, or
@@ -11682,17 +11870,18 @@ function classifySegmentWithVerb(
             });
             return plainHit === null || (patternHit !== null && protectedRank(patternHit.surface) < protectedRank(plainHit.surface)) ? patternHit : plainHit;
           })();
-    const named =
-      landedNamed !== null && (operandNamed === null || protectedRank(landedNamed.surface) < protectedRank(operandNamed.surface))
-        ? landedNamed
-        : operandNamed;
-    const fed = strictestProtected(readTargets, protectedPaths);
-    const touched =
-      fed === null || (named !== null && protectedRank(named.surface) <= protectedRank(fed.surface))
-        ? named
-        : fed;
+    // The operands' answer wins on equal rank, as main's positional answer
+    // does; every other class rides beside it (#690, {@link strongerProtected}).
+    const named = strongerProtected(operandNamed, landedNamed === null ? null : { ...landedNamed, others: [] });
+    const touched = strongerProtected(named, strictestProtected(readTargets, protectedPaths));
     if (touched !== null) {
-      return { ok: true, class: touched.surface, rule: "protected-path", path: touched.path };
+      return {
+        ok: true,
+        class: touched.surface,
+        rule: "protected-path",
+        path: touched.path,
+        ...besideProtected(touched.surface, [touched]),
+      };
     }
   }
 
@@ -11825,6 +12014,7 @@ function classifySegmentWithVerb(
     ...(sandbox === null ? {} : { sandbox }),
     ...(execCode === null ? {} : { execCode }),
   };
+  }
 }
 
 /**
@@ -12288,6 +12478,16 @@ function classifyCommandAsReadWithRules(
         ...(outcome.patternAlso.path === undefined ? {} : { path: outcome.patternAlso.path }),
       });
       if (!classes.includes(outcome.patternAlso.class)) classes.push(outcome.patternAlso.class);
+    }
+    // Every other protected class the segment's targets take, the same way.
+    for (const beside of outcome.more ?? []) {
+      segments.push({
+        text: segment.text,
+        class: beside.class,
+        rule: beside.rule,
+        ...(beside.path === undefined ? {} : { path: beside.path }),
+      });
+      if (!classes.includes(beside.class)) classes.push(beside.class);
     }
   }
   return { ok: true, segments, classes };
