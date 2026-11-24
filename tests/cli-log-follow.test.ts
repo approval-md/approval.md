@@ -46,6 +46,9 @@ function start(args: string[], cwd: string): ChildProcessWithoutNullStreams {
   });
 }
 
+/** What the stats shim writes to stderr when a stdout write first returns false. */
+const BACKPRESSURED = "stdout-stats: backpressured\n";
+
 function startWithWriteStats(
   args: string[],
   cwd: string,
@@ -68,6 +71,7 @@ stdout.write = (...args) => {
   const accepted = originalWrite(...args);
   writes += 1;
   peak = Math.max(peak, stdout.writableLength);
+  if (!accepted && !backpressured) process.stderr.write(${JSON.stringify(BACKPRESSURED)});
   if (!accepted) backpressured = true;
   return accepted;
 };
@@ -132,19 +136,38 @@ function exitOf(child: ChildProcessWithoutNullStreams, timeoutMs = 4_000): Promi
   });
 }
 
-async function waitUntilReadable(child: ChildProcessWithoutNullStreams): Promise<void> {
-  if (child.stdout.readableLength > 0) return;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      once(child.stdout, "readable"),
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error("listener stdout never became readable")), 5_000);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
+/**
+ * Resolves once the stats shim reports that a stdout write returned false.
+ *
+ * Reads stderr only. Waiting on stdout (a 'readable' listener) would change
+ * its flow state: removing that listener resets readableFlowing from false to
+ * null, and a 'data' listener added afterwards then resumes the stream.
+ */
+function backpressured(child: ChildProcessWithoutNullStreams, timeoutMs = 5_000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let stderr = "";
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`listener stdout never reported backpressure; stderr: ${stderr}`));
+    }, timeoutMs);
+    const data = (chunk: Buffer): void => {
+      stderr += chunk.toString("utf8");
+      if (!stderr.includes(BACKPRESSURED)) return;
+      cleanup();
+      resolve();
+    };
+    const exited = (code: number | null): void => {
+      cleanup();
+      reject(new Error(`listener exited ${String(code)} before backpressure; stderr: ${stderr}`));
+    };
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      child.stderr.off("data", data);
+      child.off("exit", exited);
+    };
+    child.stderr.on("data", data);
+    child.once("exit", exited);
+  });
 }
 
 test("CLI replays exclusively, follows a real append, and SIGTERM exits zero", async () => {
@@ -249,7 +272,10 @@ test("a slow native pipe bounds producer output and resumes after an incomplete 
   const statsPath = join(scratch, `stdout-stats-${String(counter)}.json`);
   const child = startWithWriteStats(["log", "follow", "--json"], world.cwd, statsPath);
   child.stdout.pause();
-  await waitUntilReadable(child);
+  await backpressured(child);
+  // The reader stays stalled until the signal lands. A flowing reader lets the
+  // listener flush whole records and sometimes stop on a record boundary.
+  assert.equal(child.stdout.readableFlowing, false, "the test reader resumed before the signal");
   const output: Buffer[] = [];
   child.stdout.on("data", (chunk: Buffer) => output.push(chunk));
   const outputEnded = new Promise<void>((resolve) => child.stdout.once("end", resolve));
