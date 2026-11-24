@@ -21,7 +21,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
-import { classifyCommand, classifyCommandWithDollarQuotesKept } from "../src/core/command-class.js";
+import {
+  classifyCommand,
+  classifyCommandWithDollarQuotesKept,
+  commandSegmentShapes,
+  SUBSTITUTION_SENTINEL,
+} from "../src/core/command-class.js";
 import { cpuSeconds, runner, scaledBound } from "./cost-runner.js";
 
 function classesOf(command: string): string[] {
@@ -97,6 +102,58 @@ test("every escape bash and zsh decode alike is decoded", () => {
   assert.deepEqual(classesOf("echo x > $'APPROVAL.md\\\\'"), asPlain("echo x > $'APPROVAL.md\\\\'", "echo x > 'APPROVAL.md\\'"));
   // A letter escape decodes to its character.
   assert.deepEqual(classesOf("echo $'a\\tb\\n' > notes.txt"), mainClasses("echo $'a\\tb\\n' > notes.txt"));
+});
+
+/** The lexer's text for the redirect target of `echo x > <word>`. */
+function targetText(word: string): string {
+  const shapes = commandSegmentShapes(`echo x > ${word}`);
+  assert.ok(shapes !== null && shapes.length === 1, word);
+  return (shapes[0] as { writes: string[] }).writes[0] as string;
+}
+
+test("the lexer's text: each shared escape decoded, each other one unknown", () => {
+  const U = SUBSTITUTION_SENTINEL;
+  const cases: readonly (readonly [string, string])[] = [
+    ["$'APPROVAL.md'", "APPROVAL.md"],
+    ["$'\\x41'", "A"],
+    ["$'\\x4'g", "\u0004g"],
+    ["$'\\101'", "A"],
+    ["$'\\1011'", "A1"],
+    ["$'\\0101'", "\b1"],
+    ["$'\\777'", U], // a byte: 0xFF, outside ASCII
+    ["$'\\u0041'", "A"],
+    ["$'\\u00411'", "A1"],
+    ["$'a\\tb\\nc'", "a\tb\nc"],
+    ["$'\\a\\b\\e\\E\\f\\r\\v'", "\u0007\b\u001b\u001b\f\r\v"],
+    ["$'\\\\'", "\\"],
+    ["$'\\''", "'"],
+    ["$'\\\"'", '"'],
+    ["$'\\?'", "?"],
+    ['$"APPROVAL.md"', "APPROVAL.md"],
+    ['$"$X.md"', "$X.md"],
+    ["$'APPRO\\VAL.md'", `APPRO${U}AL.md`],
+    ["$'a\\qb'", `a${U}b`],
+    ["$'a\\cAb'", `a${U}`],
+    ["$'a\\U00000041b'", `a${U}`],
+    ["$'a\\u41b'", `a${U}`],
+    ["$'a\\xgb'", `a${U}`],
+    ["$'a\\C-ab'", `a${U}`],
+    ["$'a\\M-ab'", `a${U}`],
+    ["$'a\\xc3\\xa9b'", `a${U}b`],
+    ["$'a\\u00e9b'", `a${U}b`],
+    ["$'a\\0b'c", `a${U}`],
+    ["$'a\\x00b'c", `a${U}`],
+    ["$'a\\400b'c", `a${U}`],
+    ["x$'a'$'b'\"c\"'d'", "xabcd"],
+    [`$'${"\\q".repeat(40)}'tail`, `${U}tail`], // one unread run
+    [`$'${"a\\q".repeat(40)}'tail`, `a${U}`.repeat(33)], // past the bound: the rest of the word is unknown
+  ];
+  for (const [word, text] of cases) assert.equal(targetText(word), text, word);
+  // The program word and a read operand are read the same way.
+  const verb = commandSegmentShapes("$'\\x72m' -rf x");
+  assert.equal(verb?.[0]?.bin, "rm");
+  const read = commandSegmentShapes("cat $'.approval/\\x65nv'");
+  assert.deepEqual(read?.[0]?.args, [".approval/env"]);
 });
 
 test("an escape the shells read differently, a non-ASCII character or a NUL leaves the word unknown", () => {
@@ -178,6 +235,12 @@ test("through the hook: the policy file spelled as a dollar quote is not a works
       assert.ok(refined.result.ok, command);
       if (refined.result.ok) assert.ok(refined.result.classes.includes("policy.core"), `${command}: ${refined.result.classes.join(",")}`);
     }
+    // Main's answer rides beside through the hook too: a copy to a decoded workspace
+    // name keeps main's fail-closed class for the target it could not read.
+    const copy = classifyForHook("cp notes.txt $'b.txt'", [], cwd);
+    assert.ok(copy.result.ok && copy.result.classes.includes("policy.core"), JSON.stringify(copy.result));
+    const removed = classifyForHook("rm $'\\x41PPROVAL.md'", [], cwd);
+    assert.ok(removed.result.ok && removed.result.classes.includes("files.delete.out_of_scope") && removed.result.classes.includes("policy.core"));
     const read = classifyForHook("cat $'.approval/\\x65nv'", [], cwd);
     assert.ok(read.result.ok && read.result.classes.includes("account.credential"));
   } finally {
@@ -208,7 +271,7 @@ test("cost: 100 KB of dollar quotes is read in time; past the bound the rest of 
       assert.ok(classes.length > 0, label);
     }
     // Past the bound the word is unknown: a copy to it keeps the fail-closed class.
-    const many = `cp notes.txt $'${"\\q".repeat(40)}APPROVAL.md'`;
+    const many = `cp notes.txt $'${"a\\q".repeat(40)}APPROVAL.md'`;
     assert.ok(classesOf(many).includes("policy.core"));
   } finally {
     rmSync(cwd, { recursive: true, force: true });
