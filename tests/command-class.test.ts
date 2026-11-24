@@ -389,9 +389,10 @@ const FIXTURES: readonly Fixture[] = [
     row: "rm",
     context: { globDisk: { cwd: "/w", home: "/h", listings: new Map([["/w", ["src", "dist"]]]) } },
   },
-  // A variable alone may name the working directory or the home, which may
-  // hold an organ directory (lead ruling L61587, parents): fail closed.
-  { command: "rm -rf $TARGET", class: "policy.core", rule: "protected-path", row: "rm" },
+  // An ordinary variable alone keeps main's class (lead ruling L62435, S7;
+  // it was policy.core); below a proven parent it may be the workspace.
+  { command: "rm -rf $TARGET", class: "files.delete.out_of_scope", rule: "rm-unreadable-path", row: "rm" },
+  { command: "rm -rf ../$TARGET", class: "policy.core", rule: "protected-path", row: "rm" },
   { command: "rm -rf $TARGET/x", class: "files.delete.out_of_scope", rule: "rm-unreadable-path", row: "rm" },
   { command: "rm -rf node_modules", class: "files.write.workspace", rule: "rm-workspace", row: "rm" },
 
@@ -473,13 +474,13 @@ const FIXTURES: readonly Fixture[] = [
     context: SCRATCH_ROOTS,
   },
   // Unreadable values: an unexpanded variable and a glob could name anything.
-  // A variable last may hold `..` and climb to the working directory, which
-  // may hold an organ directory (lead ruling L61587, parents; security review
-  // 5): fail closed. With a readable name after it, still not scratch.
+  // An ordinary variable below a directory that holds neither the working
+  // directory nor the home keeps main's class (lead ruling L62435, S7). With
+  // a readable name after it, still not scratch.
   {
     command: "rm -rf /private/tmp/$SESSION",
-    class: "policy.core",
-    rule: "protected-path",
+    class: "files.delete.out_of_scope",
+    rule: "rm-absolute",
     row: "rm",
     context: SCRATCH_ROOTS,
   },
@@ -746,12 +747,14 @@ const FIXTURES: readonly Fixture[] = [
   { command: "grep -o TODO src/a.ts", class: "read.shell", rule: "read-shell" },
   // …and the primaries that make `find` act.
   // A find that deletes under a parent of an organ directory (lead ruling
-  // L62013): with no listing, fail closed; main's class rides beside.
+  // L62013): with no listing, fail closed; main's class rides beside. A name
+  // test narrows it (lead ruling L62435, S7): main's class.
   {
     command: "find . -type f -delete",
     class: "policy.core",
     rule: "protected-path",
   },
+  { command: "find . -name '*.tmp' -delete", class: "files.delete.out_of_scope", rule: "find-delete" },
   { command: "find . -name x -fprint out.txt", class: "files.write.workspace", rule: "find-write" },
 
   // -- the overrides, split three ways (APRV-198) ---------------------------

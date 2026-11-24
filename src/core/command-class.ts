@@ -3005,6 +3005,8 @@ export interface ClassifierContext {
   globTracker?: { raised: boolean; parent?: boolean };
   /** The pass without the parents rule (lead ruling L61587), for the class it rides beside. Internal. */
   organParentsOff?: boolean;
+  /** The values the line (and any line it sits in) assigns each variable, for the parents rule (lead ruling L62435). Internal. */
+  lineAssigned?: ReadonlyMap<string, readonly string[]>;
   /**
    * The segments whose words, targets and substitution bodies the line's own
    * reading for {@link lineNamesGit} already went through (review of the
@@ -9192,6 +9194,14 @@ export interface GlobDisk {
   homeOk?: boolean;
   /** `false`: no listing is used (something else on the line may create, move, link or extract a file). */
   listingsOk?: boolean;
+  /**
+   * The session directories the hook's envelope names where they differ from
+   * `cwd` (the reason `relativeOk` is `false`): the parents rule places a word
+   * from each of them and from `cwd` (lead ruling L62435, S7). Set by the hook.
+   */
+  sessionCwds?: readonly string[];
+  /** The line (or a line it sits in) may change directory: set per line by the classifier. */
+  lineMovesDir?: boolean;
   collect?: Set<string>;
 }
 
@@ -9628,9 +9638,14 @@ function organParentOperands(
   // refused before this; were they classified, their files are every word
   // after the owner or group.
   if (basename === "chown" || basename === "chgrp") return positionals.slice(1);
-  // find: any -delete, -exec, -execdir or -ok (a test narrows what it deletes
-  // to what matches, which may be `.claude/settings.json`: fail closed).
-  if (basename === "find") return args.some((arg) => ["-delete", "-exec", "-execdir", "-ok", "-okdir"].includes(arg)) ? findStartPaths(args) : [];
+  // find: any -exec, -execdir or -ok, and a `-delete` no test narrows (lead
+  // ruling L62435, S7: `find . -name '*.tmp' -delete` is not a delete of
+  // everything below, and keeps main's class; `find . -delete` and
+  // `find . -type f -delete` are).
+  if (basename === "find") {
+    const runs = args.some((arg) => ["-exec", "-execdir", "-ok", "-okdir"].includes(arg));
+    return runs || (args.includes("-delete") && !findDeleteNarrowed(args)) ? findStartPaths(args) : [];
+  }
   if (basename === "git") return gitRemovedPaths(args);
   // tar `--remove-files` (any unique prefix, `--rem` on), or an option from
   // the environment (`TAR_OPTIONS=` before it): every operand.
@@ -9786,6 +9801,41 @@ function findStartPaths(args: readonly string[]): string[] {
 /** A find expression word: a primary or an operator, never a leading option. */
 const FIND_PRIMARY = /^-(?:[a-z]{2,}|a|o)$/u;
 
+/** find primaries that take one value, read by {@link findDeleteNarrowed}. */
+const FIND_VALUED = new Set(["-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex", "-type", "-maxdepth", "-mindepth", "-newer", "-mtime", "-mmin", "-atime", "-amin", "-ctime", "-cmin", "-size", "-user", "-group", "-perm", "-regextype"]);
+/** The name tests among them: the ones that narrow what `-delete` reaches. */
+const FIND_NAME_TESTS = new Set(["-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex"]);
+/** find words that take no value and widen nothing. */
+const FIND_BARE = new Set(["-delete", "-depth", "-d", "-xdev", "-mount", "-x", "-print", "-print0", "-ls", "-a", "-and", "-follow", "-empty"]);
+
+/**
+ * Does a test narrow what `find … -delete` removes (lead ruling L62435, S7)?
+ * Only a plain AND of known primaries, at least one a name test with a
+ * pattern that is not every name (`'*.tmp'`, `.DS_Store`; not `'*'`, `'.*'`,
+ * `'./*'`) or `-empty`. An operator (`!`, `-not`, `-o`, `-or`, `,`, a
+ * parenthesis), a primary outside the list, or a missing value: not narrowed,
+ * so the start paths are read by the parents rule (fail closed).
+ */
+function findDeleteNarrowed(args: readonly string[]): boolean {
+  const start = args.findIndex((arg) => FIND_PRIMARY.test(arg) || arg === "!" || arg === "(");
+  if (start === -1) return false;
+  let narrowed = false;
+  for (let at = start; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (FIND_VALUED.has(arg)) {
+      const value = args[at + 1];
+      if (value === undefined) return false;
+      const everyName = /^[*?./]*$/u.test(value) || (arg.endsWith("regex") && /^[.*^$]*$/u.test(value));
+      if (FIND_NAME_TESTS.has(arg) && !everyName) narrowed = true;
+      at += 1;
+      continue;
+    }
+    if (arg === "-empty") narrowed = true;
+    else if (!FIND_BARE.has(arg)) return false;
+  }
+  return narrowed;
+}
+
 /**
  * chmod's files (security review of the parents rule, 1): its options are
  * `-R`, `-c`, `-f`, `-v`, `-h`, `-H`, `-L`, `-P` and long `--…` ones; the
@@ -9816,14 +9866,102 @@ function chmodFiles(args: readonly string[]): string[] {
 /** The most directories on one parent's chain that are listed before the parent is judged strict. */
 const ORGAN_PARENT_CHAIN_CAP = 8;
 
+/** Variables whose value is a working directory or the home: never read as an ordinary variable. */
+const PARENT_VARIABLES = new Set(["PWD", "OLDPWD", "HOME"]);
+
+/**
+ * Is `part` unreadable only through ordinary variables (`$X`, `${X}`, `$1`,
+ * `$OUT.bak`, `${X:-dist}`; lead ruling L62435, S6 and S7)? Not a
+ * substitution, a backtick, a `${…}` with another operator or value
+ * (`${PWD%/*}`, `${X:-.}`), `~user`, `~+`, `~-`, or
+ * `$PWD`, `$OLDPWD`, `$HOME`: those stay read as a parent may be.
+ */
+function ordinaryVariablePart(part: string): boolean {
+  if (part.includes(SUBSTITUTION_SENTINEL) || part.includes(PARAMETER_MARK) || part.includes("`")) return false;
+  const names: string[] = [];
+  // `${X:-dist}`, `${OUT:?}`: a default, check or alternative that is a
+  // plain name (never `.`, `..`, `~` or a path) reads as the variable.
+  const left = part.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::?[-=?+](?:[A-Za-z0-9_][A-Za-z0-9_.-]*)?)?\}|([A-Za-z_][A-Za-z0-9_]*)|([0-9@*#?!-]))/gu, (_whole: string, braced?: string, bare?: string, special?: string) => {
+    names.push(braced ?? bare ?? special ?? "");
+    return "";
+  });
+  return names.length > 0 && !/[$`]/u.test(left) && !names.some((name) => PARENT_VARIABLES.has(name));
+}
+
+/**
+ * The directories a relative word may start from (lead ruling L62435, S7):
+ * the working directory where the caller is sure it is the shell's; with a
+ * session directory the hook's envelope names that differs from the hook's
+ * own (`sessionCwds`), both, on a line that does not change directory; else
+ * none (the word cannot be placed).
+ */
+function parentStarts(disk: GlobDisk): string[] {
+  if (disk.relativeOk !== false) return disk.cwd.startsWith("/") ? [disk.cwd] : [];
+  if (disk.lineMovesDir === true) return [];
+  return (disk.sessionCwds ?? []).length === 0 ? [] : [disk.cwd, ...(disk.sessionCwds ?? [])].filter((dir) => dir.startsWith("/"));
+}
+
+/** The working directories and the home a parent holds, by the caller's disk. */
+function parentSides(disk: GlobDisk): string[] {
+  const home = disk.homeOk === false || disk.home === null || !disk.home.startsWith("/") ? [] : [disk.home];
+  return [...parentStarts(disk), ...home];
+}
+
+/** `path`'s canonical form as the hook resolved it ({@link realpathKey}), or `null`. */
+function canonicalOnDisk(disk: GlobDisk, path: string): string | null {
+  const resolved = disk.listings.get(realpathKey(path));
+  return Array.isArray(resolved) && typeof resolved[0] === "string" && resolved[0].startsWith("/") ? resolved[0] : null;
+}
+
+/**
+ * A word whose last part the text cannot read through ordinary variables
+ * (lead ruling L62435, S6 and S7): is its READABLE part (`prefix`, the parts
+ * before the first unreadable or glob part) proven to be a strict ancestor of
+ * the working directory or the home, so the unreadable part may make the word
+ * the workspace or an ancestor of it? `../$X`, `~/$X`, `/$X`, `$PWD/../$X`
+ * are; `$X`, `"$OUT"`, `./$X`, `scripts/$NAME` (below the working directory)
+ * and `/tmp/$name` (an absolute path that holds neither) are not, and keep
+ * main's class. A readable part with names after the `..`s (`../../dev/$X`,
+ * `~/dev/$X`, `/Users/$X`) is placed by the caller's disk, with symlinks and
+ * letter case resolved as for a parent spelled in full; without the disk only
+ * a `..` the names do not climb back from counts.
+ */
+function unreadableBelowParent(base: "cwd" | "home" | "root", prefix: readonly string[], disk: GlobDisk | undefined): boolean {
+  let ups = 0;
+  while (ups < prefix.length && prefix[ups] === "..") ups += 1;
+  const names = prefix.slice(ups);
+  if (names.length === 0 && (base !== "cwd" || ups > 0)) return true;
+  if (base === "cwd" && ups === 0) return false;
+  if (disk === undefined) return base === "cwd" && names.length < ups;
+  const relative = parentStarts(disk);
+  const starts =
+    base === "cwd" ? relative : base === "home" ? (disk.homeOk === false || disk.home === null || !disk.home.startsWith("/") ? [] : [disk.home]) : relative.length === 0 ? [] : ["/"];
+  if (starts.length === 0) return base === "cwd" ? names.length < ups : true;
+  const sides = parentSides(disk);
+  const fold = (path: string): string => foldNameExact(path);
+  const strictlyUnder = (dir: string, top: string): boolean => dir !== top && (top === "/" || dir.startsWith(`${top}/`));
+  for (const from of starts) {
+    const kept = from.split("/").filter((part) => part.length > 0);
+    const target = `/${[...kept.slice(0, Math.max(0, kept.length - ups)), ...names].join("/")}`;
+    disk.collect?.add(target);
+    if (sides.some((side) => strictlyUnder(fold(side), fold(target)))) return true;
+    const canonicalTarget = canonicalOnDisk(disk, target);
+    const canonicalSides = sides.map((side) => canonicalOnDisk(disk, side));
+    if (canonicalTarget === null || canonicalSides.some((dir) => dir === null)) return true;
+    if (canonicalSides.some((dir) => dir !== null && strictlyUnder(fold(dir), fold(canonicalTarget)))) return true;
+  }
+  return false;
+}
+
 /**
  * Is `operand` the working directory, an ancestor of it, the home or an
  * ancestor of the home (`.`, `./`, `sub/..`, `..`, `$PWD`, `"$PWD"`, `$(pwd)`,
  * `~`, `~/`, `$HOME`, `/`)? `null` when it is not such a word, or not one the
- * text can tell (any other variable or substitution, a glob: their own rules
- * answer). Otherwise the absolute directories whose listings decide (the
- * operand and every directory from it down to the working directory or home
- * it holds), or `"unplaced"` when the caller cannot place or list them.
+ * text can tell (an ordinary variable alone or below the working directory,
+ * a glob: their own rules answer). Otherwise the absolute directories whose
+ * listings decide (the operand and every directory from it down to the
+ * working directory or home it holds), or `"unplaced"` when the caller cannot
+ * place or list them.
  */
 function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | undefined): string[] | "unplaced" | null {
   let base: "cwd" | "home" | "root";
@@ -9839,9 +9977,10 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
   // before it. A word the text cannot read (`$X`, `"$X"`, `${X}`, `$OLDPWD`,
   // a substitution, `~user`) may itself hold `..` or be the working
   // directory or the home (security review, 4 and 5). So: a `..` that would
-  // remove such a word, or such a word (or a glob after one) last, leaves the
-  // target unknown: fail closed. A readable name after it (`$X/dist`,
-  // `"$TMPDIR"/x`) is not the directory itself: not judged here, as on main.
+  // remove such a word leaves the target unknown: fail closed. A readable
+  // name after it (`$X/dist`, `"$TMPDIR"/x`) is not the directory itself: not
+  // judged here, as on main. Such a word (or a glob after one) last: see
+  // below.
   const unreadable = (part: string): boolean =>
     /[$`]/u.test(part) || part.includes(SUBSTITUTION_SENTINEL) || part.includes(PARAMETER_MARK);
   const globbed = (part: string): boolean => /[*?[\]{}~]/u.test(part);
@@ -9863,8 +10002,16 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
   const firstUnread = stack.findIndex(unreadable);
   if (firstUnread >= 0) {
     const last = stack[stack.length - 1] as string;
-    if (unreadable(last) || stack.slice(firstUnread + 1).some(globbed)) return "unplaced";
-    return null;
+    if (!unreadable(last) && !stack.slice(firstUnread + 1).some(globbed)) return null;
+    // Lead ruling L62435 (S6, S7; it reverses part of security review 4): a
+    // word whose unreadable parts are ordinary variables places as a parent
+    // only when its readable part proves it may be one
+    // ({@link unreadableBelowParent}). `$PWD`-, `$HOME`- and `$(pwd)`-led
+    // words are read above; any other unreadable part (a substitution,
+    // `${X%/*}`, `$OLDPWD`, `~user`) fails closed, as before.
+    if (!stack.every((part) => !unreadable(part) || ordinaryVariablePart(part))) return "unplaced";
+    const firstOpaque = stack.findIndex((part) => unreadable(part) || globbed(part));
+    return unreadableBelowParent(base, stack.slice(0, firstOpaque), disk) ? "unplaced" : null;
   }
   // A glob that names what a directory holds (`dist/*`) is the glob rule's.
   if (stack.some(globbed)) return null;
@@ -9880,78 +10027,90 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
   // other absolute path is not judged here.
   if (!poppedName && base !== "root" && ups === 0 && names.length > 0) return null;
   if (disk === undefined) return !poppedName && base === "root" && stack.length > 0 ? null : "unplaced";
-  let target: string;
-  let from = "";
-  if (base === "root") {
-    target = `/${stack.join("/")}`;
-  } else {
-    const start = base === "home" ? (disk.homeOk === false ? null : disk.home) : disk.relativeOk === false ? null : disk.cwd;
-    if (start === null || !start.startsWith("/")) return "unplaced";
-    from = start;
-    const parts = from.split("/").filter((part) => part.length > 0);
-    target = `/${[...parts.slice(0, Math.max(0, parts.length - ups)), ...names].join("/")}`;
-  }
   const under = (dir: string, top: string): boolean => dir === top || top === "/" || dir.startsWith(`${top}/`);
   // Paths compare by the shared fold too (#688: one fold): folded in the
   // folded reading, exactly as spelled in the other (review-b A686-FOLD5 M1).
   const fold = (path: string): string => foldNameExact(path);
-  const sides = [disk.relativeOk === false ? null : disk.cwd, disk.homeOk === false ? null : disk.home].filter(
-    (dir): dir is string => dir !== null && dir.startsWith("/"),
-  );
-  const canonical = (path: string): string | null => {
-    const resolved = disk.listings.get(realpathKey(path));
-    return Array.isArray(resolved) && typeof resolved[0] === "string" && resolved[0].startsWith("/") ? resolved[0] : null;
+  // Lead ruling L62435 (S7): where the hook's envelope names a session
+  // directory other than the hook's own, a word is placed from both, and is
+  // a parent if it is one from either ({@link parentStarts}).
+  const relative = parentStarts(disk);
+  const sides = parentSides(disk);
+  const placeable = relative.length > 0 && disk.homeOk !== false;
+  const canonical = (path: string): string | null => canonicalOnDisk(disk, path);
+  const judge = (from: string): string[] | "unplaced" | null => {
+    let target: string;
+    if (base === "root") {
+      target = `/${stack.join("/")}`;
+    } else {
+      const parts = from.split("/").filter((part) => part.length > 0);
+      target = `/${[...parts.slice(0, Math.max(0, parts.length - ups)), ...names].join("/")}`;
+    }
+    if (poppedName) {
+      // Placed by the hook's resolution of the operand AS WRITTEN (the kernel's
+      // reading, `..` after the symlink it follows), not by the text's. Not
+      // resolved: fail closed. Holding neither the working directory nor the
+      // home: judged by its own listing, read through the same spelling. Holding
+      // one: only when it is the directory the text names, else fail closed.
+      if (base === "root" && !placeable) return "unplaced";
+      const written = base === "root" ? rest : `${from}/${rest.replace(/^\/+/u, "")}`;
+      disk.collect?.add(written);
+      disk.collect?.add(target);
+      const physical = canonical(written);
+      const physicalSides = sides.map(canonical);
+      if (physical === null || physicalSides.some((dir) => dir === null)) return "unplaced";
+      if (!physicalSides.some((dir) => dir !== null && under(fold(dir), fold(physical)))) {
+        return disk.listingsOk === false ? "unplaced" : [written];
+      }
+      const lexical = canonical(target);
+      if (lexical === null || fold(lexical) !== fold(physical)) return "unplaced";
+      if (base !== "root" && ups === 0 && names.length > 0) return null;
+    }
+    const places = sides.filter((dir) => under(dir, target));
+    if (places.length === 0) {
+      // A path that holds neither the working directory nor the home as
+      // written may still hold one by another spelling (security review, 6):
+      // another letter case on a case-insensitive volume (`/Users/Me/Proj`
+      // for /Users/me/proj), or a symlink on the way (`/tmp/x` for
+      // /private/tmp/x). The chain cannot be named then: fail closed. It is
+      // elsewhere only when the canonical paths the hook resolved (keyed by
+      // {@link realpathKey}) show it, compared with letter case folded too;
+      // then it is judged by its own listing (a sibling, `../other-project`;
+      // `/tmp/build`). Without them nothing shows it: fail closed.
+      if (base === "root" && !placeable) return "unplaced";
+      disk.collect?.add(target);
+      const canonicalTarget = canonical(target);
+      const canonicalSides = sides.map(canonical);
+      if (canonicalTarget === null || canonicalSides.some((dir) => dir === null)) return "unplaced";
+      if (canonicalSides.some((dir) => dir !== null && under(fold(dir), fold(canonicalTarget)))) return "unplaced";
+      return disk.listingsOk === false ? "unplaced" : [target];
+    }
+    if (disk.listingsOk === false) return "unplaced";
+    const dirs = new Set<string>([target]);
+    for (const place of places) {
+      const below = place.slice(target === "/" ? 1 : target.length + 1).split("/").filter((part) => part.length > 0);
+      let at = target === "/" ? "" : target;
+      for (const part of below) {
+        at = `${at}/${part}`;
+        dirs.add(at);
+      }
+    }
+    return dirs.size > ORGAN_PARENT_CHAIN_CAP ? "unplaced" : [...dirs];
   };
-  if (poppedName) {
-    // Placed by the hook's resolution of the operand AS WRITTEN (the kernel's
-    // reading, `..` after the symlink it follows), not by the text's. Not
-    // resolved: fail closed. Holding neither the working directory nor the
-    // home: judged by its own listing, read through the same spelling. Holding
-    // one: only when it is the directory the text names, else fail closed.
-    if (base === "root" && (disk.relativeOk === false || disk.homeOk === false)) return "unplaced";
-    const written = base === "root" ? rest : `${from}/${rest.replace(/^\/+/u, "")}`;
-    disk.collect?.add(written);
-    disk.collect?.add(target);
-    const physical = canonical(written);
-    const physicalSides = sides.map(canonical);
-    if (physical === null || physicalSides.some((dir) => dir === null)) return "unplaced";
-    if (!physicalSides.some((dir) => dir !== null && under(fold(dir), fold(physical)))) {
-      return disk.listingsOk === false ? "unplaced" : [written];
-    }
-    const lexical = canonical(target);
-    if (lexical === null || fold(lexical) !== fold(physical)) return "unplaced";
-    if (base !== "root" && ups === 0 && names.length > 0) return null;
+  if (base === "root") return judge("/");
+  const starts = base === "home" ? (disk.homeOk === false || disk.home === null ? [] : [disk.home]) : relative;
+  if (starts.length === 0 || starts.some((start) => !start.startsWith("/"))) return "unplaced";
+  const all = new Set<string>();
+  let parent = false;
+  for (const start of starts) {
+    const dirs = judge(start);
+    if (dirs === "unplaced") return "unplaced";
+    if (dirs === null) continue;
+    parent = true;
+    for (const dir of dirs) all.add(dir);
   }
-  const places = sides.filter((dir) => under(dir, target));
-  if (places.length === 0) {
-    // A path that holds neither the working directory nor the home as
-    // written may still hold one by another spelling (security review, 6):
-    // another letter case on a case-insensitive volume (`/Users/Me/Proj`
-    // for /Users/me/proj), or a symlink on the way (`/tmp/x` for
-    // /private/tmp/x). The chain cannot be named then: fail closed. It is
-    // elsewhere only when the canonical paths the hook resolved (keyed by
-    // {@link realpathKey}) show it, compared with letter case folded too;
-    // then it is judged by its own listing (a sibling, `../other-project`;
-    // `/tmp/build`). Without them nothing shows it: fail closed.
-    if (base === "root" && (disk.relativeOk === false || disk.homeOk === false)) return "unplaced";
-    disk.collect?.add(target);
-    const canonicalTarget = canonical(target);
-    const canonicalSides = sides.map(canonical);
-    if (canonicalTarget === null || canonicalSides.some((dir) => dir === null)) return "unplaced";
-    if (canonicalSides.some((dir) => dir !== null && under(fold(dir), fold(canonicalTarget)))) return "unplaced";
-    return disk.listingsOk === false ? "unplaced" : [target];
-  }
-  if (disk.listingsOk === false) return "unplaced";
-  const dirs = new Set<string>([target]);
-  for (const place of places) {
-    const below = place.slice(target === "/" ? 1 : target.length + 1).split("/").filter((part) => part.length > 0);
-    let at = target === "/" ? "" : target;
-    for (const part of below) {
-      at = `${at}/${part}`;
-      dirs.add(at);
-    }
-  }
-  return dirs.size > ORGAN_PARENT_CHAIN_CAP ? "unplaced" : [...dirs];
+  if (!parent) return null;
+  return all.size > ORGAN_PARENT_CHAIN_CAP ? "unplaced" : [...all];
 }
 
 let guardedSpellings: Map<string, string[]> | null = null;
@@ -10021,6 +10180,7 @@ function organParentClass(
   words: readonly LexWord[],
   protectedPaths: readonly ProtectedPathEntry[],
   disk: GlobDisk | undefined,
+  assigned: ReadonlyMap<string, readonly string[]> | undefined = undefined,
 ): { named: { surface: string; path: string } | null; git: Set<string> } {
   let named: { surface: string; path: string } | null = null;
   const git = new Set<string>();
@@ -10031,27 +10191,51 @@ function organParentClass(
     if (!claims.includes(surface)) claims.push(surface);
     if (named === null || protectedRank(surface) < protectedRank(named.surface)) named = { surface, path };
   };
+  // `$(pwd)`, `$(pwd -P)`, `$(builtin pwd)`, `$(command pwd -L)` (security
+  // review, 4), found once for the segment (review N3: once per operand was
+  // operands x words).
+  const pwdWords = new Set(
+    words
+      .filter((word) => word.substitutions.length === 1 && /^(?:(?:builtin|command)\s+)?pwd(?:\s+-[LP]+)*$/u.test(word.substitutions[0]?.trim() ?? ""))
+      .map((word) => word.text),
+  );
+  // What each listed directory gives, read once (review N3: a repeated
+  // parent was operands x entries). The same classes in the same order.
+  const held = new Map<string, { classes: string[]; git: boolean }>();
+  const seen = new Set<string>();
   for (const operand of operands) {
-    // `$(pwd)`, `$(pwd -P)`, `$(builtin pwd)`, `$(command pwd -L)` (security review, 4).
-    const pwdWord = words.some(
-      (word) => word.text === operand && word.substitutions.length === 1 && /^(?:(?:builtin|command)\s+)?pwd(?:\s+-[LP]+)*$/u.test(word.substitutions[0]?.trim() ?? ""),
-    );
-    const dirs = organParentDirs(operand, pwdWord, disk);
-    if (dirs === null) continue;
-    if (dirs === "unplaced" || disk === undefined) {
+    if (seen.has(operand)) continue;
+    seen.add(operand);
+    const readings = assignedReadings(operand, assigned);
+    if (readings === null) {
       offer("policy.core", operand);
       continue;
     }
-    for (const dir of dirs) {
-      disk.collect?.add(dir);
-      // A directory that is not there holds nothing, on a line where nothing before it may make it.
-      const listing = diskListing(disk, dir, true);
-      if (listing === undefined) {
+    for (const reading of readings) {
+      const dirs = organParentDirs(reading, reading === operand && pwdWords.has(operand), disk);
+      if (dirs === null) continue;
+      if (dirs === "unplaced" || disk === undefined) {
         offer("policy.core", operand);
         continue;
       }
-      for (const name of listing) {
-        const entry = guardedEntryClass(name, protectedPaths, dir);
+      for (const dir of dirs) {
+        disk.collect?.add(dir);
+        let entry = held.get(dir);
+        if (entry === undefined) {
+          // A directory that is not there holds nothing, on a line where nothing before it may make it.
+          const listing = diskListing(disk, dir, true);
+          if (listing === undefined) {
+            offer("policy.core", operand);
+            continue;
+          }
+          entry = { classes: [], git: false };
+          for (const name of listing) {
+            const guarded = guardedEntryClass(name, protectedPaths, dir);
+            for (const cls of guarded.classes) if (!entry.classes.includes(cls)) entry.classes.push(cls);
+            if (guarded.git) entry.git = true;
+          }
+          held.set(dir, entry);
+        }
         for (const cls of entry.classes) offer(cls, operand);
         if (entry.git) git.add(operand);
       }
@@ -10061,6 +10245,55 @@ function organParentClass(
   if (strictest === null || claims.length <= 1) return { named: strictest, git };
   const ordered = [strictest.surface, ...claims.filter((cls) => cls !== strictest.surface)];
   return { named: { surface: takeAmongEqual(ordered), path: strictest.path }, git };
+}
+
+/** Most readings one operand takes from the line's own assignments before it is judged strict. */
+const ASSIGNED_READINGS_CAP = 16;
+
+/**
+ * The operand as written, and once more for each value the line itself
+ * assigns a variable it names (`X=. ; rm -rf $X` is `rm -rf .`; lead ruling
+ * L62435, S7: an ordinary variable alone keeps main's class, so one the line
+ * sets is read as what it sets). `null` past {@link ASSIGNED_READINGS_CAP}.
+ */
+function assignedReadings(operand: string, assigned: ReadonlyMap<string, readonly string[]> | undefined): string[] | null {
+  if (assigned === undefined || assigned.size === 0 || !operand.includes("$")) return [operand];
+  const reference = /\$\{?([A-Za-z_][A-Za-z0-9_]*)(\}?)/gu;
+  const found = [...operand.matchAll(reference)].filter((match) => assigned.has(match[1] as string));
+  // `${X:-…}` and the like of a variable the line sets: not read, strict.
+  if (found.some((match) => match[0].startsWith("${") && match[2] !== "}")) return null;
+  const names = [...new Set(found.map((match) => match[1] as string))];
+  if (names.length === 0) return [operand];
+  let readings = [operand];
+  for (const name of names) {
+    const values = assigned.get(name) ?? [];
+    const next: string[] = [];
+    for (const reading of readings) {
+      next.push(reading);
+      for (const value of values) {
+        next.push(reading.replace(new RegExp(`\\$(?:\\{${name}\\}|${name}(?![A-Za-z0-9_]))`, "gu"), () => value));
+      }
+    }
+    readings = [...new Set(next)];
+    if (readings.length > ASSIGNED_READINGS_CAP) return null;
+  }
+  return readings;
+}
+
+/** `NAME=value` and `NAME+=value` words anywhere on the line, by name (for {@link assignedReadings}). */
+function lineAssignments(segments: readonly LexSegment[], outer: ReadonlyMap<string, readonly string[]> | undefined): ReadonlyMap<string, readonly string[]> {
+  const assigned = new Map<string, string[]>();
+  for (const [name, values] of outer ?? []) assigned.set(name, [...values]);
+  for (const segment of segments) {
+    for (const word of segment.words) {
+      if (!word.assignment) continue;
+      const match = /^([A-Za-z_][A-Za-z0-9_]*)\+?=([\s\S]*)$/u.exec(word.text);
+      if (match === null) continue;
+      const [name, value] = [match[1] as string, match[2] as string];
+      assigned.set(name, [...(assigned.get(name) ?? []), value]);
+    }
+  }
+  return assigned;
 }
 
 /**
@@ -12322,7 +12555,7 @@ function classifySegmentWithVerb(
   const organParent =
     context.organParentsOff === true || mainRulesOnly
       ? { named: null, git: new Set<string>() }
-      : organParentClass(parentOperands, segment.words, protectedPaths, glob.disk);
+      : organParentClass(parentOperands, segment.words, protectedPaths, glob.disk, context.lineAssigned);
   if (organParent.named !== null || organParent.git.size > 0) {
     // A GLOB-WRITE-family rule (main has none): the main pass joins the line
     // (lead ruling L61926), as it does for #686's rules.
@@ -13033,12 +13266,14 @@ function classifyCommandAsReadWithRules(
   // Review of 6e3cbc9e: listings are used only on a line where nothing else
   // can create, move, link or extract a file before or beside the pattern
   // (M2), and a `~` prefix only on a line that names no `HOME` (M3).
+  const lineMovesDir = context.globDisk !== undefined && segmentsMayChangeDirectory(lexed.segments);
   const globDisk =
     context.globDisk === undefined
       ? undefined
       : {
           ...context.globDisk,
-          relativeOk: context.globDisk.relativeOk !== false && !segmentsMayChangeDirectory(lexed.segments),
+          relativeOk: context.globDisk.relativeOk !== false && !lineMovesDir,
+          lineMovesDir: context.globDisk.lineMovesDir === true || lineMovesDir,
           homeOk: context.globDisk.homeOk !== false && !command.includes("HOME"),
           listingsOk: context.globDisk.listingsOk !== false && lineListingSafe(command, lexed.segments),
           singleSegment: context.globDisk.singleSegment !== false && lexed.segments.length === 1,
@@ -13048,8 +13283,9 @@ function classifyCommandAsReadWithRules(
     // Review-b M1: ONE matcher budget for the whole line and every script read inside it.
     globBudget: context.globBudget ?? { left: GLOB_GUARD_STEP_CAP },
   };
-  context = { ...context, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false };
-  execContext = { ...execContext, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false };
+  const lineAssigned = lineAssignments(lexed.segments, context.lineAssigned);
+  context = { ...context, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned };
+  execContext = { ...execContext, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned };
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };

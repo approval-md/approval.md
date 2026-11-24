@@ -1435,9 +1435,17 @@ test("security review of the parents rule (L61587), 3: a listed name in another 
 });
 
 test("security review of the parents rule (L61587), 4: an operand the text cannot read", () => {
-  // An operand the text cannot read may be the working directory: fail closed.
-  for (const command of ["rm -rf $X", 'rm -rf "$X"', "rm -rf ${X}/", "rm -rf $OLDPWD", "rm -rf $(pwd -P)", "rm -rf ${PWD}", 'rm -rf "$PWD/"', "chmod -R 000 $X", 'mv "$X" ../y']) {
+  // An operand that names the working directory, the last one or the home
+  // through a word the text cannot read may be a parent: fail closed.
+  for (const command of ["rm -rf $OLDPWD", "rm -rf $(pwd -P)", "rm -rf ${PWD}", 'rm -rf "$PWD/"', "rm -rf ${PWD%/*}", "rm -rf ${X:-.}"]) {
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // Lead ruling L62435 (S6, S7) reverses this review's first answer for an
+  // ordinary variable: alone it keeps main's class (it was policy.core).
+  for (const command of ["rm -rf $X", 'rm -rf "$X"', "rm -rf ${X}/", "chmod -R 000 $X", 'mv "$X" ../y']) {
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    assert.deepEqual(classesOf(command), main.classes, command);
   }
   // `builtin pwd` and `command pwd` are refused by main (no rule for the
   // wrapper); a refusal is stricter than any class and stays one.
@@ -1464,15 +1472,23 @@ test("security review of the parents rule (L61587), 5: a tail after an unreadabl
     "rm -rf $(echo x)/a/..",
     "rm -rf $HOME/x/..",
     'rm -rf "$X"/..',
-    "rm -rf $X/*",
-    "chmod -R 000 ./$X",
-    "chmod -R 000 sub/$X",
-    'rm -rf "$X/$Y"',
-    "chmod -R 000 $X/$Y",
+    "rm -rf ../$X/*",
+    "chmod -R 000 ../$X",
+    "chmod -R 000 ~/$X",
+    'rm -rf "../$X/$Y"',
     "rm -rf ~someone",
     "chmod -R 000 ~someone/",
   ]) {
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
+  // Lead ruling L62435 (S7): an ordinary variable below the working
+  // directory, or after another, keeps main's class (it was policy.core).
+  // (`$X/*` keeps #686's pattern answer, main's since 9122cb3e.)
+  assert.deepEqual(classesOf("rm -rf $X/*"), ["policy.core", "files.delete.out_of_scope", "log.mutate"]);
+  for (const command of ["chmod -R 000 ./$X", "chmod -R 000 sub/$X", 'rm -rf "$X/$Y"', "chmod -R 000 $X/$Y"]) {
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    assert.deepEqual(classesOf(command), main.classes, command);
   }
   // A named tail is not the unreadable directory itself: main's class.
   assert.deepEqual(classesOf("rm -rf $X/dist"), ["files.delete.out_of_scope"]);
@@ -1785,7 +1801,6 @@ test("lead ruling L62013 for the parents rule: a parent takes the classes of the
   const organ = { "/w": [".claude", "src"] };
   for (const command of [
     "find . -delete",
-    "find . -name '*.pyc' -delete",
     "find . -type f -delete",
     "git rm -r .",
     "tar --remove-files -czf x.tgz .",
@@ -1808,6 +1823,9 @@ test("lead ruling L62013 for the parents rule: a parent takes the classes of the
     ["mkdir -p .", "files.write.workspace"],
     ["touch .", "files.write.workspace"],
     ["git add .", "vcs.commit.branch"],
+    // Lead ruling L62435 (S7): a find a name test narrows is not a delete of
+    // everything below.
+    ["find . -name '*.pyc' -delete", "files.delete.out_of_scope"],
   ] as const) {
     assert.deepEqual(withListing(command, organ), [main], command);
   }
@@ -1830,7 +1848,7 @@ test("security review of d3ecdd5e: find's leading options, rsync's remove spelli
     "find -D tree . -delete",
     "find -O3 . -delete",
     "find -delete",
-    "find -name '*.o' -delete",
+    "find -type f -delete",
     "find -Z . -delete",
   ]) {
     assert.ok(withListing(command, organ).includes("policy.core"), `${command} -> ${withListing(command, organ).join(",")}`);
@@ -2046,4 +2064,109 @@ test("lead ruling L62319: a refusal main has for another reason still refuses a 
   // main refuses still refuses the line.
   assert.equal(classifyCommand("echo x >! APPROVAL.md; cat <<< y").ok, false);
   assert.equal(classifyCommand("echo x >! out.log; python3 -c 'print(1)'").ok, classifyCommand("echo x > out.log; python3 -c 'print(1)'").ok);
+});
+
+/** The classes main's rules give `command` with the same disk (or none). */
+function mainClasses(command: string, globDisk?: Parameters<typeof classifyCommand>[2] extends infer C ? (C extends { globDisk?: infer D } ? D : never) : never): string[] {
+  const main = classifyCommandWithMainRules(command, [], globDisk === undefined ? {} : { globDisk });
+  assert.ok(main.ok, `${command}: main refuses it`);
+  return main.classes;
+}
+
+test("lead ruling L62435 (S6): a chmod of a word the text cannot read keeps main's class, with or without -R", () => {
+  const disk = { cwd: "/w", home: "/h", listings: new Map<string, readonly string[]>(Object.entries({ "/w": [".claude", "scripts"], "/w/scripts": ["run.sh"], ...realpaths("/w", "/h", "/w/scripts") })) };
+  for (const command of ['chmod +x "$f"', "chmod +x ./$NAME", "chmod u+x $1", "chmod 755 $DIR", 'chmod -R 755 "$OUT"', "chmod +x $SCRIPT", "chmod +x scripts/$NAME"]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
+    const withDiskClasses = classifyCommand(command, [], { globDisk: disk });
+    assert.ok(withDiskClasses.ok, command);
+    assert.deepEqual(withDiskClasses.classes, mainClasses(command, disk), `${command} (listing)`);
+    assert.deepEqual(withDiskClasses.classes, ["files.write.workspace"], command);
+  }
+  // A readable parent spelling still counts without -R (it locks every organ below).
+  for (const command of ["chmod 000 .", "chmod 000 ..", "chmod 000 ~"]) {
+    assert.ok(classesOf(command).includes("policy.core"), command);
+  }
+  // Below a proven parent, an unreadable word may be the workspace: strict.
+  for (const command of ["chmod +x ../$X", "chmod -R 000 ~/$X", "chmod 000 /$X"]) {
+    assert.ok(classesOf(command).includes("policy.core"), command);
+  }
+});
+
+test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary variable alone or below a place that holds no workspace, keep main's class", () => {
+  const organ = { "/w": [".claude", "src"], ...realpaths("/w", "/h") };
+  for (const command of [
+    "find . -name '*.tmp' -delete",
+    "find . -name '*.pyc' -delete",
+    "find . -name .DS_Store -delete",
+    "find . -empty -delete",
+    "find . -type f -name '*.log' -delete",
+    "find .. -name '*.tmp' -delete",
+  ]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
+    assert.deepEqual(withListing(command, organ), ["files.delete.out_of_scope"], `${command} (listing)`);
+  }
+  // No test narrowing it (or one that widens it): the parents rule's answer.
+  for (const command of ["find . -delete", "find .. -delete", "find . -type f -delete", "find . -depth -delete", "find . ! -name x -delete", "find . -not -name x -delete", "find . -name x -o -delete", "find . -name '*' -delete", "find . -name '.*' -delete", "find . -mtime +3 -delete", "find . \\( -name x \\) -delete"]) {
+    leads(withListing(command, organ), "policy.core");
+    assert.ok(classesOf(command).includes("policy.core"), command);
+  }
+  // An ordinary variable alone, below the working directory, or below a
+  // directory that holds neither the working directory nor the home.
+  const tmp = { "/w": [".claude"], "/tmp": ["x"], "/private/tmp": ["x"], ...realpaths("/w", "/h", "/private/tmp"), [realpathKey("/tmp")]: ["/private/tmp"] };
+  for (const command of ["rm -rf $TARGET", "rm -rf $BUILD_DIR", 'rm -rf "$OUT"', 'rm -rf "$TMPDIR"', "rm -rf ./$X", "rm -rf /tmp/$name", "rm -rf /private/tmp/$SESSION", "rm -rf ${OUT:-dist}", 'rm -rf "${OUT:?}"']) {
+    assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
+    assert.deepEqual(withListing(command, tmp), ["files.delete.out_of_scope"], `${command} (listing)`);
+  }
+  // Below a proven parent: may be the workspace itself, strict.
+  for (const command of ["rm -rf ../$X", "rm -rf ~/$X", "rm -rf /$X", "rm -rf $PWD/../$X", "rm -rf ../../$X", "rm -rf ~/../$X", 'rm -rf "../$X/$Y"']) {
+    leads(classesOf(command), "policy.core");
+    leads(withListing(command, tmp), "policy.core");
+  }
+  // An absolute directory above the working directory: strict; one beside it: main's.
+  leads(withDisk("rm -rf /a/$X", "/a/b/w", { "/a": ["b"], ...realpaths("/a", "/a/b/w", "/h") }), "policy.core");
+  assert.deepEqual(withDisk("rm -rf /a/c/$X", "/a/b/w", { "/a/c": ["x"], ...realpaths("/a/c", "/a/b/w", "/h") }), ["files.delete.out_of_scope"]);
+  // ... and one the hook could not resolve: strict.
+  leads(withDisk("rm -rf /a/c/$X", "/a/b/w", { "/a/c": ["x"] }), "policy.core");
+  // Words that name a working directory or the home stay read as parents.
+  for (const command of ["rm -rf $OLDPWD", 'rm -rf "$(pwd -P)"', "rm -rf $PWD", "rm -rf ${PWD%/*}", "rm -rf ~+", "rm -rf ~-", "rm -rf $X/.."]) {
+    assert.ok(classesOf(command).includes("policy.core"), command);
+  }
+});
+
+test("lead ruling L62435 (S7): a variable the line itself sets is read as what it sets", () => {
+  for (const command of ["X=. ; rm -rf $X", 'X=.; rm -rf "$X"', "X=.. rm -rf $X", "X=$(pwd); rm -rf $X", "X=.; rm -rf ${X:-dist}"]) {
+    assert.ok(classesOf(command).includes("policy.core"), command);
+  }
+  // `.claude` is not a parent (main's own rules judge the organ by name): main's class.
+  for (const command of ["D=.claude; rm -rf $D", "X=dist; rm -rf $X"]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), command);
+  }
+});
+
+test("lead ruling L62435 (S7): with a session directory that differs from the hook's own, a word is placed from both", () => {
+  const session = (command: string, listings: Record<string, readonly string[] | "unreadable" | "missing">): string[] => {
+    const result = classifyCommand(command, [], { globDisk: { cwd: "/w", home: "/h", relativeOk: false, sessionCwds: ["/w/sub"], listings: new Map(Object.entries(listings)) } });
+    assert.ok(result.ok, command);
+    return result.classes;
+  };
+  const disk = {
+    "/w": [".claude", "sub"],
+    "/w/sub": ["a"],
+    "/tmp/x": ["y"],
+    "/plain": ["x"],
+    "/other/x": ["y"],
+    "/w/plain": "missing" as const,
+    "/w/other/x": "missing" as const,
+    ...realpaths("/w", "/w/sub", "/h", "/tmp/x", "/plain", "/other/x", "/w/plain", "/w/other/x"),
+  };
+  for (const command of ["rm -rf /tmp/x", "rm -rf ../plain", "rm -rf ../other/x"]) {
+    assert.deepEqual(session(command, disk), ["files.delete.out_of_scope"], command);
+  }
+  // `..` from the session directory is the hook's own: a parent from either is a parent.
+  leads(session("rm -rf ..", disk), "policy.core");
+  leads(session("rm -rf /w", disk), "policy.core");
+  // Without the session directory's canonical path: strict, as before.
+  leads(session("rm -rf /tmp/x", { "/tmp/x": ["y"], ...realpaths("/w", "/h", "/tmp/x") }), "policy.core");
+  // A line that may change directory: a relative word is not placed (strict).
+  assert.ok(session("cd x && rm -rf ../plain", disk).includes("policy.core"));
 });

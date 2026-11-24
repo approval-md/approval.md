@@ -851,3 +851,91 @@ test("lead ruling L62319, through the real hook after main's #700: a zsh clobber
     assert.match(decided.reason, /^hook-unparseable: redirection /u, command);
   }
 });
+
+/** The `examples/agent-village` classes and defaults (its channels left out so the loader takes it alone). */
+const POLICY_AV = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: autonomous",
+  "  approval_ttl: 72h",
+  "  on_expiry: reject",
+  "classes:",
+  "  policy.core:",
+  "    autonomy: human-only",
+  "  log.mutate:",
+  "    autonomy: human-only",
+  "  account.credential:",
+  "    autonomy: human-only",
+  "```",
+  "",
+].join("\n");
+
+let decidedAv = 0;
+/** The real hook's decision with the hook process in `dir` and the envelope's session `cwd` set to `session`. */
+function decideAv(dir: string, home: string, session: string, command: string): { permission: string; reason: string } {
+  decidedAv += 1;
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+  delete env["APPROVAL_HUMAN"];
+  const input = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "l62435", tool_use_id: `l62435-${decidedAv}`, cwd: session, transcript_path: "/dev/null", tool_name: "Bash", tool_input: { command } });
+  const ran = spawnSync(process.execPath, [CLI_ENTRY, "hook", "claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "100ms"], { cwd: dir, encoding: "utf8", env, input });
+  assert.equal(ran.status, 0, ran.stderr);
+  const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+  return { permission: output.permissionDecision, reason: output.permissionDecisionReason };
+}
+
+test("lead ruling L62435 (S6, S7), through the real hook under the agent-village classes: the over-asks are back at main's allow; a parent still denies", () => {
+  const lab = join(scratch, "l62435-av");
+  const dir = join(lab, "proj");
+  const home = join(lab, "home");
+  for (const [sub, file] of [["src", "a.ts"], ["scripts", "run.sh"], ["sub", "b.ts"], [".claude", "settings.json"], ["../home/.claude", "settings.json"], ["../plain", "x"]] as const) {
+    mkdirSync(join(dir, sub), { recursive: true });
+    writeFileSync(join(dir, sub, file), "made-up\n");
+  }
+  writeFileSync(join(dir, "APPROVAL.md"), POLICY_AV);
+  const attested = spawnSync(process.execPath, [CLI_ENTRY, "policy", "attest", "--as", "human:alice"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home } });
+  assert.equal(attested.status, 0, attested.stderr);
+  // Main 9122cb3e allows each of these under these classes.
+  for (const command of [
+    'chmod +x "$f"',
+    "chmod +x ./$NAME",
+    "chmod u+x $1",
+    "chmod 755 $DIR",
+    'chmod -R 755 "$OUT"',
+    "chmod +x $SCRIPT",
+    "chmod +x scripts/$NAME",
+    "find . -name '*.tmp' -delete",
+    "find . -name '*.pyc' -delete",
+    "find . -name .DS_Store -delete",
+    "find . -empty -delete",
+    "rm -rf $TARGET",
+    "rm -rf $BUILD_DIR",
+    'rm -rf "$OUT"',
+    "rm -rf /tmp/$name",
+    "rm -rf ./$X",
+    "rm -rf /private/tmp/$SESSION",
+    "D=.claude; rm -rf $D",
+  ]) {
+    const decision = decideAv(dir, home, dir, command);
+    assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
+  }
+  // A parent, or an unreadable word below one: human-only.
+  for (const command of ["find . -delete", "rm -rf ../$X", "rm -rf ~/$X", "chmod 000 .", "X=. ; rm -rf $X"]) {
+    const decision = decideAv(dir, home, dir, command);
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+  }
+  // The session's directory differs from the hook's (a `cd` in an earlier
+  // call): a word is placed from both, so a place that holds neither keeps
+  // main's allow, and a parent from either still denies.
+  const session = join(dir, "sub");
+  for (const command of ["rm -rf /tmp/b2-l62435-not-there", "rm -rf ../plain", `rm -rf ${join(lab, "plain")}`]) {
+    const decision = decideAv(dir, home, session, command);
+    assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
+  }
+  for (const command of ["rm -rf ..", "rm -rf ../..", `rm -rf ${dir}`, "chmod -R 000 ."]) {
+    const decision = decideAv(dir, home, session, command);
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+  }
+});
