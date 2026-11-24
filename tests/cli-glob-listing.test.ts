@@ -605,3 +605,70 @@ test("main #693 through the real hook: a call whose listing pass outlasts the ho
   const read = decide({});
   assert.equal(read.permission, "allow", read.reason);
 });
+
+test("review-b A686-FOLD7 S2 (lead ruling L62219), through the real hook: a long line that removes a folder holding four routed entries is never allowed, whether the read stops at the deadline or finishes", () => {
+  // Review-b's shape: `cp a.js … out/; rm -rf .github`, four routed entries
+  // under `.github`. At 100 KB the read takes about 20 CPU s and stops at the
+  // shipped deadline; 10 KB (about 1.3 CPU s here) keeps CI's cost down and
+  // still shows both ends: a short deadline stops it, the shipped one lets it
+  // finish. A later speed-up may move this line from the first to the second,
+  // and neither may answer allow.
+  const dir = join(scratch, "s2-lab");
+  mkdirSync(join(dir, "out"), { recursive: true });
+  mkdirSync(join(dir, ".github", "r0"), { recursive: true });
+  writeFileSync(join(dir, "a.js"), "made-up\n");
+  writeFileSync(join(dir, ".github", "r0", "x.yml"), "made-up\n");
+  const home = join(scratch, "s2-home");
+  mkdirSync(home, { recursive: true });
+  const routes = [0, 1, 2, 3];
+  writeFileSync(
+    join(dir, "APPROVAL.md"),
+    [
+      "# Policy",
+      "",
+      "```yaml approval-policy",
+      'version: "0.1"',
+      "defaults:",
+      "  autonomy: manual",
+      '  approval_ttl: "1h"',
+      "  on_expiry: reject",
+      "protected_paths:",
+      ...routes.map((index) => `  - { path: .github/r${String(index)}/, class: policy.edit.r${String(index)} }`),
+      "classes:",
+      "  read.*:",
+      "    autonomy: autonomous",
+      "  files.write.workspace:",
+      "    autonomy: autonomous",
+      // Main's class for the folder is allowed: only the routed classes ask.
+      "  policy.edit:",
+      "    autonomy: autonomous",
+      ...routes.flatMap((index) => [`  policy.edit.r${String(index)}:`, "    autonomy: manual"]),
+      "```",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(runCliIn(["policy", "attest", "--as", "human:alice"], dir).code, 0);
+  const tail = " out/; rm -rf .github";
+  const command = `cp${" a.js".repeat(Math.floor((10_000 - 2 - tail.length) / 5))}${tail}`;
+  const decide = (extra: Readonly<Record<string, string>>): { permission: string; reason: string } => {
+    decided += 1;
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, ...extra };
+    delete env["APPROVAL_HUMAN"];
+    const input = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "s2", tool_use_id: `s2-${String(decided)}`, cwd: dir, transcript_path: "/dev/null", tool_name: "Bash", tool_input: { command } });
+    const ran = spawnSync(process.execPath, [CLI_ENTRY, "hook", "claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "100ms"], { cwd: dir, encoding: "utf8", env, input });
+    assert.equal(ran.status, 0, ran.stderr);
+    const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
+    return { permission: output.permissionDecision, reason: output.permissionDecisionReason };
+  };
+  // Stopped at the deadline: refused, never a pass.
+  const stopped = decide({ [DESCRIBE_DEADLINE_ENV]: "200" });
+  assert.notEqual(stopped.permission, "allow", stopped.reason);
+  assert.equal(stopped.permission, "deny", stopped.reason);
+  assert.match(stopped.reason, /^hook-deadline: /u);
+  // Read in full under the shipped deadline: the routed classes ask (manual,
+  // a one-second wait, then refused), never main's autonomous policy.edit.
+  const finished = decide({});
+  assert.notEqual(finished.permission, "allow", finished.reason);
+  assert.equal(finished.permission, "deny", finished.reason);
+  assert.match(finished.reason, /^hook-timeout: .*policy\.edit\.r[0-3]/u);
+});

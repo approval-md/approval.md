@@ -100,6 +100,8 @@ option, case folded), and takes the strictest class among them.
   out of the deadline and counts as reading time. Stopped at the deadline,
   the call is refused `hook-deadline` (it ran unbounded before: a 40 KB
   `rsync -aR` answered a 500 ms deadline after 5.5 s).
+  An open window describes the call with the same listings, so its read is
+  cut by the pass's time too (review-b A686-FOLD7 N2).
 - **Main's class is carried beside every raise (lead ruling L61926):** a line
   any GLOB-WRITE rule fires on is classified a second time with every
   GLOB-WRITE rule off (main's answer), and the two join: every class of each
