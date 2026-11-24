@@ -244,6 +244,10 @@ test("through the hook: the policy file spelled as a dollar quote is not a works
     assert.ok(copy.result.ok && copy.result.classes.includes("policy.core"), JSON.stringify(copy.result));
     const removed = classifyForHook("rm $'\\x41PPROVAL.md'", [], cwd);
     assert.ok(removed.result.ok && removed.result.classes.includes("files.delete.out_of_scope") && removed.result.classes.includes("policy.core"));
+    // The hook's own passes run in both readings too: main's credential pass read the unknown
+    // spans of `$.claude/$settings.json` as a credential once resolved, and that class stays.
+    const spans = classifyForHook("cat $'.claude/'$\"settings.json\"", [], cwd);
+    assert.ok(spans.result.ok && spans.result.classes.includes("account.credential"), JSON.stringify(spans.result));
     const read = classifyForHook("cat $'.approval/\\x65nv'", [], cwd);
     assert.ok(read.result.ok && read.result.classes.includes("account.credential"));
   } finally {
