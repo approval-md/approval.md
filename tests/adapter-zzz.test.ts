@@ -451,8 +451,8 @@ test("ineligible no-token actions touch neither credentials nor adapter precheck
   async function deniedBeforeBoundary(unit: Case, code: string, value?: JsonValue) {
     const checked = await runWithSpies(unit, value);
     const denied = refusal(checked.result);
-    assert.equal(denied.code, code);
-    assert.deepEqual(checked.calls, { credentials: 0, precheck: 0, act: 0 });
+    assert.equal(denied.code, code, JSON.stringify(denied));
+    assert.deepEqual(checked.calls, { credentials: 0, precheck: 0, act: 0 }, JSON.stringify(denied));
   }
 
   const manual = policyAuthorized(payload(), "autonomous").unit;
@@ -468,8 +468,8 @@ test("ineligible no-token actions touch neither credentials nor adapter precheck
 
   const invalidActor = policyAuthorized(payload(), "autonomous").unit;
   const invalid = await runWithSpies(invalidActor, invalidActor.payload, "system:gate");
-  assert.equal(refusal(invalid.result).code, "actor-invalid");
-  assert.deepEqual(invalid.calls, { credentials: 0, precheck: 0, act: 0 });
+  assert.equal(refusal(invalid.result).code, "actor-invalid", JSON.stringify(invalid.result));
+  assert.deepEqual(invalid.calls, { credentials: 0, precheck: 0, act: 0 }, JSON.stringify(invalid.result));
 
   const humanOnly = policyAuthorized(payload(), "autonomous").unit;
   writeFileSync(
@@ -483,7 +483,7 @@ test("ineligible no-token actions touch neither credentials nor adapter precheck
   await deniedBeforeBoundary(humanOnly, "class-human-only");
 
   const selected = policyAuthorized(payload(), "supervised-live", 1);
-  assert.equal(selected.gate?.ok, true);
+  assert.equal(selected.gate?.ok, true, JSON.stringify(selected.gate));
   await deniedBeforeBoundary(selected.unit, "token-required");
 
   const unattested = policyAuthorized(payload(), "autonomous", undefined, [], false).unit;
@@ -503,10 +503,11 @@ test("ineligible no-token actions touch neither credentials nor adapter precheck
     ["    limits:", "      per_action_usd: 0.01"],
   ).unit;
   await deniedBeforeBoundary(overBudget, "budget-exceeded");
-  assert.equal(events(overBudget.logPath).at(-1), "budget.exceeded");
+  assert.equal(events(overBudget.logPath).at(-1), "budget.exceeded", JSON.stringify(events(overBudget.logPath)));
 
   const spent = policyAuthorized(payload(), "autonomous").unit;
-  assert.equal((await run(spent)).ok, true);
+  const spentRun = await run(spent);
+  assert.equal(spentRun.ok, true, JSON.stringify(spentRun));
   await deniedBeforeBoundary(spent, "already-executed");
 });
 
