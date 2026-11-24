@@ -1003,6 +1003,13 @@ test("lead ruling L62511 (S-C), through the real hook in a checkout with a reali
   const decide = (command: string): string => decideAv(dir, home, dir, command).permission;
   for (const command of ["find . -name '*.tmp' -delete", "find . -name '*.pyc' -delete", "find . -name .DS_Store -delete"]) assert.equal(decide(command), "allow", command);
   for (const command of ["find . -name HEAD -delete", "find . -name config -delete", "find . -name '*.pack' -delete", "find . -name main -delete", "find . -name 'pack-*' -delete"]) assert.equal(decide(command), "deny", command);
+  // The walk's order (security review of the fold): `refs` before the bulky
+  // `logs`, so a ref named `zz.tmp` is read before a limit cuts the walk.
+  for (let index = 0; index < 4_100; index += 1) put(`.git/logs/refs/heads/r${String(index)}`);
+  put(".git/refs/heads/zz.tmp");
+  assert.equal(decide("find . -name '*.tmp' -delete"), "deny");
+  rmSync(join(dir, ".git", "refs", "heads", "zz.tmp"));
+  assert.equal(decide("find . -name '*.tmp' -delete"), "allow");
   // A `.claude` past the walk's limits (4,000 names): `*.<ext>` outside the
   // list keeps main's class, a plain name or `x.*` takes the folder's.
   for (let index = 0; index < 4_100; index += 1) put(`.claude/cache/f${String(index)}.json`);
