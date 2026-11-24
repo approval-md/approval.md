@@ -12447,6 +12447,20 @@ export function classifyCommandInThisReading(
 }
 
 /**
+ * {@link classifyCommandInThisReading} with every GLOB-WRITE rule off: the
+ * row main's own classifier gives a segment, before #686 raises a write
+ * pattern to the class it may reach. Read by the hook's write pass to pick
+ * how a segment's words are read; never a decision on its own.
+ */
+export function classifyCommandInThisReadingWithMainRules(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[] = [],
+  context: ClassifierContext = {},
+): CommandClassification {
+  return withMainRules(() => classifyCommandAsRead(command, protectedPaths, context));
+}
+
+/**
  * Join a classification's name readings (`[folded]`, `[folded, asSpelled]`,
  * or the folded answer once per equal claim and then the as-spelled one) as
  * {@link classifyCommand} states: the folded answer, then each later

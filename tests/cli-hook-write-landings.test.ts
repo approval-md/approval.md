@@ -1913,3 +1913,22 @@ test("main's bare organ directory rule is .claude's only: a bare .claude-<suffix
     assert.ok(pure.ok && pure.classes.includes("policy.core"), `${command}: ${JSON.stringify(pure)}`);
   }
 });
+
+test("the write pass reads a segment by main's own row, not by #686's raise: a pattern does not move it to rule A", async () => {
+  // #686 puts policy.core ahead of `sed -i`'s row for `*.md` (the policy file
+  // may match), with or without the hook's listing. The pass still reads the
+  // segment by its row: the operands are judged writes, so an operand
+  // outside the roots is out of scope, as it was before #686.
+  for (const command of ["sed -i s/a/b/ *.md ../outside/x", "npx prettier --write *.md ../outside/y", "echo x > *.md; echo y > ../outside/x"]) {
+    for (const listed of [false, true]) {
+      const listings = listed ? await listGlobWriteDirsFor(command, [ws]) : null;
+      const { result } = classifyForHook(command, [], ws, [], false, [], false, optedIn(), listings);
+      assert.ok(result.ok, command);
+      if (!result.ok) continue;
+      assert.ok(result.classes.includes(OUT), `${command} (listing ${String(listed)}): ${JSON.stringify(result.segments)}`);
+    }
+  }
+  // A row main tightens to files.delete.out_of_scope stays exactly as main has it (decision A).
+  const deleted = see("chmod +x scripts/* ../outside/x", optedIn());
+  assert.ok(deleted.classes.includes(DELETE_OUT) && !deleted.classes.includes(OUT), JSON.stringify(deleted.segments));
+});

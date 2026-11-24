@@ -101,6 +101,7 @@ import {
   braceCandidates,
   copyArgvUnknown,
   classifyCommandInThisReading,
+  classifyCommandInThisReadingWithMainRules,
   collapseBracedVariables,
   commandSegmentShapes,
   copyTargetDirectories,
@@ -4772,12 +4773,23 @@ export function refineWriteLandings(
    * packaging rows (whose candidates over-include) and to leave a row main
    * already tightens to `files.delete.*` exactly as main has it. Never read by
    * matching text against the line's segments.
+   *
+   * Read with main's rules alone (#686's GLOB-WRITE rules off): the row the
+   * segment's words are read by. #686 puts the class a write pattern may
+   * reach ahead of the row (`sed -i s/a/b/ *.md` is policy.core first, with
+   * or without the hook's listing), which would send the segment to rule A:
+   * its operands would leave the judged writes, and the out-of-scope test
+   * with them, and a pattern's matches would be landed twice. Where main's
+   * rules refuse the text (a zsh clobber form, which #686 reads), the full
+   * reading answers.
    */
   const ownAnswers = new Map<string, ClassifiedSegment | null>();
   const ownAnswer = (shape: CommandSegmentShape): ClassifiedSegment | null => {
     const known = ownAnswers.get(shape.text);
     if (known !== undefined) return known;
-    const pure = classifyCommandInThisReading(shape.text, protectedPaths, { scratchRoots: resolveScratchRoots(hookCwd) });
+    const context = { scratchRoots: resolveScratchRoots(hookCwd) };
+    const asMain = classifyCommandInThisReadingWithMainRules(shape.text, protectedPaths, context);
+    const pure = asMain.ok ? asMain : classifyCommandInThisReading(shape.text, protectedPaths, context);
     const raised = refineWriteScope(pure, resolveWriteRoots(hookCwd), hookCwd).result;
     const answer = raised.ok ? (raised.segments[0] ?? null) : null;
     ownAnswers.set(shape.text, answer);
