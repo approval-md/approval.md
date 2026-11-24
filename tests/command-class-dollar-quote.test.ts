@@ -154,6 +154,9 @@ test("the lexer's text: each shared escape decoded, each other one unknown", () 
   assert.equal(verb?.[0]?.bin, "rm");
   const read = commandSegmentShapes("cat $'.approval/\\x65nv'");
   assert.deepEqual(read?.[0]?.args, [".approval/env"]);
+  // A substitution ends at its own `)`, past a `\'` inside a dollar quote.
+  const inner = commandSegmentShapes("echo $(printf $'a\\'b') > out.txt");
+  assert.deepEqual(inner?.[0]?.substitutions, ["printf $'a\\'b'"]);
 });
 
 test("an escape the shells read differently, a non-ASCII character or a NUL leaves the word unknown", () => {
