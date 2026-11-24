@@ -8058,44 +8058,63 @@ function outranksCredential(surface: string): boolean {
 }
 
 /**
- * The protected path, if any, that outranks a credential answer for this
- * segment (APRV-503). `null` when none does, which is when the credential tier
- * may answer at once.
+ * The protected scan of a segment that reads credential material (APRV-503),
+ * the words that ARE the credential read left out. `found` is the strictest
+ * protected path the scan names; where it outranks a credential answer
+ * (`log.mutate`, `policy.core`) the credential answer is deferred, and where
+ * it does not, the credential tier may answer at once and `found` is the
+ * protected class its write targets take, reported beside it (`more`).
  *
  * Scanned as the protected scan reads the segment: the positionals with the
  * prose skip, and the `<` targets. A credential file is ALSO a protected path
  * (`.approval/env` lies under the gate's directory), so the words that ARE the
  * credential read are left out, or every credential read would outrank itself:
  * the `<` targets that are credential files, and the credential positionals of
- * a binary that reads what it names. A write-only binary's credential
- * positional stays in, because for it that word is a write to the gate's
- * directory (`tee .approval/env < .approval/vault.enc` is `policy.core`, as
- * `tee .approval/env` is). On equal rank the positional is the one named.
+ * a binary that reads what it names ({@link isCredentialReadWord}). A
+ * write-only binary's credential positional stays in, because for it that
+ * word is a write to the gate's directory (`tee .approval/env <
+ * .approval/vault.enc` is `policy.core`, as `tee .approval/env` is). On equal
+ * rank the positional is the one named. The word lists scanned are returned
+ * too, so a later scan of the same segment reads the same words.
  */
-function outrankingProtected(
+function credentialSideScan(
   positionals: readonly string[],
   readTargets: readonly string[],
   writesOnly: boolean,
   protectedPaths: readonly ProtectedPathEntry[],
-): ProtectedHit | null {
-  // APRV-522: a credential word whose OWN protected class outranks
-  // `policy.core` stays in the scan. Since `..` resolves in the credential
-  // rule, a `..` spelling can name the environment map while its spelling also
-  // names the log directory; the stricter of the two must not be dropped.
-  const isTheRead = (word: string): boolean =>
+): CredentialSideScan {
+  const isTheRead = (word: string): boolean => isCredentialReadWord(word, protectedPaths);
+  const scannedPositionals = writesOnly ? positionals : positionals.filter((arg) => !isTheRead(arg));
+  const reads = readTargets.filter((target) => !isTheRead(target));
+  const named = strictestProtected(scannedPositionals, protectedPaths, true);
+  const fed = strictestProtected(reads, protectedPaths);
+  return { positionals: scannedPositionals, reads, found: strongerProtected(named, fed) };
+}
+
+/** {@link credentialSideScan}'s answer: the words it scanned, and what it found. */
+interface CredentialSideScan {
+  positionals: readonly string[];
+  reads: readonly string[];
+  found: ProtectedHit | null;
+}
+
+/**
+ * Is this word a credential READ rather than a protected path the segment
+ * writes? ({@link credentialSideScan}.) A credential file is also a
+ * protected path (`.approval/env` lies under the gate's directory), so the
+ * protected scans leave out the words that are the credential read, or every
+ * credential read would outrank itself.
+ *
+ * APRV-522: a credential word whose OWN protected class outranks
+ * `policy.core` stays in the scan. Since `..` resolves in the credential
+ * rule, a `..` spelling can name the environment map while its spelling also
+ * names the log directory; the stricter of the two must not be dropped.
+ */
+function isCredentialReadWord(word: string, protectedPaths: readonly ProtectedPathEntry[]): boolean {
+  return (
     isCredentialPathAsRead(word) &&
-    protectedRank(protectedPathClass(word, protectedPaths) ?? "policy.core") >= protectedRank("policy.core");
-  const named = strictestProtected(
-    writesOnly ? positionals : positionals.filter((arg) => !isTheRead(arg)),
-    protectedPaths,
-    true,
+    protectedRank(protectedPathClass(word, protectedPaths) ?? "policy.core") >= protectedRank("policy.core")
   );
-  const fed = strictestProtected(
-    readTargets.filter((target) => !isTheRead(target)),
-    protectedPaths,
-  );
-  const found = strongerProtected(named, fed);
-  return found !== null && outranksCredential(found.surface) ? found : null;
 }
 
 /**
@@ -8755,6 +8774,21 @@ function besideProtected(
   return more.length === 0 ? {} : { more: [...more] };
 }
 
+/**
+ * The protected classes a segment's answer reports, as `more` entries: the
+ * answer itself where it is a protected path's class, then its own `more`. A
+ * credential answer carries the classes of the segment's protected targets
+ * in its `more` (the credential tier in {@link classifySegment}), and hands
+ * those on. Nothing for a refusal or for any other answer.
+ */
+function protectedBeside(answer: SegmentOutcome): ProtectedBeside[] {
+  if (!answer.ok) return [];
+  const own: ProtectedBeside[] = PROTECTED_ANSWER_RULES.has(answer.rule)
+    ? [{ class: answer.class, rule: answer.rule, ...(answer.path === undefined ? {} : { path: answer.path }) }]
+    : [];
+  return [...own, ...(answer.more ?? [])];
+}
+
 /** The rules under which a segment's answer is a protected path's class. */
 const PROTECTED_ANSWER_RULES: ReadonlySet<string> = new Set([
   "redirect-protected",
@@ -9323,14 +9357,12 @@ function classifySegment(
     // (`cat SPEC.md > design/x`) earns no protected answer and adds nothing.
     // The segment is still walked once: this is the walk every other segment
     // takes ({@link commandAnswer}), not a second classification.
-    const own = foldedOnly((): ProtectedBeside[] => {
-      const answer = commandAnswer(segment.redirects.filter((redirect) => redirect.op === "<"));
-      if (!answer.ok || !PROTECTED_ANSWER_RULES.has(answer.rule)) return [];
-      return [
-        { class: answer.class, rule: answer.rule, ...(answer.path === undefined ? {} : { path: answer.path }) },
-        ...(answer.more ?? []),
-      ];
-    });
+    // A credential read in front of the redirection (`cp .approval/env
+    // .github/workflows/ci.yml > design/x`) answers the credential class, and
+    // its own protected targets ride in its `more`: those are judged too.
+    const own = foldedOnly((): ProtectedBeside[] =>
+      protectedBeside(commandAnswer(segment.redirects.filter((redirect) => redirect.op === "<"))),
+    );
     return {
       ok: true,
       class: redirected.surface,
@@ -9622,23 +9654,53 @@ function classifySegment(
         ? uploadCredential
         : argCredential;
   const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets);
-  const outranking =
+  const sideScan =
     credential === null && redirectCredential === null
       ? null
-      : outrankingProtected(
+      : credentialSideScan(
           judged,
           readTargets,
           credentialWritesOnly(basename, args) || credentialProtectedScanKeeps(basename),
           protectedPaths,
         );
+  const outranking =
+    sideScan !== null && sideScan.found !== null && outranksCredential(sideScan.found.surface) ? sideScan.found : null;
   // Merge of APRV-511 and APRV-522: APRV-522's credential read words include
   // an upload's option words, so a credential answer is deferred, never taken
   // here, while a download output outranks it (`policy.core`,
   // `fetch-output-unknown` answer below), as APRV-511 keeps the upload's own.
-  if (outranking === null && !fetchOutranksCredential) {
-    if (credential !== null) return { ok: true, ...credential };
-    if (redirectCredential !== null) return { ok: true, ...redirectCredential };
+  //
+  // The credential answer taken here ends the walk, and the segment may still
+  // WRITE protected paths that rank below the credential class (`cp
+  // .approval/env .github/workflows/ci.yml`, `cp .approval/env CLAUDE.md`,
+  // `tee .github/workflows/ci.yml < .approval/env`). The classifier's rank is
+  // not a policy's order, so those classes are reported beside the credential
+  // class as `more`, the way every other protected answer reports its other
+  // targets: the protected answer the rest of this walk gives, the credential
+  // words left out of its scans (they are the read: {@link
+  // isCredentialReadWord}). The credential class still answers, first. The
+  // walk goes on from here, so the segment is walked once, and the protected
+  // scan of its words is the one already made ({@link credentialSideScan});
+  // a refusal or an unprotected answer further on adds nothing. Folded
+  // reading only (`foldedOnly`): as spelled the credential answer is returned
+  // here, alone, as it was.
+  const answered = outranking === null && !fetchOutranksCredential ? (credential ?? redirectCredential) : null;
+  if (answered !== null) {
+    const more = foldedOnly(() => protectedBeside(restOfWalk()));
+    return { ok: true, ...answered, ...(more.length === 0 ? {} : { more: [...more] }) };
   }
+  return restOfWalk();
+
+  /**
+   * The walk from the credential tier on. Its body keeps the indentation it
+   * had as the tail of {@link commandAnswer}, so the change that made it a
+   * function moves no line.
+   */
+  function restOfWalk(): SegmentOutcome {
+  // Where the credential answer was taken above, the protected scans below
+  // read the words {@link credentialSideScan} read, the credential read left
+  // out, and the effectful scan IS that scan. Otherwise every word, as before.
+  const besideRead = answered === null ? null : sideScan;
   const deferredCredential = credential ?? redirectCredential;
   const sub = positionals[0] ?? null;
   const substituted = segment.words
@@ -9752,14 +9814,28 @@ function classifySegment(
     protectedPaths,
   );
   const copyUnknown = copyFamily ? copyArgvUnknown(args, argFlags) : null;
+  // The effectful scan: the positionals (and an upload's sources) with the
+  // prose skip, and the `<` targets. Beside a credential answer taken above it
+  // is the scan {@link credentialSideScan} already made of the same words.
+  const effectfulProtected = (): ProtectedHit | null =>
+    besideRead !== null
+      ? besideRead.found
+      : strongerProtected(strictestProtected(judged, protectedPaths, true), strictestProtected(readTargets, protectedPaths));
+  // The copy-unknown scan: every positional and `<` target, no prose skip. A
+  // copy has no upload sources, so the side scan's words are its positionals.
+  const copyNamed = (): ProtectedHit | null =>
+    strictestProtected(
+      besideRead !== null ? [...besideRead.positionals, ...besideRead.reads] : [...positionals, ...readTargets],
+      protectedPaths,
+    );
   // What the scans below this point answer with when an earlier answer does
   // not end the walk first: the copy-unknown scan, or the effectful scan. An
   // earlier answer reports these classes beside its own.
   const laterProtected = (): ProtectedHit | null => {
-    if (copyUnknown !== null) return strictestProtected([...positionals, ...readTargets], protectedPaths);
+    if (copyUnknown !== null) return copyNamed();
     if (cls.startsWith("read.") || cls === GATE_SELF_CLASS) return null;
     if (deferredCredential !== null && outranking !== null) return outranking;
-    return strongerProtected(strictestProtected(judged, protectedPaths, true), strictestProtected(readTargets, protectedPaths));
+    return effectfulProtected();
   };
   if (fetchedProtected !== null) {
     return {
@@ -9787,7 +9863,7 @@ function classifySegment(
   // the destination, so the destination is unknown: `policy.core`, unless a
   // named path already earns a class at least as strict (the log).
   if (copyUnknown !== null) {
-    const named = strictestProtected([...positionals, ...readTargets], protectedPaths);
+    const named = copyNamed();
     if (named !== null && protectedRank(named.surface) <= protectedRank("policy.core")) {
       return {
         ok: true,
@@ -9855,10 +9931,7 @@ function classifySegment(
         ...besideProtected(outranking.surface, [outranking]),
       };
     }
-    const touched = strongerProtected(
-      strictestProtected(judged, protectedPaths, true),
-      strictestProtected(readTargets, protectedPaths),
-    );
+    const touched = effectfulProtected();
     if (touched !== null) {
       return {
         ok: true,
@@ -9997,6 +10070,7 @@ function classifySegment(
     ...(sandbox === null ? {} : { sandbox }),
     ...(execCode === null ? {} : { execCode }),
   };
+  }
   }
 }
 

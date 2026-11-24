@@ -275,6 +275,46 @@ on the change above.
   and 10,000 levels of nesting each take under half a second of CPU through
   the hook.
 
+**A credential read names the protected paths it writes.** A segment that
+reads credential material answered `account.credential` alone whenever no
+protected path it names outranks that class (`log.mutate`, `policy.core`).
+So with `.github/workflows/` routed to `policy.edit.ci`, `cp .approval/env
+.github/workflows/ci.yml` was the credential class alone: the workflow write
+was not named, and a policy that runs `account.credential` more lightly than
+`policy.edit.ci` let it through with no tap. The same held for a built-in
+`policy.edit` target (`cp .approval/env CLAUDE.md`), for the redirect form of
+the read (`tee .github/workflows/ci.yml < .approval/env`), for a download's
+output beside an upload of the credential, and for a Hermes-home credential
+(`cp ~/.hermes/.env design/x`). The credential class still answers, first;
+every protected class the segment's write targets take now follows it, each
+as its own entry over the same text, as the entry below reports them for
+other segments, and the hook judges each.
+
+- **Which words count is unchanged.** The classes come from the scans the
+  classifier already made: the positionals and `<` targets of an effectful
+  command, a copy's target directory, a download's outputs. The words that
+  are the credential read are left out, as they were when the classifier
+  asked whether a protected path outranks the read, so `cp .approval/env
+  notes.txt` is still the credential class alone and never `policy.core`.
+- **A reader's arguments are still not targets:** `cat .approval/env
+  .github/workflows/ci.yml` and `cat .approval/env > notes.txt` are the
+  credential class alone. A reader in front of a protected redirection
+  answers as before (`cat .approval/env > design/x` is the design class,
+  then the credential class).
+- **A copy whose destination the text cannot know** (`cp .approval/env $X`)
+  reports `policy.core` (`copy-target-unknown`) beside the credential class,
+  as `cp notes.txt $X` answers.
+- **Not changed:** a protected path that outranks the credential class
+  still answers first with the credential beside it; a refusal stays a
+  refusal (`sudo cat .approval/env`); and where the rest of the walk would
+  refuse (a binary with no rule), the credential class answers alone, as
+  before. The as-spelled name reading answers exactly as before.
+- The segment is still walked once: the walk goes on from the credential
+  answer, and its protected scan is the one the credential tier already
+  made.
+- Conformance: three new `command-class` vectors; the 395 before them are
+  byte-identical.
+
 **Every protected path a command writes is judged.** A segment that named
 two protected paths took the class of one of them: the stricter by the
 classifier's own precedence (`log.mutate`, `policy.core`, then `policy.edit`
@@ -304,9 +344,9 @@ and the strictest decision answers.
 - **One word that brace expansion makes several files of** reports each
   file's class, and where two of them each match tied routes, every tied
   class of both.
-- **Not changed:** a segment whose answer is a credential read alone
-  (`cp .approval/env design/x`) reports no protected class beside it, as
-  before.
+- A segment whose answer is a credential read alone (`cp .approval/env
+  design/x`) reported no protected class beside it; the entry above
+  ("A credential read names the protected paths it writes") reports them.
 - The load note for a routed entry spelled like a built-in path in another
   case is worded by tier: beside a built-in `policy.edit` path the route is
   judged too; a built-in `policy.core` or `log.mutate` path is answered by
