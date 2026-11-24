@@ -1054,11 +1054,17 @@
             "class": "vcs.history.rewrite",
             "rule": "git-dir-write",
             "path": ".g${__APPROVAL_SUBST__}/config"
+          },
+          {
+            "class": "policy.edit",
+            "rule": "redirect-protected",
+            "path": ".g${__APPROVAL_SUBST__}/config"
           }
         ],
         "classes": [
           "policy.core",
-          "vcs.history.rewrite"
+          "vcs.history.rewrite",
+          "policy.edit"
         ]
       }
     },
@@ -3261,7 +3267,7 @@
     },
     {
       "id": "spliced-parameter-in-the-policy-file-name",
-      "description": "with E empty the shell writes APPROVAL.md: the policy file's class, and the earlier workspace answer beside it",
+      "description": "with E empty the shell writes APPROVAL.md: the policy file's class, every other guarded class the word may reach (E holding a `/`), and the earlier workspace answer beside it",
       "input": {
         "command": "echo x > APPROVAL$E.md"
       },
@@ -3274,12 +3280,18 @@
             "path": "APPROVAL$E.md"
           },
           {
+            "class": "policy.edit",
+            "rule": "redirect-protected",
+            "path": "APPROVAL$E.md"
+          },
+          {
             "class": "files.write.workspace",
             "rule": "redirect-write"
           }
         ],
         "classes": [
           "policy.core",
+          "policy.edit",
           "files.write.workspace"
         ]
       }
@@ -3399,7 +3411,7 @@
     },
     {
       "id": "spliced-dot-is-literal-text",
-      "description": "a `.` in a component is literal text: .$X may be .approval, and the write asks with the strictest class it could reach",
+      "description": "a `.` in a component is literal text: .$X may be .approval, and the write asks with the strictest class it could reach, every other one beside it",
       "input": {
         "command": "echo x > .$X"
       },
@@ -3412,8 +3424,23 @@
             "path": ".$X"
           },
           {
+            "class": "policy.core",
+            "rule": "redirect-protected",
+            "path": ".$X"
+          },
+          {
+            "class": "policy.edit",
+            "rule": "redirect-protected",
+            "path": ".$X"
+          },
+          {
             "class": "files.write.workspace",
             "rule": "redirect-write"
+          },
+          {
+            "class": "cron.manage",
+            "rule": "redirect-protected",
+            "path": ".$X"
           },
           {
             "class": "vcs.history.rewrite",
@@ -3423,7 +3450,10 @@
         ],
         "classes": [
           "log.mutate",
+          "policy.core",
+          "policy.edit",
           "files.write.workspace",
+          "cron.manage",
           "vcs.history.rewrite"
         ]
       }

@@ -9727,6 +9727,19 @@ function strictestProtectedWrite(
       };
     }
   };
+  // The spliced reading's strictest class, and every other class it reached
+  // beside it (the plain spelling's among them).
+  const offerSpliced = (found: { surface: string | null; also: readonly string[] }, word: string): void => {
+    offer(found.surface, word);
+    if (best === null || found.also.length === 0) return;
+    const current: ProtectedHit = best;
+    const others = foldedOnly(() => distinctOthers(current.surface, [...current.others, ...found.also.map((surface) => ({ surface, path: word }))]));
+    if (others.length !== current.others.length) {
+      best = { ...current, others };
+      markGlobWriteFired();
+      if (glob.tracker !== undefined) glob.tracker.raised = true;
+    }
+  };
   // The matcher steps each word already judged here took. The same word again
   // (`rsync -aR s0/*/./a* … s45/*/./a* d/` lands every source as `d/a*`, and
   // 46 sources made 46 walks of one pattern) offers exactly what it offered
@@ -9741,7 +9754,7 @@ function strictestProtectedWrite(
     if (!inexact(word)) {
       // A substitution leaves its word `exact` to the lexer, and its output is
       // an unread part all the same (`APPROVAL$(true).md`).
-      if (word.includes(SUBSTITUTION_SENTINEL) && !(skipProse && /\s/u.test(word))) offer(splicedGuardClass(word, protectedPaths, glob.budget, glob.options, globLive(glob, word)), word);
+      if (word.includes(SUBSTITUTION_SENTINEL) && !(skipProse && /\s/u.test(word))) offerSpliced(splicedGuardClass(word, protectedPaths, glob.budget, glob.options, globLive(glob, word)), word);
       continue;
     }
     if (skipProse && /\s/u.test(word)) continue;
@@ -9764,7 +9777,7 @@ function strictestProtectedWrite(
       // An unread part spliced into literal text (lead ruling CLAIMS L62568):
       // `APPROVAL$E.md` is the policy file when E is empty, inside double
       // quotes too (the value is spliced in, only not globbed).
-      offer(splicedGuardClass(reading, protectedPaths, glob.budget, glob.options, globLive(glob, word)), word);
+      offerSpliced(splicedGuardClass(reading, protectedPaths, glob.budget, glob.options, globLive(glob, word)), word);
     }
     spent.set(word, budgetBefore - glob.budget.left);
   }
@@ -12360,8 +12373,13 @@ function splicedGuardClass(
   budget: { left: number },
   options: boolean,
   live: boolean,
-): string | null {
-  return splicedClass(word, budget, options, live, (path) => protectedPathClass(path, protectedPaths), protectedPaths, "log.mutate");
+): { surface: string | null; also: readonly string[] } {
+  // Every class a counted candidate takes, not only the strictest: the plain
+  // spelling's class rides beside a stricter one (`.$X/settings.json` may be
+  // `.approval/log/settings.json` or `.claude/settings.json`).
+  const also = new Set<string>();
+  const surface = splicedClass(word, budget, options, live, (path) => protectedPathClass(path, protectedPaths), protectedPaths, "log.mutate", false, also);
+  return { surface, also: [...also].filter((cls) => cls !== surface) };
 }
 
 /**
@@ -12428,6 +12446,7 @@ function splicedClass(
   protectedPaths: readonly ProtectedPathEntry[],
   wide: string,
   directoryKeeps = false,
+  also?: Set<string>,
 ): string | null {
   // Off in main's passes, as {@link splicedNamesGit} is.
   if (mainRulesOnly) return null;
@@ -12484,9 +12503,9 @@ function splicedClass(
       // (`APPROVAL.md`), and a word whose own names do not fold keeps its one
       // name reading; an equal claim it meets still counts. Main's answer, as
       // spelled, has no spliced reading.
-      const found = foldedOnlyQuietly(() => globGuardClass(reading(slashed), protectedPaths, budget, options, undefined, { unreadDirectory, judge }));
+      const found = foldedOnlyQuietly(() => globGuardClass(reading(slashed), protectedPaths, budget, options, undefined, { unreadDirectory, judge, also }));
       if (found !== null && (strictest === null || protectedRank(found) < protectedRank(strictest))) strictest = found;
-      if (strictest === "log.mutate") return strictest;
+      if (strictest === "log.mutate" && also === undefined) return strictest;
     }
   }
   return strictest;
@@ -12528,7 +12547,7 @@ function globGuardClass(
   budget: { left: number } = { left: GLOB_GUARD_STEP_CAP },
   options = false,
   disk?: GlobDisk,
-  spliced: false | { unreadDirectory: boolean; judge: (path: string) => string | null } = false,
+  spliced: false | { unreadDirectory: boolean; judge: (path: string) => string | null; also?: Set<string> | undefined } = false,
 ): string | null {
   // zsh's extendedglob forms (`#`, `^`, the `~` exclusion) and braceccl need an
   // option; with none possibly set on the line they are literal text (lead
@@ -12539,9 +12558,12 @@ function globGuardClass(
   const words = [word];
   if (options) for (let at = 1; at < word.length; at += 1) if (word[at] === "~") words.push(word.slice(0, at));
   let strictest: string | null = null;
+  // Spliced with `also`: every class is gathered, so the walk does not stop at the log.
+  const gather = spliced === false ? undefined : spliced.also;
   const consider = (surface: string | null): boolean => {
     if (surface !== null && (strictest === null || protectedRank(surface) < protectedRank(strictest))) strictest = surface;
-    return strictest === "log.mutate";
+    if (surface !== null) gather?.add(surface);
+    return strictest === "log.mutate" && gather === undefined;
   };
   for (const each of words) {
     const expansions = braceCandidates(each);

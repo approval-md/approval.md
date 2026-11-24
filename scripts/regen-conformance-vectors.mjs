@@ -2952,7 +2952,7 @@ const commandClassVectors = [
   // with an unread directory asks where a guarded path ends in its tail.
   {
     id: "spliced-parameter-in-the-policy-file-name",
-    description: "with E empty the shell writes APPROVAL.md: the policy file's class, and the earlier workspace answer beside it",
+    description: "with E empty the shell writes APPROVAL.md: the policy file's class, every other guarded class the word may reach (E holding a `/`), and the earlier workspace answer beside it",
     input: { command: "echo x > APPROVAL$E.md" },
   },
   {
@@ -2982,7 +2982,7 @@ const commandClassVectors = [
   },
   {
     id: "spliced-dot-is-literal-text",
-    description: "a `.` in a component is literal text: .$X may be .approval, and the write asks with the strictest class it could reach",
+    description: "a `.` in a component is literal text: .$X may be .approval, and the write asks with the strictest class it could reach, every other one beside it",
     input: { command: "echo x > .$X" },
   },
   {

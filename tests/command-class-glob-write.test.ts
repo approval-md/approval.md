@@ -294,8 +294,9 @@ test("review 2b: more ${…} operator spans than the cap, or a default nested to
   const spans = (n: number): string => Array.from({ length: n }, (_, k) => `\${X${String(k)}:-a}`).join("");
   // At the cap (8) the readings are judged; one past it fails closed.
   // (The spliced reading, L62568, build-6: `out/${X0}a${X1}…` may be
-  // `out/.approval/log/…`, a part holding `/` beside the literal `a`.)
-  assert.deepEqual(classesOf(`echo x > out/${spans(8)}.log`), ["log.mutate", "files.write.workspace"]);
+  // `out/.approval/log/…`, a part holding `/` beside the literal `a`; every
+  // class it may reach rides beside.)
+  assert.deepEqual(classesOf(`echo x > out/${spans(8)}.log`), ["log.mutate", "policy.core", "files.write.workspace"]);
   assert.equal(strictest(`echo x > out/${spans(9)}.log`), "log.mutate");
   // The guarded default past the cap is not lost.
   assert.equal(strictest(`echo x > ${spans(8)}\${Y:-.approval/env}`), "log.mutate");
@@ -330,8 +331,8 @@ test("review 5: the parameter placeholder cannot be forged, and $ beside a glob 
   assert.equal(strictest("echo x > ab*"), "log.mutate");
   // `$1`, `$9` are variables (their value is unseen, as on main); no collision.
   // (The spliced reading, L62568, build-6: `$1` may hold a `/`, so the word
-  // may be `~/.hermes/plugins/auth.json.bak`.)
-  assert.deepEqual(classesOf("echo x > ~/.hermes/$1uth.json.bak"), andMain(["policy.core", "files.write.workspace"], "echo x > ~/.hermes/$1uth.json.bak"));
+  // may be `~/.hermes/plugins/auth.json.bak` or under its `scripts`.)
+  assert.deepEqual(classesOf("echo x > ~/.hermes/$1uth.json.bak"), andMain(["policy.core", "cron.manage", "files.write.workspace"], "echo x > ~/.hermes/$1uth.json.bak"));
   assert.deepEqual(classesOf('echo x > "$9"'), andMain(["files.write.workspace"], 'echo x > "$9"'));
   // A variable beside a glob construct may hold a `/`: it may name anything.
   assert.equal(strictest("echo x > ${X}*"), "log.mutate");
@@ -1501,8 +1502,8 @@ test("security review of the parents rule (L61587), 5: a tail after an unreadabl
   // directory, or after another, keeps main's class (it was policy.core).
   // (`$X/*` keeps #686's pattern answer, main's since 9122cb3e.)
   // The spliced reading (L62568, build-6) leads with the log: `$X/*` may be
-  // `.approval/log/*`. The classes are main's, in another order.
-  assert.deepEqual(classesOf("rm -rf $X/*"), ["log.mutate", "policy.core", "files.delete.out_of_scope"]);
+  // `.approval/log/*`; every other guarded folder it may be rides beside.
+  assert.deepEqual(classesOf("rm -rf $X/*"), ["log.mutate", "policy.core", "policy.edit", "cron.manage", "files.delete.out_of_scope"]);
   // Lead ruling L62511 (S-D): a recursive chmod of one is policy.core again.
   for (const command of ["chmod -R 000 ./$X", "chmod -R 000 sub/$X", "chmod -R 000 $X/$Y"]) assert.ok(classesOf(command).includes("policy.core"), command);
   for (const command of ['rm -rf "$X/$Y"']) {

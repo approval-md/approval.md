@@ -37,17 +37,27 @@ dollar-quoted program word (`$'rm' -rf x`) keeps its refusal.
 **An unread part spliced into a guarded name asks.** `echo x > APPROVAL$E.md`,
 `echo x > .claude$S/settings.json`, `echo x >> .appro${x}val/env` and
 `echo x > {APPROVAL,x}$E.md` write the guarded file when the parameter is
-empty, and were workspace writes. A write target whose literal text holds an
-unread part (a parameter, a substitution's output, an unread dollar-quote
-escape) is now read with each part as any text, a `/` included, against every
-guarded path and `.git`; a possible match takes that path's class (the
-strictest where several match), with the earlier answer beside it. A match
-counts only where the word's literal text takes part in it, and a word that
-opens with an unread directory asks only where a guarded path ends in its tail
-by name: `$D/APPROVAL.md` and `$D/settings.json` ask; `$OUT`, `$D/$F`,
-`$D/notes.md`, `out/$F` and `$L/scripts/run.sh` keep their answer. Past eight
-unread parts in one word the word could be any path (`log.mutate`). On one
-day's 19,368 Bash calls holding a `$`, no answer changed.
+empty, and were workspace writes; `cat .approval/$F` and `cat
+.appro${x}val/env` were `read.shell` to the pure classifier. A word whose
+literal text holds an unread part (a parameter, a substitution's output, an
+unread dollar-quote escape) is now read with each part as any text, a `/`
+included, against every guarded path and `.git` (brace groups expanded
+first); a possible match takes that path's class (the strictest where several
+match, every other one beside it), with the earlier answer beside it, and a
+word read as a credential
+file (`cat`, `grep`, `<`, a copy's source) takes `account.credential`, with
+the line's earlier answer joined so a refusal stands. A match counts only
+where the word's literal text takes part in it (a `.` in a component counts:
+`.$X` may be `.approval`), and a word whose directory is wholly unread asks
+only where a guarded path ends in its tail by name: `$D/APPROVAL.md`,
+`$D/settings.json`, `.github/$W/ci.yml`, `$W/scripts/run.sh` and `.$X` ask;
+`$OUT`, `$D/$F`, `./$X`, `$D/notes.md`, `$D/env` and `out/$F` keep their
+answer. Past eight unread parts in one word the word could be any path
+(`log.mutate`), and so is a word whose readings pass the candidate bound. On
+one day's 19,368 Bash calls holding a `$`, 11 answers moved, each stricter: 8
+writes below a `$W/scripts` directory take `cron.manage` beside (W may be the
+Hermes home), one `printf` of a format with more than eight parameters may
+read a credential, and two refusals changed their code.
 
 **A glob in a write target to a guarded path stays guarded (GLOB-WRITE).**
 `echo x > ~/.hermes/auth.json` was `policy.core`, and the same write with a
