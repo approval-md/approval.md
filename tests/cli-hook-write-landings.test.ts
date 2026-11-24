@@ -22,9 +22,12 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -36,7 +39,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
-import { classifyForHook, hookSettingsReads, HOOK_SETTINGS_MAX_BYTES, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, writeLandingJudgements, writeLandingMemo, type WriteScopeContext } from "../src/cli/hook.js";
+import { classifyForHook, hookSettingsReads, HOOK_SETTINGS_MAX_BYTES, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, memoDiskReads, writeLandingJudgements, writeLandingMemo, type WriteScopeContext } from "../src/cli/hook.js";
 import { classifyCommandInThisReading } from "../src/core/command-class.js";
 import { withNamesAsSpelled } from "../src/core/name-fold.js";
 import { commandGate } from "../src/cli/gate-window.js";
@@ -2009,4 +2012,59 @@ test("the call's memo is the call's: each call judges its landings once, whateve
   // A class the second reading gives that the first does not is still reported (the synthetic lines are not shared).
   const both = see("x=.approval; echo y >> $x/LOG/z");
   assert.ok(both.classes.includes("log.mutate") && both.classes.includes("policy.core"), JSON.stringify(both.segments));
+});
+
+test("the call's disk memo answers as the disk does: realpath through links and missing entries, lstat, listings", () => {
+  const root = join(ws, "disk-memo");
+  mkdirSync(join(root, "real", "deep"), { recursive: true });
+  writeFileSync(join(root, "real", "file"), "x", "utf8");
+  symlinkSync(join(root, "real"), join(root, "to-real"));
+  symlinkSync("real/deep", join(root, "relative-link"));
+  symlinkSync(join(root, "nowhere"), join(root, "dangling"));
+  const paths = [
+    root,
+    join(root, "real"),
+    join(root, "real", "deep"),
+    join(root, "real", "file"),
+    join(root, "real", "file", "under-a-file"),
+    join(root, "real", "missing"),
+    join(root, "real", "missing", "deeper"),
+    join(root, "to-real"),
+    join(root, "to-real", "deep"),
+    join(root, "to-real", "missing"),
+    join(root, "relative-link"),
+    join(root, "relative-link", "x"),
+    join(root, "dangling"),
+    join(root, "dangling", "x"),
+    join(root, "REAL", "deep"),
+    "/",
+    "/private",
+  ];
+  const direct = (path: string): string | null => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return null;
+    }
+  };
+  const memo = memoDiskReads();
+  // Twice each, so the second answer is the memo's.
+  for (const round of [1, 2]) {
+    for (const path of paths) {
+      assert.equal(memo.realpath(path), direct(path), `realpath ${path} (round ${String(round)})`);
+      const link = memo.link(path);
+      let want: string | null | undefined;
+      try {
+        want = lstatSync(path).isSymbolicLink() ? readlinkSync(path) : null;
+      } catch {
+        want = undefined;
+      }
+      assert.equal(link, want, `lstat ${path}`);
+    }
+  }
+  const listed = memo.list(root);
+  assert.ok(Array.isArray(listed));
+  assert.deepEqual((listed as Array<{ name: string }>).map((entry) => entry.name).sort(), readdirSync(root).sort());
+  assert.equal(memo.list(join(root, "real", "missing")), "ENOENT");
+  assert.equal(memo.list(join(root, "real", "file")), "ENOTDIR");
 });
