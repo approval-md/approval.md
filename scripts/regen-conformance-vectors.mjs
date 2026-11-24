@@ -2868,6 +2868,25 @@ const commandClassVectors = [
     input: { command: 'cat <<< "$(cat ~/.hermes/.env)"' },
     control: true,
   },
+  // --- zsh's clobber redirections are refused ---------------------------------
+  {
+    id: "zsh-clobber-redirect-is-refused",
+    description:
+      "`>!` is one operator in zsh, and the word after it is the file written; bash reads a file named `!` and an argument. The two shells write different files, so the form is refused rather than read as either",
+    input: { command: "echo x >! APPROVAL.md" },
+    control: true,
+  },
+  {
+    id: "zsh-clobber-append-joined-is-refused",
+    description: "the append form, joined to its target, with a descriptor in front: zsh appends to the policy file, bash to a file named `!APPROVAL.md`",
+    input: { command: "echo x 1>>!APPROVAL.md" },
+    control: true,
+  },
+  {
+    id: "clobber-redirect-both-shells-share-is-read",
+    description: "beside the two above: `>|` is the clobber operator bash and zsh share, and its target is read as any redirection target is",
+    input: { command: "echo x >| APPROVAL.md" },
+  },
   {
     id: "redirect-read-of-an-ordinary-file-is-a-read",
     description: "an ordinary file on stdin is the read it always was",
@@ -5711,6 +5730,8 @@ const SUITES = [
     // long-s home, and a control, `approval-notes.md`, which stays a workspace
     // write. Regenerating over main's 382 leaves them byte-identical. The
     // number is bumped once, at the release cut, for every change it carries.
+    // zsh's clobber redirections: three more in the same unreleased 1.12.0,
+    // `>!` and `1>>!` refused (controls), and `>|`, which reads as it did.
     vectors_version: "1.12.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",

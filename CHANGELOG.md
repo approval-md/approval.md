@@ -497,6 +497,29 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   Conformance: ten new `command-class` vectors; main's 382 are
   byte-identical. The vectors version is bumped once, at the release cut.
 
+**zsh's clobber redirections are refused (open in 0.4.8).** In zsh `>!`,
+`>>!` and `>&!` are each one operator, and the word after it is the file:
+`echo x >! APPROVAL.md` overwrites the policy file. bash reads the same text
+as a redirection onto a file named `!`, with `APPROVAL.md` an argument of
+`echo`. The classifier read bash's, so under zsh, the shell Claude Code's
+Bash tool runs on macOS, a line that wrote a protected file was
+`files.write.workspace` and ran wherever a policy lets workspace writes run.
+
+- **The form is refused `unparseable`**, with or without a space before the
+  target, with a descriptor in front (`2>!`, `1>>!`) and after an `&`
+  (`&>!`), anywhere on the line and inside `$(…)` or a `sh -c` script. The
+  two shells write different files, so neither reading is admitted. The
+  refusal names what to write instead.
+- **Unmoved:** `>|`, the clobber operator both shells share, and a file
+  really named `!` when it is quoted, escaped or set apart (`>'!'`, `>\!`,
+  `> !`), which both shells read alike. `>>|`, `>&|`, `>>&!` and their
+  kin are zsh's alone and were refused already.
+- **Evidence.** Each form was run in zsh 5.9 and bash 3.2 in a scratch
+  folder, and the test repeats that where both shells are installed. No
+  overlay recipe and no earlier conformance vector carries the form.
+  Conformance: three new `command-class` vectors (two refusals and `>|`);
+  the 395 before them are byte-identical.
+
 ### Added
 
 - **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536).**
