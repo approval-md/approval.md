@@ -1509,7 +1509,9 @@ test("cost (L62090): a word already judged on a line is not walked again, and st
   const cp = (k: number): string => `cp ${"s/*.json ".repeat(k)}d*/`;
   assert.deepEqual(classesOf(rsync(1)).sort(), ["network.call", "policy.core"]);
   assert.deepEqual(classesOf(rsync(1000)).sort(), ["network.call", "policy.core"]);
-  assert.deepEqual(classesOf(rsync(2000)).sort(), ["log.mutate", "network.call"]);
+  // Past the budget the landing answers `log.mutate`; since main's #690 the
+  // operands' own `policy.core` (`a*` may be `APPROVAL.md`) rides beside it.
+  assert.deepEqual(classesOf(rsync(2000)).sort(), ["log.mutate", "network.call", "policy.core"]);
   assert.deepEqual(classesOf(cp(1000)).sort(), ["files.write.workspace"]);
   assert.deepEqual(classesOf(cp(2000)).sort(), ["files.write.workspace", "log.mutate"]);
 });
