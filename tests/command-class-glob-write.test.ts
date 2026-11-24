@@ -2156,6 +2156,16 @@ test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary varia
     "find . -name '[!x]claude' -delete",
     "find . -name *.tmp -delete",
     "find . -name \\*.md -delete",
+    // Security review of the fold, 9 and 10: a `*`-led pattern other than
+    // `*.<ext>` meets the prefixes; an unquoted `~`, `#` or `^`.
+    "find . -name '*env*' -delete",
+    "find . -name '*.e*' -delete",
+    "find . -name '*rc' -delete",
+    "find . -name '*.env' -delete",
+    "find . -name '*.t?p' -delete",
+    "find . -name x~ -delete",
+    "find . -name x#y -delete",
+    "find . -name x^y -delete",
   ]) {
     leads(withListing(command, organ), "policy.core");
     assert.ok(classesOf(command).includes("policy.core"), command);

@@ -9900,10 +9900,14 @@ function findDeleteNarrowed(args: readonly string[], protectedPaths: readonly Pr
       const value = args[at + 1];
       if (value === undefined) return false;
       // The pattern as find receives it: after the shell's quotes, and only
-      // where the shell does not expand it first (an unquoted `*.tmp` may
-      // become other words; security review of the fold, 6).
+      // where the shell passes exactly that text (security review of the
+      // fold, 6 and 10: the gate the exact-word readers use; an unquoted
+      // glob, `#`, `^` or `~`, a variable or a substitution narrows nothing).
+      // Shell options (dotglob, extglob, zsh's) change only unquoted words,
+      // which this gate already refuses; find reads its pattern by fnmatch.
       const word = argWords.length === args.length ? argWords[at + 1] : undefined;
-      const asWritten = word !== undefined && word.text === value && !word.expands && word.substitutions.length === 0 && !word.splits;
+      const asWritten =
+        word !== undefined && word.text === value && word.exact && word.zshGlob === false && !word.expands && !word.splits && word.substitutions.length === 0;
       if ((arg === "-name" || arg === "-iname") && asWritten && findNameMissesGuarded(value, arg === "-iname", protectedPaths)) narrowed = true;
       at += 1;
       continue;
@@ -9926,11 +9930,11 @@ function findDeleteNarrowed(args: readonly string[], protectedPaths: readonly Pr
  * each of the policy's protected paths (`.github/workflows/ci.yml` gives
  * `.github`, `workflows` and `ci.yml`), matched with the classifier's own
  * reader and matcher ({@link globSegmentTokens}, {@link globTokensMatch},
- * folded in the folded reading; `-iname` in every case). A pattern that does
- * not start with `*` is matched against each {@link GLOB_GUARD_PREFIXES} entry
- * as a prefix too (`set*`, `.env*`, `vault-?`); one that starts with `*`
- * (`*.tmp`) is not, by the lead's ruling L62435 that puts
- * `find . -name '*.tmp' -delete` back at main's class. A backslash or a
+ * folded in the folded reading; `-iname` in every case). Every pattern but
+ * one of exactly `*.<letters or digits>` (the lead's ruling L62435 puts
+ * `find . -name '*.tmp' -delete` back at main's class) is also matched
+ * against each {@link GLOB_GUARD_PREFIXES} entry followed by any suffix
+ * (`set*`, `.env*`, `*env*`, `*rc`, `*.t?p`). A backslash or a
  * bracket (fnmatch reads them in ways the shared matcher only
  * over-approximates), a match, or a spent budget: not narrowed.
  */
@@ -9948,7 +9952,12 @@ function findNameMissesGuarded(pattern: string, caseless: boolean, protectedPath
     for (const name of names) {
       for (const each of variants(name)) if (globTokensMatch(tokens, each, false, budget) !== false) return false;
     }
-    if (spelling.startsWith("*")) continue;
+    // The one exception (lead ruling L62433/L62435: `find . -name '*.tmp'
+    // -delete` keeps main's class): a pattern of exactly `*.<letters or
+    // digits>` that matched no guarded name above is not matched against the
+    // prefixes, though `*.tmp` could name `<guarded prefix>….tmp` (equal on
+    // main). Every other pattern is (security review of the fold, 9).
+    if (/^\*\.[A-Za-z0-9]+$/u.test(spelling)) continue;
     for (const prefix of GLOB_GUARD_PREFIXES) {
       for (const each of variants(prefix)) if (globTokensMatch(tokens, each, true, budget) !== false) return false;
     }
