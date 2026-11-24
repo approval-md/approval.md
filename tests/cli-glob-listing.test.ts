@@ -906,6 +906,10 @@ test("lead ruling L62435 (S6, S7), through the real hook under the agent-village
     writeFileSync(join(dir, sub, file), "made-up\n");
   }
   writeFileSync(join(dir, "APPROVAL.md"), POLICY_AV);
+  // A place provably not above the lab on any OS (CI's temp root is /tmp, which
+  // IS above it there; macOS's is /private/var/folders, which is not /tmp).
+  const other = join(scratch, "l62435-other");
+  mkdirSync(other, { recursive: true });
   const attested = spawnSync(process.execPath, [CLI_ENTRY, "policy", "attest", "--as", "human:alice"], { cwd: dir, encoding: "utf8", env: { ...process.env, HOME: home } });
   assert.equal(attested.status, 0, attested.stderr);
   // Main 9122cb3e allows each of these under these classes.
@@ -923,9 +927,9 @@ test("lead ruling L62435 (S6, S7), through the real hook under the agent-village
     "rm -rf $TARGET",
     "rm -rf $BUILD_DIR",
     'rm -rf "$OUT"',
-    "rm -rf /tmp/$name",
+    `rm -rf ${other}/$name`,
     "rm -rf ./$X",
-    "rm -rf /private/tmp/$SESSION",
+    `rm -rf ${other}/$SESSION`,
     "D=.claude; rm -rf $D",
     "rsync -a --delete src/ build/out/",
     "cd src && rm -rf dist",
@@ -937,6 +941,18 @@ test("lead ruling L62435 (S6, S7), through the real hook under the agent-village
   for (const command of ["cd .. && rm -rf proj", "(cd .. && rm -rf proj)", "rsync -a --delete /tmp/b2-l62435-empty/ ./", "rsync -a --delete /tmp/b2-l62435-empty/ ~/", "find . -delete", "find . -empty -delete", "find . -name settings.json -delete", "find . -delete -name '*.tmp'", "rm -rf ../$X", "rm -rf ~/$X", "rm -rf $CLAUDE_PROJECT_DIR", "chmod 000 .", "X=. ; rm -rf $X"]) {
     const decision = decideAv(dir, home, dir, command);
     assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+  }
+  // The opposite: an unreadable word below the lab's own parent (or the lab) may
+  // be the workspace's parent, so it denies on every OS.
+  for (const command of [`rm -rf ${scratch}/$name`, `rm -rf ${lab}/$name`]) {
+    const decision = decideAv(dir, home, dir, command);
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+  }
+  // `/tmp/$name` keeps main's allow only when /tmp is not above the workspace.
+  for (const [root, command] of [["/tmp", "rm -rf /tmp/$name"], ["/private/tmp", "rm -rf /private/tmp/$SESSION"]] as const) {
+    const above = existsSync(root) && dir.startsWith(`${realpathSync(root)}/`);
+    const decision = decideAv(dir, home, dir, command);
+    assert.equal(decision.permission, above ? "deny" : "allow", `${command} (${root} above the lab: ${above}): ${decision.reason}`);
   }
   // The session's directory differs from the hook's (a `cd` in an earlier
   // call): a word is placed from both, so a place that holds neither keeps
