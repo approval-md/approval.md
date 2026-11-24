@@ -2170,3 +2170,35 @@ test("lead ruling L62435 (S7): with a session directory that differs from the ho
   // A line that may change directory: a relative word is not placed (strict).
   assert.ok(session("cd x && rm -rf ../plain", disk).includes("policy.core"));
 });
+
+test("lead ruling L62435 (S1): each word a brace makes is judged by the parents rule; a brace with no parent keeps main's class", () => {
+  const organ = { "/": ["w", "h"], "/w": [".claude", "src"], "/h": [], ...realpaths("/w", "/h") };
+  for (const command of [
+    "rm -rf {../proj,x}",
+    "rm -rf {..,.}/proj",
+    "rm -rf ..{/proj,}",
+    "chmod -R 000 {.,x}",
+    "chmod -R 000 {~,x}",
+    "chmod 000 {../proj,x}",
+    "mv {../proj,x} /tmp/zz",
+    "find {../proj,x} -delete",
+    "git rm -r {../proj,x}",
+    "rm -rf ../{proj,x}",
+    // Past the cap, a word that spells a part of a parent: strict.
+    "rm -rf {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,.}",
+  ]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    for (const cls of main.classes) assert.ok(classesOf(command).includes(cls), `${command} keeps main's ${cls}`);
+  }
+  leads(withListing("rm -rf {.,x}", organ), "policy.core");
+  leads(withListing("chmod -R 000 {..,x}", organ), "policy.core");
+  // Expanded words that hold no organ directory: main's class.
+  assert.deepEqual(withListing("rm -rf {.,x}", { "/w": ["src"], ...realpaths("/w", "/h") }), ["files.write.workspace"]);
+  for (const command of ["rm -rf {dist,build}", "rm -rf src/{a,b}", "rm -rf {a,b}/{c,d}", "rm -rf x{1..3}", "rm -rf ${X}/{a,b}", "rm -rf {a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,n}"]) {
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    assert.deepEqual(classesOf(command), main.classes, command);
+  }
+});

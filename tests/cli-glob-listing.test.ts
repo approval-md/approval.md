@@ -232,6 +232,11 @@ test("lead ruling L61587, parents, through the hook: `rm -rf .` where the direct
   assert.deepEqual(await hookClasses("rm -rf ./dist", plain), ["files.write.workspace"]);
   const checkout = project({ ".git": ["config"], src: ["a.ts"] });
   assert.ok((await hookClasses("rm -rf .", checkout)).includes("vcs.history.rewrite"));
+  // Lead ruling L62435 (S1): a brace word is judged word by word.
+  for (const command of ["rm -rf {.,x}", "chmod -R 000 {.,x}", "rm -rf {..,.}/sub/..", "find {.,x} -delete"]) {
+    assert.ok((await hookClasses(command, organ)).includes("policy.core"), command);
+  }
+  assert.deepEqual(await hookClasses("rm -rf {dist,build}", plain), ["files.write.workspace"]);
 });
 
 test("security review of the parents rule (L61587), 6, through the hook: an absolute path that reaches the working directory through a symlink or another letter case", async (t) => {

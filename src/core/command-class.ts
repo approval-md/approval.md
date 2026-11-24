@@ -10206,8 +10206,24 @@ function organParentClass(
   for (const operand of operands) {
     if (seen.has(operand)) continue;
     seen.add(operand);
-    const readings = assignedReadings(operand, assigned);
-    if (readings === null) {
+    // Lead ruling L62435 (S1): each word a brace makes is judged
+    // (`{../proj,x}` is `../proj` and `x`); past the cap, a word that spells
+    // any part of a parent is strict.
+    const braced = braceReadings(operand);
+    if (braced === null) {
+      offer("policy.core", operand);
+      continue;
+    }
+    const readings: string[] = [];
+    for (const each of braced) {
+      const assignedEach = assignedReadings(each, assigned);
+      if (assignedEach === null) {
+        readings.length = 0;
+        break;
+      }
+      readings.push(...assignedEach);
+    }
+    if (readings.length === 0) {
       offer("policy.core", operand);
       continue;
     }
@@ -10245,6 +10261,22 @@ function organParentClass(
   if (strictest === null || claims.length <= 1) return { named: strictest, git };
   const ordered = [strictest.surface, ...claims.filter((cls) => cls !== strictest.surface)];
   return { named: { surface: takeAmongEqual(ordered), path: strictest.path }, git };
+}
+
+/** Most words one operand's braces make before it is judged by its text alone. */
+const PARENT_BRACE_CAP = 64;
+
+/**
+ * The words brace expansion makes of `operand` (lead ruling L62435, S1), or
+ * the operand alone when it has none. Past {@link PARENT_BRACE_CAP}: `null`
+ * (strict) when the word spells any part of a parent (`.`, `~`, `/`, `$PWD`,
+ * `$HOME`, `$OLDPWD`), else the operand alone (main's class, as before).
+ */
+function braceReadings(operand: string): string[] | null {
+  if (!operand.includes("{")) return [operand];
+  const words = expandBraces(operand, PARENT_BRACE_CAP);
+  if (words !== null) return words.length === 0 ? [operand] : words;
+  return /[.~/]|\$\{?(?:PWD|HOME|OLDPWD)/u.test(operand) ? null : [operand];
 }
 
 /** Most readings one operand takes from the line's own assignments before it is judged strict. */
