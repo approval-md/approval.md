@@ -469,6 +469,37 @@ test("an empty spelling is no landing: a JSON body of `{}` in the home folder is
   }
 });
 
+test("a segment that reports several protected classes keeps them all, and a guarded landing beside it is still found", () => {
+  // A segment that writes two protected paths reports each class as its own
+  // entry over the same text (#690), so the classifier's list is longer than
+  // the line's segments. This pass places its entries by position: none of
+  // the classifier's may be lost to that, and none of its own.
+  const routes = [
+    { path: "design/", class: "policy.edit.design" },
+    { path: ".github/workflows/", class: "policy.edit.ci" },
+  ];
+  const classesOf = (command: string): string[] => {
+    const { result } = classifyForHook(command, routes, ws, [], false, [], false, WRITE_SCOPE_OFF);
+    return result.ok ? result.classes : [`refused ${result.code}`];
+  };
+  const BOTH = ["policy.edit.design", "policy.edit.ci"];
+  for (const [command, guarded] of [
+    ["tee design/x .github/workflows/ci.yml", false],
+    ["tee design/x .github/workflows/ci.yml; echo ok > out.txt", false],
+    ["tee design/x .github/workflows/ci.yml; echo x > ~/.zshrc", true],
+    ["echo x > ~/.zshrc; tee design/x .github/workflows/ci.yml", true],
+    ["tee design/x .github/workflows/ci.yml ~/.zshrc", true],
+    ["tee design/x .github/workflows/ci.yml > ~/.ssh/k", true],
+    ["echo a > notes.txt; tee design/x .github/workflows/ci.yml; echo x > ~/.ssh/k; echo b > c.txt", true],
+    ["tee {design/x,.github/workflows/ci.yml}; cp -r a.d ~/.ssh", true],
+    ["echo x > design/a > .github/workflows/ci.yml; echo y > ~/.zshrc", true],
+  ] as const) {
+    const classes = classesOf(command);
+    for (const cls of BOTH) assert.ok(classes.includes(cls), `${command}: ${classes.join(", ")}`);
+    assert.equal(classes.includes(GUARDED), guarded, `${command}: ${classes.join(", ")}`);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 5. The snapshot rule (codex, CLAIMS L61466)
 // ---------------------------------------------------------------------------
