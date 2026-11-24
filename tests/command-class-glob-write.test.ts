@@ -2232,6 +2232,13 @@ test("lead ruling L62435 (S7): a variable the line itself sets is read as what i
   for (const command of ["A=..; B=$A; rm -rf $B", 'A=..; B="$A/"; rm -rf $B', "A=..; B=${A}; rm -rf $B", "A=..; B=$A; C=$B; rm -rf $C", "A=$A/..; rm -rf $A", "A=$B; B=$A; rm -rf $A"]) {
     assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
   }
+  // Security review of the fold, 24: the word as written is judged too, so an
+  // assignment that may not reach the use hides nothing (accepted: an
+  // assigned name below a proven parent is strict whatever its value).
+  for (const command of ["(X=dist); rm -rf ../$X", "X=dist true; rm -rf ../$X", "false && X=dist; rm -rf ../$X", "X=build; rm -rf ../$X"]) {
+    const result = classifyCommand(command);
+    assert.ok(!result.ok || result.classes.includes("policy.core"), `${command} -> ${result.ok ? result.classes.join(",") : result.code}`);
+  }
   // `.claude` is not a parent (main's own rules judge the organ by name): main's class.
   for (const command of ["D=.claude; rm -rf $D", "X=dist; rm -rf $X", "printf -v d dist; rm -rf $d", "OUT=dist; rm -rf $OUT", "D=build; T=$D/tmp; rm -rf $T"]) {
     assert.deepEqual(classesOf(command), mainClasses(command), command);
@@ -2436,6 +2443,9 @@ test("automated security review of the fold, 15: with CDPATH set on the line, a 
     'printf -v "$n" .. && cd proj && rm -rf x',
     // 21: a target that only contains `$(pwd)` later is relative.
     "CDPATH=.. cd x/$(pwd) && rm -rf y",
+    // 25: through `command` / `builtin`.
+    'command printf -v "$n" .. && cd proj && rm -rf x',
+    'builtin printf -v "$n" .. && cd proj && rm -rf x',
   ]) {
     const result = classifyCommand(command);
     assert.ok(!result.ok || result.classes.includes("policy.core"), `${command} -> ${result.ok ? result.classes.join(",") : result.code}`);

@@ -10486,10 +10486,11 @@ const ASSIGNED_READINGS_CAP = 16;
 
 /**
  * The operand read through the line's own assignments (lead ruling L62435,
- * S7; security review of the fold, 22): each variable the line assigns is
- * replaced by each value it is given, again and again to a fixpoint
- * (`A=..; B=$A; rm -rf $B` is `rm -rf ..`), so a reading is returned only
- * once it names no variable the line assigns. `null` (the strict answer)
+ * S7; security review of the fold, 22 and 24): the word as written, and the
+ * word with each variable the line assigns replaced by each value it is
+ * given, again and again to a fixpoint (`A=..; B=$A; rm -rf $B` is also
+ * `rm -rf ..`); a substituted reading is kept once it names no variable the
+ * line assigns. `null` (the strict answer)
  * when a value is one the text cannot read (a substitution, a backtick, a
  * binding {@link UNREAD_BINDING}), an assigned variable is read with an
  * operator (`${X:-…}`), the readings never stop naming one (`A=$A/..`, a
@@ -10521,7 +10522,10 @@ function assignedReadings(operand: string, assigned: ReadonlyMap<string, readonl
     pending = [...new Set(next)];
     if (pending.length + done.size > ASSIGNED_READINGS_CAP) return null;
   }
-  return [...done];
+  // The word as written is judged too (security review of the fold, 24): an
+  // assignment may not reach the use (`(X=dist); rm -rf ../$X`, `false &&
+  // X=dist; …`), so the strictest of every reading answers.
+  return [...new Set([operand, ...done])];
 }
 
 /** The value {@link lineAssignments} records for a variable the line binds in a way the text cannot read. */
@@ -10533,7 +10537,7 @@ const UNREAD_BINDING = "\u0000unread";
  * fold, 20)? Such a line may set CDPATH.
  */
 function bindsUnreadableName(segment: LexSegment): boolean {
-  const at = segment.words.findIndex((word) => !word.assignment);
+  const at = builtinWordAt(segment.words);
   const command = at === -1 ? "" : (segment.words[at]?.text.split("/").pop() ?? "");
   const rest = at === -1 ? [] : segment.words.slice(at + 1).map((word) => word.text);
   const unreadable = (text: string): boolean => /[$`]/u.test(text) || text.includes(SUBSTITUTION_SENTINEL) || text.includes(PARAMETER_MARK);
@@ -10545,6 +10549,21 @@ function bindsUnreadableName(segment: LexSegment): boolean {
     return name === undefined || unreadable(name);
   }
   return false;
+}
+
+/**
+ * The index of the word a segment runs, past its assignments and any
+ * `command` / `builtin` wrapper with its flags (`command -p declare X=..`;
+ * security review of the fold, 25), or -1. `eval`, `source` and `.` are not
+ * looked through.
+ */
+function builtinWordAt(words: readonly LexWord[]): number {
+  let at = words.findIndex((word) => !word.assignment);
+  while (at !== -1 && at < words.length && ["command", "builtin"].includes(words[at]?.text ?? "")) {
+    at += 1;
+    while (at < words.length && (words[at]?.text ?? "").startsWith("-")) at += 1;
+  }
+  return at < words.length ? at : -1;
 }
 
 /** Builtins that bind the variables they name (automated security review of the fold, 3b). */
@@ -10570,7 +10589,7 @@ function lineAssignments(segments: readonly LexSegment[], outer: ReadonlyMap<str
       const match = /^([A-Za-z_][A-Za-z0-9_]*)\+?=([\s\S]*)$/u.exec(word.text);
       if (match !== null) bind(match[1] as string, match[2] as string);
     }
-    const commandAt = segment.words.findIndex((word) => !word.assignment);
+    const commandAt = builtinWordAt(segment.words);
     const command = commandAt === -1 ? undefined : (segment.words[commandAt]?.text.split("/").pop() ?? "");
     const rest = commandAt === -1 ? [] : segment.words.slice(commandAt + 1).map((word) => word.text);
     if (command !== undefined && BINDING_BUILTINS.has(command)) {

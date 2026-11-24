@@ -296,7 +296,8 @@ working directory or the home (`rm -rf ../$X`, `~/$X`, `/$X` are
 `scripts/$NAME`) or below a directory that holds neither (`/tmp/$name`,
 `/private/tmp/$SESSION`) it keeps main's class, so `chmod +x "$f"` and `rm
 -rf $BUILD_DIR` answer as on main. A variable the line itself sets is read
-as each value it is given, through chains to a fixpoint (`X=. ; rm -rf $X`
+as written and as each value it is given, through chains to a fixpoint, the
+strictest answering (`X=. ; rm -rf $X`
 and `A=..; B=$A; rm -rf $B` are `policy.core`; `printf -v` with a plain
 format too; one `read` or `mapfile` binds, a self-reference or a cycle is
 strict); after a `cd` to a parent, any variable below the shell's directory
@@ -321,8 +322,9 @@ each equal on main): a symlink name inside the workspace that points at a
 parent (`rm -rf uplink/`), a glob after a parent (`rm -rf ../pr*`), the wide
 `cd` case (a `cd` into a name or an unreadable target, then a plain name: `cd
 "$DIR" && rm -rf x`; a parent spelled after any `cd`, `cd sub && rm -rf ..`,
-is covered), a `CDPATH` set only in the environment or built by `eval`, an
-alias or function named `cd` or `rsync`, an ordinary variable whose value (set
+is covered), a `CDPATH` (or a variable) set only in the environment or
+inside `eval`, a sourced file, a function or an alias, an alias or function
+named `cd` or `rsync`, an ordinary variable whose value (set
 in an earlier call) is a parent, organ directories nested below a subdirectory
 (`rm -rf packages` holding `packages/a/.claude`), an unguarded file inside an
 organ folder a narrowed `find` reaches (`find . -name '*.tmp' -delete` and
