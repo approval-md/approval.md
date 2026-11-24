@@ -76,6 +76,9 @@ test("the brief's table: each dollar-quoted line answers as its plain spelling, 
     ["echo x > .approval/$'env'", "echo x > .approval/env"],
     ["echo x > $'SP'EC.md", "echo x > SPEC.md"],
   ];
+  // Those two are their plain spelling's answer exactly: main's reading adds nothing.
+  assert.deepEqual(classesOf("echo x > .approval/$'env'"), classesOf("echo x > .approval/env"));
+  assert.deepEqual(classesOf("echo x > $'SP'EC.md"), classesOf("echo x > SPEC.md"));
   for (const [command, plain] of rows) {
     assert.deepEqual(classesOf(command), asPlain(command, plain), command);
     // The plain spelling's strictest class is there.
