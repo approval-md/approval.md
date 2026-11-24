@@ -1498,7 +1498,8 @@ test("security review of the parents rule (L61587), 5: a tail after an unreadabl
   // directory, or after another, keeps main's class (it was policy.core).
   // (`$X/*` keeps #686's pattern answer, main's since 9122cb3e, widened by #682's
   // M2 fold: an unreadable part may name any guarded path, so the answer carries
-  // every class one can hold, policy.edit (.github) and cron.manage included.)
+  // every class one can hold, policy.edit (.github) and cron.manage included;
+  // lead ruling L62588.)
   assert.deepEqual(classesOf("rm -rf $X/*"), ["policy.core", "policy.edit", "files.delete.out_of_scope", "log.mutate", "cron.manage"]);
   // Lead ruling L62511 (S-D): a recursive chmod of one is policy.core again.
   for (const command of ["chmod -R 000 ./$X", "chmod -R 000 sub/$X", "chmod -R 000 $X/$Y"]) assert.ok(classesOf(command).includes("policy.core"), command);
