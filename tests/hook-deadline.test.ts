@@ -699,9 +699,14 @@ test("through the real hook, a read of seconds is timed by the real clock, and t
   //
   // The read must take more than the free second and less than the 15 s
   // deadline on a machine of any speed, at any load. So the line is sized
-  // here, now: path words enough to take about two seconds in this process
-  // (the CLI, starting cold, takes longer). If the machine is so busy that
-  // even that meets the deadline, a third of it is tried once.
+  // here, now: path words enough to take about four seconds in this process,
+  // the middle of that window. The size is an estimate, and it has been wrong
+  // both ways: a busy machine met the deadline, and on CI (run 45272670454) the
+  // CLI read the line in under the free second, said nothing about the read,
+  // and the test failed with nothing to measure. So the size is searched for:
+  // a read that met the deadline is tried at a third, one that left no line
+  // at three times, four tries in all. What is asserted is unchanged, and it
+  // is asserted of the first read that lands in the window.
   const dir = lab();
   const line = (words: number): string => `curl -X POST https://example.com/api -d call=1; cat ${"notes/a.txt ".repeat(words)}`;
   const millisecondsFor = (words: number): number => {
@@ -711,11 +716,14 @@ test("through the real hook, a read of seconds is timed by the real clock, and t
   };
   millisecondsFor(500);
   const sample = millisecondsFor(4_000);
-  const sized = Math.min(80_000, Math.max(4_000, Math.round((4_000 * 2_000) / sample)));
+  const MOST_WORDS = 240_000;
+  const sized = Math.min(160_000, Math.max(4_000, Math.round((4_000 * 4_000) / sample)));
   let said: RegExpExecArray | null = null;
   let reason = "";
   let err = "";
-  for (const words of [sized, Math.max(1_500, Math.round(sized / 3))]) {
+  const tried: string[] = [];
+  let words = sized;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     const stdin = openSync(eventFile(dir, line(words)), "r");
     try {
       const ran = spawnSync(
@@ -732,12 +740,19 @@ test("through the real hook, a read of seconds is timed by the real clock, and t
     } finally {
       closeSync(stdin);
     }
-    if (reason.startsWith("hook-deadline: ")) continue;
+    if (reason.startsWith("hook-deadline: ")) {
+      tried.push(`${String(words)} words met the deadline`);
+      words = Math.max(1_500, Math.round(words / 3));
+      continue;
+    }
     said = /reading this call took (\d+)ms, so the wait for a decision is (\d+)ms of its 2000ms/u.exec(err);
-    break;
+    if (said !== null || words >= MOST_WORDS) break;
+    tried.push(`${String(words)} words left no line about the read`);
+    words = Math.min(MOST_WORDS, words * 3);
   }
-  assert.match(reason, /^hook-timeout: /u, `${String(sized)} words (4,000 took ${sample.toFixed(0)} ms here): ${reason.slice(0, 200)}`);
-  assert.ok(said !== null, `no line about the read on stderr, so the read was not timed: ${err.slice(0, 400)}`);
+  const history = `4,000 words took ${sample.toFixed(0)} ms here; ${tried.join("; ")}`;
+  assert.match(reason, /^hook-timeout: /u, `${history}: ${reason.slice(0, 200)}`);
+  assert.ok(said !== null, `no line about the read on stderr at any size, so the read was not timed (${history}): ${err.slice(0, 400)}`);
   const readMs = Number(said[1]);
   const left = Number(said[2]);
   assert.ok(readMs > READ_FREE_MS && readMs < DESCRIBE_DEADLINE_MS, `the read took ${String(readMs)} ms by the hook's clock`);
