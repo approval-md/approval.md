@@ -197,6 +197,8 @@ test("foldFileName: the dotless i is the one stricter case; the rest APFS keeps 
 interface Row {
   readonly path: string;
   readonly write: string;
+  /** Classes a write onto the bare folder also takes from its contents (lead ruling L62013, S1). */
+  readonly contents?: readonly string[];
   readonly read: string;
   readonly spellings: readonly string[];
 }
@@ -209,7 +211,7 @@ const CREDENTIAL = "account.credential credential-path";
 const ROWS: readonly Row[] = [
   { path: "APPROVAL.md", write: WRITE_CORE, read: READ, spellings: ["Approval.MD", "approval.md", "aPpRoVaL.mD"] },
   { path: "APPROVALS.md", write: WRITE_CORE, read: READ, spellings: ["approvals.md", "Approvals.Md", `APPROVAL${LONG_S}.md`] },
-  { path: ".approval", write: WRITE_CORE, read: READ, spellings: [".APPROVAL", ".Approval"] },
+  { path: ".approval", write: WRITE_CORE, contents: ["log.mutate redirect-protected"], read: READ, spellings: [".APPROVAL", ".Approval"] },
   { path: ".approval/env", write: WRITE_CORE, read: CREDENTIAL, spellings: [".APPROVAL/env", ".approval/ENV", ".Approval/Env"] },
   { path: ".approval/vault.enc", write: WRITE_CORE, read: CREDENTIAL, spellings: [".APPROVAL/vault.enc", ".approval/VAULT.ENC"] },
   { path: ".approval/keys/k1", write: WRITE_CORE, read: CREDENTIAL, spellings: [".APPROVAL/KEYS/k1", `.approval/${KELVIN}eys/k1`, `.approval/key${LONG_S}/k1`] },
@@ -242,7 +244,7 @@ const ROWS: readonly Row[] = [
 
 test("every spelling of a guarded name: its canonical spelling's class and rule, then main's class for it, pure", () => {
   for (const row of ROWS) {
-    assert.deepEqual(pure(`echo x > ${row.path}`), [row.write], `canonical write ${row.path}`);
+    assert.deepEqual(pure(`echo x > ${row.path}`), [row.write, ...(row.contents ?? [])], `canonical write ${row.path}`);
     assert.deepEqual(pure(`cat ${row.path}`), [row.read], `canonical read ${row.path}`);
     const canonical = {
       write: pure(`echo x > ${row.path}`),
@@ -251,7 +253,9 @@ test("every spelling of a guarded name: its canonical spelling's class and rule,
       read: pure(`cat ${row.path}`),
     };
     // A canonical spelling reads alike both ways: nothing is added to it.
-    assert.deepEqual(spelledPure(`echo x > ${row.path}`), canonical.write, `canonical write as spelled ${row.path}`);
+    // The folder's contents are claims of equal standing (takeAmongEqual): the
+    // as-spelled reading takes the first, the folded one each in turn.
+    assert.deepEqual(spelledPure(`echo x > ${row.path}`), row.contents === undefined ? canonical.write : canonical.write.slice(0, 1), `canonical write as spelled ${row.path}`);
     for (const spelled of row.spellings) {
       assert.notEqual(spelled, row.path);
       const lines: readonly (readonly [string, readonly string[]])[] = [
@@ -313,6 +317,7 @@ test("the brief's examples are guarded, not ordinary writes", () => {
   for (const [command, expected] of [
     ["echo x > Approval.MD", WRITE_CORE],
     ["echo x > approval.md", WRITE_CORE],
+    // Its log goes with the folder (lead ruling L62013, S1): below.
     ["rm -rf .APPROVAL", "policy.core protected-path"],
     ["echo x > .APPROVAL/env", WRITE_CORE],
     ["echo x > .APPROVAL/log/events.jsonl", "log.mutate redirect-protected"],
@@ -330,7 +335,8 @@ test("the brief's examples are guarded, not ordinary writes", () => {
     // The folded class first; main's class for the spelling may follow it.
     const got = pure(command);
     assert.equal(got[0], expected, command);
-    assert.deepEqual(got, union([expected], spelledPure(command)), command);
+    const contents = command === "rm -rf .APPROVAL" ? ["log.mutate protected-path"] : [];
+    assert.deepEqual(got, union([expected, ...contents], spelledPure(command)), command);
   }
 });
 
