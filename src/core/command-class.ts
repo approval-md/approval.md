@@ -9621,6 +9621,7 @@ function organParentOperands(
   plan: CopyPlan | null,
   assignments: readonly LexWord[] = [],
   protectedPaths: readonly ProtectedPathEntry[] = [],
+  argWords: readonly LexWord[] = [],
 ): string[] {
   const recursive = (...letters: string[]): boolean => hasFlag(args, ["--recursive"]) || hasShortFlag(args, letters);
   if (basename === "rm") return recursive("r", "R") ? [...positionals] : [];
@@ -9645,7 +9646,7 @@ function organParentOperands(
   // `find . -type f -delete` are).
   if (basename === "find") {
     const runs = args.some((arg) => ["-exec", "-execdir", "-ok", "-okdir"].includes(arg));
-    return runs || (args.includes("-delete") && !findDeleteNarrowed(args, protectedPaths)) ? findStartPaths(args) : [];
+    return runs || (args.includes("-delete") && !findDeleteNarrowed(args, protectedPaths, argWords)) ? findStartPaths(args) : [];
   }
   if (basename === "git") return gitRemovedPaths(args);
   // tar `--remove-files` (any unique prefix, `--rem` on), or an option from
@@ -9826,7 +9827,7 @@ const FIND_BARE = new Set(["-depth", "-d", "-xdev", "-mount", "-x", "-print", "-
  * here; `find . -delete -name x` deletes everything before the test. Anything
  * else: not narrowed, so the start paths are read by the parents rule.
  */
-function findDeleteNarrowed(args: readonly string[], protectedPaths: readonly ProtectedPathEntry[]): boolean {
+function findDeleteNarrowed(args: readonly string[], protectedPaths: readonly ProtectedPathEntry[], argWords: readonly LexWord[] = []): boolean {
   const start = args.findIndex((arg) => FIND_PRIMARY.test(arg) || arg === "!" || arg === "(");
   if (start === -1) return false;
   let narrowed = false;
@@ -9836,7 +9837,12 @@ function findDeleteNarrowed(args: readonly string[], protectedPaths: readonly Pr
     if (FIND_VALUED.has(arg)) {
       const value = args[at + 1];
       if (value === undefined) return false;
-      if ((arg === "-name" || arg === "-iname") && findNameMissesGuarded(value, arg === "-iname", protectedPaths)) narrowed = true;
+      // The pattern as find receives it: after the shell's quotes, and only
+      // where the shell does not expand it first (an unquoted `*.tmp` may
+      // become other words; security review of the fold, 6).
+      const word = argWords.length === args.length ? argWords[at + 1] : undefined;
+      const asWritten = word !== undefined && word.text === value && !word.expands && word.substitutions.length === 0 && !word.splits;
+      if ((arg === "-name" || arg === "-iname") && asWritten && findNameMissesGuarded(value, arg === "-iname", protectedPaths)) narrowed = true;
       at += 1;
       continue;
     }
@@ -9850,29 +9856,39 @@ function findDeleteNarrowed(args: readonly string[], protectedPaths: readonly Pr
 
 /**
  * Can the find `-name` pattern match no guarded name (automated security
- * review of the fold, 2)? Matched by the classifier's own pattern reader and
- * matcher ({@link globSegmentTokens}, {@link globTokensMatch}, folded in the
- * folded reading) against every organ directory, every name the guarded-path
- * rules read ({@link GLOB_GUARD_NAMES}: `APPROVAL.md`, `CLAUDE.md`,
- * `auth.json`, `hooks.json`, `.env`, ...), `.git`, the settings files and the
- * last part of each of the policy's own protected paths. `-iname` is matched
- * in every letter case. A match, or a budget spent: not narrowed.
+ * review of the fold, 2, 5 and 6)? Read from the classifier's own registries:
+ * every {@link ORGAN_DIRECTORIES} name, every name the guarded-path rules read
+ * ({@link GLOB_GUARD_NAMES}, which holds {@link CORE_FILENAMES} and
+ * {@link PROTECTED_FILENAMES}: `APPROVAL.md`, `CLAUDE.md`, `auth.json`,
+ * `hooks.json`, `.env`, ...), `.git`, the settings files, and every part of
+ * each of the policy's protected paths (`.github/workflows/ci.yml` gives
+ * `.github`, `workflows` and `ci.yml`), matched with the classifier's own
+ * reader and matcher ({@link globSegmentTokens}, {@link globTokensMatch},
+ * folded in the folded reading; `-iname` in every case). A pattern that does
+ * not start with `*` is matched against each {@link GLOB_GUARD_PREFIXES} entry
+ * as a prefix too (`set*`, `.env*`, `vault-?`); one that starts with `*`
+ * (`*.tmp`) is not, by the lead's ruling L62435 that puts
+ * `find . -name '*.tmp' -delete` back at main's class. A backslash or a
+ * bracket (fnmatch reads them in ways the shared matcher only
+ * over-approximates), a match, or a spent budget: not narrowed.
  */
 function findNameMissesGuarded(pattern: string, caseless: boolean, protectedPaths: readonly ProtectedPathEntry[]): boolean {
-  if (pattern.length === 0 || pattern.includes("/")) return false;
+  if (pattern.length === 0 || /[/\\[\]]/u.test(pattern)) return false;
   const names = new Set<string>([...Object.keys(ORGAN_DIRECTORIES), ...GLOB_GUARD_NAMES, ".git", "settings.json", "settings.local.json"]);
   for (const entry of protectedPaths) {
-    const last = (typeof entry === "string" ? entry : entry.path).replace(/\/+$/u, "").split("/").pop();
-    if (last !== undefined && last.length > 0) names.add(last);
+    for (const part of (typeof entry === "string" ? entry : entry.path).split("/")) if (part.length > 0) names.add(part);
   }
   const budget = { left: GLOB_GUARD_STEP_CAP };
   const spellings = caseless ? [pattern, pattern.toLowerCase(), pattern.toUpperCase()] : [pattern];
+  const variants = (name: string): string[] => (caseless ? [name, name.toLowerCase(), name.toUpperCase()] : [name]);
   for (const spelling of spellings) {
     const tokens = globSegmentTokens(spelling, true);
     for (const name of names) {
-      for (const each of caseless ? [name, name.toLowerCase(), name.toUpperCase()] : [name]) {
-        if (globTokensMatch(tokens, each, false, budget) !== false) return false;
-      }
+      for (const each of variants(name)) if (globTokensMatch(tokens, each, false, budget) !== false) return false;
+    }
+    if (spelling.startsWith("*")) continue;
+    for (const prefix of GLOB_GUARD_PREFIXES) {
+      for (const each of variants(prefix)) if (globTokensMatch(tokens, each, true, budget) !== false) return false;
     }
   }
   return true;
@@ -12665,7 +12681,7 @@ function classifySegmentWithVerb(
   // Not every command's: an operand the text cannot place is `policy.core`
   // here, fail closed, so reading every command's operands would make
   // `git push origin $BRANCH` and `rm ../sibling/file` policy.core.
-  const parentOperands = organVerbs ? organParentOperands(basename, args, positionals, plan, segment.words.slice(0, cursor), protectedPaths) : [];
+  const parentOperands = organVerbs ? organParentOperands(basename, args, positionals, plan, segment.words.slice(0, cursor), protectedPaths, segment.words.slice(cursor + 1)) : [];
   const organParent =
     context.organParentsOff === true || mainRulesOnly
       ? { named: null, git: new Set<string>() }

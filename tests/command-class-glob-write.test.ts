@@ -2102,6 +2102,10 @@ test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary varia
     "find .. -name '*.tmp' -delete",
     "find . -iname '*.TMP' -delete",
     "find . -empty -name '*.tmp' -delete",
+    // The shell's quoting removed first: find sees `*.tmp` in each.
+    "find . -name \\*.tmp -delete",
+    'find . -name "*.tmp" -delete',
+    "find . -name '*'.tmp -delete",
   ]) {
     assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
     assert.deepEqual(withListing(command, organ), ["files.delete.out_of_scope"], `${command} (listing)`);
@@ -2135,10 +2139,29 @@ test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary varia
     "find . -path './.claude/*' -delete",
     "find . -regex '.*tmp' -delete",
     "find . -mtime +3 -delete",
+    // Security review of the fold, 5 and 6: a guarded prefix (`settings*`,
+    // `.env.*`, `vault*`), an fnmatch escape or bracket, an unquoted glob the
+    // shell may expand first, and `\*.md` (find sees `*.md`).
+    "find . -name 'set*' -delete",
+    "find . -name 'vault-?' -delete",
+    "find . -name '.env*' -delete",
+    "find . -name '\\.claude' -delete",
+    "find . -name 'settings\\.json' -delete",
+    "find . -name '[.]claude' -delete",
+    "find . -name '.cl[a]ude' -delete",
+    "find . -name '[!x]claude' -delete",
+    "find . -name *.tmp -delete",
+    "find . -name \\*.md -delete",
   ]) {
     leads(withListing(command, organ), "policy.core");
     assert.ok(classesOf(command).includes("policy.core"), command);
   }
+  // A part of one of the policy's protected paths (routed entries included).
+  const routes = [{ path: ".github/workflows/", class: "policy.edit.ci" }, { path: ".github/CODEOWNERS", class: "policy.edit.owners" }, { path: "SPEC.md", class: "policy.edit.spec" }];
+  for (const command of ["find . -name CODEOWNERS -delete", "find . -name SPEC.md -delete", "find . -name workflows -delete"]) {
+    assert.ok(classesOf(command, routes).includes("policy.core"), command);
+  }
+  assert.ok(!classesOf("find . -name '*.tmp' -delete", routes).includes("policy.core"));
   // An ordinary variable alone, below the working directory, or below a
   // directory that holds neither the working directory nor the home.
   const tmp = { "/w": [".claude"], "/tmp": ["x"], "/private/tmp": ["x"], ...realpaths("/w", "/h", "/private/tmp"), [realpathKey("/tmp")]: ["/private/tmp"] };
