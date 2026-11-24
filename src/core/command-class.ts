@@ -851,15 +851,21 @@ export function protectedPathClass(
   // files and two classes, and the classifier's rank is not a policy's order,
   // so the folded reading takes each class in turn ({@link takeAmongEqual}).
   const claims: string[] = [];
+  // GLOB-WRITE (lead ruling L62013, S1): an organ folder named bare also
+  // claims the classes of the guarded paths inside it, taken after the
+  // word's own claims ({@link folderClaimsOfWord}).
+  const inside: string[] = [];
   for (const expansion of expansions) {
-    for (const cls of protectedClaimsOfWord(expansion, extra)) if (!claims.includes(cls)) claims.push(cls);
+    const own = protectedClaimsOfWord(expansion, extra);
+    for (const cls of own) if (!claims.includes(cls)) claims.push(cls);
+    for (const cls of folderClaimsOfWord(expansion, own, extra)) if (!inside.includes(cls)) inside.push(cls);
   }
   if (claims.length === 0) return null;
   const ranked = claims
     .map((cls, index) => ({ cls, index }))
     .sort((a, b) => protectedRank(a.cls) - protectedRank(b.cls) || a.index - b.index)
     .map((claim) => claim.cls);
-  return takeAmongEqual(ranked);
+  return takeAmongEqual([...ranked, ...inside.filter((cls) => !ranked.includes(cls))]);
 }
 
 // ===========================================================================
@@ -1071,15 +1077,15 @@ const FOLDER_CONTENTS: Readonly<Record<string, readonly string[]>> = {
  * representative per organ ({@link FOLDER_CONTENTS}) and one per policy entry
  * that names a path under the folder.
  */
-function protectedClaimsOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): readonly string[] {
-  const own = protectedClaimsOfWordAlone(candidate, extra);
-  if (own.length === 0 || !organVerbs || mainRulesOnly) return own;
+function folderClaimsOfWord(candidate: string, own: readonly string[], extra: readonly ProtectedPathEntry[]): readonly string[] {
+  if (own.length === 0 || !organVerbs || mainRulesOnly) return [];
   const claims = folderContentClaims(candidate, own, extra);
-  if (claims.length <= own.length) return own;
+  if (claims.length <= own.length) return [];
   markGlobWriteFired();
-  // The folded reading takes each in turn ({@link protectedPathClass}); as
-  // spelled the word's own claims answer, as before names folded.
-  return [...own, ...foldedOnly(() => claims.slice(own.length))];
+  // The folded reading takes each in turn after the word's own claims
+  // ({@link protectedPathClass}); as spelled the word's own claims answer, as
+  // before names folded.
+  return foldedOnly(() => claims.slice(own.length));
 }
 
 /** `own`, then each distinct class of a path inside the organ folder `candidate` names bare (S1). */
@@ -1108,7 +1114,7 @@ function folderContentClaims(candidate: string, own: readonly string[], extra: r
   }
   const claims = [...own];
   for (const path of inside) {
-    for (const cls of protectedClaimsOfWordAlone(path, extra)) if (!claims.includes(cls)) claims.push(cls);
+    for (const cls of protectedClaimsOfWord(path, extra)) if (!claims.includes(cls)) claims.push(cls);
   }
   return claims;
 }
@@ -1145,13 +1151,17 @@ function distinctClasses(readings: readonly (string | null)[]): string[] {
   return out;
 }
 
-/** {@link protectedClaimsOfWord} for one word alone: no class, one class, or tier 3's equal claims. */
-function protectedClaimsOfWordAlone(candidate: string, extra: readonly ProtectedPathEntry[]): readonly string[] {
+/**
+ * The classes one word claims, brace expansion already made: one class, or
+ * none, except where routed entries tie (tier 3), which claim one each in the
+ * folded reading.
+ */
+function protectedClaimsOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): readonly string[] {
   const cls = protectedClassOfWord(candidate, extra);
   return cls === null ? [] : typeof cls === "string" ? [cls] : cls;
 }
 
-/** {@link protectedClaimsOfWordAlone}'s answer: no class, one class, or tier 3's equal claims. */
+/** {@link protectedClaimsOfWord}'s answer: no class, one class, or tier 3's equal claims. */
 function protectedClassOfWord(candidate: string, extra: readonly ProtectedPathEntry[]): string | readonly string[] | null {
   // Every guarded name below is compared with the candidate's FOLDED segments
   // ({@link foldFileName}), on every platform: APFS opens `Approval.MD`,
@@ -9213,10 +9223,9 @@ function strictestProtectedWrite(
   if (glob.off || mainRulesOnly) return best;
   const offer = (surface: string | null, word: string): void => {
     if (surface !== null && (best === null || protectedRank(surface) < protectedRank(best.surface))) {
-      // The answer it replaces, and that answer's other classes, ride beside
-      // the stricter one (#690: every protected class the words take).
-      const before = best;
-      best = { surface, path: word, others: foldedOnly(() => (before === null ? [] : distinctOthers(surface, [before, ...before.others]))) };
+      // Main's text answer and its other classes ride beside the raise (#690:
+      // every protected class the words take, as main reports them).
+      best = { surface, path: word, others: foldedOnly(() => (text === null ? [] : distinctOthers(surface, [text, ...text.others]))) };
     }
   };
   // The matcher steps each word already judged here took. The same word again
@@ -9882,7 +9891,7 @@ function guardedEntryClass(
     // guarded path inside the folder it names, routed ones included: a parent
     // takes the classes of the folders it holds, each by that rule.
     // The name's own claims (main's tier 3 may give several, #690).
-    const own = protectedClaimsOfWordAlone(spelling, protectedPaths);
+    const own = protectedClaimsOfWord(spelling, protectedPaths);
     add(organ);
     for (const cls of own) add(cls);
     const first = own.length > 0 ? own : organ === null ? [] : [organ];
@@ -12395,12 +12404,18 @@ function classifySegmentWithVerb(
             });
             return plainHit === null || (patternHit !== null && protectedRank(patternHit.surface) < protectedRank(plainHit.surface)) ? patternHit : plainHit;
           })();
-    // The operands' answer wins on equal rank, as main's positional answer
-    // does, and the parents rule only where it is stricter; every other class
-    // rides beside (#690, {@link strongerProtected}).
-    const namedOperand = strongerProtected(operandNamed, landedNamed === null ? null : { ...landedNamed, others: [] });
+    // A landing answers only where it is stricter than the operands' answer,
+    // and the parents rule only where it is stricter than both, as before
+    // #690; the answer it replaces then rides beside it ({@link strongerProtected}).
+    const namedOperand =
+      landedNamed !== null && (operandNamed === null || protectedRank(landedNamed.surface) < protectedRank(operandNamed.surface))
+        ? strongerProtected({ ...landedNamed, others: [] }, operandNamed)
+        : operandNamed;
     const parentNamed = organParent.named;
-    const named = strongerProtected(namedOperand, parentNamed === null ? null : { ...parentNamed, others: [] });
+    const named =
+      parentNamed !== null && (namedOperand === null || protectedRank(parentNamed.surface) < protectedRank(namedOperand.surface))
+        ? strongerProtected({ ...parentNamed, others: [] }, namedOperand)
+        : namedOperand;
     const touched = strongerProtected(named, strictestProtected(readTargets, protectedPaths));
     if (touched !== null) {
       return {

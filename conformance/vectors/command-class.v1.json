@@ -1193,12 +1193,12 @@
         "valid": true,
         "segments": [
           {
-            "class": "log.mutate",
+            "class": "policy.core",
             "rule": "protected-path",
             "path": ".APPROVAL"
           },
           {
-            "class": "policy.core",
+            "class": "log.mutate",
             "rule": "protected-path",
             "path": ".APPROVAL"
           },
@@ -1208,8 +1208,8 @@
           }
         ],
         "classes": [
-          "log.mutate",
           "policy.core",
+          "log.mutate",
           "files.write.workspace"
         ]
       }
@@ -2654,16 +2654,10 @@
             "class": "policy.core",
             "rule": "protected-path",
             "path": ".github/workflows/sub dir/APPROVAL.md"
-          },
-          {
-            "class": "policy.edit",
-            "rule": "protected-path",
-            "path": ".github/workflows/sub dir/APPROVAL.md/a.md"
           }
         ],
         "classes": [
-          "policy.core",
-          "policy.edit"
+          "policy.core"
         ]
       }
     },
