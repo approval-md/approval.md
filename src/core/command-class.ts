@@ -71,6 +71,7 @@ import {
   foldedOnly,
   foldNameExact,
   foldNameLower,
+  inFoldedReadingOnly,
   nameListIncludes,
   SUBSTITUTION_SENTINEL,
   takeAmongEqual,
@@ -933,10 +934,14 @@ function protectedClassOfWord(candidate: string, extra: readonly ProtectedPathEn
     // The harness's own settings, which is where a hook is installed or removed.
     // A `.claude-<suffix>` folder (one or more characters after the dash) is a
     // config folder too: every account run with `CLAUDE_CONFIG_DIR=~/.claude-<name>`
-    // reads its settings there (lead, CLAIMS L62289, S2).
+    // reads its settings there (lead, CLAIMS L62289, S2). That rule is in the
+    // FOLDED reading only: as spelled the word keeps the class main gave it, so
+    // both are reported and no policy can find the new answer lighter (the
+    // seat's ruling on the differential of d76ebd0d), and such a path is no
+    // gate organ (a grant must hold in both readings).
     if (segment === ".claude" || (segment !== undefined && segment.startsWith(".claude-") && segment.length > ".claude-".length)) {
       const next = segments[index + 1];
-      if (next !== undefined && next.startsWith("settings")) return "policy.core";
+      if (next !== undefined && next.startsWith("settings") && (segment === ".claude" || inFoldedReadingOnly())) return "policy.core";
     }
     // Cursor's equivalent surface: the hook install file, hook scripts, and
     // custom-agent prompts. An agent that could write those could write itself

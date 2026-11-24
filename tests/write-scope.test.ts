@@ -16,7 +16,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { classifyCommand } from "../src/core/command-class.js";
+import { classifyCommand, isGateOrganPath } from "../src/core/command-class.js";
+import { eachNameReading, withNamesAsSpelled } from "../src/core/name-fold.js";
 import { explain } from "../src/core/policy-explain.js";
 import { loadPolicy, type PolicyLoadResult } from "../src/core/policy-load.js";
 import { CLASS_MINIMUMS, resolve } from "../src/core/policy-match.js";
@@ -462,4 +463,61 @@ test("S2.3: .git/config and config.worktree are guarded anywhere, as the hooks p
   assert.equal(guardedEntryBelow("/work/repo/.git/worktrees", HOMES), "a git config file");
   assert.equal(guardedEntryBelow("/work/repo/.git/worktrees/lane", HOMES), "a git config file");
   assert.equal(guardedEntryBelow("/work/repo/.git/worktrees/lane/logs", HOMES), null);
+});
+
+// ---------------------------------------------------------------------------
+// S2.1: the `.claude-<suffix>` settings rule is in the folded reading only
+// (seat ruling on the differential of d76ebd0d: 0 looser)
+// ---------------------------------------------------------------------------
+
+/** Every segment as `class rule`. */
+function segmentsOf1(command: string): string[] {
+  const result = classifyCommand(command, []);
+  assert.equal(result.ok, true, command);
+  return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [];
+}
+
+test("S2.1 reading: a .claude-<suffix> settings write is policy.core folded and keeps main's class as spelled; both are reported", () => {
+  for (const [command, own] of [
+    ["echo x > ~/.claude-work/settings.json", "files.write.workspace redirect-write"],
+    ["cp a .claude-2/settings.local.json", "files.write.workspace workspace-write"],
+    ["echo x > /Users/tester/.claude-b1/settings.json", "files.write.workspace redirect-write"],
+  ] as const) {
+    const both = segmentsOf1(command);
+    assert.ok(both.some((each) => each.startsWith("policy.core ")), `${command}: ${both.join(" | ")}`);
+    assert.ok(both.includes(own), `${command}: main's own class is kept beside it: ${both.join(" | ")}`);
+    // As spelled the rule does not apply: exactly the answer main gave.
+    const spelled = withNamesAsSpelled(() => segmentsOf1(command));
+    assert.deepEqual(spelled, [own], command);
+  }
+  // `.claude/settings*` is policy.core in both readings, as on main.
+  assert.deepEqual(withNamesAsSpelled(() => segmentsOf1("echo x > .claude/settings.json")), ["policy.core redirect-protected"]);
+  assert.deepEqual(segmentsOf1("echo x > .claude/settings.json"), ["policy.core redirect-protected"]);
+});
+
+test("S2.1 reading: the second reading runs for a .claude-<suffix> settings word and nowhere else it did not run before", () => {
+  const readings = (command: string): number => eachNameReading(() => classifyCommand(command, [])).length;
+  assert.equal(readings("echo x > ~/.claude-work/settings.json"), 2);
+  assert.equal(readings("cp a .claude-2/settings.local.json"), 2);
+  for (const command of [
+    "echo x > notes.txt",
+    "echo x > .claude/settings.json",
+    "echo x > ~/.claude-work/notes.md",
+    "echo x > ~/.claude-work/projects/p/settings-notes.md",
+    "echo x > ~/.claude-/settings.json",
+    "echo x > ~/.claudex/settings.json",
+    "echo x > ~/.claude-x/hooks/h.sh",
+    "echo x > ~/.claude-x/plugins/p/x.js",
+    `touch ${Array.from({ length: 200 }, (_, i) => `out/p${String(i)}.txt`).join(" ")}`,
+  ]) {
+    assert.equal(readings(command), 1, command);
+  }
+});
+
+test("S2.1 reading: a .claude-<suffix> settings file is not a gate organ (a grant holds in both readings); .claude's still is", () => {
+  for (const path of [".claude-x/settings.json", "/Users/tester/.claude-b1/settings.local.json", ".claude-2/settings.json"]) {
+    assert.equal(isGateOrganPath(path), false, path);
+  }
+  assert.equal(isGateOrganPath(".claude/settings.json"), true);
+  assert.equal(isGateOrganPath(".claude/settings.local.json"), true);
 });

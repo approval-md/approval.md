@@ -2364,18 +2364,21 @@ const commandClassVectors = [
   // Every account run with `CLAUDE_CONFIG_DIR=~/.claude-<name>` reads its
   // settings from that folder, so a `.claude-<suffix>` segment (one or more
   // characters after the dash, through the fold) followed by `settings*` is
-  // the harness settings `.claude/settings*` is. A bare `.claude-` is not a
-  // config folder, and a file beside the settings keeps its class.
+  // the harness settings `.claude/settings*` is, in the FOLDED reading only:
+  // as spelled the word keeps the class it had before the rule, and both
+  // readings' classes are reported, so no policy finds the new answer
+  // lighter. A bare `.claude-` is not a config folder, and a file beside the
+  // settings keeps its class.
   {
     id: "claude-config-folder-settings",
     description:
-      "a write to the settings of a .claude-<suffix> config folder is policy.core, as .claude/settings.json is",
+      "a write to the settings of a .claude-<suffix> config folder is policy.core in the folded reading and keeps its workspace class as spelled: both are reported",
     input: { command: "echo x > ~/.claude-work/settings.json" },
   },
   {
     id: "claude-config-folder-settings-local-copy",
     description:
-      "a copy onto settings.local.json in a .claude-<suffix> config folder is policy.core",
+      "a copy onto settings.local.json in a .claude-<suffix> config folder is policy.core folded and a workspace write as spelled: both are reported",
     input: { command: "cp a .claude-2/settings.local.json" },
   },
   {
@@ -5811,7 +5814,8 @@ const SUITES = [
     // Claude Code config folders (S2): five more vectors in the same
     // unreleased 1.12.0, and no expectation moved: a `.claude-<suffix>`
     // folder's settings, settings.local.json and a case spelling are
-    // policy.core; a bare `.claude-` folder and a file beside the settings
+    // policy.core folded and keep their workspace class as spelled (both
+    // reported); a bare `.claude-` folder and a file beside the settings
     // stay workspace writes.
     vectors_version: "1.12.0",
     algorithm:

@@ -1404,7 +1404,7 @@
     },
     {
       "id": "claude-config-folder-settings",
-      "description": "a write to the settings of a .claude-<suffix> config folder is policy.core, as .claude/settings.json is",
+      "description": "a write to the settings of a .claude-<suffix> config folder is policy.core in the folded reading and keeps its workspace class as spelled: both are reported",
       "input": {
         "command": "echo x > ~/.claude-work/settings.json"
       },
@@ -1415,16 +1415,21 @@
             "class": "policy.core",
             "rule": "redirect-protected",
             "path": "~/.claude-work/settings.json"
+          },
+          {
+            "class": "files.write.workspace",
+            "rule": "redirect-write"
           }
         ],
         "classes": [
-          "policy.core"
+          "policy.core",
+          "files.write.workspace"
         ]
       }
     },
     {
       "id": "claude-config-folder-settings-local-copy",
-      "description": "a copy onto settings.local.json in a .claude-<suffix> config folder is policy.core",
+      "description": "a copy onto settings.local.json in a .claude-<suffix> config folder is policy.core folded and a workspace write as spelled: both are reported",
       "input": {
         "command": "cp a .claude-2/settings.local.json"
       },
@@ -1435,10 +1440,15 @@
             "class": "policy.core",
             "rule": "protected-path",
             "path": ".claude-2/settings.local.json"
+          },
+          {
+            "class": "files.write.workspace",
+            "rule": "workspace-write"
           }
         ],
         "classes": [
-          "policy.core"
+          "policy.core",
+          "files.write.workspace"
         ]
       }
     },
