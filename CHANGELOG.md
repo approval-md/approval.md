@@ -34,6 +34,21 @@ rides beside, so nothing answers lighter than it did: `rm $'\x41PPROVAL.md'`
 is `policy.core` with the earlier `files.delete.out_of_scope` beside it, and a
 dollar-quoted program word (`$'rm' -rf x`) keeps its refusal.
 
+**An unread part spliced into a guarded name asks.** `echo x > APPROVAL$E.md`,
+`echo x > .claude$S/settings.json`, `echo x >> .appro${x}val/env` and
+`echo x > {APPROVAL,x}$E.md` write the guarded file when the parameter is
+empty, and were workspace writes. A write target whose literal text holds an
+unread part (a parameter, a substitution's output, an unread dollar-quote
+escape) is now read with each part as any text, a `/` included, against every
+guarded path and `.git`; a possible match takes that path's class (the
+strictest where several match), with the earlier answer beside it. A match
+counts only where the word's literal text takes part in it, and a word that
+opens with an unread directory asks only where a guarded path ends in its tail
+by name: `$D/APPROVAL.md` and `$D/settings.json` ask; `$OUT`, `$D/$F`,
+`$D/notes.md`, `out/$F` and `$L/scripts/run.sh` keep their answer. Past eight
+unread parts in one word the word could be any path (`log.mutate`). On one
+day's 19,368 Bash calls holding a `$`, no answer changed.
+
 **A glob in a write target to a guarded path stays guarded (GLOB-WRITE).**
 `echo x > ~/.hermes/auth.json` was `policy.core`, and the same write with a
 glob in any component (`~/.hermes/[!Z]uth.json`, `~/.[!Z]ermes/auth.json`,

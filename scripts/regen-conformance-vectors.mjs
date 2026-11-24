@@ -2936,7 +2936,7 @@ const commandClassVectors = [
   {
     id: "dollar-quote-escape-the-shells-read-differently-is-unknown",
     description:
-      "bash keeps `\\V` and zsh drops its backslash, so the copy target is not settled by the text: the copy to an unknown target keeps its fail-closed class",
+      "bash keeps `\\V` and zsh drops its backslash, so the copy target is not settled by the text: the escape is an unread part spliced into the policy file's name (lead ruling L62568), and the copy asks with that file's class",
     input: { command: "cp notes.txt $'APPRO\\VAL.md'" },
   },
   {
@@ -2944,6 +2944,36 @@ const commandClassVectors = [
     description: "a program spelled as a dollar quote keeps the refusal the earlier reading gives it",
     input: { command: "$'rm' -rf x" },
     control: true,
+  },
+  // --- an unread part spliced into a guarded name ----------------------------
+  // Lead ruling CLAIMS L62568: each unread part counts as any text, a `/`
+  // included, and the word is matched against every guarded path; a match
+  // counts where the word's literal text takes part in it, and a word opening
+  // with an unread directory asks where a guarded path ends in its tail.
+  {
+    id: "spliced-parameter-in-the-policy-file-name",
+    description: "with E empty the shell writes APPROVAL.md: the policy file's class, and the earlier workspace answer beside it",
+    input: { command: "echo x > APPROVAL$E.md" },
+  },
+  {
+    id: "spliced-parameter-after-a-guarded-folder-name",
+    description: "with S empty the write is .claude/settings.json: the settings file's class",
+    input: { command: "echo x > .claude$S/settings.json" },
+  },
+  {
+    id: "spliced-unread-directory-before-a-guarded-name",
+    description: "an unread directory whose literal tail ends a guarded path by name (.claude/settings.json) asks",
+    input: { command: "echo x > $D/settings.json" },
+  },
+  {
+    id: "spliced-unread-directory-before-an-ordinary-name-is-unmoved",
+    description: "an unread directory whose tail no guarded path ends in keeps the workspace answer (the directory alone could be .approval, which a word with no literal text reaches as well)",
+    input: { command: "echo x > $D/notes.md" },
+  },
+  {
+    id: "spliced-word-of-unread-parts-only-is-unmoved",
+    description: "a word with no literal text but `/` keeps main's answer for an unknown target",
+    input: { command: "echo x > $D/$F" },
   },
   {
     id: "redirect-read-of-an-ordinary-file-is-a-read",
