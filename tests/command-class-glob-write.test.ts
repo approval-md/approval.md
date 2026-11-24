@@ -2362,6 +2362,16 @@ test("automated security review of the fold, 7, 8 and 11-14: an rsync delete thr
     "rsync -a --delete /tmp/empty/ :",
     "rsync -a --delete /tmp/empty/ host::",
     "rsync -a --delete /tmp/empty/ rsync://host/",
+    // A daemon module, any host, with or without a path, and a `~` that is
+    // not the home (16, 17): strict.
+    "rsync -a --delete /tmp/empty/ host::module/out/",
+    "rsync -a --delete /tmp/empty/ localhost::module",
+    "rsync -a --delete /tmp/empty/ rsync://host/module/out/",
+    "rsync -a --delete /tmp/empty/ rsync://localhost/module",
+    "rsync -a --delete /tmp/empty/ host:~user/x",
+    "rsync -a --delete /tmp/empty/ host:~+",
+    "rsync -a --delete /tmp/empty/ ~root",
+    "rsync -a --delete /tmp/empty/ ~+",
   ]) {
     const classes = classesOf(command);
     assert.ok(classes.includes("policy.core") && classes.includes("network.call"), `${command} -> ${classes.join(",")}`);
@@ -2372,8 +2382,6 @@ test("automated security review of the fold, 7, 8 and 11-14: an rsync delete thr
   for (const command of [
     "rsync -a --delete /tmp/empty/ host:/var/www/site/",
     "rsync -a --delete /tmp/empty/ host:deploy/out/",
-    "rsync -a --delete /tmp/empty/ host::module/out/",
-    "rsync -a --delete /tmp/empty/ rsync://host/module/out/",
     "rsync -a --delete /tmp/empty/ ./a:b",
     "rsync -a --delete /tmp/empty/ /tmp/x:y",
     "rsync -a --max-delete=5 src/ ./",

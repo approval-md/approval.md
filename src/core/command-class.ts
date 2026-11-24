@@ -9712,24 +9712,25 @@ function rsyncDeletes(args: readonly string[]): boolean {
  * spelling no list can hold), the path part is placed as rsync's receiving
  * side reads it: an absolute or `~` path as written, a relative one or none
  * under the home (`host:`, `host:.` and `host:..` are parents;
- * `host:deploy/out/` and `host:/var/www/site/` are not). The daemon forms
- * (`host::module/path`, `rsync://host/module/path`) the same way.
+ * `host:deploy/out/` and `host:/var/www/site/` are not). A daemon form
+ * (`host::module/path`, `rsync://host/...`) names a module whose directory
+ * the text cannot know, and a `~` that is not exactly `~` or `~/...`
+ * (`host:~user`, `host:~+`) another directory: both unplaceable, strict
+ * (security review of the fold, 16 and 17).
  */
 function rsyncLocalDest(dest: string): string[] {
-  const url = /^rsync:\/\/[^/]*(?:\/([\s\S]*))?$/iu.exec(dest);
-  let path: string;
-  if (url !== null) path = url[1] ?? "";
-  else {
-    // A bracketed host (`[::1]:`, `u@[fe80::1]:`) holds colons of its own.
-    const open = dest.indexOf("[");
-    const close = dest.indexOf("]");
-    const first = dest.indexOf(":");
-    const colon = open !== -1 && open < first && close > open ? dest.indexOf(":", close) : first;
-    const slash = dest.indexOf("/");
-    if (colon === -1 || (slash !== -1 && slash < colon)) return [dest];
-    path = dest.slice(colon + 1);
-    if (path.startsWith(":")) path = path.slice(1);
-  }
+  const strict = "$(rsync-destination)";
+  if (/^rsync:\/\//iu.test(dest)) return [strict];
+  // A bracketed host (`[::1]:`, `u@[fe80::1]:`) holds colons of its own.
+  const open = dest.indexOf("[");
+  const close = dest.indexOf("]");
+  const first = dest.indexOf(":");
+  const colon = open !== -1 && open < first && close > open ? dest.indexOf(":", close) : first;
+  const slash = dest.indexOf("/");
+  if (colon === -1 || (slash !== -1 && slash < colon)) return [dest];
+  const path = dest.slice(colon + 1);
+  if (path.startsWith(":")) return [strict];
+  if (path.startsWith("~") && path !== "~" && !path.startsWith("~/")) return [strict];
   if (path.startsWith("/") || path === "~" || path.startsWith("~/")) return [path];
   return [path.length === 0 ? "~" : `~/${path}`];
 }
