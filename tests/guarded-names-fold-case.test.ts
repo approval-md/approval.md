@@ -1521,26 +1521,82 @@ test("a credential read through a wrapper names an unknown target for a brace ex
   builtTarget("~bob/x", [UNKNOWN], "bob/x");
 });
 
-test("a credential read through a wrapper reads the path glued to a short option", () => {
+test("a credential read through a wrapper reads the path attached to a short option", () => {
+  // Every tail after the option letter is read (`attachedOptionValues`), the
+  // credential reads among them left out.
   builtTarget("-o.github/workflows/ci.yml", ["policy.edit.ci protected-path"], "-onotes.txt");
-  builtTarget("-t.approval/log", ["log.mutate protected-path"], "-tnotes/x");
+  // A cluster with an attached value: its tail after the `o` is the path.
+  builtTarget("-xo.github/workflows/ci.yml", ["policy.edit.ci protected-path"], "-xonotes.txt");
   builtTarget("-oCLAUDE.md", ["policy.edit protected-path"], "-oREADME.md");
   for (const program of BUILT_TARGET_PROGRAMS) {
-    // A cluster of flag letters is not a path, even where its letters spell
-    // a protected name.
+    // A cluster of flag letters: its tails name nothing protected, so it adds nothing.
     assert.deepEqual(pure(`${program} -rf .approval/env notes.txt`, TWO_ROUTES), [CRED], program);
-    assert.deepEqual(pure(`${program} -xdesign .approval/env notes.txt`, TWO_ROUTES), [CRED], program);
-    // A credential file glued to an option is the read, not a write.
+    // Letters that spell a protected name are read as that name: stricter, never looser.
+    assert.deepEqual(pure(`${program} -xdesign .approval/env notes.txt`, TWO_ROUTES), [CRED, "policy.edit.design protected-path"], program);
+    // A credential file attached to an option is the read, not a write.
     assert.deepEqual(pure(`${program} -i.approval/env notes.txt`, TWO_ROUTES), [CRED], program);
     assert.deepEqual(pure(`${program} -i.approval/env -o.github/workflows/ci.yml`, TWO_ROUTES), [CRED, "policy.edit.ci protected-path"], program);
-    assert.deepEqual(pure(`${program} -i~/.hermes/.env notes.txt`, TWO_ROUTES), [CRED], program);
     // A long option's name is not a path.
     assert.deepEqual(pure(`${program} --design .approval/env notes.txt`, TWO_ROUTES), [CRED], program);
+    // As spelled: main's answer.
+    for (const line of [`${program} -xo.github/workflows/ci.yml .approval/env`, `${program} -xdesign .approval/env notes.txt`]) {
+      assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);
+    }
   }
-  // The path is the glued value, as the other protected words name theirs.
+  // The path is the attached value, as the other protected words name theirs.
   const classified = classifyCommand("frobnicate -o.github/workflows/ci.yml .approval/env", TWO_ROUTES);
   assert.equal(classified.ok, true);
   if (classified.ok) assert.deepEqual(classified.segments.map((segment) => segment.path), [".approval/env", ".github/workflows/ci.yml"]);
+});
+
+test("an attached or = value that outranks the credential class leaves the line refused, as the same path as its own word does", () => {
+  for (const program of BUILT_TARGET_PROGRAMS) {
+    for (const path of ["APPROVAL.md", ".approval/log/x"]) {
+      // The path as its own word defers the credential, and the walk refuses.
+      const own = pure(`${program} .approval/env ${path}`, TWO_ROUTES);
+      assert.deepEqual(own, ["refused unclassified"], program);
+      // Attached to a short option, alone or in a cluster, or as an `=` value: the same.
+      for (const word of [`-o${path}`, `-xo${path}`, `--out=${path}`, `of=${path}`]) {
+        for (const line of [`${program} .approval/env ${word}`, `${program} ${word} .approval/env`]) {
+          assert.deepEqual(pure(line, TWO_ROUTES), own, line);
+          // As spelled: main's answer, the credential class alone.
+          assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);
+        }
+      }
+    }
+    assert.deepEqual(pure(`${program} -t.approval/log .approval/env`, TWO_ROUTES), ["refused unclassified"], program);
+  }
+});
+
+test("a word is the credential read only when nothing else in it can vary", () => {
+  for (const program of ["command cp", "frobnicate"]) {
+    for (const [words, want] of [
+      // Exempt: exactly a secret reference, a credential path (a leading home
+      // may vary), or one of those after a literal `key=` or `--opt=`.
+      ["$APPROVAL_TG_TOKEN notes.txt", ["account.credential credential-env"]],
+      ['"${APPROVAL_TG_TOKEN}" notes.txt', ["account.credential credential-env"]],
+      ["--token=$APPROVAL_TG_TOKEN notes.txt", ["account.credential credential-env"]],
+      ["~/.hermes/.env notes.txt", [CRED]],
+      ["$HOME/.hermes/.env notes.txt", [CRED]],
+      ["--in=$HOME/.hermes/.env notes.txt", [CRED]],
+      ["if=~/.hermes/.env notes.txt", [CRED]],
+      // Not exempt: a secret reference or a credential path with anything
+      // else the shell may change in the same word is a built target.
+      ["$APPROVAL_TG_TOKEN-$X notes.txt", ["account.credential credential-env", UNKNOWN]],
+      ["{a,$APPROVAL_TG_TOKEN} notes.txt", ["account.credential credential-env", UNKNOWN]],
+      ["--out=$X/.approval/env notes.txt", [CRED, UNKNOWN]],
+      [".approval/env --out=$X/.approval/env", [CRED, UNKNOWN]],
+      ["~/.hermes/.env ~/.hermes/.env*", [CRED, UNKNOWN]],
+      // A glob under the gate's directory is a policy.core path of its own:
+      // it outranks the credential and the line is refused.
+      [".approval/env .approval/env*", ["refused unclassified"]],
+      // An attached option prefix is not a `key=` prefix: the word is built.
+      ["-i~/.hermes/.env notes.txt", [CRED, UNKNOWN]],
+    ] as const) {
+      const line = `${program} ${words}`;
+      assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    }
+  }
 });
 
 test("a target the shell builds beside a credential read: the order, one entry per class, and what does not move", () => {
@@ -1549,9 +1605,11 @@ test("a target the shell builds beside a credential read: the order, one entry p
     ["frobnicate .approval/env $X .github/workflows/ci.yml", [CRED, "policy.edit.ci protected-path", UNKNOWN]],
     ["frobnicate -o.github/workflows/ci.yml --to=design/x .approval/env", [CRED, "policy.edit.design protected-path", "policy.edit.ci protected-path"]],
     ["frobnicate -odesign/x .approval/env $X *.md", [CRED, "policy.edit.design protected-path", UNKNOWN]],
-    // One entry per class: a named policy.core path keeps its own.
-    ["frobnicate --out=APPROVAL.md .approval/env $X", [CRED, "policy.core protected-path"]],
-    ["frobnicate -oAPPROVAL.md .approval/env $X", [CRED, "policy.core protected-path"]],
+    // One entry per class.
+    ["frobnicate .approval/env $X *.md CLAUDE.md", [CRED, "policy.edit protected-path", UNKNOWN]],
+    // A value that outranks the credential class: refused, as its own word is.
+    ["frobnicate --out=APPROVAL.md .approval/env $X", ["refused unclassified"]],
+    ["frobnicate -oAPPROVAL.md .approval/env $X", ["refused unclassified"]],
     // The words that are the credential read are not an unknown target.
     ["frobnicate $APPROVAL_TG_TOKEN notes.txt", ["account.credential credential-env"]],
     ['frobnicate "$APPROVAL_TG_TOKEN" $X', ["account.credential credential-env", UNKNOWN]],

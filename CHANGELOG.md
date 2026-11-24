@@ -317,12 +317,16 @@ other segments, and the hook judges each.
   brace expansion or a `~` in a word of the line (`command cp .approval/env
   $X`, `"$(…)"`, `.gith*/workflows/ci.yml`, `{a,b}.yml`, `~bob/x`) reports
   `policy.core` (`copy-target-unknown`) beside the credential class, after
-  the classes above, and the value glued to a short option
-  (`-o.github/workflows/ci.yml`, `-t.approval/log`) is read as a word. A
-  quoted `'$X'` is a literal, a cluster of flag letters (`-rf`, `-xdesign`)
-  is not a path, and the credential read's own words (`-i.approval/env`,
-  `$APPROVAL_TG_TOKEN`) are the read. Before, these lines were the
-  credential class alone.
+  the classes above, and every tail of a short option's attached value is
+  read as a word (`-o.github/workflows/ci.yml`, `-xo.github/workflows/ci.yml`).
+  An attached or `=` value that outranks the credential class
+  (`-oAPPROVAL.md`, `--out=APPROVAL.md`, `-t.approval/log`) leaves the line
+  refused, as the same path as its own word does. A quoted `'$X'` is a
+  literal, and a word that is the credential read and nothing else
+  (`$APPROVAL_TG_TOKEN`, `~/.hermes/.env`, `--in=.approval/env`) is the
+  read; with anything else the shell may change in it
+  (`$APPROVAL_TG_TOKEN-$X`) it is a built target. Before, these lines were
+  the credential class alone.
 - **Not changed:** a protected path that outranks the credential class
   still answers first with the credential beside it, except in a copy's
   joined target-directory flag (`cp --target-directory=.approval/log
