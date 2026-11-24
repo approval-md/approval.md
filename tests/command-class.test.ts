@@ -1980,16 +1980,18 @@ test("APRV-503 refutation BLOCKING-1: a credential < never displaces log.mutate 
 
   // Where the walk ends on an answer the credential class is STRICTER than, the
   // credential class still answers: a reader is not scanned for protected
-  // paths, so its `<` is the read that matters; `policy.edit` ranks below it.
-  for (const command of [
-    "cat .approval/log/events.jsonl < .approval/env",
-    "node x.js CLAUDE.md < .approval/env",
-    "approval status .approval/log < .approval/env",
-  ]) {
+  // paths, so its `<` is the read that matters; `policy.edit` ranks below it,
+  // and is reported beside the credential class, after it, for the effectful
+  // command that writes it.
+  for (const [command, classes] of [
+    ["cat .approval/log/events.jsonl < .approval/env", ["account.credential"]],
+    ["node x.js CLAUDE.md < .approval/env", ["account.credential", "policy.edit"]],
+    ["approval status .approval/log < .approval/env", ["account.credential"]],
+  ] as const) {
     const result = classifyCommand(command);
     assert.ok(result.ok, command);
     if (!result.ok) continue;
-    assert.deepEqual(result.classes, ["account.credential"], command);
+    assert.deepEqual(result.classes, classes, command);
     assert.equal(result.segments[0]?.rule, "credential-path", command);
   }
 });
@@ -2037,18 +2039,19 @@ test("APRV-503 fix round 2: a NAMED credential never displaces log.mutate or pol
   }
 
   // Unmoved: the credential class still answers where nothing outranks it, and
-  // a reader still takes it whatever else it names.
-  for (const command of [
-    "cp .approval/vault.enc /tmp/vault.enc",
-    "cp /tmp/vault.enc .approval/vault.enc",
-    "cp .approval/env CLAUDE.md",
-    "cat .approval/env .approval/log/events.jsonl",
-    "grep x .approval/env APPROVAL.md",
-  ]) {
+  // a reader still takes it whatever else it names. A protected target that
+  // ranks below it is reported beside it, after it.
+  for (const [command, classes] of [
+    ["cp .approval/vault.enc /tmp/vault.enc", ["account.credential"]],
+    ["cp /tmp/vault.enc .approval/vault.enc", ["account.credential"]],
+    ["cp .approval/env CLAUDE.md", ["account.credential", "policy.edit"]],
+    ["cat .approval/env .approval/log/events.jsonl", ["account.credential"]],
+    ["grep x .approval/env APPROVAL.md", ["account.credential"]],
+  ] as const) {
     const result = classifyCommand(command);
     assert.ok(result.ok, command);
     if (!result.ok) continue;
-    assert.deepEqual(result.classes, ["account.credential"], command);
+    assert.deepEqual(result.classes, classes, command);
     assert.equal(result.segments[0]?.rule, "credential-path", command);
   }
 });
