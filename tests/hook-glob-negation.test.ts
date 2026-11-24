@@ -29,7 +29,6 @@ import {
   classifyCommandInThisReading,
   commandSegmentShapes,
   globSegmentMatches,
-  globSegmentMatchesExactly,
 } from "../src/core/command-class.js";
 import { withNamesAsSpelled } from "../src/core/name-fold.js";
 
@@ -427,10 +426,13 @@ test("build-2's sweep v3 on 83f30bdc: a write through a glob that names the Herm
     assert.match(decision, /^deny: /u, `${command}: ${decision}`);
     assert.ok(classes(command, true).includes("account.credential"), command);
   }
-  // A glob that can name no organ stays the workspace write it was.
-  for (const command of ["echo x > *.md", "echo x > build/*.json", "cp README.md docs/?.md"]) {
+  // A glob that can name no organ stays the workspace write it was. `*.md`
+  // can (APPROVAL.md, AGENTS.md: #686's reader, GLOB-WRITE), and keeps main's
+  // workspace write beside them (lead ruling L61926).
+  for (const command of ["echo x > build/*.json", "cp README.md docs/?.md"]) {
     assert.deepEqual(classes(command), ["files.write.workspace"], command);
   }
+  assert.deepEqual(classes("echo x > *.md"), ["policy.core", "policy.edit", "files.write.workspace"]);
 });
 
 test("security review of 54624872: a glob last segment that names a top-level gate file is that file's write", () => {
@@ -448,9 +450,12 @@ test("security review of 54624872: a glob last segment that names a top-level ga
   for (const command of ["echo x > CL?UDE.md", "echo x > CLAUDE.m[d]", "echo x > [A]GENTS.md", "echo x > .npmr?"]) {
     assert.deepEqual(classes(command), ["policy.edit", "files.write.workspace"], command);
   }
-  // `*` alone and `*` with an extension keep main's answer exactly.
+  // `*` alone and `*` with an extension: #682 kept main's answer exactly for
+  // these; #686's reader (one reader, lead's ruling L62400) reads them too,
+  // and main's workspace write stays beside each (lead ruling L61926).
   for (const command of ["echo x > *.md", "echo x > *", "cp src/* out/", "echo x > docs/*.md"]) {
-    assert.deepEqual(classes(command), ["files.write.workspace"], command);
+    const judged = classes(command);
+    assert.ok(judged.includes("files.write.workspace") && judged.includes("policy.core"), `${command}: ${judged.join(", ")}`);
   }
 });
 
@@ -515,19 +520,31 @@ test("review-b's N1 and codex's M1 at bcb1be08: each class a word's readings nam
     "rm -rf .approval/*",
     "cp README.md .approval/*",
     // codex's HOLD at d24f98ab: a credential read beside the glob (the
-    // deferral path) keeps every class the readings named.
+    // deferral path) keeps every class the readings named. With #686's
+    // reader the deferral path did not read the pattern at all, and `rm -rf
+    // .approval/* < .approval/env` lost `log.mutate` (#682's case, added to
+    // #686's reader in classifySegment's deferral branch).
     "rm -rf .approval/* < .approval/env",
-    "cp .approval/* /tmp/x < .approval/env",
-    "echo x > .approval/log/*/*",
-    `echo x > .approval/log/${"b*/".repeat(65)}x`,
+    "tee .approval/l* < .approval/env",
   ]) {
     for (const at of [lab, logLab]) {
       const decision = claude(command, at);
-      assert.match(decision, /^deny: .*(policy\.core|log\.mutate)/u, `${command}: ${decision}`);
+      // The credential read beside it may be the class the denial names.
+      assert.match(decision, /^deny: .*(policy\.core|log\.mutate|account\.credential)/u, `${command}: ${decision}`);
     }
     const judged = classes(command);
     assert.ok(judged.includes("policy.core") && judged.includes("log.mutate"), `${command}: ${judged.join(", ")}`);
   }
+  // A copy READS its sources: `.approval/*` as a source is the approval
+  // home's class, as on main, beside the credential read.
+  assert.deepEqual([...classes("cp .approval/* /tmp/x < .approval/env")].sort(), ["account.credential", "policy.core"]);
+  // Every candidate under the log is the log: no cap demotes or widens it.
+  assert.deepEqual(classes("echo x > .approval/log/*/*"), ["log.mutate"]);
+  assert.match(claude("echo x > .approval/log/*/*", logLab), /^deny: .*log\.mutate/u);
+  // Past #686's caps the word is the log and the gate's organs, each judged.
+  const pastCap = `echo x > .approval/log/${"b*/".repeat(65)}x`;
+  assert.deepEqual(classes(pastCap), ["log.mutate", "policy.core"]);
+  for (const at of [lab, logLab]) assert.match(claude(pastCap, at), /^deny: .*(policy\.core|log\.mutate)/u);
   // An explicit log path with no glob keeps its one class.
   assert.deepEqual(classes("echo x > .approval/log/x"), ["log.mutate"]);
 });
@@ -613,9 +630,15 @@ test("lead's ruling L61492: every word is read as zsh reads it under extendedglo
   // class. The rest answer as their plain spellings do (quoted text is not a
   // glob to zsh).
   const GUARDED = /^(policy\.|log\.mutate|vcs\.history\.rewrite|account\.credential)/u;
-  for (const command of ["rm -rf dist/^keep", "echo x > dist/^keep", "ls dist/{a}"]) {
-    assert.ok(!classes(command).some((cls) => GUARDED.test(cls)), `${command}: ${classes(command).join(", ")}`);
+  // `dist/^keep` is judged as `dist/*` is, whose own reading (#686's,
+  // GLOB-WRITE) may name `dist/.approval`: nothing beyond that.
+  for (const [command, star] of [
+    ["rm -rf dist/^keep", "rm -rf dist/*"],
+    ["echo x > dist/^keep", "echo x > dist/*"],
+  ] as const) {
+    assert.deepEqual([...classes(command)].sort(), [...new Set([...classes(star), ...classes(command.replace("^keep", "keep"))])].sort(), command);
   }
+  assert.ok(!classes("ls dist/{a}").some((cls) => GUARDED.test(cls)), classes("ls dist/{a}").join(", "));
   for (const [command, plain] of [
     ["cat notes#1.md", "cat notes1.md"],
     ["git log HEAD^", "git log HEAD"],
@@ -828,11 +851,6 @@ test("review-b's M1 at 3774fdd4: a glob read as a top-level gate file keeps main
 
 test("review-b's M1 at 3774fdd4: the as-spelled reading matches a glob with letter case kept, as bash does", () => {
   assert.equal(globSegmentMatches("CLAUDE.M?", "CLAUDE.md"), true);
-  assert.equal(globSegmentMatchesExactly("CLAUDE.M?", "CLAUDE.md"), false);
-  assert.equal(globSegmentMatchesExactly("CLAUDE.m?", "CLAUDE.md"), true);
-  assert.equal(globSegmentMatchesExactly("AGENTſ.m?", "AGENTS.md"), false);
-  assert.equal(globSegmentMatchesExactly("C[L]AUDE.MD", "CLAUDE.md"), false);
-  assert.equal(globSegmentMatchesExactly("?LAUDE.md", "CLAUDE.md"), true);
   // Folded, the case-variant glob may name the file; as spelled it names a
   // new one only. Both readings are judged.
   const asSpelled = (command: string): string[] => {
@@ -933,4 +951,48 @@ test("review-b's N1 at 3774fdd4: a bad pattern and a lone repeat are read as zsh
   assert.equal(zshOptionCommandReading("cat ~/.hermes/au#th.json", null), "cat ~/.hermes/a*th.json");
   assert.equal(zshOptionCommandReading("cat ~/.Z#hermes/auth.json", null), "cat ~/.*hermes/auth.json");
   assert.match(claude("cat ~/.hermes/au#th.json"), /^deny: /u);
+});
+
+test("lead's ruling L62400: the write-target cases #682's reader caught and #686's missed, in #686's reader", () => {
+  // One reader, #686's (lead's ruling L62400). On main 9122cb3e each line below
+  // was ALLOWED through the real hook under `lab`'s policy (policy.core
+  // human-only, log.mutate at the autonomous default), though each writes or
+  // deletes a gate file in bash and zsh; #682's reader judged each policy.core.
+  const deniedAsCore = [
+    // 1. A pattern the reader cannot finish (here an ANSI-C quoted `!` in a
+    //    class, a member to every shell) was `log.mutate` alone: the log is
+    //    not the strict answer under a policy that leaves it autonomous. Now
+    //    GLOB_GUARD_UNKNOWN, `log.mutate` and `policy.core`, each judged.
+    "echo x >> [$'!'A]PPROVAL.md",
+    "rm -f [$'!'A]PPROVAL.md",
+    "echo x >> .[$'!'c]laude/settings.json",
+    // 2. A walk stopped at the first candidate naming the log, and the other
+    //    candidates' classes were not judged: `**` may be the log's folder or
+    //    the Hermes home's own.
+    "echo x > ~/.hermes/**/config.yaml",
+    "cp README.md ~/.hermes/**/auth.json",
+    // 3. A segment's words stopped at the first word whose answer was
+    //    `log.mutate`, and the words after it were not read: `A*.md` is
+    //    APPROVAL.md.
+    "tee .approval/log/x A*.md",
+    "echo x > .approval/log/x > A*.md",
+  ];
+  for (const command of deniedAsCore) {
+    assert.ok(classes(command).includes("policy.core"), `${command}: ${classes(command).join(", ")}`);
+    const decision = claude(command, lab);
+    assert.match(decision, /^deny: .*policy\.core/u, `${command}: ${decision}`);
+  }
+  // 4. Every class a candidate names is judged, not the strictest by the
+  //    classifier's rank alone (review-b N1 at bcb1be08; #690): `A*.md` is
+  //    AGENTS.md as well as APPROVAL.md, and `~/.hermes/*/.env` may be a
+  //    profile's or the cron folder's.
+  assert.ok(classes("echo x > A*.md").includes("policy.edit"), classes("echo x > A*.md").join(", "));
+  assert.ok(classes("cp -r ~/.hermes/*/.env").includes("cron.manage"), classes("cp -r ~/.hermes/*/.env").join(", "));
+  // 5. The deferral path (a credential read beside a protected write) read no
+  //    pattern: `log.mutate` was lost (codex's HOLD at d24f98ab).
+  for (const command of ["rm -rf .approval/* < .approval/env", "tee .approval/l* < .approval/env"]) {
+    const judged = classes(command);
+    assert.ok(["log.mutate", "policy.core", "account.credential"].every((cls) => judged.includes(cls)), `${command}: ${judged.join(", ")}`);
+    assert.match(claude(command, logLab), /^deny: /u, command);
+  }
 });

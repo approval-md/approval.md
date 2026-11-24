@@ -153,7 +153,12 @@ test("rule 2: literal text and a substitution's output that join into .git name 
   assert.deepEqual(pure("echo x >> x$(printf /.gi)t/config"), [DIR_WRITE]);
   assert.deepEqual(pure("echo x >> .g$(printf it/)config"), [DIR_WRITE]);
   // A glob or brace beside the substitution is read the broad way.
-  assert.deepEqual(pure("echo x >> .g$(printf i)?/config"), [DIR_WRITE]);
+  // GLOB-WRITE (22 Nov 2026): an output beside a glob construct may hold a
+  // `/` and so name any directory, the approval log's among them: the stricter
+  // `log.mutate` answers before the `.git` reader.
+  // An output beside a glob may name any directory: every class it may name
+  // is judged (#682's reader; review-b N1 at bcb1be08).
+  assert.deepEqual(pure("echo x >> .g$(printf i)?/config"), ["log.mutate redirect-protected", "vcs.history.rewrite git-dir-write", "policy.core redirect-protected", "cron.manage redirect-protected", "policy.edit redirect-protected"]);
   assert.deepEqual(pure("echo x >> .g{x,$(printf it)}/config"), [DIR_WRITE]);
   // git's own write option, and a script a shell wrapper runs.
   assert.deepEqual(pure("git log --output=.g$(printf it)/config"), [DIR_WRITE]);
@@ -589,7 +594,12 @@ test("gate M3: zsh subscripts and modifiers count", () => {
     "f=x.git; echo x > ${f[2]}${f[3]}${f[4]}${f[5]}/config",
     "f=x.git; echo x > $f[2]$f[3]$f[4]$f[5]/config",
   ]) {
-    assert.deepEqual(pure(line), [ASSIGNMENT, DIR_WRITE], line);
+    // GLOB-WRITE: bash reads an UNQUOTED `[...]` after a parameter as a glob
+    // beside an unknown value, which may name a guarded path, so that pattern
+    // rides beside the git-dir write; in double quotes it is text.
+    const globbed = /\$\w+\[/u.test(line) && !line.includes('"');
+    // Every class that pattern may name is judged (#682's reader; review-b N1 at bcb1be08).
+    assert.deepEqual(pure(line), globbed ? [ASSIGNMENT, "log.mutate redirect-protected", DIR_WRITE, "policy.core redirect-protected", "cron.manage redirect-protected", "policy.edit redirect-protected"] : [ASSIGNMENT, DIR_WRITE], line);
   }
   // The coarse rule: after an unbraced parameter, any `[` or `:` and a
   // letter or `&` counts, on any parameter, special ones too.
