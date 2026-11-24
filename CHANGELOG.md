@@ -287,18 +287,22 @@ rule's verbs (`cd .. && rm -rf proj`, `(cd .. && rm -rf proj)`) is
 a `cd` to any target not led by `/`, `./` or `../`. `cd build && rm -rf
 out` keeps main's class. Words the text cannot read (lead ruling L62435,
 which reverses the earlier answer for an ordinary variable): an ordinary
-variable (`$X`, `"$OUT"`, `${X}`, `$1`, `$@`, `${X:-dist}`) places as a
-parent only where its readable part proves it may be one: below `..`, `~`,
+variable (`$X`, `"$OUT"`, `${X}`, `$1`, `$@`, `build-$ID`, `$NAME.log`;
+not `.$X`, `$X.`, `$X$Y`) places as a parent only where its readable part
+proves it may be one: below `..`, `~`,
 `/`, `$PWD/..`, or (by the hook's disk) an absolute directory above the
 working directory or the home (`rm -rf ../$X`, `~/$X`, `/$X` are
 `policy.core`); alone, below the working directory (`./$X`,
 `scripts/$NAME`) or below a directory that holds neither (`/tmp/$name`,
 `/private/tmp/$SESSION`) it keeps main's class, so `chmod +x "$f"` and `rm
 -rf $BUILD_DIR` answer as on main. A variable the line itself sets is read
-as each value it is given (`X=. ; rm -rf $X` is `policy.core`; `printf -v`
-with a plain format too; one `read` or `mapfile` binds is strict).
+as each value it is given, through chains to a fixpoint (`X=. ; rm -rf $X`
+and `A=..; B=$A; rm -rf $B` are `policy.core`; `printf -v` with a plain
+format too; one `read` or `mapfile` binds, a self-reference or a cycle is
+strict); after a `cd` to a parent, any variable below the shell's directory
+is strict.
 `$PWD`, `$OLDPWD`, `$HOME`, `$CLAUDE_PROJECT_DIR`, `$INIT_CWD`, `$(pwd)`,
-any other `$(...)`, an operator expansion (`${PWD%/*}`, `${X:-.}`), `~user`,
+any other `$(...)`, any operator expansion (`${PWD%/*}`, `${X:-dist}`), `~user`,
 `~+` and `~-` stay strict, as does a word a later `..` removes
 (`$(echo sub)/..`, `$X/a/../..`). Where Claude Code's envelope names a
 session directory other than the hook's own (a `cd` in an earlier call), the
@@ -314,13 +318,14 @@ list. Not a parent, and unchanged: `rm -rf ./dist`, `rm -rf "$TMPDIR"/x`,
 nothing (rename(2) refuses them) and keep their class; `rm -rf $(builtin
 pwd)` and `$(command pwd)` stay refused, as on main. Not covered (follow-up;
 each equal on main): a symlink name inside the workspace that points at a
-parent (`rm -rf uplink/`), a glob after a parent (`rm -rf ../pr*`), the
-wide `cd` case (a `cd` into a name or an unreadable target, then a plain
-name: `cd "$DIR" && rm -rf x`; a parent spelled after any `cd`, `cd sub &&
-rm -rf ..`, is covered), a `CDPATH` set only in the environment, an ordinary variable whose value (set in an earlier call) is a
-parent, organ directories nested below a subdirectory (`rm -rf packages`
-holding `packages/a/.claude`), an unguarded file inside an organ folder a
-narrowed `find` reaches (`find . -name '*.tmp' -delete` and
+parent (`rm -rf uplink/`), a glob after a parent (`rm -rf ../pr*`), the wide
+`cd` case (a `cd` into a name or an unreadable target, then a plain name: `cd
+"$DIR" && rm -rf x`; a parent spelled after any `cd`, `cd sub && rm -rf ..`,
+is covered), a `CDPATH` set only in the environment or built by `eval`, an
+alias or function named `cd` or `rsync`, an ordinary variable whose value (set
+in an earlier call) is a parent, organ directories nested below a subdirectory
+(`rm -rf packages` holding `packages/a/.claude`), an unguarded file inside an
+organ folder a narrowed `find` reaches (`find . -name '*.tmp' -delete` and
 `.claude/x.tmp`), `rsync`'s `-e`/`--rsync-path` value (a command on the
 receiving side), an absolute path for a caller with no listing, `rmdir .`,
 `chown`/`chgrp` (refused), and organ directories in a sibling tree under an

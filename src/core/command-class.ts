@@ -10000,22 +10000,26 @@ const ORGAN_PARENT_CHAIN_CAP = 8;
 const PARENT_VARIABLES = new Set(["PWD", "OLDPWD", "HOME", "CLAUDE_PROJECT_DIR", "INIT_CWD"]);
 
 /**
- * Is `part` unreadable only through ordinary variables (`$X`, `${X}`, `$1`,
- * `$OUT.bak`, `${X:-dist}`; lead ruling L62435, S6 and S7)? Not a
- * substitution, a backtick, a `${…}` with another operator or value
- * (`${PWD%/*}`, `${X:-.}`), `~user`, `~+`, `~-`, or
- * `$PWD`, `$OLDPWD`, `$HOME`: those stay read as a parent may be.
+ * Is `part` unreadable only through ordinary variables (lead ruling L62435,
+ * S6 and S7; security review of the fold, 23)? Exactly one plain reference
+ * (`$X`, `${X}`, `$1`, `$@`), or plain references with a literal affix that
+ * holds a character other than `.` (`build-$ID`, `$NAME.log`, `v$A.$B`). Not:
+ * a part whose affix is only dots (`.$X`, `$X.`, `..$X`), two references
+ * with nothing between (`$X$Y`), any `${…}` with an operator (`${X:-..}`,
+ * `${PWD%/*}`), a substitution, a backtick, `~user`, `~+`, `~-`, or
+ * `$PWD`, `$OLDPWD`, `$HOME`, `$CLAUDE_PROJECT_DIR`, `$INIT_CWD`: those stay
+ * read as a parent may be.
  */
 function ordinaryVariablePart(part: string): boolean {
   if (part.includes(SUBSTITUTION_SENTINEL) || part.includes(PARAMETER_MARK) || part.includes("`")) return false;
   const names: string[] = [];
-  // `${X:-dist}`, `${OUT:?}`: a default, check or alternative that is a
-  // plain name (never `.`, `..`, `~` or a path) reads as the variable.
-  const left = part.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::?[-=?+](?:[A-Za-z0-9_][A-Za-z0-9_.-]*)?)?\}|([A-Za-z_][A-Za-z0-9_]*)|([0-9@*#?!-]))/gu, (_whole: string, braced?: string, bare?: string, special?: string) => {
+  const left = part.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*)|([0-9@*#?!_-]))/gu, (_whole: string, braced?: string, bare?: string, special?: string) => {
     names.push(braced ?? bare ?? special ?? "");
     return "";
   });
-  return names.length > 0 && !/[$`]/u.test(left) && !names.some((name) => PARENT_VARIABLES.has(name));
+  if (names.length === 0 || /[$`]/u.test(left) || names.some((name) => PARENT_VARIABLES.has(name))) return false;
+  if (left.length === 0) return names.length === 1;
+  return !/^\.+$/u.test(left);
 }
 
 /**
@@ -10140,6 +10144,9 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
     // words are read above; any other unreadable part (a substitution,
     // `${X%/*}`, `$OLDPWD`, `~user`) fails closed, as before.
     if (!stack.every((part) => !unreadable(part) || ordinaryVariablePart(part))) return "unplaced";
+    // After a `cd` to a parent (the narrow cd rule), a word below the shell's
+    // directory names something in that parent (security review, 23).
+    if (cdParent && base === "cwd") return "unplaced";
     const firstOpaque = stack.findIndex((part) => unreadable(part) || globbed(part));
     return unreadableBelowParent(base, stack.slice(0, firstOpaque), disk) ? "unplaced" : null;
   }
@@ -10429,7 +10436,10 @@ function segmentCdsToParent(segment: LexSegment, disk: GlobDisk | undefined, cdp
   // target that does not start with `/`, `./` or `../` (and is not placed
   // as `~`, `$HOME` or `$PWD` below) may land anywhere CDPATH names, a
   // parent included: a glob, a brace or an expansion too.
-  if (cdpath && home === null && pwd === null && !pwdWord && !word.startsWith("/") && !/^\.{1,2}(?:\/|$)/u.test(word)) return true;
+  // Skipped only for a word that STARTS with an anchor (security review of
+  // the fold, 21): `x/$(pwd)` is a relative target.
+  const anchored = home !== null || pwd !== null || (pwdWord && word.startsWith(SUBSTITUTION_SENTINEL)) || word.startsWith("/") || /^\.{1,2}(?:\/|$)/u.test(word);
+  if (cdpath && !anchored) return true;
   if (/[$`*?[\]{}~]/u.test(tail) || tail.includes(SUBSTITUTION_SENTINEL) || tail.includes(PARAMETER_MARK)) return false;
   const stack: string[] = [];
   for (const part of tail.split("/")) {
@@ -10475,38 +10485,67 @@ function braceReadings(operand: string): string[] | null {
 const ASSIGNED_READINGS_CAP = 16;
 
 /**
- * The operand as written, and once more for each value the line itself
- * assigns a variable it names (`X=. ; rm -rf $X` is `rm -rf .`; lead ruling
- * L62435, S7: an ordinary variable alone keeps main's class, so one the line
- * sets is read as what it sets). `null` past {@link ASSIGNED_READINGS_CAP}.
+ * The operand read through the line's own assignments (lead ruling L62435,
+ * S7; security review of the fold, 22): each variable the line assigns is
+ * replaced by each value it is given, again and again to a fixpoint
+ * (`A=..; B=$A; rm -rf $B` is `rm -rf ..`), so a reading is returned only
+ * once it names no variable the line assigns. `null` (the strict answer)
+ * when a value is one the text cannot read (a substitution, a backtick, a
+ * binding {@link UNREAD_BINDING}), an assigned variable is read with an
+ * operator (`${X:-…}`), the readings never stop naming one (`A=$A/..`, a
+ * cycle), or they pass {@link ASSIGNED_READINGS_CAP}. A variable the line
+ * never assigns is left as written (main's class alone, as ruled).
  */
 function assignedReadings(operand: string, assigned: ReadonlyMap<string, readonly string[]> | undefined): string[] | null {
   if (assigned === undefined || assigned.size === 0 || !operand.includes("$")) return [operand];
   const reference = /\$\{?([A-Za-z_][A-Za-z0-9_]*)(\}?)/gu;
-  const found = [...operand.matchAll(reference)].filter((match) => assigned.has(match[1] as string));
-  // `${X:-…}` and the like of a variable the line sets: not read, strict.
-  if (found.some((match) => match[0].startsWith("${") && match[2] !== "}")) return null;
-  const names = [...new Set(found.map((match) => match[1] as string))];
-  if (names.length === 0) return [operand];
-  let readings = [operand];
-  for (const name of names) {
-    const values = assigned.get(name) ?? [];
-    if (values.includes(UNREAD_BINDING)) return null;
+  const done = new Set<string>();
+  let pending = [operand];
+  for (let round = 0; pending.length > 0; round += 1) {
+    if (round > ASSIGNED_READINGS_CAP) return null;
     const next: string[] = [];
-    for (const reading of readings) {
-      next.push(reading);
-      for (const value of values) {
+    for (const reading of pending) {
+      const found = [...reading.matchAll(reference)].filter((match) => assigned.has(match[1] as string));
+      if (found.some((match) => match[0].startsWith("${") && match[2] !== "}")) return null;
+      const first = found[0];
+      if (first === undefined) {
+        done.add(reading);
+        continue;
+      }
+      const name = first[1] as string;
+      for (const value of assigned.get(name) ?? []) {
+        if (value === UNREAD_BINDING || value.includes("`") || value.includes(SUBSTITUTION_SENTINEL) || value.includes(PARAMETER_MARK)) return null;
         next.push(reading.replace(new RegExp(`\\$(?:\\{${name}\\}|${name}(?![A-Za-z0-9_]))`, "gu"), () => value));
       }
     }
-    readings = [...new Set(next)];
-    if (readings.length > ASSIGNED_READINGS_CAP) return null;
+    pending = [...new Set(next)];
+    if (pending.length + done.size > ASSIGNED_READINGS_CAP) return null;
   }
-  return readings;
+  return [...done];
 }
 
 /** The value {@link lineAssignments} records for a variable the line binds in a way the text cannot read. */
 const UNREAD_BINDING = "\u0000unread";
+
+/**
+ * Does `segment` run a binding builtin (or `printf -v`) on a variable name the
+ * text cannot read (`read "$v"`, `printf -v "$n" ..`; security review of the
+ * fold, 20)? Such a line may set CDPATH.
+ */
+function bindsUnreadableName(segment: LexSegment): boolean {
+  const at = segment.words.findIndex((word) => !word.assignment);
+  const command = at === -1 ? "" : (segment.words[at]?.text.split("/").pop() ?? "");
+  const rest = at === -1 ? [] : segment.words.slice(at + 1).map((word) => word.text);
+  const unreadable = (text: string): boolean => /[$`]/u.test(text) || text.includes(SUBSTITUTION_SENTINEL) || text.includes(PARAMETER_MARK);
+  if (BINDING_BUILTINS.has(command)) return rest.some((text) => !text.startsWith("-") && unreadable(text.split("=")[0] as string));
+  if (command === "printf") {
+    const flag = rest.findIndex((text) => text.startsWith("-v"));
+    if (flag === -1) return false;
+    const name = rest[flag] === "-v" ? rest[flag + 1] : rest[flag]?.slice(2);
+    return name === undefined || unreadable(name);
+  }
+  return false;
+}
 
 /** Builtins that bind the variables they name (automated security review of the fold, 3b). */
 const BINDING_BUILTINS = new Set(["read", "mapfile", "readarray", "getopts", "declare", "typeset", "local", "export", "readonly"]);
@@ -13545,9 +13584,15 @@ function classifyCommandAsReadWithRules(
   execContext = { ...execContext, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned };
   // Lead ruling L62435 (S2, narrow): a `cd` to a parent spelling earlier on the line.
   let cdParent = context.organCdParent === true;
-  // Security review of the fold, 15 and 19: the token `CDPATH` anywhere on
-  // the line (any quoting, any builtin that may set it) counts as setting it.
-  const lineSetsCdpath = context.organCdpath === true || /(?:^|[^A-Za-z0-9_])CDPATH(?![A-Za-z0-9_])/u.test(command);
+  // Security review of the fold, 15, 19 and 20: the token `CDPATH` anywhere
+  // on the line, in the raw text or in a word after the shell's quoting
+  // (`C"D"PATH=..`), or a binding builtin that names a variable the text
+  // cannot read (`read "$v"`), counts as setting it.
+  const cdpathToken = /(?:^|[^A-Za-z0-9_])CDPATH(?![A-Za-z0-9_])/u;
+  const lineSetsCdpath =
+    context.organCdpath === true ||
+    cdpathToken.test(command) ||
+    lexed.segments.some((segment) => segment.words.some((word) => cdpathToken.test(word.text)) || bindsUnreadableName(segment));
   execContext = { ...execContext, organCdpath: lineSetsCdpath };
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {

@@ -2179,7 +2179,7 @@ test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary varia
   // An ordinary variable alone, below the working directory, or below a
   // directory that holds neither the working directory nor the home.
   const tmp = { "/w": [".claude"], "/tmp": ["x"], "/private/tmp": ["x"], ...realpaths("/w", "/h", "/private/tmp"), [realpathKey("/tmp")]: ["/private/tmp"] };
-  for (const command of ["rm -rf $TARGET", "rm -rf $BUILD_DIR", 'rm -rf "$OUT"', 'rm -rf "$TMPDIR"', "rm -rf ./$X", "rm -rf /tmp/$name", "rm -rf /private/tmp/$SESSION", "rm -rf ${OUT:-dist}", 'rm -rf "${OUT:?}"']) {
+  for (const command of ["rm -rf $TARGET", "rm -rf $BUILD_DIR", 'rm -rf "$OUT"', 'rm -rf "$TMPDIR"', "rm -rf ./$X", "rm -rf /tmp/$name", "rm -rf /private/tmp/$SESSION", "rm -rf build-$ID", "rm -rf dist/$X.tmp", "rm -rf v$A.$B"]) {
     assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
     assert.deepEqual(withListing(command, tmp), ["files.delete.out_of_scope"], `${command} (listing)`);
   }
@@ -2194,7 +2194,31 @@ test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary varia
   // ... and one the hook could not resolve: strict.
   leads(withDisk("rm -rf /a/c/$X", "/a/b/w", { "/a/c": ["x"] }), "policy.core");
   // Words that name a working directory or the home stay read as parents.
-  for (const command of ["rm -rf $OLDPWD", 'rm -rf "$(pwd -P)"', "rm -rf $PWD", "rm -rf ${PWD%/*}", "rm -rf ~+", "rm -rf ~-", "rm -rf $X/..", "rm -rf $CLAUDE_PROJECT_DIR", 'rm -rf "$CLAUDE_PROJECT_DIR"', "rm -rf $INIT_CWD"]) {
+  for (const command of [
+    "rm -rf $OLDPWD",
+    'rm -rf "$(pwd -P)"',
+    "rm -rf $PWD",
+    "rm -rf ${PWD%/*}",
+    "rm -rf ~+",
+    "rm -rf ~-",
+    "rm -rf $X/..",
+    "rm -rf $CLAUDE_PROJECT_DIR",
+    'rm -rf "$CLAUDE_PROJECT_DIR"',
+    "rm -rf $INIT_CWD",
+    // Security review of the fold, 23: joined to dots, two references with
+    // nothing between, any operator, and after a cd to a parent.
+    "rm -rf .$X",
+    "rm -rf $X.",
+    "rm -rf ..$X",
+    "rm -rf $X..",
+    "rm -rf $X$Y",
+    "rm -rf .$1",
+    "rm -rf ${X:-..}",
+    "rm -rf ${X:=~}",
+    "rm -rf ${X:+..}",
+    "rm -rf ${OUT:-dist}",
+    "cd .. && rm -rf $X",
+  ]) {
     assert.ok(classesOf(command).includes("policy.core"), command);
   }
 });
@@ -2203,8 +2227,13 @@ test("lead ruling L62435 (S7): a variable the line itself sets is read as what i
   for (const command of ["X=. ; rm -rf $X", 'X=.; rm -rf "$X"', "X=.. rm -rf $X", "X=$(pwd); rm -rf $X", "X=.; rm -rf ${X:-dist}"]) {
     assert.ok(classesOf(command).includes("policy.core"), command);
   }
+  // Security review of the fold, 22: chained assignments to a fixpoint; a
+  // self-reference or a cycle never settles: strict.
+  for (const command of ["A=..; B=$A; rm -rf $B", 'A=..; B="$A/"; rm -rf $B', "A=..; B=${A}; rm -rf $B", "A=..; B=$A; C=$B; rm -rf $C", "A=$A/..; rm -rf $A", "A=$B; B=$A; rm -rf $A"]) {
+    assert.ok(classesOf(command).includes("policy.core"), `${command} -> ${classesOf(command).join(",")}`);
+  }
   // `.claude` is not a parent (main's own rules judge the organ by name): main's class.
-  for (const command of ["D=.claude; rm -rf $D", "X=dist; rm -rf $X", "printf -v d dist; rm -rf $d"]) {
+  for (const command of ["D=.claude; rm -rf $D", "X=dist; rm -rf $X", "printf -v d dist; rm -rf $d", "OUT=dist; rm -rf $OUT", "D=build; T=$D/tmp; rm -rf $T"]) {
     assert.deepEqual(classesOf(command), mainClasses(command), command);
   }
   // Automated security review of the fold, 3b: bound another way the text
@@ -2402,6 +2431,11 @@ test("automated security review of the fold, 15: with CDPATH set on the line, a 
     // 19: the token anywhere on the line counts as setting it.
     "echo $CDPATH; cd proj && rm -rf x",
     'printf -v CDPATH .. && cd proj && rm -rf x',
+    // 20: after the shell's quoting, and a binding of a name the text cannot read.
+    'C"D"PATH=.. cd proj && rm -rf x',
+    'printf -v "$n" .. && cd proj && rm -rf x',
+    // 21: a target that only contains `$(pwd)` later is relative.
+    "CDPATH=.. cd x/$(pwd) && rm -rf y",
   ]) {
     const result = classifyCommand(command);
     assert.ok(!result.ok || result.classes.includes("policy.core"), `${command} -> ${result.ok ? result.classes.join(",") : result.code}`);
