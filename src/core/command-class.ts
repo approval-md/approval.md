@@ -12634,18 +12634,6 @@ function globGuardClass(
       if (exhausted) return "log.mutate";
       let total = 1;
       for (const choice of choices) total *= choice.length;
-      // Spliced: an unread part that is the whole LAST component may hold a
-      // `/` as well (`~/$F` as `~/.hermes/config.yaml`): nothing, one or two
-      // guarded names there, where that stays within the candidate bound.
-      const tail = segments.length - 1;
-      if (spliced !== false && tail > 0 && (segments[tail] as string).includes(UNREAD_MARK) && (segments[tail] as string).replaceAll(UNREAD_MARK, "").length === 0) {
-        const spans: string[][] = [[], ...names.map((name) => [name]), ...names.flatMap((first) => names.map((second) => [first, second]))];
-        const widened = (total / (choices[tail] as string[][]).length) * spans.length;
-        if (widened <= GLOB_GUARD_CANDIDATE_CAP) {
-          choices[tail] = spans;
-          total = widened;
-        }
-      }
       if (total > GLOB_GUARD_CANDIDATE_CAP) return "log.mutate";
       // Spliced (lead ruling CLAIMS L62568): a candidate counts only where the
       // word's LITERAL text takes part in it. The same candidate with every

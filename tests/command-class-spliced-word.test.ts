@@ -187,6 +187,17 @@ test("round two (L62542, for reads too): a word that could be a credential file 
     assert.ok(head.includes("account.credential"), `${command}: ${head.join(",")}`);
     for (const each of mainClasses(command)) assert.ok(head.includes(each), `${command}: main's ${each}`);
   }
+  // Main refuses this line (no rule for an awk program); the program's nine
+  // parameters are past the parts bound, so it may be a credential, and the
+  // refusal still stands (the line's main answer joins).
+  const awk = classifyCommand("awk '{print $3,$4,$5,$6,$7,$8,$9,$10,$11}' x", []);
+  assert.equal(awk.ok, false, JSON.stringify(awk));
+  assert.equal(classifyCommandWithMainRules("awk '{print $3,$4,$5,$6,$7,$8,$9,$10,$11}' x", []).ok, false);
+  // A `$` that opens no parameter is text in the spliced reading, not one
+  // that may hold several directories.
+  for (const command of ['grep -n "build.py\\" \\"\\$S\\"|-I build.py|build.py \\$" w/*.sh', 'node q.mjs "echo x > \\$\'A\'*\\$?"']) {
+    assert.deepEqual(classesOf(command), mainClasses(command), command);
+  }
   // As the plain spelling: `source .approval/env` is refused, and so is this.
   for (const command of ["source .approval/$F", ". .approval/$F"]) assert.equal(classifyCommand(command, []).ok, false, command);
   // No credential reading, or a glob (judged against the listing by the hook, as main judges it).
