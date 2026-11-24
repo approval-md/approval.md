@@ -9400,23 +9400,24 @@ function strictestProtectedWrite(
   const spent = new Map<string, number>();
   for (const word of words) {
     // Review-b M1: once the line's matcher budget is spent, every later word
-    // answers GLOB_GUARD_UNKNOWN, which an earlier word offered already, so
-    // stop there. (Before, the walk stopped at the first `log.mutate`, and
-    // the classes of the words after it were not judged.)
+    // answers the unknown classes ({@link globGuardUnknown}), which an earlier
+    // word offered already, so stop there. (Before, the walk stopped at the
+    // first `log.mutate`, and the classes of the words after it were not
+    // judged.)
     if (glob.budget.left < 0 && named.some((hit) => hit.surface === "log.mutate")) break;
     if (!inexact(word)) continue;
     if (skipProse && /\s/u.test(word)) continue;
     const steps = spent.get(word);
     if (steps !== undefined) {
       glob.budget.left -= steps;
-      if (steps > 0 && glob.budget.left < 0) offerEach(GLOB_GUARD_UNKNOWN, word);
+      if (steps > 0 && glob.budget.left < 0) offerEach(globGuardUnknown(protectedPaths), word);
       continue;
     }
     const budgetBefore = glob.budget.left;
     // A special parameter's name is not a glob, where the word's every `$` is real.
     const subject = glob.names?.(word) === true ? maskSpecialParameters(word) : word;
     const { readings, overflow } = writeWordReadings(subject);
-    if (overflow) offerEach(GLOB_GUARD_UNKNOWN, word);
+    if (overflow) offerEach(globGuardUnknown(protectedPaths), word);
     for (const reading of readings) {
       if (reading !== subject) offer(protectedPathClass(reading, protectedPaths), word);
       // ONE matcher budget for the whole command line (review-b M1), shared
@@ -10565,8 +10566,45 @@ function globTokensMatch(
 const GLOB_GUARD_UNKNOWN: readonly string[] = ["log.mutate", "policy.core"];
 
 /**
- * The strictest protected class a write-target pattern could reach, or `null`
- * when no guarded path is within its reach (`out/*.log`). FAIL CLOSED.
+ * What a write-target pattern this reader cannot finish may name, under one
+ * policy's routes (build-1's M2 at 64c43399, lead ruling L62483): the log and
+ * the gate's organs ({@link GLOB_GUARD_UNKNOWN}), and the class of every other
+ * guarded name such a pattern could match: the instructions and release files
+ * (`policy.edit`), each organ folder's contents ({@link FOLDER_CONTENTS}: the
+ * workflows, which a policy may route to `policy.edit.ci`; Hermes' scripts,
+ * `cron.manage`) and each of the policy's own entries (`SPEC.md` routed to
+ * `policy.edit.spec`, `.claude/agents/` to its class). Past a cap no candidate
+ * was judged, so every class one could have named is judged. Kept per entry
+ * list.
+ */
+function globGuardUnknown(protectedPaths: readonly ProtectedPathEntry[]): readonly string[] {
+  const known = GLOB_GUARD_UNKNOWN_MEMO.get(protectedPaths);
+  if (known !== undefined) return known;
+  const paths = [...CORE_FILENAMES, ...PROTECTED_FILENAMES];
+  for (const [folder, tails] of Object.entries(FOLDER_CONTENTS)) for (const tail of tails) paths.push(`${folder}/${tail}`);
+  for (const raw of protectedPaths) {
+    const entry = parseProtectedEntry(raw);
+    if (entry !== null) paths.push(`${entry.segments.join("/")}${entry.directory ? "/x" : ""}`);
+  }
+  const out = [...GLOB_GUARD_UNKNOWN];
+  for (const path of paths) for (const cls of protectedPathClasses(path, protectedPaths)) if (!out.includes(cls)) out.push(cls);
+  GLOB_GUARD_UNKNOWN_MEMO.set(protectedPaths, out);
+  return out;
+}
+
+const GLOB_GUARD_UNKNOWN_MEMO = new WeakMap<readonly ProtectedPathEntry[], readonly string[]>();
+
+/**
+ * Most candidate paths one word's expansions are walked over together. Each
+ * expansion is judged on its own (build-1's M2 at 64c43399: one expansion past
+ * a cap no longer ends the word), so this bounds the walk of a word of many
+ * expansions; an expansion past it is judged unknown, as one past its own cap.
+ */
+const GLOB_GUARD_WALK_CAP = 16 * GLOB_GUARD_CANDIDATE_CAP;
+
+/**
+ * Every protected class a write-target pattern could reach, empty when no
+ * guarded path is within its reach (`out/*.log`). FAIL CLOSED.
  *
  * The reading is brace-expanded first ({@link braceCandidates}; a group too
  * large to expand is `policy.core`, as {@link protectedPathClass} answers it).
@@ -10592,8 +10630,11 @@ const GLOB_GUARD_UNKNOWN: readonly string[] = ["log.mutate", "policy.core"];
  * segments than {@link GLOB_GUARD_SEGMENTS_CAP}, more matcher steps than
  * {@link GLOB_GUARD_STEP_CAP} (one budget over every reading of a word), a
  * reading that already holds {@link PARAMETER_MARK}, or a placeholder that
- * cannot be restored, adds {@link GLOB_GUARD_UNKNOWN}: a pattern that wide
- * could name the log or the gate's organs.
+ * cannot be restored, adds {@link globGuardUnknown}: a pattern that wide
+ * could name the log, the gate's organs or any other guarded name. A cap
+ * applies to one brace expansion at a time, and the word's other expansions
+ * are still walked (build-1's M2 at 64c43399), {@link GLOB_GUARD_WALK_CAP}
+ * candidates over all of them.
  */
 function globGuardClasses(
   word: string,
@@ -10605,7 +10646,7 @@ function globGuardClasses(
   // zsh's extendedglob forms (`#`, `^`, the `~` exclusion) and braceccl need an
   // option; with none possibly set on the line they are literal text (lead
   // ruling L60846; review-b S2: `rm -f *~` is the files ending in `~`).
-  if (word.includes(PARAMETER_MARK)) return GLOB_GUARD_UNKNOWN;
+  if (word.includes(PARAMETER_MARK)) return globGuardUnknown(protectedPaths);
   const extraNames = protectedPaths.flatMap((entry) => parseProtectedEntry(entry)?.segments ?? []);
   const names = [...new Set([...GLOB_GUARD_NAMES, ...extraNames])];
   const words = [word];
@@ -10619,10 +10660,16 @@ function globGuardClasses(
     if (surface !== null && !found.includes(surface)) found.push(surface);
     return false;
   };
-  const unknown = (): readonly string[] => {
-    for (const cls of GLOB_GUARD_UNKNOWN) consider(cls);
-    return found;
+  // An expansion this reader cannot finish (past a cap, the step budget, a
+  // placeholder it cannot restore) adds every class a guarded name it could
+  // match carries, and the walk goes on to the word's other expansions
+  // (build-1's M2 at 64c43399: `tee {*/*/*/x,CLAUDE.m?}` writes CLAUDE.md
+  // whatever the first expansion names).
+  const unknown = (): void => {
+    for (const cls of globGuardUnknown(protectedPaths)) consider(cls);
   };
+  // Candidates walked over every expansion, against GLOB_GUARD_WALK_CAP.
+  let walked = 0;
   for (const each of words) {
     const expansions = braceCandidates(each);
     if (expansions === null) {
@@ -10639,7 +10686,12 @@ function globGuardClasses(
           return held ?? "";
         });
       const segments = masked.text.split("/");
-      if (segments.length > GLOB_GUARD_SEGMENTS_CAP) return unknown();
+      // Past the segment cap, or with the line's step budget already spent
+      // (each name tried would fail at once), the expansion is unknown.
+      if (segments.length > GLOB_GUARD_SEGMENTS_CAP || budget.left < 0) {
+        unknown();
+        continue;
+      }
       // The caller's listing of the directory a prefix names, or `undefined`.
       const listingFor = (prefix: readonly string[]): readonly string[] | undefined => {
         if (disk === undefined || disk.listingsOk === false) return undefined;
@@ -10716,10 +10768,13 @@ function globGuardClasses(
         for (const name of GLOB_GUARD_PREFIXES) if (test(name, true)) out.push([name]);
         return out;
       });
-      if (exhausted) return unknown();
       let total = 1;
       for (const choice of choices) total *= choice.length;
-      if (total > GLOB_GUARD_CANDIDATE_CAP) return unknown();
+      if (exhausted || total > GLOB_GUARD_CANDIDATE_CAP || walked + total > GLOB_GUARD_WALK_CAP) {
+        unknown();
+        continue;
+      }
+      walked += total;
       const walk = (index: number, parts: string[]): boolean => {
         if (index === choices.length) {
           const path = unmask(parts.join("/"));

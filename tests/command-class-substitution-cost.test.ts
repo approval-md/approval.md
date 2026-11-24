@@ -355,9 +355,16 @@ test("cost: the bounded readers answer as before under their bounds", () => {
   assert.deepEqual(pure(nest(32, "out")), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure(nest(32, ".git")), [DIR_WRITE]);
   // Past the depth the GLOB-WRITE reading of a write target's `${…}` defaults
-  // (22 Nov 2026) fails closed too, to GLOB_GUARD_UNKNOWN: `log.mutate` and
-  // `policy.core`, each judged (#682's cap rule; review-b N1 at bcb1be08).
-  assert.deepEqual(pure(nest(33, "out")), ["log.mutate redirect-protected", "vcs.history.rewrite git-dir-write", "policy.core redirect-protected"]);
+  // (22 Nov 2026) fails closed too, to the unknown answer: `log.mutate`,
+  // `policy.core` and every other guarded name's class, each judged (#682's
+  // cap rule; review-b N1 at bcb1be08; build-1's M2 at 64c43399).
+  assert.deepEqual(pure(nest(33, "out")), [
+    "log.mutate redirect-protected",
+    "vcs.history.rewrite git-dir-write",
+    "policy.core redirect-protected",
+    "policy.edit redirect-protected",
+    "cron.manage redirect-protected",
+  ]);
   // An unclosed `${` set aside is put back as text: what it prints still counts.
   assert.deepEqual(pure(`echo x > "$(printf '%s' 'a${"${".repeat(3)} .git')"`), [DIR_WRITE]);
   assert.deepEqual(pure(`echo x > "$(printf '%s' 'a\${b} c')"`), ["files.write.workspace redirect-write"]);
@@ -425,23 +432,27 @@ test("cost: the gate follow-up's readers (zsh forms, printf modifiers and words)
 
 test("cost: a word of many glob segments is read in one pass (security review of 54624872)", () => {
   // Copying each prefix per segment took 11 CPU s for the second. #686's
-  // reader judges such a word past its caps as GLOB_GUARD_UNKNOWN: the log
-  // and the gate's organs, each judged (#682's cap rule; review-b N1 at
-  // bcb1be08), with main's class for the word beside them.
+  // reader judges such a word past its caps as unknown: the log, the gate's
+  // organs and every other guarded name's class, each judged (#682's cap
+  // rule; review-b N1 at bcb1be08; build-1's M2 at 64c43399), with main's
+  // class for the word beside them.
   const LOG = "log.mutate redirect-protected";
   const CORE = "policy.core redirect-protected";
+  const EDIT = "policy.edit redirect-protected";
+  const CRON = "cron.manage redirect-protected";
   const WORKSPACE = "files.write.workspace redirect-write";
-  assert.deepEqual(bounded(`echo x > ${"a*/".repeat(100000)}f`, "100,000 a*/"), [LOG, CORE, WORKSPACE]);
-  assert.deepEqual(bounded(`echo x > ${"x/".repeat(100000)}.g*/hooks/pre-push`, "100,000 x/ then .g*"), [LOG, DIR_WRITE, CORE]);
-  assert.deepEqual(pure(`echo x > ${"b*/".repeat(64)}f`), [LOG, CORE, WORKSPACE]);
-  assert.deepEqual(pure(`echo x > ${"b*/".repeat(65)}f`), [LOG, CORE, WORKSPACE]);
+  assert.deepEqual(bounded(`echo x > ${"a*/".repeat(100000)}f`, "100,000 a*/"), [LOG, CORE, EDIT, CRON, WORKSPACE]);
+  assert.deepEqual(bounded(`echo x > ${"x/".repeat(100000)}.g*/hooks/pre-push`, "100,000 x/ then .g*"), [LOG, DIR_WRITE, CORE, EDIT, CRON]);
+  assert.deepEqual(pure(`echo x > ${"b*/".repeat(64)}f`), [LOG, CORE, EDIT, CRON, WORKSPACE]);
+  assert.deepEqual(pure(`echo x > ${"b*/".repeat(65)}f`), [LOG, CORE, EDIT, CRON, WORKSPACE]);
 });
 
 test("cost: a word past either glob cap keeps the stricter class it has on its own (codex on bcb1be08)", () => {
   // An explicit log path stays log.mutate past a cap; at bcb1be08 each was
-  // demoted to policy.core. Past a cap a word is GLOB_GUARD_UNKNOWN, the log
-  // and the gate's organs, each judged beside the word's own classes (review-b
-  // N1 at bcb1be08): a policy may hold log.mutate looser than policy.core.
+  // demoted to policy.core. Past a cap a word is unknown: the log, the gate's
+  // organs and every other guarded name's class, each judged beside the
+  // word's own classes (review-b N1 at bcb1be08; build-1's M2 at 64c43399): a
+  // policy may hold log.mutate looser than policy.core.
   const LOG = "log.mutate redirect-protected";
   const CORE = "policy.core redirect-protected";
   const EDIT = "policy.edit redirect-protected";
@@ -449,12 +460,12 @@ test("cost: a word past either glob cap keeps the stricter class it has on its o
   const WORKSPACE = "files.write.workspace redirect-write";
   // Every candidate under the log is the log.
   assert.deepEqual(pure("echo x > .approval/log/*/*"), [LOG]);
-  assert.deepEqual(pure(`echo x > .approval/log/${"b*/".repeat(65)}x`), [LOG, CORE]);
+  assert.deepEqual(pure(`echo x > .approval/log/${"b*/".repeat(65)}x`), [LOG, CORE, EDIT, CRON]);
   assert.deepEqual(pure("echo x > {.approval/log,build}/*/*"), [LOG, CORE, EDIT, CRON]);
   // A plain path past either cap: the log and the organs, beside main's
   // workspace write (lead ruling L61926).
-  assert.deepEqual(pure(`echo x > build/${"b*/".repeat(65)}x`), [LOG, CORE, WORKSPACE]);
-  assert.deepEqual(pure(`echo x > build/${"b*/".repeat(64)}x`), [LOG, CORE, WORKSPACE]);
+  assert.deepEqual(pure(`echo x > build/${"b*/".repeat(65)}x`), [LOG, CORE, EDIT, CRON, WORKSPACE]);
+  assert.deepEqual(pure(`echo x > build/${"b*/".repeat(64)}x`), [LOG, CORE, EDIT, CRON, WORKSPACE]);
   // Under the caps every class a candidate names is judged: `build/*/*` may be
   // `build/x/.approval`, `build/x/AGENTS.md` or `build/x/.hermes`.
   assert.deepEqual(pure("echo x > build/*/*"), [LOG, CORE, EDIT, CRON, WORKSPACE]);

@@ -9038,21 +9038,19 @@ export function zshOptionCommandReading(command: string, cwds: readonly string[]
         current.units.push(unit);
       }
     }
-    const hasForm = (segment: typeof units): boolean =>
-      segment.some(
-        (unit, index) =>
-          !unit.quoted &&
-          unit.param !== true &&
-          !(unit.char === "#" && segment[index - 1]?.char === "$") &&
-          (/[\^#{]/u.test(unit.char) || (unit.char === "~" && index > 0)),
-      );
+    const hasForm = (segment: typeof units): boolean => segment.some((_, index) => optionFormAt(segment, index));
     if (!segments.some((segment) => hasForm(segment.units))) {
       write(word);
       continue;
     }
     const read = segments.map(({ units: segment, from, to }) => {
       if (!hasForm(segment)) return command.slice(from, to);
-      if (segment.some((unit) => unit.unknown)) return "*";
+      // A `$` or backquote beside a form: the segment is any name, unless its
+      // only forms are brace groups the shell expands anyway (`{a,b}`,
+      // `{1..3}`), which braceccl leaves as they are, and zsh never globs a
+      // parameter's or a substitution's value (build-1's S1 at 64c43399:
+      // `touch file{1..3}$EXT` is file1$EXT … file3$EXT, as with no option).
+      if (segment.some((unit) => unit.unknown)) return onlyExpandedBraces(segment) ? command.slice(from, to) : "*";
       const plain = segment
         .map((unit) => (unit.quoted && /[*?[\]^#~{}!\\'"`$\s;&|<>()]/u.test(unit.char) ? "?" : unit.char))
         .join("");
@@ -9088,6 +9086,66 @@ export function zshOptionCommandReading(command: string, cwds: readonly string[]
     write(rewritten);
   }
   return changed ? parts.join("") : null;
+}
+
+/** One character of a word as {@link zshOptionCommandReading} reads it. */
+interface OptionUnit {
+  char: string;
+  quoted: boolean;
+  unknown: boolean;
+  param?: true;
+}
+
+/** Is `segment[index]` a form zsh reads under `extendedglob` or `braceccl` (`^`, `#`, `{`, a `~` past the start)? */
+function optionFormAt(segment: readonly OptionUnit[], index: number): boolean {
+  const unit = segment[index] as OptionUnit;
+  return (
+    !unit.quoted &&
+    unit.param !== true &&
+    !(unit.char === "#" && segment[index - 1]?.char === "$") &&
+    (/[\^#{]/u.test(unit.char) || (unit.char === "~" && index > 0))
+  );
+}
+
+/**
+ * Is every form in `segment` ({@link optionFormAt}) the opening brace of a
+ * group the shell expands with no option set: one holding an unquoted comma
+ * outside any inner group (`{a,b}`, `{,s}`), or a sequence of plain text
+ * (`{1..3}`, `{a..c}`, `{1..9..2}`)? zsh's braceccl reads only a group that
+ * would not otherwise expand (`{AP}` is `A` and `P`), so such a segment holds
+ * nothing the option changes (build-1's S1 at 64c43399). A sequence holding a
+ * `$` (`{1..$N}`, which zsh expands after the parameter and bash not at all),
+ * an unclosed group, or a group cut by a `/` is not one. One pass over the
+ * segment, and one over each group's body.
+ */
+function onlyExpandedBraces(segment: readonly OptionUnit[]): boolean {
+  const live = (unit: OptionUnit): boolean => !unit.quoted && unit.param !== true;
+  const expanded = new Set<number>();
+  const open: number[] = [];
+  for (let index = 0; index < segment.length; index += 1) {
+    const unit = segment[index] as OptionUnit;
+    if (!live(unit)) continue;
+    if (unit.char === "{") open.push(index);
+    else if (unit.char === "}") {
+      const start = open.pop();
+      if (start !== undefined && expandsWithNoOption(segment.slice(start + 1, index))) expanded.add(start);
+    }
+  }
+  return segment.every((_, index) => !optionFormAt(segment, index) || expanded.has(index));
+}
+
+/** Does a brace group with this body expand with no option set (see {@link onlyExpandedBraces})? */
+function expandsWithNoOption(body: readonly OptionUnit[]): boolean {
+  let depth = 0;
+  for (const unit of body) {
+    if (unit.quoted || unit.param === true) continue;
+    if (unit.char === "{") depth += 1;
+    else if (unit.char === "}") depth -= 1;
+    else if (unit.char === "," && depth === 0) return true;
+  }
+  if (body.some((unit) => unit.quoted || unit.unknown || unit.param === true)) return false;
+  const text = body.map((unit) => unit.char).join("");
+  return /^(?:-?\d+\.\.-?\d+|[A-Za-z]\.\.[A-Za-z])(?:\.\.-?\d+)?$/u.test(text);
 }
 
 /** The commands whose words {@link listingCommand} lets a listing answer: none changes directory or makes a file. */

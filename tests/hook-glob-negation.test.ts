@@ -117,6 +117,39 @@ const logLab = ((): { dir: string; home: string } => {
   return { dir, home: lab.home };
 })();
 
+/**
+ * A gate whose policy holds ONLY `cls` human-only (defaults autonomous), with
+ * `routes` as its protected_paths, and every guarded file the M2 lines write
+ * present (the hook matches a pattern's first globbed component against the
+ * listing): build-1's M2 at 64c43399, lead ruling L62483.
+ */
+function classLab(name: string, cls: string, routes: readonly string[] = []): { dir: string; home: string } {
+  const dir = join(scratch, `proj-${name}`);
+  mkdirSync(join(dir, ".approval"), { recursive: true });
+  mkdirSync(join(dir, ".github", "workflows"), { recursive: true });
+  const policy = [
+    "# Policy",
+    "",
+    "```yaml approval-policy",
+    'version: "0.1"',
+    "defaults:",
+    "  autonomy: autonomous",
+    '  approval_ttl: "1h"',
+    "  on_expiry: reject",
+    ...(routes.length === 0 ? [] : ["protected_paths:", ...routes.map((route) => `  - ${route}`)]),
+    "classes:",
+    `  ${cls}:`,
+    "    autonomy: human-only",
+    "```",
+    "",
+  ].join("\n");
+  writeFileSync(join(dir, "APPROVAL.md"), policy, "utf8");
+  const attested = runCli(["policy", "attest", "--as", "human:alice"], dir, lab.home);
+  assert.equal(attested.code, 0, attested.stderr);
+  for (const file of ["CLAUDE.md", "AGENTS.md", ".npmrc", "SPEC.md", ".github/workflows/ci.yml", "README.md"]) writeFileSync(join(dir, file), "made-up\n", "utf8");
+  return { dir, home: lab.home };
+}
+
 /** The decision the Claude Code hook gives a Bash command, and its reason; `abstain` when it prints none. */
 function claude(command: string, at: { dir: string; home: string } = lab): string {
   const run = runCli(
@@ -541,9 +574,10 @@ test("review-b's N1 and codex's M1 at bcb1be08: each class a word's readings nam
   // Every candidate under the log is the log: no cap demotes or widens it.
   assert.deepEqual(classes("echo x > .approval/log/*/*"), ["log.mutate"]);
   assert.match(claude("echo x > .approval/log/*/*", logLab), /^deny: .*log\.mutate/u);
-  // Past #686's caps the word is the log and the gate's organs, each judged.
+  // Past #686's caps the word is the log and the gate's organs, and every
+  // other guarded name's class (build-1's M2 at 64c43399), each judged.
   const pastCap = `echo x > .approval/log/${"b*/".repeat(65)}x`;
-  assert.deepEqual(classes(pastCap), ["log.mutate", "policy.core"]);
+  assert.deepEqual(classes(pastCap), ["log.mutate", "policy.core", "policy.edit", "cron.manage"]);
   for (const at of [lab, logLab]) assert.match(claude(pastCap, at), /^deny: .*(policy\.core|log\.mutate)/u);
   // An explicit log path with no glob keeps its one class.
   assert.deepEqual(classes("echo x > .approval/log/x"), ["log.mutate"]);
@@ -975,6 +1009,14 @@ test("lead's ruling L62400: the write-target cases #682's reader caught and #686
     //    APPROVAL.md.
     "tee .approval/log/x A*.md",
     "echo x > .approval/log/x > A*.md",
+    // 1 again, alone (build-1's N5 at 64c43399): one word whose first
+    // expansion is the log and whose next one is the policy file, which the
+    // lab holds (the hook matches the pattern against the listing). The walk
+    // that stopped at the first candidate naming the log never reached the
+    // second expansion; main 74fa1f34 allows each.
+    "echo x > {.approval/log/x,A*.md}",
+    "rm -f {.approval/log/x,APPROVAL.m?}",
+    "tee {.approval/log/x,APPROVAL.m?}",
   ];
   for (const command of deniedAsCore) {
     assert.ok(classes(command).includes("policy.core"), `${command}: ${classes(command).join(", ")}`);
@@ -999,4 +1041,67 @@ test("lead's ruling L62400: the write-target cases #682's reader caught and #686
   const pastCaps = `echo x > build/${"b*/".repeat(65)}x`;
   assert.ok(classes(pastCaps).includes("policy.core"), classes(pastCaps).join(", "));
   assert.match(claude(pastCaps, lab), /^deny: .*policy\.core/u);
+});
+
+
+test("build-1's M2 at 64c43399 (lead ruling L62483): an expansion past a cap no longer ends the word, and the unknown answer carries every guarded class", () => {
+  // Each line was ALLOWED through the real hook at 64c43399 (and on main) in a
+  // lab holding only its class human-only: the first expansion, `*/*/*/x`, is
+  // past the candidate cap, the reader returned there, and the unknown answer
+  // was `log.mutate` and `policy.core` alone, so `CLAUDE.md`, `SPEC.md` and the
+  // workflow the second expansion writes were never judged.
+  const editLab = classLab("edit", "policy.edit");
+  const specLab = classLab("spec", "policy.edit.spec", ['{ path: "SPEC.md", class: policy.edit.spec }']);
+  const ciLab = classLab("ci", "policy.edit.ci", ['{ path: ".github/workflows/", class: policy.edit.ci }']);
+  for (const [command, at, cls] of [
+    ["tee {*/*/*/x,CLAUDE.m?}", editLab, "policy.edit"],
+    ["tee {*/*/*/x,AGENTS.m?}", editLab, "policy.edit"],
+    ["tee {*/*/*/x,.npmr?}", editLab, "policy.edit"],
+    ["tee {*/*/*/x,SPEC.m?}", specLab, "policy.edit.spec"],
+    ["tee {*/*/*/x,.g*/workflows/ci.yml}", ciLab, "policy.edit.ci"],
+    // A word past the cap on its own: no candidate is judged, so every class
+    // a guarded name could carry is (the half that kills a narrow unknown).
+    ["tee */*/*/x", editLab, "policy.edit"],
+    ["tee */*/*/x", specLab, "policy.edit.spec"],
+    ["tee */*/*/x", ciLab, "policy.edit.ci"],
+    [`echo x > build/${"b*/".repeat(65)}x`, ciLab, "policy.edit.ci"],
+  ] as const) {
+    const decision = claude(command, at);
+    assert.match(decision, new RegExp(`^deny: .*class ${cls.replaceAll(".", "\\.")} `, "u"), `${command}: ${decision}`);
+  }
+});
+
+test("build-1's S1 at 64c43399: a brace group the shell expands anyway, beside a parameter, is not any name under zsh's options", () => {
+  // The zsh option reading wrote a segment holding a form and a `$` as `*`,
+  // which #686's reader takes as every guarded name: these went from allow
+  // (main 74fa1f34, c2259a22) to deny under policy.core human-only. braceccl
+  // reads only a group that would not otherwise expand, and zsh never globs a
+  // parameter's or a substitution's value (zsh -f, braceccl and extendedglob
+  // set: `print -r -- file{1..3}$EXT` prints `file1.txt file2.txt file3.txt`).
+  for (const command of [
+    "touch file{1..3}$EXT",
+    "mkdir -p build/{debug,release}$SUFFIX",
+    "echo x > out{1,2}$N.log",
+    "mkdir -p dist/{css,js}$V",
+    "touch log{1,2}.$USER",
+    "mkdir -p out/{a,b}_$(date +%s)",
+    "mkdir -p {a,b}${SUFFIX}",
+    "mkdir -p ~/proj/{src,test}$X",
+  ]) {
+    assert.equal(zshOptionCommandReading(command, null), null, command);
+    assert.match(claude(command), /^allow: autonomous: files\.write\.workspace$/u, command);
+  }
+  // The guarded twins keep the any-name reading: `{A}` is a braceccl group
+  // (`A`), a `^` is a negation, `{1..$N}` is no sequence until the parameter is
+  // read, and a group cut by a quote is not one.
+  for (const command of [
+    "echo x > {A}PPROVAL.md$N",
+    "echo x > APPROVAL.m^q\"$N\"",
+    "echo x > {1..$N}APPROVAL.md",
+    "echo x > {a','b}APPROVAL.md$N",
+    "touch {a,b}^c$X",
+  ]) {
+    assert.equal(zshOptionCommandReading(command, null)?.endsWith(" *"), true, command);
+    assert.match(claude(command), /^deny: .*policy\.core/u, command);
+  }
 });
