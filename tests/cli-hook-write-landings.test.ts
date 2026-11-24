@@ -2068,3 +2068,24 @@ test("the call's disk memo answers as the disk does: realpath through links and 
   assert.equal(memo.list(join(root, "real", "missing")), "ENOENT");
   assert.equal(memo.list(join(root, "real", "file")), "ENOTDIR");
 });
+
+test("each name reading reads a segment by its own row: a row only one reading gives still sends the segment's words to their judge", () => {
+  // `.claude-x/settings.json` is policy.core in the folded reading only, so the
+  // folded reading reads this segment by rule A (its words against the list)
+  // and the as-spelled one by the tool's row (each word a tree written): a
+  // tree at a checkout is guarded by the second. A row kept from the first
+  // reading would lose it.
+  mkdirSync(join(ws, "row-checkout", ".git"), { recursive: true });
+  for (const command of ["npx prettier --write row-checkout", "npx prettier --write row-checkout .claude-x/settings.json"]) {
+    const seen = see(command);
+    assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+});
+
+test("the call's memo of where a spelling lands is per spelling: two folders' `k` are two landings for the snapshot rule", () => {
+  mkdirSync(join(ws, "snap-a.d"), { recursive: true });
+  mkdirSync(join(ws, "snap-plain"), { recursive: true });
+  mkdirSync(join(ws, "snap-sub"), { recursive: true });
+  assert.ok(!see("mv snap-a.d snap-plain/k; echo y > snap-sub/k").classes.includes(GUARDED), "a write beside what the move changed");
+  assert.ok(see("mv snap-a.d snap-plain/k; echo y > snap-plain/k/z").classes.includes(GUARDED), "a write through what the move changed");
+});
