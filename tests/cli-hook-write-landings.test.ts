@@ -35,6 +35,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
 import { classifyForHook, hookSettingsReads, HOOK_SETTINGS_MAX_BYTES, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, type WriteScopeContext } from "../src/cli/hook.js";
 import { commandGate } from "../src/cli/gate-window.js";
 import type { Streams } from "../src/cli/main.js";
@@ -291,7 +292,7 @@ test("a glob is judged by what it matches on the disk", () => {
   assert.ok(see("chmod 600 ~/.ss?/*").classes.includes(GUARDED));
 });
 
-test("a pattern takes the class its matches take written out: the directory is listed (lead, CLAIMS L61914)", () => {
+test("a pattern takes the class its matches take written out: the directory is listed (lead, CLAIMS L61914)", async () => {
   // A gate's own folder: the policy file beside ordinary ones.
   const gated = join(base, "gated");
   mkdirSync(join(gated, "plain"), { recursive: true });
@@ -322,11 +323,36 @@ test("a pattern takes the class its matches take written out: the directory is l
     "cd plain && echo x > ../*.md",
     "true && tee *.md < a.txt",
   ];
+  // Since main 9122cb3e (#686), main's classifier reads a pattern in a write
+  // target, or in a write's argv, itself: with no listing it gives the strict
+  // answer, policy.core from its own rule, and this pass adds no second entry
+  // of a class the line already has. The pass's own entry and note stay for
+  // the lines main does not read as a pattern (a variable's value, `**`
+  // handed to a tool).
+  const MAIN_READS_ITSELF = new Set([
+    "echo x > *.md",
+    "echo x > A*",
+    "echo x > APPROVAL.m?",
+    "echo x > [A]PPROVAL.md",
+    "echo x > ./*.md",
+    "echo x >> $PWD/*.md",
+    "sed -i s/a/b/ *.md",
+    "touch *.md",
+    "chmod +x *.md",
+    "cp a.txt A*.md",
+    "git add *.md",
+    "cd plain && echo x > ../*.md",
+    "true && tee *.md < a.txt",
+  ]);
   for (const line of REACHES) {
     const seen = at(line);
     assert.ok(seen.ok, line);
     assert.ok(seen.classes.includes("policy.core"), `${line}: ${JSON.stringify(seen.segments)}`);
-    assert.match(seen.notes, /write-resolved-landing: .* matches \d+ names? on the disk/u, line);
+    if (MAIN_READS_ITSELF.has(line)) {
+      assert.ok(seen.segments.some(([cls, rule]) => cls === "policy.core" && rule !== "write-resolved-landing"), `${line}: ${JSON.stringify(seen.segments)}`);
+    } else {
+      assert.match(seen.notes, /write-resolved-landing: .* matches \d+ names? on the disk/u, line);
+    }
   }
   // Only ever beside: what the line had without the entry is what it has with it.
   for (const line of REACHES) {
@@ -339,13 +365,26 @@ test("a pattern takes the class its matches take written out: the directory is l
       line,
     );
   }
-  // The same pattern where it reaches no such file adds nothing.
+  // The same pattern where it reaches no such file adds nothing. Since main
+  // 9122cb3e (#686) main's own answer for a write pattern is strict without
+  // the hook's listing of its directory (`*.md` may be APPROVAL.md), so
+  // these lines are judged as the hook judges them, with that listing
+  // (`listGlobWriteDirsFor`, then the classifier): there main reads what is
+  // there, and the write pass adds nothing either way.
+  const listed = async (command: string, cwd: string): Promise<Seen> => {
+    const refined = classifyForHook(command, [], cwd, [], false, [], false, WRITE_SCOPE_OFF, await listGlobWriteDirsFor(command, [cwd]));
+    if (!refined.result.ok) return { ok: false, segments: [], classes: [], notes: refined.result.code };
+    return { ok: true, segments: refined.result.segments.map((segment) => [segment.class, segment.rule]), classes: refined.result.classes, notes: refined.notes.join("\n") };
+  };
   for (const line of ["echo x > plain/*.md", "sed -i s/a/b/ plain/*.md", "touch plain/*.md docs/*.md", "echo x > *.txt", "chmod +x docs/*.md"]) {
-    assert.ok(!at(line).classes.includes("policy.core"), `${line}: ${JSON.stringify(at(line).segments)}`);
-    assert.ok(!at(line).segments.some(([, rule]) => rule === "write-resolved-landing"), line);
+    const seen = await listed(line, gated);
+    assert.ok(!seen.classes.includes("policy.core"), `${line}: ${JSON.stringify(seen.segments)}`);
+    assert.ok(!seen.segments.some(([, rule]) => rule === "write-resolved-landing"), line);
+    assert.ok(!at(line).segments.some(([, rule]) => rule === "write-resolved-landing"), `${line}, no listing`);
   }
   for (const line of ["echo x > *.md", "sed -i s/a/b/ *.md", "touch *.md"]) {
-    assert.ok(!see(line, WRITE_SCOPE_OFF, join(gated, "plain")).classes.includes("policy.core"), `${line} in plain/`);
+    assert.ok(!(await listed(line, join(gated, "plain"))).classes.includes("policy.core"), `${line} in plain/`);
+    assert.ok((await listed(line, gated)).classes.includes("policy.core"), `${line} beside APPROVAL.md, listed`);
   }
   // A quoted pattern is a name, not a listing; a quoted variable is not globbed.
   assert.ok(!at("touch '*.md'").classes.includes("policy.core"));
