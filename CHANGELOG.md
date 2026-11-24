@@ -678,6 +678,18 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   that lands the card. A core without the flag refuses it (`usage`), which the
   check reads as a refused propose.
 
+### Changed
+
+- **`approval policy amend --as agent:<id>` no longer loses a stop request
+  sent during its proposal (APRV-479).** A SIGINT, SIGTERM or SIGHUP that
+  landed while the `policy.proposed` append held the log lock was held by the
+  lock's guard and then dropped when the attestation wait began, so the verb
+  slept out its whole `--wait` (15 minutes by default). The verb now turns the
+  event loop once after that append, so the process dies of the signal there,
+  with the lock released and the record whole, and the wait sleeps on a timer,
+  so a signal at any later point ends it at once. What the verb writes, prints
+  and exits with is unchanged.
+
 ## 0.4.8 — 2026-11-20
 
 0.4.8 carries everything merged since 0.4.7. On Telegram, a new request's
