@@ -312,6 +312,17 @@ other segments, and the hook judges each.
   (`--out=.github/workflows/ci.yml`). Before,
   one word in front of `cp` left the workflow write unnamed. Without the
   credential word these lines are refused, as they were.
+- **Behind a wrapper, a target the shell builds fails closed** as `cp
+  .approval/env $X` does: a variable, a command substitution, a glob, a
+  brace expansion or a `~` in a word of the line (`command cp .approval/env
+  $X`, `"$(…)"`, `.gith*/workflows/ci.yml`, `{a,b}.yml`, `~bob/x`) reports
+  `policy.core` (`copy-target-unknown`) beside the credential class, after
+  the classes above, and the value glued to a short option
+  (`-o.github/workflows/ci.yml`, `-t.approval/log`) is read as a word. A
+  quoted `'$X'` is a literal, a cluster of flag letters (`-rf`, `-xdesign`)
+  is not a path, and the credential read's own words (`-i.approval/env`,
+  `$APPROVAL_TG_TOKEN`) are the read. Before, these lines were the
+  credential class alone.
 - **Not changed:** a protected path that outranks the credential class
   still answers first with the credential beside it, except in a copy's
   joined target-directory flag (`cp --target-directory=.approval/log
@@ -322,7 +333,7 @@ other segments, and the hook judges each.
 - The segment is still walked once: the walk goes on from the credential
   answer, and its protected scan is the one the credential tier already
   made.
-- Conformance: four new `command-class` vectors; the 398 before them are
+- Conformance: five new `command-class` vectors; the 398 before them are
   byte-identical.
 
 **Every protected path a command writes is judged.** A segment that named

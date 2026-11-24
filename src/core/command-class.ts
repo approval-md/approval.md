@@ -8135,6 +8135,42 @@ function isCredentialReadWord(word: string, protectedPaths: readonly ProtectedPa
 }
 
 /**
+ * The value glued to a short option (`-o.github/workflows/ci.yml` gives
+ * `.github/workflows/ci.yml`, `-t.approval/log` gives `.approval/log`), or
+ * `null`: the text after the option letter of a single-dash word. Read by the
+ * credential tier where the rest of the walk refuses (build-1's S2 on #701),
+ * as {@link credentialReadWords} reads the same text for a credential file.
+ *
+ * Not a value: a cluster of flag letters or digits (`-rf`, `-xvzf`, `-o0`,
+ * `-n10`), which names no path, so it never becomes one; a value that begins
+ * with `=` (`-o=F`), which is read as an `=` value already; and a long option
+ * (`--out`), whose name is not a path (its value, `--out F`, is the next word,
+ * a positional, or `--out=F`, an `=` value). So a glued value spelled with
+ * letters and digits alone (`-odesign`) is read as a cluster.
+ */
+function gluedOptionValue(arg: string): string | null {
+  if (arg.length <= 2 || arg[0] !== "-" || arg[1] === "-") return null;
+  const value = arg.slice(2);
+  if (value.startsWith("=") || /^[A-Za-z0-9]+$/u.test(value)) return null;
+  return value;
+}
+
+/**
+ * Is this argument word the credential read itself (build-1's S2 on #701)?
+ * A credential file named as the word, as its glued option value or as its
+ * `=` value ({@link isCredentialReadWord}), or a secret-named variable it
+ * expands ({@link secretEnvReference}). The rule that a word the shell still
+ * builds is an unknown write target leaves these out: they are the read.
+ */
+function isCredentialArgWord(word: string, protectedPaths: readonly ProtectedPathEntry[]): boolean {
+  if (secretEnvReference(word) !== null || isCredentialReadWord(word, protectedPaths)) return true;
+  const glued = gluedOptionValue(word);
+  if (glued !== null && isCredentialReadWord(glued, protectedPaths)) return true;
+  const equals = word.indexOf("=");
+  return equals !== -1 && isCredentialReadWord(word.slice(equals + 1), protectedPaths);
+}
+
+/**
  * Is this word PROSE that merely spells a protected path, rather than a path?
  * (APRV-409.)
  *
@@ -9712,6 +9748,19 @@ function classifySegment(
   // an option or of a `key=value` word (`--out=.github/workflows/ci.yml`,
   // `of=.github/workflows/ci.yml`) is a word of such a program too, so it is
   // read with them; a credential file there is the read.
+  //
+  // Two more (build-1's S2 on #701, the lead's ruling CLAIMS L62362), after
+  // those, one entry per class. The value glued to a short option
+  // (`-o.github/workflows/ci.yml`, `-t.approval/log`) is read as a word the
+  // same way ({@link gluedOptionValue}: a cluster such as `-rf` is not a
+  // value). And a target the shell still builds fails closed as `cp
+  // .approval/env $X` does, `policy.core` `copy-target-unknown`: the first
+  // argument word whose value the text cannot settle, by the flags the copy
+  // family's test reads (`splits`, `expands`), the lexer's `exact` (a `$`
+  // inside double quotes, an unquoted `~`) and its substitutions (`"$(…)"`).
+  // Every word counts, `--` or not: nobody knows this program's operands. The
+  // words that are the credential read are left out ({@link
+  // isCredentialArgWord}); `'$X'` is a literal.
   const answered = outranking === null && !fetchOutranksCredential ? (credential ?? redirectCredential) : null;
   if (answered !== null) {
     const more = foldedOnly((): ProtectedBeside[] => {
@@ -9723,8 +9772,25 @@ function classifySegment(
         const value = arg.slice(equals + 1);
         return value.length === 0 || isCredentialReadWord(value, protectedPaths) ? [] : [value];
       });
-      const named = [sideScan?.found ?? null, strictestProtected(optionValues, protectedPaths)];
-      return besideProtected(answered.class, named).more ?? [];
+      const gluedValues = args.flatMap((arg) => {
+        const value = gluedOptionValue(arg);
+        return value === null || isCredentialReadWord(value, protectedPaths) ? [] : [value];
+      });
+      const built = segment.words
+        .slice(cursor + 1)
+        .find(
+          (word) =>
+            (word.splits || word.expands || !word.exact || word.substitutions.length > 0) &&
+            !isCredentialArgWord(word.text, protectedPaths),
+        );
+      const named = [
+        sideScan?.found ?? null,
+        strictestProtected(optionValues, protectedPaths),
+        strictestProtected(gluedValues, protectedPaths),
+      ];
+      const unknown: ProtectedBeside[] =
+        built === undefined ? [] : [{ class: "policy.core", rule: "copy-target-unknown", path: built.text }];
+      return besideProtected(answered.class, named, "protected-path", unknown).more ?? [];
     });
     return { ok: true, ...answered, ...(more.length === 0 ? {} : { more: [...more] }) };
   }

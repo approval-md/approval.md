@@ -1449,6 +1449,131 @@ test("a credential read through a program with no rule: the other forms", () => 
   }
 });
 
+// A target the shell builds, behind a wrapper or a program with no rule
+// (build-1's S2 on #701, the lead's ruling CLAIMS L62362): "a target the shell
+// builds ($X, a glob, an option-glued path) fails closed as plain cp $X does
+// (policy.core, copy-target-unknown), with a test each". The same lines
+// without the credential word are refused; as spelled each answers what main
+// gave it, the credential class alone.
+const BUILT_TARGET_PROGRAMS = ["command cp", "nice cp", "ditto", "python3 x.py", "frobnicate"] as const;
+const UNKNOWN = "policy.core copy-target-unknown";
+
+/**
+ * One form of a target the shell builds, across {@link BUILT_TARGET_PROGRAMS}:
+ * the word, where it sits in the line, what the folded reading adds, and the
+ * literal control that stands in its place.
+ */
+function builtTarget(word: string, added: readonly string[], control = "notes.txt"): void {
+  for (const program of BUILT_TARGET_PROGRAMS) {
+    for (const line of [`${program} .approval/env ${word}`, `${program} ${word} .approval/env`]) {
+      assert.deepEqual(pure(line, TWO_ROUTES), [CRED, ...added], line);
+      // As spelled: main's answer, the credential class alone.
+      assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);
+    }
+    // The control: a literal ordinary word in its place is the credential
+    // class alone, as it was.
+    assert.deepEqual(pure(`${program} .approval/env ${control}`, TWO_ROUTES), [CRED], program);
+    // Without the credential word nobody can say what the line does: refused.
+    assert.deepEqual(pure(`${program} notes.txt ${word}`, TWO_ROUTES), ["refused unclassified"], program);
+  }
+}
+
+test("a credential read through a wrapper names an unknown target for a variable", () => {
+  builtTarget("$X", [UNKNOWN]);
+  // The word itself is the path, as `cp .approval/env $X` names it.
+  const classified = classifyCommand("command cp .approval/env $X", TWO_ROUTES);
+  assert.equal(classified.ok, true);
+  if (classified.ok) {
+    assert.deepEqual(classified.segments.map((segment) => segment.path), [".approval/env", "$X"]);
+    assert.deepEqual(classified.classes, ["account.credential", "policy.core"]);
+  }
+  // Double quotes still expand it; single quotes make it a literal.
+  builtTarget('"$X"', [UNKNOWN], "'$X'");
+  for (const program of BUILT_TARGET_PROGRAMS) {
+    assert.deepEqual(pure(`${program} .approval/env '$X'`, TWO_ROUTES), [CRED], program);
+  }
+  // Set in the line before: the shell still builds the word.
+  assert.deepEqual(pure("X=.github/workflows/ci.yml; command cp .approval/env $X", TWO_ROUTES), ["read.shell assignment", CRED, UNKNOWN]);
+});
+
+test("a credential read through a wrapper names an unknown target for a braced variable", () => {
+  builtTarget("${X}", [UNKNOWN]);
+  builtTarget("${X:-.github/workflows/ci.yml}", [UNKNOWN]);
+});
+
+test("a credential read through a wrapper names an unknown target for a command substitution", () => {
+  builtTarget('"$(echo .github/workflows/ci.yml)"', [UNKNOWN]);
+  builtTarget("$(echo .github/workflows/ci.yml)", [UNKNOWN]);
+});
+
+test("a credential read through a wrapper names an unknown target for a glob", () => {
+  builtTarget(".gith*/workflows/ci.yml", [UNKNOWN], ".github-notes/ci.yml");
+  builtTarget("*.md", [UNKNOWN], "notes.md");
+  // A quoted glob is a literal.
+  for (const program of BUILT_TARGET_PROGRAMS) {
+    assert.deepEqual(pure(`${program} .approval/env '*.md'`, TWO_ROUTES), [CRED], program);
+    assert.deepEqual(pure(`${program} .approval/env "*.md"`, TWO_ROUTES), [CRED], program);
+  }
+});
+
+test("a credential read through a wrapper names an unknown target for a brace expansion and a ~user", () => {
+  builtTarget("{a,b}.yml", [UNKNOWN], "a.yml");
+  builtTarget("~bob/x", [UNKNOWN], "bob/x");
+});
+
+test("a credential read through a wrapper reads the path glued to a short option", () => {
+  builtTarget("-o.github/workflows/ci.yml", ["policy.edit.ci protected-path"], "-onotes.txt");
+  builtTarget("-t.approval/log", ["log.mutate protected-path"], "-tnotes/x");
+  builtTarget("-oCLAUDE.md", ["policy.edit protected-path"], "-oREADME.md");
+  for (const program of BUILT_TARGET_PROGRAMS) {
+    // A cluster of flag letters is not a path, even where its letters spell
+    // a protected name.
+    assert.deepEqual(pure(`${program} -rf .approval/env notes.txt`, TWO_ROUTES), [CRED], program);
+    assert.deepEqual(pure(`${program} -xdesign .approval/env notes.txt`, TWO_ROUTES), [CRED], program);
+    // A credential file glued to an option is the read, not a write.
+    assert.deepEqual(pure(`${program} -i.approval/env notes.txt`, TWO_ROUTES), [CRED], program);
+    assert.deepEqual(pure(`${program} -i.approval/env -o.github/workflows/ci.yml`, TWO_ROUTES), [CRED, "policy.edit.ci protected-path"], program);
+    assert.deepEqual(pure(`${program} -i~/.hermes/.env notes.txt`, TWO_ROUTES), [CRED], program);
+    // A long option's name is not a path.
+    assert.deepEqual(pure(`${program} --design .approval/env notes.txt`, TWO_ROUTES), [CRED], program);
+  }
+  // The path is the glued value, as the other protected words name theirs.
+  const classified = classifyCommand("frobnicate -o.github/workflows/ci.yml .approval/env", TWO_ROUTES);
+  assert.equal(classified.ok, true);
+  if (classified.ok) assert.deepEqual(classified.segments.map((segment) => segment.path), [".approval/env", ".github/workflows/ci.yml"]);
+});
+
+test("a target the shell builds beside a credential read: the order, one entry per class, and what does not move", () => {
+  for (const [line, want] of [
+    // The credential class, then the classes the branch named before, then the new ones.
+    ["frobnicate .approval/env $X .github/workflows/ci.yml", [CRED, "policy.edit.ci protected-path", UNKNOWN]],
+    ["frobnicate -o.github/workflows/ci.yml --to=design/x .approval/env", [CRED, "policy.edit.design protected-path", "policy.edit.ci protected-path"]],
+    ["frobnicate -odesign/x .approval/env $X *.md", [CRED, "policy.edit.design protected-path", UNKNOWN]],
+    // One entry per class: a named policy.core path keeps its own.
+    ["frobnicate --out=APPROVAL.md .approval/env $X", [CRED, "policy.core protected-path"]],
+    ["frobnicate -oAPPROVAL.md .approval/env $X", [CRED, "policy.core protected-path"]],
+    // The words that are the credential read are not an unknown target.
+    ["frobnicate $APPROVAL_TG_TOKEN notes.txt", ["account.credential credential-env"]],
+    ['frobnicate "$APPROVAL_TG_TOKEN" $X', ["account.credential credential-env", UNKNOWN]],
+    ["command cp ~/.hermes/.env notes.txt", [CRED]],
+    ["frobnicate --in=$HOME/.hermes/.env notes.txt", [CRED]],
+    // Where the rest of the walk answers, its answer stands.
+    ["cp .approval/env $X", [CRED, UNKNOWN]],
+    ["cp .approval/env .gith*/workflows/ci.yml", [CRED]],
+    ["cat .approval/env $X", [CRED]],
+    ["base64 .approval/env *.md", [CRED]],
+    // No credential read, a refusal above the credential tier, a path that
+    // outranks the credential class: refused, as they were.
+    ["frobnicate notes.txt $X", ["refused unclassified"]],
+    ["command cp notes.txt -o.github/workflows/ci.yml", ["refused unclassified"]],
+    ["sudo cp .approval/env $X", ["refused opaque"]],
+    ["frobnicate .approval/env APPROVAL.md $X", ["refused unclassified"]],
+    ["frobnicate .approval/env .approval/log/x *.md", ["refused unclassified"]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+});
+
 /** `account.credential` unattended, the workflow folder a tap, design unattended. */
 const POLICY_CREDENTIAL_LIGHT = [
   ...POLICY_HEAD,
@@ -1505,6 +1630,21 @@ test("through the real hook, a wrapper in front of the copy does not take the wo
     const decision = decide(dir, bash(command));
     assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
   }
+});
+
+test("through the real hook, a target the shell builds behind a wrapper is not run as a credential read alone", { skip }, () => {
+  const dir = attestedLab(POLICY_CREDENTIAL_LIGHT);
+  // `policy.core` is at this policy's default, manual: the wait for its tap
+  // times out. On main both ran as `account.credential`, autonomous here.
+  for (const command of ["command cp .approval/env $X", "frobnicate -o.github/workflows/ci.yml .approval/env"]) {
+    const decision = decide(dir, bash(command));
+    assert.equal(strictness(decision), 1, `${command}: ${decision.permission} ${decision.reason}`);
+    assert.doesNotMatch(decision.reason, /^autonomous/u, command);
+  }
+  // The same wrapper with a quoted literal target runs as the policy says a
+  // credential read does, as it did.
+  const control = decide(dir, bash("command cp .approval/env '$X'"));
+  assert.equal(control.permission, "allow", control.reason);
 });
 
 test("a credential read is walked once: it costs about what the same line with an ordinary file costs", () => {
