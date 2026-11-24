@@ -97,11 +97,14 @@ test("reading a routed path is still a read", () => {
 test("the strictest surface still wins within one segment", () => {
   // A segment naming both a routed path and the gate's own organs is a
   // `policy.core` segment. A routed sub-class ranks where `policy.edit` ranks,
-  // which is below `policy.core`, so nothing here changed.
+  // which is below `policy.core`, so the segment is still named by the organ.
+  // The routed class is reported beside it (every protected target of a
+  // segment is judged), so a policy that holds it the stricter still sees it.
   const result = classifyCommand("cp design/notes.md APPROVAL.md", ROUTED);
   assert.equal(result.ok, true, result.ok ? "" : `${result.code}: ${result.detail}`);
   if (!result.ok) return;
-  assert.deepEqual(result.classes, ["policy.core"]);
+  assert.deepEqual(result.classes, ["policy.core", "policy.edit.design"]);
+  assert.equal(result.segments[0]?.class, "policy.core");
 });
 
 // ---------------------------------------------------------------------------
