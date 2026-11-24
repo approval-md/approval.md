@@ -3007,6 +3007,8 @@ export interface ClassifierContext {
   organParentsOff?: boolean;
   /** The values the line (and any line it sits in) assigns each variable, for the parents rule (lead ruling L62435). Internal. */
   lineAssigned?: ReadonlyMap<string, readonly string[]>;
+  /** An earlier segment of the line moved the shell to a parent spelling (`cd ..`; lead ruling L62435, S2). Internal. */
+  organCdParent?: boolean;
   /**
    * The segments whose words, targets and substitution bodies the line's own
    * reading for {@link lineNamesGit} already went through (review of the
@@ -10085,7 +10087,7 @@ function unreadableBelowParent(base: "cwd" | "home" | "root", prefix: readonly s
  * working directory or home it holds), or `"unplaced"` when the caller cannot
  * place or list them.
  */
-function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | undefined): string[] | "unplaced" | null {
+function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | undefined, cdParent = false): string[] | "unplaced" | null {
   let base: "cwd" | "home" | "root";
   let rest: string;
   const home = /^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/u.exec(operand);
@@ -10147,7 +10149,9 @@ function organParentDirs(operand: string, pwdWord: boolean, disk: GlobDisk | und
   // ancestors and `/` are parents of an organ directory the text cannot rule
   // out, and so is a path with a `..` after a name (security review, 7); any
   // other absolute path is not judged here.
-  if (!poppedName && base !== "root" && ups === 0 && names.length > 0) return null;
+  // Lead ruling L62435 (S2, narrow): after a `cd` to a parent spelling
+  // (`cd .. && rm -rf proj`), a plain relative name may be the workspace.
+  if (!poppedName && base !== "root" && ups === 0 && names.length > 0) return cdParent && base === "cwd" ? "unplaced" : null;
   if (disk === undefined) return !poppedName && base === "root" && stack.length > 0 ? null : "unplaced";
   const under = (dir: string, top: string): boolean => dir === top || top === "/" || dir.startsWith(`${top}/`);
   // Paths compare by the shared fold too (#688: one fold): folded in the
@@ -10303,6 +10307,7 @@ function organParentClass(
   protectedPaths: readonly ProtectedPathEntry[],
   disk: GlobDisk | undefined,
   assigned: ReadonlyMap<string, readonly string[]> | undefined = undefined,
+  cdParent = false,
 ): { named: { surface: string; path: string } | null; git: Set<string> } {
   let named: { surface: string; path: string } | null = null;
   const git = new Set<string>();
@@ -10350,7 +10355,7 @@ function organParentClass(
       continue;
     }
     for (const reading of readings) {
-      const dirs = organParentDirs(reading, reading === operand && pwdWords.has(operand), disk);
+      const dirs = organParentDirs(reading, reading === operand && pwdWords.has(operand), disk, cdParent);
       if (dirs === null) continue;
       if (dirs === "unplaced" || disk === undefined) {
         offer("policy.core", operand);
@@ -10383,6 +10388,57 @@ function organParentClass(
   if (strictest === null || claims.length <= 1) return { named: strictest, git };
   const ordered = [strictest.surface, ...claims.filter((cls) => cls !== strictest.surface)];
   return { named: { surface: takeAmongEqual(ordered), path: strictest.path }, git };
+}
+
+/**
+ * Does `segment` move the shell to a parent spelling (lead ruling L62435, S2,
+ * narrow)? A `cd`, `chdir` or `pushd` (bare: the home) whose target is `..`
+ * (any number), `/`, `~`, `$HOME`, `"$PWD/.."`, or, by the caller's disk, an
+ * absolute directory above the working directory (or the home itself). A
+ * target the text cannot read (`"$DIR"`, `-`), or a name below the working
+ * directory (`build`, `src`), is not proven a parent: main's class after it.
+ */
+function segmentCdsToParent(segment: LexSegment, disk: GlobDisk | undefined): boolean {
+  const at = segment.words.findIndex((word) => !word.assignment);
+  const command = segment.words[at];
+  if (command === undefined || !["cd", "chdir", "pushd"].includes(command.text.split("/").pop() ?? "")) return false;
+  const rest = segment.words.slice(at + 1);
+  let index = 0;
+  while (index < rest.length && /^-[LPe@]+$/u.test(rest[index]?.text ?? "")) index += 1;
+  if (rest[index]?.text === "--") index += 1;
+  const target = rest[index];
+  if (target === undefined) return true;
+  const pwdWord = target.substitutions.length === 1 && /^(?:(?:builtin|command)\s+)?pwd(?:\s+-[LP]+)*$/u.test(target.substitutions[0]?.trim() ?? "");
+  const word = target.text;
+  let base: "cwd" | "home" | "root";
+  let tail: string;
+  const home = /^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/u.exec(word);
+  const pwd = /^(?:\$PWD|\$\{PWD\})(?=\/|$)/u.exec(word);
+  if (home !== null) [base, tail] = ["home", word.slice(home[0].length)];
+  else if (pwd !== null) [base, tail] = ["cwd", word.slice(pwd[0].length)];
+  else if (pwdWord && word.startsWith(SUBSTITUTION_SENTINEL)) [base, tail] = ["cwd", word.slice(SUBSTITUTION_SENTINEL.length)];
+  else if (word.startsWith("/")) [base, tail] = ["root", word];
+  else [base, tail] = ["cwd", word];
+  if (/[$`*?[\]{}~]/u.test(tail) || tail.includes(SUBSTITUTION_SENTINEL) || tail.includes(PARAMETER_MARK)) return false;
+  const stack: string[] = [];
+  for (const part of tail.split("/")) {
+    if (part.length === 0 || part === ".") continue;
+    if (part === ".." && stack.length > 0 && stack[stack.length - 1] !== "..") stack.pop();
+    else if (part === ".." && base === "root") continue;
+    else stack.push(part);
+  }
+  const names = stack.filter((part) => part !== "..");
+  if (base === "cwd") return names.length === 0 && stack.length > 0;
+  if (base === "home") return names.length === 0;
+  if (stack.length === 0) return true;
+  if (disk === undefined) return false;
+  const target_ = `/${stack.join("/")}`;
+  const fold = (path: string): string => foldNameExact(path);
+  const strictlyUnder = (dir: string, top: string): boolean => dir !== top && dir.startsWith(`${top}/`);
+  const cwds = [disk.cwd, ...(disk.sessionCwds ?? [])].filter((dir) => dir.startsWith("/"));
+  if (cwds.some((dir) => strictlyUnder(fold(dir), fold(target_)))) return true;
+  const home_ = disk.home;
+  return home_ !== null && home_.startsWith("/") && (fold(home_) === fold(target_) || strictlyUnder(fold(home_), fold(target_)));
 }
 
 /** Most words one operand's braces make before it is judged by its text alone. */
@@ -12745,7 +12801,7 @@ function classifySegmentWithVerb(
   const organParent =
     context.organParentsOff === true || mainRulesOnly
       ? { named: null, git: new Set<string>() }
-      : organParentClass(parentOperands, segment.words, protectedPaths, glob.disk, context.lineAssigned);
+      : organParentClass(parentOperands, segment.words, protectedPaths, glob.disk, context.lineAssigned, context.organCdParent === true);
   if (organParent.named !== null || organParent.git.size > 0) {
     // A GLOB-WRITE-family rule (main has none): the main pass joins the line
     // (lead ruling L61926), as it does for #686's rules.
@@ -13476,12 +13532,15 @@ function classifyCommandAsReadWithRules(
   const lineAssigned = lineAssignments(lexed.segments, context.lineAssigned);
   context = { ...context, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned };
   execContext = { ...execContext, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned };
+  // Lead ruling L62435 (S2, narrow): a `cd` to a parent spelling earlier on the line.
+  let cdParent = context.organCdParent === true;
   for (const segment of lexed.segments) {
     if (execContext.execCode === true && movesNameResolution(segment)) {
       execContext = { ...execContext, execCode: false };
     }
-    execContext = { ...execContext, shellDir };
+    execContext = { ...execContext, shellDir, organCdParent: cdParent };
     shellDir = nextShellDir(segment, shellDir);
+    if (!cdParent && segmentCdsToParent(segment, globDisk)) cdParent = true;
     // APRV-380. A LOGIN-SHELL WRAPPER is classified by the script it runs.
     // `loginShellScript` states the exact shape and why this is not the second
     // parser `OPAQUE_BINS` refuses; the inner classification is run with

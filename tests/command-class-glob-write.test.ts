@@ -1303,6 +1303,8 @@ test("lead ruling L61587 (review-b A686-FOLD3 M1): a delete, move or chmod of an
     // `..` after a name: `x` may be a symlink, so the text cannot place it
     // (parents rule, security review 7): policy.core, at least as strict.
     assert.ok(classesOf(`rm -rf ${dir}/x/..`).includes("policy.core"), `${dir}/x/..`);
+    // ...and the organ's own class still rides beside it (review A689 N6).
+    assert.ok(classesOf(`rm -rf ${dir}/x/..`).includes(cls), `${dir}/x/.. -> ${classesOf(`rm -rf ${dir}/x/..`).join(",")}`);
   }
   // A dot-name `*` reaches by the hook's listing (L61492): where the directory holds one.
   assert.ok(withListing("rm -rf *", { "/w": [".claude", "a.js"] }).includes("policy.core"));
@@ -1321,8 +1323,10 @@ test("lead ruling L61587 (review-b A686-FOLD3 M1): a delete, move or chmod of an
   ] as const) {
     assert.deepEqual(classesOf(command), [main], command);
   }
-  // A parent of an organ directory is the parent rule's (below): with no listing, strict.
+  // A parent of an organ directory is the parent rule's (below): with no
+  // listing, strict, and main's class rides beside (review A689 N6).
   leads(classesOf("rm -rf ."), "policy.core");
+  assert.deepEqual(classesOf("rm -rf ."), andMain(["policy.core"], "rm -rf ."));
 });
 
 test("lead ruling L61587, parents: a recursive delete, move or chmod of a directory that holds an organ directory takes its class", () => {
@@ -2357,5 +2361,40 @@ test("automated security review of the fold, 7 and 8: an rsync delete through an
     "rsync -a -- --delete ./",
   ]) {
     assert.deepEqual(classesOf(command), ["network.call"], command);
+  }
+});
+
+test("lead ruling L62435 (S2, narrow): after a cd to a parent spelling, a plain relative name of the rule's verbs is policy.core", () => {
+  for (const command of [
+    "cd .. && rm -rf proj",
+    "cd ..; rm -rf proj",
+    "cd ../ && rm -rf proj/",
+    "cd .. && chmod -R 000 proj",
+    "cd / ; rm -rf Users",
+    "(cd .. && rm -rf proj)",
+    'cd "$PWD/.." && rm -rf proj',
+    "cd ~ && rm -rf dev",
+    "cd && rm -rf dev",
+    "cd ../.. && rm -rf dev",
+    "bash -c 'cd .. && rm -rf proj'",
+  ]) {
+    const classes = classesOf(command);
+    assert.ok(classes.includes("policy.core"), `${command} -> ${classes.join(",")}`);
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    for (const cls of main.classes) assert.ok(classes.includes(cls), `${command} keeps main's ${cls}`);
+  }
+  // An absolute directory above the working directory, by the caller's disk.
+  assert.ok(withDisk("cd /a && rm -rf b", "/a/b/w", { ...realpaths("/a", "/a/b/w", "/h") }).includes("policy.core"));
+  assert.ok(!withDisk("cd /tmp && rm -rf b", "/a/b/w", { ...realpaths("/tmp", "/a/b/w", "/h") }).includes("policy.core"));
+  // `cd .. && mv proj /tmp/x` keeps main's class beside.
+  const moved = withListing("cd .. && mv proj /tmp/x", { "/": ["w", "h"], "/w": [".git"], ...realpaths("/w", "/h") });
+  assert.ok(moved.includes("policy.core"), moved.join(","));
+  // Not the wide form: a cd into a name, an unreadable target, `cd -`, or a
+  // cd after the delete keeps main's class.
+  for (const command of ["cd build && rm -rf out", "cd src && rm -rf dist", 'cd "$DIR" && rm -rf x', "cd - && rm -rf x", "cd /tmp && rm -rf x", "rm -rf proj; cd ..", "cd .. && ls"]) {
+    const main = classifyCommandWithMainRules(command);
+    assert.ok(main.ok, command);
+    assert.deepEqual(classesOf(command), main.classes, command);
   }
 });
