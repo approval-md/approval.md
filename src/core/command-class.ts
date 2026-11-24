@@ -9666,14 +9666,74 @@ function organParentOperands(
     // other `--del…`) remove what is below the destination that the sources
     // lack: the destination is read by the parents rule. A remote one
     // (`host:path`) is not on this disk.
-    const deletes = args.some((arg) => (arg.split("=")[0] as string).startsWith("--del"));
-    const local = (dest: string): boolean => !/^[^/]*:/u.test(dest);
-    const dests = deletes ? (plan === null || plan.dests.length === 0 ? positionals.slice(-1) : plan.dests).filter(local) : [];
+    const dests = rsyncDeletes(args) ? (plan === null || plan.dests.length === 0 ? positionals.slice(-1) : plan.dests).flatMap(rsyncLocalDest) : [];
     return [...(removes ? [...(plan?.sources ?? positionals)] : []), ...dests];
   }
   // zip `-m` / `--move`: deletes what it archives.
   if (basename === "zip") return hasShortFlag(args, ["m"]) || hasFlag(args, ["--move"]) ? positionals.slice(1) : [];
   return [];
+}
+
+/**
+ * Does an rsync line delete under its destination (lead ruling L62435, S5;
+ * automated security review of the fold, 7)? Fail closed: any long option
+ * that is `--del…` or a prefix of `--delete` (rsync takes a unique prefix),
+ * any `--remote-option` spelling or short `-M` (in any group, attached or
+ * not: its value is an option the receiving side runs, which for a local
+ * destination is this machine), and any `--read-batch`, `--write-batch` or
+ * `--only-write-batch` spelling (a recorded transfer, deletes included).
+ * Nothing after `--` is an option.
+ */
+function rsyncDeletes(args: readonly string[]): boolean {
+  for (const arg of args) {
+    if (arg === "--") return false;
+    if (arg.startsWith("--")) {
+      const name = arg.split("=")[0] as string;
+      if (name.length > 2 && (name.startsWith("--del") || "--delete".startsWith(name))) return true;
+      if (name.length >= "--remot".length && "--remote-option".startsWith(name)) return true;
+      if (["--read-batch", "--write-batch", "--only-write-batch"].some((option) => name.length >= 5 && option.startsWith(name))) return true;
+      continue;
+    }
+    if (/^-[^-]/u.test(arg) && arg.slice(1).includes("M")) return true;
+  }
+  return false;
+}
+
+/** A loopback host rsync may name (automated security review of the fold, 8): never resolved, only these spellings. */
+const RSYNC_LOOPBACK = /^(?:|localhost|127(?:\.\d{1,3}){3}|::1|\[::1\])$/iu;
+
+/**
+ * The local path an rsync destination names, for the parents rule
+ * (automated security review of the fold, 8). A path with no colon before
+ * its first `/` is local as written (`./a:b`, `/tmp/x:y`). `HOST:PATH` with
+ * a loopback host (`localhost`, `127.x.x.x`, `::1`, `[::1]`, or none, after
+ * any `user@`) is this machine: an absolute PATH as written, a relative one
+ * (or none) under the remote home, `~`. A daemon form (`HOST::module/path`,
+ * `rsync://HOST/...`) on a loopback host names a module root the text cannot
+ * place: an unreadable word, strict. Any other host: none (main's class; the
+ * classifier never resolves a name).
+ */
+function rsyncLocalDest(dest: string): string[] {
+  const daemon = /^rsync:\/\/(?:[^@/]*@)?(\[[^\]]*\]|[^/:]*)(?::\d+)?(?:\/|$)/iu.exec(dest);
+  if (daemon !== null) return RSYNC_LOOPBACK.test(daemon[1] as string) ? ["$(rsync-module)"] : [];
+  const colon = dest.indexOf(":");
+  const slash = dest.indexOf("/");
+  if (colon === -1 || (slash !== -1 && slash < colon && !dest.startsWith("["))) return [dest];
+  let host: string;
+  let rest: string;
+  if (dest.startsWith("[") || /^[^@]*@\[/u.test(dest)) {
+    const close = dest.indexOf("]");
+    if (close === -1 || dest[close + 1] !== ":") return [];
+    host = dest.slice(dest.lastIndexOf("@", dest.indexOf("[")) + 1, close + 1);
+    rest = dest.slice(close + 2);
+  } else {
+    host = dest.slice(0, colon).replace(/^[^@]*@/u, "");
+    rest = dest.slice(colon + 1);
+  }
+  if (!RSYNC_LOOPBACK.test(host)) return [];
+  if (rest.startsWith(":")) return ["$(rsync-module)"];
+  if (rest.startsWith("/")) return [rest];
+  return [rest.length === 0 ? "~" : `~/${rest}`];
 }
 
 /**

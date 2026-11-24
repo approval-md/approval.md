@@ -2318,3 +2318,44 @@ test("lead ruling L62435 (S5): rsync --delete onto a parent is a recursive delet
     assert.deepEqual(classesOf(command), ["network.call"], command);
   }
 });
+
+test("automated security review of the fold, 7 and 8: an rsync delete through an option value, a batch, an abbreviation, or onto this machine by a loopback host", () => {
+  for (const command of [
+    "rsync -a -M--delete /tmp/empty/ ./",
+    "rsync -a -M --delete /tmp/empty/ ./",
+    "rsync -aM--delete /tmp/empty/ ./",
+    "rsync -a --remote-option=--delete /tmp/empty/ ./",
+    "rsync -a --remote-option --delete-after /tmp/empty/ ./",
+    "rsync -a --remot=--delete /tmp/empty/ ./",
+    "rsync -a --read-batch=batch ./",
+    "rsync -a --write-batch=b /tmp/empty/ ./",
+    "rsync -a --only-write-batch=b /tmp/empty/ ./",
+    "rsync -a --dele /tmp/empty/ ./",
+    "rsync -a --delete-missing-args /tmp/empty/ ./",
+    "rsync -a --delete /tmp/empty/ localhost:",
+    "rsync -a --delete /tmp/empty/ localhost:.",
+    "rsync -a --delete /tmp/empty/ me@localhost:/",
+    "rsync -a --delete /tmp/empty/ 127.0.0.1:",
+    "rsync -a --delete /tmp/empty/ [::1]:",
+    "rsync -a --delete /tmp/empty/ :",
+    // A loopback daemon's module root cannot be placed: strict.
+    "rsync -a --delete /tmp/empty/ localhost::mod/x",
+    "rsync -a --delete /tmp/empty/ rsync://localhost/mod/",
+  ]) {
+    const classes = classesOf(command);
+    assert.ok(classes.includes("policy.core") && classes.includes("network.call"), `${command} -> ${classes.join(",")}`);
+  }
+  // Another host (never resolved), a local path with a colon after a slash,
+  // a loopback path that is not a parent, or no delete: main's class.
+  for (const command of [
+    "rsync -a --delete /tmp/empty/ host:/srv/x/",
+    "rsync -a --delete /tmp/empty/ example.com:",
+    "rsync -a --delete /tmp/empty/ ./a:b",
+    "rsync -a --delete /tmp/empty/ /tmp/x:y",
+    "rsync -a --delete /tmp/empty/ me@localhost:/tmp/x",
+    "rsync -a --max-delete=5 src/ ./",
+    "rsync -a -- --delete ./",
+  ]) {
+    assert.deepEqual(classesOf(command), ["network.call"], command);
+  }
+});
