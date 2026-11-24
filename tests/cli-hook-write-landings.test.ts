@@ -1858,3 +1858,23 @@ test("main's entries beside a raise (#686) are all kept, and the write pass's en
     assert.deepEqual(guarded, [...guardedTexts], `${command}: ${JSON.stringify(result.segments)}`);
   }
 });
+
+test("zsh clobber: the file bash writes for it, `!` in the segment's directory, is judged too", () => {
+  // bash reads `echo x >! T` as `echo x T > !` (lab: bash writes `!`, zsh `T`),
+  // and #686's classifier joins bash's reading beside zsh's. Where the two
+  // land apart, the write pass judges both.
+  for (const command of ["cd ~/.ssh && echo x >! ~/notes.txt", "cd ~/.ssh && echo x 2>! ~/notes.txt", "cd ~/.ssh; echo x >&! /tmp/x.log"]) {
+    const seen = see(command);
+    assert.ok(seen.ok, command);
+    assert.ok(seen.segments.some(([cls, rule]) => cls === GUARDED && rule === "write-guarded"), `${command}: ${JSON.stringify(seen.segments)}`);
+    assert.match(seen.notes, /\.ssh\/!/u, command);
+  }
+  // Controls: the plain redirect from the same folder writes only zsh's
+  // and bash's shared target, and a clobber from the workspace lands `!` there.
+  assert.ok(!see("cd ~/.ssh && echo x > ~/notes.txt").classes.includes(GUARDED));
+  assert.ok(!see("cd ~/.ssh && echo x >| ~/notes.txt").classes.includes(GUARDED));
+  assert.ok(!see("echo x >! ~/notes.txt").classes.includes(GUARDED));
+  // Opted in: bash's `!` outside the roots is out of scope, whatever zsh's target is.
+  assert.ok(see("cd ../outside && echo x >! " + join(ws, "n.txt"), optedIn()).classes.includes(OUT));
+  assert.ok(!see("cd sub && echo x >! " + join(ws, "n.txt"), optedIn()).classes.includes(OUT));
+});

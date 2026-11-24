@@ -2190,6 +2190,12 @@ interface LexRedirect {
   /** `>` and `>>` write; `<` reads. */
   op: ">" | ">>" | "<";
   target: LexWord;
+  /**
+   * A zsh clobber form (`>!`, `>>!`, `>&!`) read at zsh's target. bash
+   * writes a file named `!` in the segment's directory instead (the target
+   * is an argument there). Read by the hook's write pass alone.
+   */
+  clobber?: true;
 }
 
 interface LexSegment {
@@ -2657,7 +2663,7 @@ function lex(command: string): LexResult {
         return { ok: false, detail: `redirection ${op} has no target` };
       }
       if (clobber && command.slice(targetStart, index).includes("$'")) return zshClobberRefusal(redirect[0] as string);
-      redirects.push({ op: op.startsWith(">>") ? ">>" : op === "<" ? "<" : ">", target });
+      redirects.push({ op: op.startsWith(">>") ? ">>" : op === "<" ? "<" : ">", target, ...(clobber ? { clobber: true as const } : {}) });
       continue;
     }
 
@@ -12805,6 +12811,14 @@ export interface CommandSegmentShape {
   equalsWords?: string[];
   /** The `NAME=value` words before the binary whose value zsh equals-expands as it assigns (S2, N1). */
   equalsAssignments?: string[];
+  /**
+   * What bash writes for each zsh clobber redirect of the segment (`>!`,
+   * `>>!`, `>&!`, read at zsh's target in {@link writes}): a file named `!`
+   * in the segment's directory. Claude Code runs bash where zsh is not the
+   * shell, and #686's classifier joins bash's reading too. Read by the hook's
+   * write pass alone.
+   */
+  clobberBashWrites?: string[];
 }
 
 export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
@@ -12846,6 +12860,7 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
         ...segment.words.slice(cursor + 1).filter((word) => word.equalsHead === true).map((word) => word.text),
       ],
       equalsAssignments: segment.words.slice(0, cursor).filter((word) => word.assignmentEquals === true).map((word) => word.text),
+      clobberBashWrites: segment.redirects.filter((redirect) => redirect.clobber === true).map(() => "!"),
     };
   });
 }

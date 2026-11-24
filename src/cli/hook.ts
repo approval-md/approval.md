@@ -5266,12 +5266,14 @@ export function refineWriteLandings(
     unreadable: string | null;
     changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[];
   } => {
-    const writes: string[] = [...shape.writes];
+    // A zsh clobber redirect (`>!`) writes zsh's target, in `shape.writes`,
+    // and in bash a file named `!` in the segment's directory: both are judged.
+    const writes: string[] = [...shape.writes, ...(shape.clobberBashWrites ?? [])];
     const intoDirs: IntoDir[] = [];
     /** Words a tree is written at (judged with {@link guardedEntryBelow} too). */
     const trees: string[] = [];
     let unreadable: string | null = null;
-    const changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[] = shape.writes.map((word) => ({ word, kind: "write" as const }));
+    const changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[] = writes.map((word) => ({ word, kind: "write" as const }));
     const bin = shape.bin === null ? null : basename(shape.bin);
     if (bin === null) return { writes, intoDirs, trees, unreadable, changes };
     // Every word not spelled as a flag, and every word after `--` (`touch --
