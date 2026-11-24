@@ -304,15 +304,25 @@ other segments, and the hook judges each.
 - **A copy whose destination the text cannot know** (`cp .approval/env $X`)
   reports `policy.core` (`copy-target-unknown`) beside the credential class,
   as `cp notes.txt $X` answers.
+- **A wrapper or a program with no rule** (`command cp .approval/env
+  .github/workflows/ci.yml`, `nice cp …`, `ditto …`, `python3 x.py …`):
+  the credential class answers, as before, and nobody can say what such a
+  program writes, so every protected path its words name is reported beside
+  it, the value of an option or of a `key=value` word included
+  (`--out=.github/workflows/ci.yml`). Before,
+  one word in front of `cp` left the workflow write unnamed. Without the
+  credential word these lines are refused, as they were.
 - **Not changed:** a protected path that outranks the credential class
-  still answers first with the credential beside it; a refusal stays a
-  refusal (`sudo cat .approval/env`); and where the rest of the walk would
-  refuse (a binary with no rule), the credential class answers alone, as
-  before. The as-spelled name reading answers exactly as before.
+  still answers first with the credential beside it, except in a copy's
+  joined target-directory flag (`cp --target-directory=.approval/log
+  .approval/env`, `-t.approval/log`), where main answered the credential
+  class alone and the outranking class now follows it; and a refusal stays
+  a refusal (`sudo cat .approval/env`). The as-spelled name reading answers
+  exactly as before.
 - The segment is still walked once: the walk goes on from the credential
   answer, and its protected scan is the one the credential tier already
   made.
-- Conformance: three new `command-class` vectors; the 395 before them are
+- Conformance: four new `command-class` vectors; the 398 before them are
   byte-identical.
 
 **Every protected path a command writes is judged.** A segment that named

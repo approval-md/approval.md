@@ -9698,12 +9698,34 @@ function classifySegment(
   // isCredentialReadWord}). The credential class still answers, first. The
   // walk goes on from here, so the segment is walked once, and the protected
   // scan of its words is the one already made ({@link credentialSideScan});
-  // a refusal or an unprotected answer further on adds nothing. Folded
-  // reading only (`foldedOnly`): as spelled the credential answer is returned
-  // here, alone, as it was.
+  // an unprotected answer further on adds nothing. Folded reading only
+  // (`foldedOnly`): as spelled the credential answer is returned here, alone,
+  // as it was.
+  //
+  // Where the rest of the walk REFUSES (`command cp .approval/env
+  // .github/workflows/ci.yml`, `nice cp …`, `ditto …`, `python3 x.py …`: a
+  // wrapper or a program with no rule), the credential class still answers,
+  // as it did, and nobody can say what that program writes. So the protected
+  // paths its words name are reported beside the credential class, from the
+  // scan already made ({@link credentialSideScan}): otherwise one word in
+  // front of `cp` took the workflow write off the answer again. The value of
+  // an option or of a `key=value` word (`--out=.github/workflows/ci.yml`,
+  // `of=.github/workflows/ci.yml`) is a word of such a program too, so it is
+  // read with them; a credential file there is the read.
   const answered = outranking === null && !fetchOutranksCredential ? (credential ?? redirectCredential) : null;
   if (answered !== null) {
-    const more = foldedOnly(() => protectedBeside(restOfWalk()));
+    const more = foldedOnly((): ProtectedBeside[] => {
+      const rest = restOfWalk();
+      if (rest.ok) return protectedBeside(rest);
+      const optionValues = args.flatMap((arg) => {
+        const equals = arg.indexOf("=");
+        if (equals === -1) return [];
+        const value = arg.slice(equals + 1);
+        return value.length === 0 || isCredentialReadWord(value, protectedPaths) ? [] : [value];
+      });
+      const named = [sideScan?.found ?? null, strictestProtected(optionValues, protectedPaths)];
+      return besideProtected(answered.class, named).more ?? [];
+    });
     return { ok: true, ...answered, ...(more.length === 0 ? {} : { more: [...more] }) };
   }
   return restOfWalk();

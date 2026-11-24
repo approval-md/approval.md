@@ -1356,24 +1356,96 @@ test("a credential read with no protected write target, or one that outranks it,
     ["tee .approval/env", ["policy.core protected-path"]],
     // A refusal above the credential tier stays a refusal.
     ["sudo cat .approval/env", ["refused opaque"]],
-    // A walk that would refuse further on leaves the credential answer as it
-    // was: a binary with no rule is named for the credential it reads.
-    ["frobnicate .approval/env .github/workflows/ci.yml", [CRED]],
+    // A program with no rule that names no protected path: the credential
+    // class alone, as it was.
+    ["frobnicate .approval/env", [CRED]],
+    ["frobnicate .approval/env notes.txt", [CRED]],
   ] as const) {
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
   }
-  // The refusal case, asked of the classifier directly: no `more`, no refusal.
-  const refused = classifyCommand("frobnicate .approval/env .github/workflows/ci.yml", TWO_ROUTES);
-  assert.equal(refused.ok, true);
-  if (refused.ok) assert.deepEqual(refused.classes, ["account.credential"]);
 });
 
 test("as spelled, a credential read answers exactly what main gave it", () => {
   for (const [line, main] of CREDENTIAL_BESIDE) {
     assert.deepEqual(spelledPure(line, TWO_ROUTES), main, line);
   }
-  for (const line of ["cat .approval/env > design/x", "cp .approval/env APPROVAL.md design/x", "frobnicate .approval/env .github/workflows/ci.yml"]) {
+  for (const line of ["cat .approval/env > design/x", "cp .approval/env APPROVAL.md design/x"]) {
     assert.deepEqual(spelledPure(line, TWO_ROUTES), pure(line, TWO_ROUTES).slice(0, 2), line);
+  }
+  for (const line of UNREAD_PROGRAMS.map((program) => `${program} .approval/env .github/workflows/ci.yml`)) {
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);
+  }
+});
+
+// A wrapper or a program the classifier has no rule for (build-1's S1 on
+// #701, the lead's ruling CLAIMS L62340: "where the walk refuses (command,
+// nice, builtin, ditto and like wrappers) the credential answer must still
+// name the guarded write; a test per wrapper"). Without the credential word
+// each of these lines is refused; with it the credential class answered
+// alone, so one word in front of `cp` took the workflow write off the answer.
+const UNREAD_PROGRAMS = [
+  "command cp",
+  "nice cp",
+  "builtin cp",
+  "caffeinate cp",
+  "stdbuf -o0 cp",
+  "ditto",
+  "python3 x.py",
+  "perl x.pl",
+  "ruby x.rb",
+  "frobnicate",
+  "gcp",
+  "busybox cp",
+  "rclone copy",
+  "gsutil cp",
+  "aws s3 cp",
+] as const;
+
+for (const program of UNREAD_PROGRAMS) {
+  test(`a credential read through ${program} still names the workflow it is handed`, () => {
+    // The control: without the credential word nobody can say what this
+    // line does, and it is refused.
+    assert.deepEqual(pure(`${program} notes.txt .github/workflows/ci.yml`, TWO_ROUTES), ["refused unclassified"]);
+    assert.deepEqual(pure(`${program} .approval/env .github/workflows/ci.yml`, TWO_ROUTES), [CRED, "policy.edit.ci protected-path"]);
+    assert.deepEqual(pure(`${program} .github/workflows/ci.yml .approval/env`, TWO_ROUTES), [CRED, "policy.edit.ci protected-path"]);
+    assert.deepEqual(pure(`${program} .approval/env design/x .github/workflows/ci.yml`, TWO_ROUTES), [
+      CRED,
+      "policy.edit.design protected-path",
+      "policy.edit.ci protected-path",
+    ]);
+    // No protected word: the credential class alone, as it was.
+    assert.deepEqual(pure(`${program} .approval/env notes.txt`, TWO_ROUTES), [CRED]);
+  });
+}
+
+test("a credential read through a program with no rule: the other forms", () => {
+  for (const [line, want] of [
+    // The redirect form of the read, a built-in target, a Hermes credential.
+    ["frobnicate .github/workflows/ci.yml < .approval/env", [CRED, "policy.edit.ci protected-path"]],
+    ["frobnicate .approval/env CLAUDE.md", [CRED, "policy.edit protected-path"]],
+    ["frobnicate ~/.hermes/.env design/x", [CRED, "policy.edit.design protected-path"]],
+    // The value of an option is a word of such a program too.
+    ["frobnicate --out=.github/workflows/ci.yml .approval/env", [CRED, "policy.edit.ci protected-path"]],
+    ["frobnicate --from=.approval/env --to=design/x", [CRED, "policy.edit.design protected-path"]],
+    ["frobnicate of=.github/workflows/ci.yml .approval/env", [CRED, "policy.edit.ci protected-path"]],
+    // A credential file as an option's value is the read, not a write.
+    ["frobnicate --in=.approval/env notes.txt", [CRED]],
+    // A `key=value` word is not a credential read (on main either): nothing
+    // answers for this program, and the line is refused as it was.
+    ["frobnicate if=.approval/env notes.txt", ["refused unclassified"]],
+    // A value that names nothing protected adds nothing.
+    ["frobnicate --mode=fast .approval/env", [CRED]],
+    // Prose that names a protected path is not a target (the positional scan's own skip).
+    ["frobnicate .approval/env 'see .github/workflows/ci.yml'", [CRED]],
+    // A path that outranks the credential class defers it, and the line is
+    // refused as it was: nothing answers for a program with no rule.
+    ["frobnicate .approval/env APPROVAL.md", ["refused unclassified"]],
+    ["frobnicate .approval/env .approval/log/x", ["refused unclassified"]],
+    // A refusal above the credential tier stays a refusal.
+    ["sudo cp .approval/env .github/workflows/ci.yml", ["refused opaque"]],
+    ["env A=1 cp .approval/env .github/workflows/ci.yml", ["refused opaque"]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
   }
 });
 
@@ -1409,6 +1481,27 @@ test("through the real hook, a credential read that writes a workflow waits for 
   // A credential read with no protected target, or a design one, runs as
   // the policy says it does.
   for (const command of ["cp .approval/env notes.txt", "cp .approval/env design/x"]) {
+    const decision = decide(dir, bash(command));
+    assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
+  }
+});
+
+test("through the real hook, a wrapper in front of the copy does not take the workflow's tap away", { skip }, () => {
+  const dir = attestedLab(POLICY_CREDENTIAL_LIGHT);
+  for (const command of [
+    "command cp .approval/env .github/workflows/ci.yml",
+    "nice cp .approval/env .github/workflows/ci.yml",
+    "ditto .approval/env .github/workflows/ci.yml",
+    "python3 x.py .approval/env .github/workflows/ci.yml",
+    "frobnicate --out=.github/workflows/ci.yml .approval/env",
+  ]) {
+    const decision = decide(dir, bash(command));
+    assert.equal(strictness(decision), 1, `${command}: ${decision.permission} ${decision.reason}`);
+    assert.match(decision.reason, /:policy\.edit\.ci within /u, command);
+  }
+  // The same wrappers with no protected target run as the policy says a
+  // credential read does, as they did.
+  for (const command of ["command cp .approval/env notes.txt", "ditto .approval/env design/x"]) {
     const decision = decide(dir, bash(command));
     assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
   }

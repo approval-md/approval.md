@@ -2342,6 +2342,12 @@ const commandClassVectors = [
       "a reader of the environment map adds nothing for the instruction file it also reads: account.credential alone (every-protected-target control)",
     input: { command: "cat .approval/env CLAUDE.md" },
   },
+  {
+    id: "every-protected-target-credential-through-a-wrapper",
+    description:
+      "a wrapper in front of the copy does not take the protected target off the answer: account.credential, then policy.edit for the instruction file. Without the credential word the line is refused, no rule covering `command`",
+    input: { command: "command cp .approval/env CLAUDE.md" },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",
