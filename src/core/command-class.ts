@@ -940,30 +940,42 @@ function zshClobberRefusal(spelled: string): { ok: false; detail: string } {
 let dollarQuotesKept = false;
 let dollarQuoteRead = false;
 /**
- * Each word's text the lexer made with a `$` in it that is TEXT, not a
- * parameter, and where each such `$` sits: one in single quotes, after a
- * backslash, decoded from a dollar quote, or, in the kept mode, a kept dollar
- * quote's own `$` (automated security review of the spliced reading, a). The
- * spliced reading ({@link unreadParts}) reads those as text and every OTHER
- * `$` as an unread part. A text the lexer did not make (a reading of a word)
- * is not here, and each `$` in it counts as a parameter: stricter. So does a
- * text made twice with its literal `$` in different places.
+ * In the KEPT mode only (main's lexing, whose answer rides beside the decoded
+ * one): each word's text the lexer made with a `$` in it that is text, not a
+ * parameter, and where each such `$` sits: a kept dollar quote's own `$`, one
+ * in single quotes, one after a backslash (automated security review of the
+ * spliced reading, a). The spliced reading ({@link unreadParts}) reads those
+ * as text and every other `$` as an unread part. Keyed by text, so it is
+ * never consulted in the decoded reading, where every `$` the spliced
+ * reading meets counts as a parameter: whatever the kept pass reads lighter
+ * than it should, the decoded pass beside it does not, and the line's answer
+ * is the union of both. In the kept pass a text made twice with its literal
+ * `$` in different places keeps none, and past {@link LITERAL_DOLLAR_WORDS_CAP}
+ * texts on one line every `$` counts as a parameter for the rest of the line
+ * (nothing is evicted).
  */
 let literalDollarWords = new Map<string, readonly number[]>();
-/** Most texts {@link literalDollarWords} holds before it starts again. */
+/** The record is full: every later `$` on the line is a parameter. */
+let literalDollarOverflow = false;
+/** Most texts {@link literalDollarWords} holds for one line. */
 const LITERAL_DOLLAR_WORDS_CAP = 8192;
 
 /** Run `run` with dollar quotes kept as main's lexer kept them, and restore the mode afterwards. */
 function withDollarQuotesKept<T>(run: () => T): T {
   const saved = dollarQuotesKept;
   const savedWords = literalDollarWords;
+  const savedOverflow = literalDollarOverflow;
   dollarQuotesKept = true;
-  if (!saved) literalDollarWords = new Map();
+  if (!saved) {
+    literalDollarWords = new Map();
+    literalDollarOverflow = false;
+  }
   try {
     return run();
   } finally {
     dollarQuotesKept = saved;
     literalDollarWords = savedWords;
+    literalDollarOverflow = savedOverflow;
   }
 }
 
@@ -2504,11 +2516,6 @@ function lex(command: string): LexResult {
           dollarQuoteRead = true;
           const scan = readDollarQuoted(command, index + 1);
           if (scan === null) return null;
-          // A decoded `$` (`\x24`) is text; an unread escape's placeholder is not.
-          for (let at = scan.text.indexOf("$"); at !== -1; at = scan.text.indexOf("$", at + 1)) {
-            if (scan.text.startsWith(SUBSTITUTION_SENTINEL, at)) at += SUBSTITUTION_SENTINEL.length - 1;
-            else literalDollars.push(text.length + at);
-          }
           text += scan.text;
           if (scan.unread) splits = true;
           unreadParts += scan.unreadParts;
@@ -2561,13 +2568,13 @@ function lex(command: string): LexResult {
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
     if (cut !== null) text = text.slice(0, cut);
-    if (text.includes("$")) {
+    if (dollarQuotesKept && !literalDollarOverflow && text.includes("$")) {
       // The same text made twice with its literal `$` in different places (or
-      // none: `'$X'` and `$X`, or kept `$'X'` and `$X`) keeps none: each `$` a parameter.
+      // none: kept `$'X'` and `$X`) keeps none: each `$` a parameter.
       const seen = literalDollarWords.get(text);
       if (seen === undefined) {
-        if (literalDollarWords.size >= LITERAL_DOLLAR_WORDS_CAP) literalDollarWords.clear();
-        literalDollarWords.set(text, literalDollars);
+        if (literalDollarWords.size >= LITERAL_DOLLAR_WORDS_CAP) literalDollarOverflow = true;
+        else literalDollarWords.set(text, literalDollars);
       } else if (seen.join(",") !== literalDollars.join(",")) literalDollarWords.set(text, []);
     }
     const assignment = ASSIGNMENT.test(command.slice(start, index));
@@ -12265,13 +12272,13 @@ const SPLICED_PARTS_CAP = 8;
  * be `.approval`, `$A.$B` may be `.git`). Otherwise the word with each run of
  * unread parts as one {@link UNREAD_MARK} (`marked`), and as one
  * {@link SUBSTITUTION_SENTINEL} (`asOutputs`, for the `.git` reader), and how
- * many parts it holds. A `$` that opens no expansion is literal, and a `$`
- * the lexer made as text ({@link literalDollarWords}: quoted, escaped,
- * decoded, a kept quote's) is text no guarded name holds ({@link SPLICED_INERT}).
+ * many parts it holds. A `$` that opens no expansion is literal, and in the
+ * kept mode a `$` main's lexer made as text ({@link literalDollarWords}) is
+ * text no guarded name holds ({@link SPLICED_INERT}).
  */
 function unreadParts(text: string): { marked: string; asOutputs: string; parts: number } | null {
   if (!text.includes("$")) return null;
-  const literalAt = literalDollarWords.get(text);
+  const literalAt = dollarQuotesKept && !literalDollarOverflow ? literalDollarWords.get(text) : undefined;
   let marked = "";
   let asOutputs = "";
   let parts = 0;
@@ -12280,9 +12287,8 @@ function unreadParts(text: string): { marked: string; asOutputs: string; parts: 
     const char = text[at] as string;
     let end = -1;
     if (char === "$" && literalAt !== undefined && literalAt.includes(at)) {
-      // A `$` that is text: quoted, escaped, decoded, or a kept quote's (in
-      // the kept mode, main's lexer kept it; the decoded reading reads the
-      // quote). A text no guarded name holds.
+      // Kept mode: a `$` main's lexer made as text (a kept quote's own, a
+      // quoted or escaped one). A text no guarded name holds.
       marked += SPLICED_INERT;
       asOutputs += SPLICED_INERT;
       afterPart = false;
@@ -12376,8 +12382,9 @@ function splicedCredential(word: string): boolean {
   if (mainRulesOnly || !word.includes("$")) return false;
   return (
     foldedOnlyQuietly(() => {
-      // Keyed by which `$` in it are text, too: `'.approval/$F'` names a file.
-      const key = `${dollarQuotesKept ? "k" : "d"}${literalDollarWords.get(word)?.join(",") ?? "-"}|${word}`;
+      // Keyed by which `$` in it are text in the kept mode, too.
+      const literalAt = dollarQuotesKept && !literalDollarOverflow ? literalDollarWords.get(word) : undefined;
+      const key = `${dollarQuotesKept ? "k" : "d"}${literalAt?.join(",") ?? "-"}|${word}`;
       const known = splicedCredentialMemo.get(key);
       if (known !== undefined) return known;
       const found =
@@ -14673,25 +14680,14 @@ export function unionNameReadings(readings: readonly CommandClassification[]): C
   return { ok: true, segments, classes };
 }
 
-/** How deep {@link classifyCommandAsRead} is: a line's own classification starts {@link literalDollarWords} afresh. */
-let classifyDepth = 0;
-
 function classifyCommandAsRead(
   command: string,
   protectedPaths: readonly ProtectedPathEntry[],
   context: ClassifierContext,
 ): CommandClassification {
-  // Each line's texts alone: an earlier line's quoted `$X` never makes this
-  // line's `$X` a parameter or text.
-  if (classifyDepth === 0 && !dollarQuotesKept) literalDollarWords = new Map();
-  classifyDepth += 1;
-  try {
-    // Dollar quotes read, and where one was, main's reading beside (see `withDollarQuotesKept`).
-    const readings = eachDollarQuoteReading(() => classifyCommandAsReadBeside(command, protectedPaths, context));
-    return readings.length === 1 ? readings[0] : unionNameReadings(readings);
-  } finally {
-    classifyDepth -= 1;
-  }
+  // Dollar quotes read, and where one was, main's reading beside (see `withDollarQuotesKept`).
+  const readings = eachDollarQuoteReading(() => classifyCommandAsReadBeside(command, protectedPaths, context));
+  return readings.length === 1 ? readings[0] : unionNameReadings(readings);
 }
 
 function classifyCommandAsReadBeside(

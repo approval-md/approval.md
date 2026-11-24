@@ -198,10 +198,12 @@ test("round two (L62542, for reads too): a word that could be a credential file 
   for (const command of ['grep -n "build.py\\" \\"\\$S\\"|-I build.py|build.py \\$" w/*.sh', 'node q.mjs "echo x > \\$\'A\'*\\$?"']) {
     assert.deepEqual(classesOf(command), mainClasses(command), command);
   }
-  // A `$` in single quotes, or escaped, is text: a file named so. The same
-  // text unquoted on a later line is read again, not remembered.
-  for (const command of ["cat '.approval/$F'", "cat .approval/\\$F", "echo x > 'APPROVAL$E.md'"]) assert.deepEqual(classesOf(command), mainClasses(command), command);
-  assert.ok(classesOf("cat .approval/$F").includes("account.credential"));
+  // The decoded reading counts every `$` the spliced reading meets as a
+  // parameter, a quoted or escaped one too (the text alone cannot tell them
+  // apart): a read of a file named `.approval/$F` asks, which is stricter.
+  for (const command of ["cat '.approval/$F'", "cat .approval/\\$F"]) assert.ok(classesOf(command).includes("account.credential"), command);
+  // A write target with every glob and `$` quoted is exact: main's answer.
+  assert.deepEqual(classesOf("echo x > 'APPROVAL$E.md'"), mainClasses("echo x > 'APPROVAL$E.md'"));
   // As the plain spelling: `source .approval/env` is refused, and so is this.
   for (const command of ["source .approval/$F", ". .approval/$F"]) assert.equal(classifyCommand(command, []).ok, false, command);
   // No credential reading, or a glob (judged against the listing by the hook, as main judges it).
@@ -225,6 +227,21 @@ test("round two (automated security review, a): the kept reading reads every unr
   assert.deepEqual(kept("echo x > $'A'PPROVAL.md"), ["files.write.workspace"]);
   // The same text made by a kept quote and by a parameter: each `$` a parameter.
   assert.ok(kept("echo x > A$PPROVAL$E.md; echo A$'P'PROVAL$E.md").includes("policy.core"));
+  // Two HIGH reviews of b41520bc: the record of a `$` that is text is the
+  // kept pass's alone, never evicted, and never the decoded pass's.
+  // A literal `$` elsewhere on the line does not make a guarded word's `$` text.
+  assert.ok(classesOf("echo '$X'; echo x > APPROVAL$X.md").includes("policy.core"));
+  assert.ok(kept("echo '$X'; echo x > APPROVAL$X.md").includes("policy.core"));
+  // A brace group holding a quoted `$`.
+  assert.ok(classesOf("echo x > {a,'$'}APPROVAL$E.md").includes("policy.core"));
+  // A reading made from a word (a default's text) equal to a quoted word's text.
+  assert.ok(classesOf("echo 'APPROVAL$E.md'; echo x > ${A:-APPROVAL$E.md}").includes("policy.core"));
+  // Past the record's bound every later `$` is a parameter: a text recorded
+  // as a parameter before the bound is not read as a kept quote's after it.
+  const filler = Array.from({ length: 8300 }, (_, i) => `$'f'${String(i)}`).join(" ");
+  const long = `echo x > APPROVAL$E.md; echo ${filler}; echo APPROVAL$'E'.md`;
+  assert.ok(kept(long).includes("policy.core"));
+  assert.ok(classesOf(`echo ${filler}; echo x > .claude$S/settings.json`).includes("policy.core"));
 });
 
 test("round two (automated security review, c): every equal claim a spliced word meets is reported", () => {

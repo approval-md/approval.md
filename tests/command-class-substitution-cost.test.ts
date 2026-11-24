@@ -358,7 +358,11 @@ test("cost: the bounded readers answer as before under their bounds", () => {
   // (22 Nov 2026) fails closed too, to the stricter `log.mutate`.
   assert.deepEqual(pure(nest(33, "out")), ["log.mutate redirect-protected", "vcs.history.rewrite git-dir-write"]);
   // An unclosed `${` set aside is put back as text: what it prints still counts.
-  assert.deepEqual(pure(`echo x > "$(printf '%s' 'a${"${".repeat(3)} .git')"`), [DIR_WRITE]);
+  // (Build-6 round two, L62542: printf's word is read as a file it may name,
+  // as main reads `printf %s .approval/env`, and its `$` as unread parts, so
+  // `a${${${ .git` may be `a…/.approval/env`: a substitution that reads a
+  // credential is refused, which is stricter than the `.git` reading.)
+  assert.deepEqual(pure(`echo x > "$(printf '%s' 'a${"${".repeat(3)} .git')"`), ["refused opaque"]);
   assert.deepEqual(pure(`echo x > "$(printf '%s' 'a\${b} c')"`), ["files.write.workspace redirect-write"]);
   // A 0 after the % is a flag, a width after it pads: neither prints .git.
   assert.deepEqual(pure(`echo x > "$(printf '%05s' a)"`), ["files.write.workspace redirect-write"]);
