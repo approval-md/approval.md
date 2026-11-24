@@ -396,3 +396,32 @@ test("N2: a copy or move of a tree that carries .git at its top is git-dir-write
   checkout(repo, "vendored");
   assert.ok(!hook("cp a.txt vendored", repo).includes(DIR_WRITE));
 });
+
+test("#682's continuation cost line: a word repeated in a segment is placed once, and the first hit is the same one", { skip }, () => {
+  // `cp README.md d*/APPROVA?.md` x 4,000 walked every repeat on the disk, in
+  // each name reading: 3.6 to 9 CPU s against a bound of 8. A repeat lands
+  // where its first copy landed, so only the walks are saved.
+  const at = root();
+  const repo = checkout(at);
+  checkout(at, "tree");
+  symlinkSync(".git", join(repo, "link"));
+  mkdirSync(join(repo, "d1"));
+  writeFileSync(join(repo, "seed.txt"), "");
+  const many = (word: string, n: number): string => `${word} `.repeat(n);
+  const noteOf = (command: string): string => classifyForHook(command, [], repo).notes.find((note) => note.startsWith("git-dir-write:")) ?? "";
+  // A target after many repeated sources still lands in .git, and the note
+  // names it, as with one copy of the repeat.
+  for (const n of [1, 2000]) {
+    const command = `cp seed.txt ${many("d*/x", n)}l*k/config`;
+    assert.deepEqual(hook(command, repo), [DIR_WRITE], `n=${String(n)}`);
+    assert.match(noteOf(command), /writes l\*k\/config, which lands at .*\/\.git\/config, inside a git directory/u, `n=${String(n)}`);
+  }
+  // A repeated tree source that carries .git is found, before or after other repeats.
+  for (const command of [`cp -R ${many("../tree/.", 2000)}.`, `cp -R ${many("d*/", 2000)}${many("../t*e/.", 3)}.`]) {
+    assert.ok(hook(command, repo).includes(DIR_WRITE), command.slice(0, 40));
+  }
+  // Repeated ordinary words do not move.
+  assert.deepEqual(hook(`cp seed.txt ${many("d*/x", 2000)}out/`, repo), ["files.write.workspace workspace-write"]);
+  // A redirection repeated: each is a sure target; the first that lands in .git answers.
+  assert.deepEqual(hook(`echo x ${many("> d*/y", 500)}> l?nk/config`, repo).filter((entry) => entry === DIR_WRITE).length > 0, true);
+});

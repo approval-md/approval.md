@@ -326,6 +326,19 @@ function expandOnDisk(base: string, word: string): Expansion {
   return { paths: found };
 }
 
+/** `items` without a repeat of any key, each kept where it first appears. */
+function distinctBy<T>(items: readonly T[], key: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of items) {
+    const each = key(item);
+    if (seen.has(each)) continue;
+    seen.add(each);
+    out.push(item);
+  }
+  return out;
+}
+
 /** Does anything exist at `path` itself (a link counts, followed or not)? */
 function entryExists(path: string): boolean {
   try {
@@ -549,10 +562,17 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
     const sedNames = bin === "sed" && readsOnly ? readWriteTargets(bin, shape.args).filter((word) => word.length > 0) : [];
     const readOutputs = bin === null || bin === "sed" ? [] : readWriteTargets(bin, shape.args).filter(pathOrPattern);
     const named = readsOnly ? readOutputs : bin === "git" ? gitWrites : writeWords(shape.args).filter(pathOrPattern);
-    const candidates: { word: string; literal: boolean }[] = [
-      ...[...shape.writes.filter(pathOrPattern), ...named].map((word) => ({ word, literal: false })),
-      ...sedNames.map((word) => ({ word, literal: true })),
-    ];
+    // A word repeated in the segment is placed once (`cp README.md d*/x
+    // d*/x …`, the 4,000 words of #682's continuation cost line): the same
+    // word from the same directories lands where it landed the first time,
+    // and the first hit is the same one, so only the walks are saved.
+    const candidates: { word: string; literal: boolean }[] = distinctBy(
+      [
+        ...[...shape.writes.filter(pathOrPattern), ...named].map((word) => ({ word, literal: false })),
+        ...sedNames.map((word) => ({ word, literal: true })),
+      ],
+      (candidate) => `${candidate.literal ? "literal" : "word"}\u0000${candidate.word}`,
+    );
     // The words the segment surely writes: its redirection targets, and every
     // word of a segment the classifier already calls a file write. A word of
     // any other segment (a `curl -d` payload, a script argument) is only a
@@ -566,7 +586,7 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
       ...gitWrites,
       ...(bin === null ? [] : readWriteSureTargets(bin, shape.args)),
     ]);
-    const sources = bin === null ? [] : treeSources(bin, shape.args).filter(pathOrPattern);
+    const sources = bin === null ? [] : [...new Set(treeSources(bin, shape.args).filter(pathOrPattern))];
     if (candidates.length === 0 && sources.length === 0) continue;
     let hit: { word: string; landed: string } | null = null;
     for (const dir of before) {
