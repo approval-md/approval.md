@@ -17,6 +17,23 @@ before a tag.
 
 ### Security
 
+**A dollar-quoted word is read as the text the shell makes of it.**
+`echo x >> $'\x41PPROVAL.md'` writes the policy file in bash and zsh, and was
+an ordinary `files.write.workspace` (main's lexer kept the `$` and read the
+word as an unknown variable); `cat $".approval/env"` was `read.shell`. The
+lexer now reads `$"…"` as a double-quoted string and decodes `$'…'` where bash
+(3.2 and 5) and zsh decode alike: the letter escapes, `\xH`, `\xHH`, `\uHHHH`
+and octal (as a byte). An escape the shells read differently (`\cX`, `\U…`,
+`\u` with fewer than four digits, `\x` with none, `\q`), a character outside
+ASCII, and the rest of a word after a decoded NUL are unknown, the way `$X` is.
+Inside `$'…'` a `\'` no longer ends the string, so `echo $'\'' ; rm -rf
+APPROVAL.md #'` reads the `rm` bash and zsh run (it was one `echo` word).
+Wherever the lexer decoded a dollar quote, the line (and the hook's whole
+chain) is classified again with dollar quotes kept as before, and that answer
+rides beside, so nothing answers lighter than it did: `rm $'\x41PPROVAL.md'`
+is `policy.core` with the earlier `files.delete.out_of_scope` beside it, and a
+dollar-quoted program word (`$'rm' -rf x`) keeps its refusal.
+
 **A glob in a write target to a guarded path stays guarded (GLOB-WRITE).**
 `echo x > ~/.hermes/auth.json` was `policy.core`, and the same write with a
 glob in any component (`~/.hermes/[!Z]uth.json`, `~/.[!Z]ermes/auth.json`,

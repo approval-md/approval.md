@@ -2906,6 +2906,45 @@ const commandClassVectors = [
     description: "beside the ones above: `>|` is the clobber operator bash and zsh share, and its target is read as any redirection target is",
     input: { command: "echo x >| APPROVAL.md" },
   },
+  // --- dollar-quoted words: the text the shell makes of them ----------------
+  // Lead ruling CLAIMS L62542: `$'…'` is decoded where bash and zsh decode it
+  // alike and `$"…"` is a double-quoted string; what the shells read
+  // differently is unknown, the way `$X` is. Where a dollar quote was read,
+  // the answer with dollar quotes kept as before rides beside.
+  {
+    id: "dollar-quote-ansi-c-names-the-policy-file",
+    description:
+      "`$'\\x41PPROVAL.md'` is `APPROVAL.md` to bash and zsh: the append is the policy file's write, and the earlier reading (a write to an unknown variable) rides beside",
+    input: { command: "echo x >> $'\\x41PPROVAL.md'" },
+  },
+  {
+    id: "dollar-quote-locale-string-names-a-credential",
+    description: "`$\"…\"` is a double-quoted string (the locale translation is the identity without a catalog): the read is the credential read it spells",
+    input: { command: 'cat $".approval/env"' },
+  },
+  {
+    id: "dollar-quote-escaped-quote-does-not-end-it",
+    description:
+      "inside `$'…'` a `\\'` is a quote character, so the string closes at the next quote and the words after it are commands bash and zsh run: the `rm` is read",
+    input: { command: "echo $'\\'' ; rm -rf APPROVAL.md #'" },
+  },
+  {
+    id: "dollar-quote-ordinary-message-is-unmoved",
+    description: "a commit message with escaped newlines keeps the class it had",
+    input: { command: "git commit -m $'fix\\n\\nbody'" },
+  },
+  {
+    id: "dollar-quote-escape-the-shells-read-differently-is-unknown",
+    description:
+      "bash keeps `\\V` and zsh drops its backslash, so the copy target is not settled by the text: the copy to an unknown target keeps its fail-closed class",
+    input: { command: "cp notes.txt $'APPRO\\VAL.md'" },
+  },
+  {
+    id: "dollar-quote-program-word-is-refused",
+    description: "a program spelled as a dollar quote keeps the refusal the earlier reading gives it",
+    input: { command: "$'rm' -rf x" },
+    control: true,
+  },
   {
     id: "redirect-read-of-an-ordinary-file-is-a-read",
     description: "an ordinary file on stdin is the read it always was",
