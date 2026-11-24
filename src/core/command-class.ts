@@ -2185,6 +2185,23 @@ function lex(command: string): LexResult {
     if (redirect !== null) {
       const op = redirect[2] as string;
       index += (redirect[0] as string).length;
+      // zsh's clobber forms. `>!`, `>>!` and `>&!` (with a descriptor in
+      // front too, or after a `&`) are ONE operator there, and the target is
+      // the word after it: `echo x >! APPROVAL.md` writes the policy file.
+      // bash reads the same text as a redirect to a file named `!`, with the
+      // next word an argument. The two shells write different files, and
+      // this lexer read bash's: the policy file was an argument of `echo` and
+      // the line an ordinary workspace write. Neither reading is right for
+      // both shells, so the form is refused. `>|` is the clobber operator
+      // both share, and a file really named `!` can be quoted or set apart
+      // (`>'!'`, `>\!`, `> !`), which both read alike: only an unquoted `!`
+      // right after the operator is zsh's.
+      if ((op === ">" || op === ">>" || op === ">&") && command[index] === "!") {
+        return {
+          ok: false,
+          detail: `redirection ${redirect[0] as string}! is not read by this classifier: zsh writes the word after it and bash a file named "!"; write >| to overwrite a file, or quote the name`,
+        };
+      }
       if (op === "<<" && command[index] === "<") {
         // A here-string (`<<<word`). Refused, as it always was, and named
         // (APRV-503): the shell expands its word, and that word is the
