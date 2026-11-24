@@ -162,15 +162,23 @@ export const GUARDED_HOME_ENTRIES: readonly GuardedEntry[] = [
   { name: "~/.bash_profile", segments: [".bash_profile"] },
   { name: "~/.profile", segments: [".profile"] },
   { name: "~/.config/fish", segments: [".config", "fish"] },
+  // login and logout files (lead, N3)
+  { name: "~/.zlogout", segments: [".zlogout"] },
+  { name: "~/.bash_login", segments: [".bash_login"] },
+  { name: "~/.bash_logout", segments: [".bash_logout"] },
   // launch agents and daemons
   { name: "~/Library/LaunchAgents", segments: ["Library", "LaunchAgents"] },
   { name: "~/Library/LaunchDaemons", segments: ["Library", "LaunchDaemons"] },
+  // Linux's user services, its launch agents (N3)
+  { name: "~/.config/systemd/user", segments: [".config", "systemd", "user"] },
   // global git config
   { name: "~/.gitconfig", segments: [".gitconfig"] },
   { name: "~/.config/git", segments: [".config", "git"] },
   // PATH folders
   { name: "~/bin", segments: ["bin"] },
   { name: "~/.local/bin", segments: [".local", "bin"] },
+  { name: "~/.pyenv/shims", segments: [".pyenv", "shims"] },
+  { name: "~/.cargo/bin", segments: [".cargo", "bin"] },
   // credential stores
   { name: "~/.aws", segments: [".aws"] },
   { name: "~/.config/gh", segments: [".config", "gh"] },
@@ -178,6 +186,9 @@ export const GUARDED_HOME_ENTRIES: readonly GuardedEntry[] = [
   { name: "~/.docker", segments: [".docker"] },
   { name: "~/.kube", segments: [".kube"] },
   { name: "~/.gnupg", segments: [".gnupg"] },
+  // npm's per-user config: a registry token, and `script-shell` or
+  // `node-options` that run code at every npm script (N3)
+  { name: "~/.npmrc", segments: [".npmrc"] },
   // Claude Code's per-user file: its `mcpServers` entries launch commands.
   { name: "~/.claude.json", segments: [".claude.json"] },
 ];
@@ -198,6 +209,9 @@ export function isClaudeConfigFolderName(folded: string): boolean {
  * (`src/cli/hook.ts`, `namedHookScripts`), not kept here.
  */
 export const HOOK_SCRIPT_ENTRY = "a hook script the settings name";
+
+/** The name a note reports for a repository's `.git/config` (or `config.worktree`). */
+export const GIT_CONFIG_ENTRY = "a git config file";
 
 /** The name a note reports for a place inside a Claude Code config folder. */
 export const CLAUDE_CONFIG_FOLDER_ENTRY = "a Claude Code config folder";
@@ -295,6 +309,11 @@ export function guardedEntryOf(path: string, homes: readonly string[], configDir
     const at = folded[index] as string;
     const next = folded[index + 1] as string;
     if (at === ".git" && next === "hooks") return "a git hooks folder";
+    // A repository's config (N3): `core.hooksPath`, `core.fsmonitor` and the
+    // like run code. The file itself, as the last segment, and a linked
+    // worktree's own `config.worktree`.
+    if (at === ".git" && index + 2 === folded.length && (next === "config" || next === "config.worktree")) return GIT_CONFIG_ENTRY;
+    if (at === ".git" && next === "worktrees" && index + 4 === folded.length && folded[index + 3] === "config.worktree") return GIT_CONFIG_ENTRY;
     if (isClaudeConfigFolderName(at) && next === "hooks") return "a Claude Code hooks folder";
     if (isClaudeConfigFolderName(at) && next === "plugins") return CLAUDE_PLUGINS_FOLDER_ENTRY;
   }
@@ -358,6 +377,8 @@ export function guardedEntryBelow(path: string, homes: readonly string[], config
   const folded = have.map((segment) => foldFileName(segment));
   for (let index = 0; index + 1 < folded.length; index += 1) {
     if (isClaudeConfigFolderName(folded[index] as string) && folded[index + 1] === "plugins") return CLAUDE_PLUGINS_FOLDER_ENTRY;
+    // `.git/worktrees` and `.git/worktrees/<name>` hold a `config.worktree`.
+    if (folded[index] === ".git" && folded[index + 1] === "worktrees" && index + 3 >= folded.length) return GIT_CONFIG_ENTRY;
   }
   for (const dir of configDirs) {
     const anchor = segmentsOf(dir);

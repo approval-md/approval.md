@@ -131,9 +131,9 @@ test("S1 hook: a pattern is expanded on disk and each match walked; one it canno
   writeFileSync(join(repo, "a.log"), "");
   mkdirSync(join(repo, "src"));
   writeFileSync(join(repo, "src", "a.ts"), "");
-  assert.deepEqual(hook("echo x >> l*k/config", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("echo x >> {li,x}nk/config", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("cd l?nk && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(hook("echo x >> l*k/config", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("echo x >> {li,x}nk/config", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("cd l?nk && echo x >> config", repo), [READ_SHELL, DIR_WRITE, LISTED]);
   assert.deepEqual(hook("cp /tmp/x lin[k]/hooks/pre-push", repo), [DIR_WRITE, LISTED]);
   // Ordinary lines in the same checkout do not move.
   assert.deepEqual(hook("rm *.log", repo), ["files.delete.out_of_scope rm-unreadable-path"]);
@@ -166,16 +166,16 @@ test("S1 review: a directory listing is read whole; thousands of matches do not 
   assert.deepEqual(hook("cp seed.txt logs/*.log", repo), ["files.write.workspace workspace-write"]);
   // Among them, one link into .git is still found.
   symlinkSync("../.git/config", join(logs, "zz.log"));
-  assert.deepEqual(hook("cp seed.txt logs/*.log", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cp seed.txt logs/*.log", repo), [DIR_WRITE, LISTED]);
 });
 
 test("S1 review: an entry whose own name holds a glob character is a real match", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "a*b"));
-  assert.deepEqual(hook("cd a*b && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(hook("cd a*b && echo x >> config", repo), [READ_SHELL, DIR_WRITE, LISTED]);
   // Matched by another pattern, so only the real listing names it.
-  assert.deepEqual(hook("cd a?b && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
-  assert.deepEqual(hook("echo x >> a*b/config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cd a?b && echo x >> config", repo), [READ_SHELL, DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("echo x >> a*b/config", repo), [DIR_WRITE, LISTED]);
   // A pattern that matches nothing, under a listing that is not empty, is
   // never "no target and nothing unknown": the hook says it cannot place it.
   const { notes } = classifyForHook("cd q*z && echo x > f", [], repo);
@@ -312,7 +312,7 @@ test("S2 hook: a git output option is walked on disk like any other write", { sk
   const repo = checkout();
   symlinkSync(".git", join(repo, "g"));
   assert.deepEqual(hook("git diff --output=g/hooks/pre-push", repo), [DIR_WRITE, LISTED]);
-  assert.deepEqual(hook("git log -1 --output g/config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("git log -1 --output g/config", repo), [DIR_WRITE, LISTED]);
   assert.deepEqual(hook("git diff --output=out.diff", repo), ["read.shell git-read"]);
 });
 
@@ -357,7 +357,7 @@ test("N1: a link to another checkout's .GIT is a git directory (APFS folds case)
   const other = checkout(at, "other");
   if (!existsSync(join(other, ".GIT"))) return; // a case-sensitive file system: nothing to fold
   symlinkSync("../other/.GIT", join(repo, "o"));
-  assert.deepEqual(hook("echo x >> o/config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("echo x >> o/config", repo), [DIR_WRITE, LISTED]);
 });
 
 test("N1: a git directory named in another case is the git directory", { skip }, () => {

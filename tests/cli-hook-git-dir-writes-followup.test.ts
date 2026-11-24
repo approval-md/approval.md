@@ -67,6 +67,7 @@ function hook(command: string, cwd: string): string[] {
 
 const DIR_WRITE = "vcs.history.rewrite git-dir-write";
 /** Design v4, decision B: a write target the hook cannot resolve is also files.write.guarded. */
+const LISTED = "files.write.guarded write-guarded";
 const UNREADABLE = "files.write.guarded write-unreadable";
 const READ_SHELL = "read.shell read-shell";
 
@@ -115,8 +116,8 @@ test("A hook: the disk pass agrees, a read's own words are no write targets", { 
   symlinkSync(".git", join(repo, "g"));
   assert.deepEqual(hook("cat .git/HEAD > list.txt", repo), ["files.write.workspace redirect-write"]);
   assert.deepEqual(hook("cat g/HEAD > list.txt", repo), ["files.write.workspace redirect-write"]);
-  assert.deepEqual(hook("cat x > g/config", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("cp g/config /tmp/c", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cat x > g/config", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("cp g/config /tmp/c", repo), [DIR_WRITE, LISTED]);
 });
 
 // ---------------------------------------------------------------------------
@@ -188,11 +189,11 @@ test("B review: a sed script is not parsed; with a w or W, its words and the res
 test("B review hook: a sed write through a link to .git, a name with blanks kept whole", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "l"));
-  assert.deepEqual(hook('sed -n "w l/config" x', repo), [DIR_WRITE]);
+  assert.deepEqual(hook('sed -n "w l/config" x', repo), [DIR_WRITE, LISTED]);
   assert.deepEqual(hook('sed -n "w l/my config" x', repo), [DIR_WRITE]);
   mkdirSync(join(repo, "my dir"));
   symlinkSync("../.git", join(repo, "my dir", "g"));
-  assert.deepEqual(hook('sed -n "w my dir/g/config" x', repo), [DIR_WRITE]);
+  assert.deepEqual(hook('sed -n "w my dir/g/config" x', repo), [DIR_WRITE, LISTED]);
   assert.deepEqual(hook('sed -n "w out.txt" x', repo), ["read.shell sed-read"]);
 });
 
@@ -202,8 +203,8 @@ test("B review: a sed name is judged both as literal text and as a shell word; e
   // `.gi?` as a shell pattern names .git: the strict answer, kept.
   assert.deepEqual(pure("sed -n 'w .gi?/config' x"), [DIR_WRITE]);
   const repo = checkout();
-  assert.deepEqual(hook("sed -n -e w.g{i,}t/config x", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("sed -n 'w .gi?/config' x", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("sed -n -e w.g{i,}t/config x", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("sed -n 'w .gi?/config' x", repo), [DIR_WRITE, LISTED]);
   // As literal text: a directory literally named `l$x`, linked to .git.
   symlinkSync(".git", join(repo, "l$x"));
   // Design v4: the sed name `l$x/config` is also read as a shell word whose
@@ -217,7 +218,7 @@ test("B review: a sed name is judged both as literal text and as a shell word; e
   assert.deepEqual(hook("sed -n 'w l*k/x' f > l*k/x", repo), [DIR_WRITE]);
   // The sed name as a shell word is expanded on disk too: only the hook sees this.
   assert.deepEqual(pure("sed -n 'w l*k/config' x"), ["read.shell sed-read"]);
-  assert.deepEqual(hook("sed -n 'w l*k/config' x", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("sed -n 'w l*k/config' x", repo), [DIR_WRITE, LISTED]);
   // Only the literal reading sees a directory literally named `{a,b}` ...
   symlinkSync(".git", join(repo, "{a,b}"));
   assert.deepEqual(hook("sed -n 'w {a,b}/config' x", repo), [DIR_WRITE]);
@@ -225,7 +226,7 @@ test("B review: a sed name is judged both as literal text and as a shell word; e
   assert.deepEqual(pure("cd .git && sed -n 'wco$nfig' x"), [READ_SHELL, DIR_WRITE]);
   // Only the script's words (rule 3b) see `l/config` in `w out;l/config`.
   symlinkSync(".git", join(repo, "l"));
-  assert.deepEqual(hook('sed -n "w out;l/config" x', repo), [DIR_WRITE]);
+  assert.deepEqual(hook('sed -n "w out;l/config" x', repo), [DIR_WRITE, LISTED]);
   // The shell still expands `$D` inside double quotes before sed sees it (S3).
   assert.deepEqual(pure('D=.git; sed -n "w $D/config" x'), ["read.shell assignment", DIR_WRITE]);
 });
@@ -250,7 +251,7 @@ test("B review: ordinary sed lines do not move, pure and in a plain checkout", {
 test("review: wget's long output options are read by any prefix, on disk too", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "g"));
-  assert.deepEqual(hook("wget --output-doc=g/config https://example.invalid/x", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("wget --output-doc=g/config https://example.invalid/x", repo), [DIR_WRITE, LISTED]);
   assert.deepEqual(hook("wget --output-f g/log https://example.invalid/x", repo), [DIR_WRITE]);
   assert.ok(!hook("wget --output-doc=out.html https://example.invalid/x", repo).includes(DIR_WRITE));
   // An abbreviated output option is a SURE target: one under a directory
@@ -270,9 +271,9 @@ test("review: wget's long output options are read by any prefix, on disk too", {
 test("B hook: a read's output word is walked on disk", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "g"));
-  assert.deepEqual(hook("sort x -o g/config", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("uniq a g/config", repo), [DIR_WRITE]);
-  assert.deepEqual(hook('sed -n "w g/config" x', repo), [DIR_WRITE]);
+  assert.deepEqual(hook("sort x -o g/config", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("uniq a g/config", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook('sed -n "w g/config" x', repo), [DIR_WRITE, LISTED]);
   assert.deepEqual(hook("sort -o out.txt in.txt", repo), [READ_SHELL]);
   assert.deepEqual(hook('sed -n "/word/p" g/config', repo), ["read.shell sed-read"]);
 });

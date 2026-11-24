@@ -117,7 +117,6 @@ test("near misses of the list are not guarded", () => {
     "/Users",
     "/private/tmp/x",
     "/work/repo/hooks/x",
-    "/work/repo/.git/config",
   ]) {
     assert.equal(guardedEntryOf(path, HOMES), null, path);
   }
@@ -402,4 +401,65 @@ test("S2.1: a tree written at a config folder, at its plugins, or above the vari
   for (const path of [`${HOME}/.claude-x/projects`, `${HOME}/.claude-`, "/opt/cc/projects/p", "/opt/ccx", "/work/repo/plugins/p"]) {
     assert.equal(guardedEntryBelow(path, HOMES, CONFIG_DIRS), null, path);
   }
+});
+
+// ---------------------------------------------------------------------------
+// S2, part 3: the list gaps (lead, N3)
+// ---------------------------------------------------------------------------
+
+test("S2.3: npm's config, the login and logout files, user services, pyenv shims and cargo's bin are guarded; near misses are not", () => {
+  const cases: Array<[path: string, entry: string]> = [
+    [`${HOME}/.npmrc`, "~/.npmrc"],
+    [`${HOME}/.NPMRC`, "~/.npmrc"],
+    [`${HOME}/.zlogout`, "~/.zlogout"],
+    [`${HOME}/.bash_login`, "~/.bash_login"],
+    [`${HOME}/.bash_logout`, "~/.bash_logout"],
+    [`${HOME}/.config/systemd/user/x.service`, "~/.config/systemd/user"],
+    [`${HOME}/.config/systemd/user`, "~/.config/systemd/user"],
+    [`${HOME}/.pyenv/shims/python`, "~/.pyenv/shims"],
+    [`${HOME}/.cargo/bin/rg`, "~/.cargo/bin"],
+    ["/private/var/tester-real/.cargo/bin/x", "~/.cargo/bin"],
+  ];
+  for (const [path, entry] of cases) assert.equal(guardedEntryOf(path, HOMES), entry, path);
+  for (const path of [
+    `${HOME}/.npmrc.bak`,
+    `${HOME}/dev/repo/.npmrc`,
+    `${HOME}/.zlogoutx`,
+    `${HOME}/.config/systemd/system/x`,
+    `${HOME}/.config/systemd/userx`,
+    `${HOME}/.pyenv/versions/3.12/bin/python`,
+    `${HOME}/.cargo/registry/x`,
+    `${HOME}/.cargo/binx`,
+  ]) {
+    assert.equal(guardedEntryOf(path, HOMES), null, path);
+  }
+  // A tree written at ~/.config/systemd holds the user services.
+  assert.equal(guardedEntryBelow(`${HOME}/.config/systemd`, HOMES), "~/.config/systemd/user");
+});
+
+test("S2.3: .git/config and config.worktree are guarded anywhere, as the hooks pair is; near misses are not", () => {
+  for (const path of [
+    "/work/repo/.git/config",
+    "/work/repo/.git/config.worktree",
+    "/work/repo/.GIT/Config",
+    "/work/repo/.git/worktrees/lane/config.worktree",
+    `${HOME}/.git/config`,
+  ]) {
+    assert.equal(guardedEntryOf(path, HOMES), "a git config file", path);
+  }
+  for (const path of [
+    "/work/repo/.git/configs",
+    "/work/repo/.gitx/config",
+    "/work/repo/.git/config/x",
+    "/work/repo/.git/info/config",
+    "/work/repo/.git/worktrees/lane/config",
+    "/work/repo/.git/worktrees/lane/sub/config.worktree",
+    "/work/repo/config",
+    "/work/repo/.git/modules/m/config",
+  ]) {
+    assert.equal(guardedEntryOf(path, HOMES), null, path);
+  }
+  assert.equal(guardedEntryBelow("/work/repo/.git/worktrees", HOMES), "a git config file");
+  assert.equal(guardedEntryBelow("/work/repo/.git/worktrees/lane", HOMES), "a git config file");
+  assert.equal(guardedEntryBelow("/work/repo/.git/worktrees/lane/logs", HOMES), null);
 });

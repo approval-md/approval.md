@@ -196,7 +196,7 @@ test("S1 hook: a hook whose own directory is inside .git makes every relative wr
   const repo = checkout();
   const hooks = join(repo, ".git", "hooks");
   assert.deepEqual(hook("cp /tmp/x pre-push", hooks), [DIR_WRITE, LISTED]);
-  assert.deepEqual(hook("echo x > config", join(repo, ".git")), ["vcs.history.rewrite git-dir-write"]);
+  assert.deepEqual(hook("echo x > config", join(repo, ".git")), ["vcs.history.rewrite git-dir-write", LISTED]);
   assert.deepEqual(hook("cd .. && printf x >> config", hooks), ["read.shell read-shell", DIR_WRITE, LISTED]);
 });
 
@@ -208,7 +208,7 @@ test("S1 hook: the disk pass adds its class beside the segment's own, so later p
   if (!result.ok) return;
   assert.deepEqual(
     result.segments.map((segment) => `${segment.class} ${segment.rule}`),
-    ["files.write.workspace redirect-write", DIR_WRITE],
+    ["files.write.workspace redirect-write", DIR_WRITE, LISTED],
   );
   // From a hook directory inside .git, the segment keeps its own class beside the added one.
   const deleted = classifyForHook("rm -rf old", [], join(repo, ".git", "hooks")).result;
@@ -224,11 +224,11 @@ test("S1 hook: a symlink to .git that exists beforehand is followed", { skip }, 
   const repo = checkout();
   symlinkSync(".git", join(repo, "g"));
   assert.deepEqual(pure("echo x >> g/config"), ["files.write.workspace redirect-write"]);
-  assert.deepEqual(hook("echo x >> g/config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("echo x >> g/config", repo), [DIR_WRITE, LISTED]);
   assert.deepEqual(hook("cp /tmp/x g/hooks/pre-push", repo), [DIR_WRITE, LISTED]);
-  assert.deepEqual(hook("cd ./g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
+  assert.deepEqual(hook("cd ./g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE, LISTED]);
   // A bare name is tried from the hook's directory (and each CDPATH entry), so it is followed too.
-  assert.deepEqual(hook("cd g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
+  assert.deepEqual(hook("cd g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE, LISTED]);
 });
 
 test("S1 hook: a separate git directory and a linked worktree's git directory are git directories", { skip }, () => {
@@ -244,7 +244,7 @@ test("S1 hook: a separate git directory and a linked worktree's git directory ar
   const main = checkout();
   git(main, "worktree", "add", "-q", "--detach", "../wt");
   const wt = join(main, "..", "wt");
-  assert.deepEqual(hook(`printf x >> ${join(main, ".git", "worktrees", "wt", "config.worktree")}`, wt), [DIR_WRITE]);
+  assert.deepEqual(hook(`printf x >> ${join(main, ".git", "worktrees", "wt", "config.worktree")}`, wt), [DIR_WRITE, LISTED]);
 });
 
 test("S2 hook: every tail of an option cluster is a candidate, a bare name included", { skip }, () => {
@@ -318,7 +318,7 @@ test("S1 hook: a possible target that cannot be placed falls back to its text, a
     // which the classifier cannot know, or has a `.git` segment.
     assert.deepEqual(pure("wget --header=locked/x/../../../store/config https://example.invalid/x"), ["read.web web-read"]);
     assert.deepEqual(hook("wget --header=locked/x/../../../store/config https://example.invalid/x", repo), [DIR_WRITE]);
-    assert.deepEqual(hook("wget --header=locked/x/../../.git/config https://example.invalid/x", repo), [DIR_WRITE]);
+    assert.deepEqual(hook("wget --header=locked/x/../../.git/config https://example.invalid/x", repo), [DIR_WRITE, LISTED]);
     // By its text elsewhere: no move.
     assert.deepEqual(hook("wget --header=locked/x/../../notes https://example.invalid/x", repo), ["read.web web-read"]);
   } finally {
@@ -366,7 +366,7 @@ test("review 2: a bare-name cd is followed from the hook's directory and each CD
     if (saved === undefined) delete process.env["CDPATH"];
     else process.env["CDPATH"] = saved;
   }
-  assert.deepEqual(hook("cd -L .git && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
+  assert.deepEqual(hook("cd -L .git && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE, LISTED]);
   // Known limit: a target the text cannot give adds no directory, and the
   // write is judged from the others (the write-scope pass ignores every cd).
   assert.deepEqual(hook('cd "$D" && echo x >> config', repo), ["read.shell read-shell", "files.write.workspace redirect-write", UNREADABLE]);
@@ -378,8 +378,8 @@ test("review 3: `..` after a symlink is applied to the physical directory, as th
   symlinkSync(".git/hooks", join(repo, "l"));
   // Textually `l/../config` is `config`; physically it is `.git/config`.
   assert.deepEqual(pure("echo x >> l/../config"), ["files.write.workspace redirect-write"]);
-  assert.deepEqual(hook("echo x >> l/../config", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("cd l/.. && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
+  assert.deepEqual(hook("echo x >> l/../config", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("cd l/.. && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE, LISTED]);
   // And the other way: textually inside .git, physically not.
   mkdirSync(join(repo, "real"));
   symlinkSync(join(repo, "real"), join(repo, ".git", "out"));
@@ -409,14 +409,16 @@ test("round 2, (1): a certain cd is judged at both landings, the logical one (cd
   mkdirSync(deep, { recursive: true });
   symlinkSync(deep, join(repo, "x"));
   // Logically `x/../g` is `g`, which is .git; physically it is other/g, which is nothing.
-  assert.deepEqual(hook("cd x/../g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
-  assert.deepEqual(hook("cd -L x/../g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
+  assert.deepEqual(hook("cd x/../g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("cd -L x/../g && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE, LISTED]);
   const physical = hookWithNotes("cd -P x/../g && echo x >> config", repo);
-  assert.deepEqual(physical.classes, ["read.shell read-shell", "files.write.workspace redirect-write"]);
-  assert.equal(physical.notes.length, 0, "-P is a certain form");
+  // S2 (N3): the logical landing of the write is .git/config, which the write
+  // pass guards beside; the git-directory pass adds nothing for -P.
+  assert.deepEqual(physical.classes, ["read.shell read-shell", "files.write.workspace redirect-write", LISTED]);
+  assert.equal(physical.notes.filter((note) => !note.startsWith("write-guarded:")).length, 0, "-P is a certain form");
   // And the physical landing alone: l -> .git/hooks, so `l/..` is physically .git.
   symlinkSync(".git/hooks", join(repo, "l"));
-  assert.deepEqual(hook("cd l/.. && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE]);
+  assert.deepEqual(hook("cd l/.. && echo x >> config", repo), ["read.shell read-shell", DIR_WRITE, LISTED]);
 });
 
 test("round 2, (2): after a segment that may change HOME, CDPATH, OLDPWD or PWD, a bare-name or no-argument cd cannot be placed", { skip }, () => {

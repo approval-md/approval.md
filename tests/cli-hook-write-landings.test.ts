@@ -1575,3 +1575,64 @@ test("S2.2 fold through the real hook: CLAUDE_PROJECT_DIR's settings, a relative
   assert.equal(run("Bash", { command: `rm -rf ${join(project, "scripts")}` }, project).permission, "deny");
   assert.equal(run("Bash", { command: `mv ${project} ${project}-old` }, project).permission, "deny");
 });
+
+// ---------------------------------------------------------------------------
+// S2, part 3: the list gaps (lead, N3)
+// ---------------------------------------------------------------------------
+
+test("S2.3 Bash: npm's config, login files, user services, shims, cargo's bin and .git/config are guarded; main's own class stays", () => {
+  const repo = join(base, "s2-repo");
+  mkdirSync(join(repo, ".git", "worktrees", "lane"), { recursive: true });
+  mkdirSync(join(repo, ".gitx"), { recursive: true });
+  for (const command of [
+    "echo '//registry/:_authToken=x' >> ~/.npmrc",
+    "echo x > ~/.NPMRC",
+    "echo x >> ~/.zlogout",
+    "echo x >> ~/.bash_login",
+    "echo x >> ~/.bash_logout",
+    "cp a ~/.config/systemd/user/x.service",
+    "echo x > ~/.pyenv/shims/python",
+    "cp a ~/.cargo/bin/rg",
+    "echo x > .git/config",
+    "echo x >> .git/config.worktree",
+    "echo x > .GIT/Config",
+    "echo x > .git/worktrees/lane/config.worktree",
+  ]) {
+    const seen = see(command, WRITE_SCOPE_OFF, repo);
+    assert.equal(seen.ok, true, command);
+    assert.ok(seen.classes.includes(GUARDED), `${command}: ${JSON.stringify(seen.segments)}`);
+  }
+  // Main's git-dir pass answers vcs.history.rewrite for .git/config: kept, the guarded entry beside it.
+  const config = see("echo x > .git/config", WRITE_SCOPE_OFF, repo);
+  assert.equal(config.segments[0]?.[0], "vcs.history.rewrite", JSON.stringify(config.segments));
+  for (const command of [
+    "echo x > ~/.npmrc.bak",
+    "echo x > .npmrc",
+    "echo x > ~/.config/systemd/system.conf",
+    "echo x > ~/.pyenv/version",
+    "echo x > ~/.cargo/config.toml",
+    "echo x > .git/configs",
+    "echo x > .gitx/config",
+    "echo x > config",
+  ]) {
+    const seen = see(command, WRITE_SCOPE_OFF, repo);
+    assert.ok(!seen.classes.includes(GUARDED), `${command}: ${seen.notes}`);
+  }
+});
+
+test("S2.3 through the real hook: the file tools onto the new entries are denied; a file beside them is allowed", () => {
+  const dir = gate([`  ${GUARDED}: { autonomy: human-only }`, "  files.*: { autonomy: autonomous }"]);
+  mkdirSync(join(dir, ".git"), { recursive: true });
+  for (const [tool, input] of FILE_TOOLS) {
+    for (const path of [join(home, ".npmrc"), join(home, ".bash_logout"), join(home, ".cargo", "bin", "rg"), join(dir, ".git", "config")]) {
+      const seen = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event(tool, input(path))));
+      assert.equal(seen.permission, "deny", `${tool} ${path}: ${seen.reason}`);
+    }
+    for (const path of [join(home, ".npmrc.bak"), join(dir, ".gitx-config")]) {
+      const seen = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event(tool, input(path))));
+      assert.equal(seen.permission, "allow", `${tool} ${path}: ${seen.reason}`);
+    }
+  }
+  const bash = verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], dir, event("Bash", { command: "echo x >> ~/.npmrc" })));
+  assert.equal(bash.permission, "deny", bash.reason);
+});
