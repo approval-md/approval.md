@@ -1669,16 +1669,23 @@ test("S2.2 fold parity: a move or delete whose word cannot be read, placed or tr
 // ---------------------------------------------------------------------------
 
 test("S2.4 Bash: an unquoted =name redirect or write target is unreadable; '=x', =, == and a=b are not that form", () => {
-  for (const command of ["echo x > =mytool", "echo x >> =node", "cp a =mytool", "tee =python3 < a", "touch =x.y", "echo x 2> =_t"]) {
+  // The seat ruled the form fails closed whatever follows the `=` (lab: zsh -f wrote bin/tool for =tool, ="tool" and =\tool).
+  for (const command of ["echo x > =mytool", "echo x >> =node", "cp a =mytool", "tee =python3 < a", "touch =x.y", "echo x 2> =_t", "echo x > =g++", "echo x > =my-tool", 'echo x > ="tool"', "echo x > =\\tool", "echo x > =$X", "echo x > ={a,b}", "cp a =-x"]) {
     const seen = see(command);
     assert.equal(seen.ok, true, command);
     assert.ok(seen.segments.some(([cls, rule]) => cls === GUARDED && rule === "write-unreadable"), `${command}: ${JSON.stringify(seen.segments)}`);
     assert.match(seen.notes, /equals expansion/u, command);
   }
-  for (const command of ["echo x > '=mytool'", 'echo x > "=mytool"', "echo x > \\=mytool", "echo x > =", "echo x > ==", "echo x > a=b", "cp a b=c", "echo =mytool > out.txt"]) {
+  for (const command of ["echo x > '=mytool'", 'echo x > "=mytool"', "echo x > \\=mytool", "echo x > =", "echo x > ==", "echo x > ==x", "echo x > a=b", "cp a b=c", "echo =mytool > out.txt", "X='=tool'; echo x > $X"]) {
     const seen = see(command);
     assert.equal(seen.ok, true, command);
     assert.ok(!seen.classes.includes(GUARDED), `${command}: ${seen.notes}`);
+  }
+  // zsh equals-expands an unquoted `=` that opens an assignment's value (or follows a `:` in it), so the
+  // variable holds the program's path (lab: X==tool; echo x > $X wrote bin/tool): not read.
+  for (const command of ["X==tool; echo x > $X", "X=a:=tool; echo x > $X"]) {
+    const seen = see(command);
+    assert.ok(seen.segments.some(([cls, rule]) => cls === GUARDED && rule === "write-unreadable"), `${command}: ${JSON.stringify(seen.segments)}`);
   }
 });
 

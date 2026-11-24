@@ -1849,12 +1849,20 @@ interface LexWord {
    */
   assignment: boolean;
   /**
-   * Does the word open with an UNQUOTED `=` followed by a name character
-   * (`=mytool`)? zsh's equals expansion turns it into the path of that
-   * program on PATH unless `NO_EQUALS` is set (S2, N1). Read by the hook's
-   * write pass alone; no rule here reads it.
+   * Does the word open with an unquoted, unescaped `=` followed by anything
+   * but another `=` (`=mytool`, `=g++`, `="tool"`, `=$X`)? zsh's equals
+   * expansion turns it into the path of a program on PATH unless `NO_EQUALS`
+   * is set (S2, N1; the seat ruled the form fails closed whatever follows).
+   * Read by the hook's write pass alone; no rule here reads it.
    */
   equalsHead?: boolean;
+  /**
+   * An assignment whose value zsh equals-expands when it assigns: an
+   * unquoted `=` opening the value or following a `:` in it (`X==tool`,
+   * `P=a:=tool`). zsh stores the program's path, not the text. Read by the
+   * hook's write pass alone.
+   */
+  assignmentEquals?: boolean;
 }
 
 interface LexRedirect {
@@ -2113,8 +2121,20 @@ function lex(command: string): LexResult {
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
     const assignment = ASSIGNMENT.test(command.slice(start, index));
-    const equalsHead = command[start] === "=" && /^[A-Za-z0-9_.]$/u.test(command[start + 1] ?? "");
-    return { text, quoted, substitutions, splits, expands, exact, assignment, ...(equalsHead ? { equalsHead } : {}) };
+    const raw = command.slice(start, index);
+    const equalsHead = raw.length > 1 && raw[0] === "=" && raw[1] !== "=";
+    const assignmentEquals = assignment && /^[^=]*=(?:=[^=]|.*:=[^=])/su.test(raw);
+    return {
+      text,
+      quoted,
+      substitutions,
+      splits,
+      expands,
+      exact,
+      assignment,
+      ...(equalsHead ? { equalsHead } : {}),
+      ...(assignmentEquals ? { assignmentEquals } : {}),
+    };
   };
 
   while (index < command.length) {
@@ -10557,6 +10577,8 @@ export interface CommandSegmentShape {
    * their text: the hook's write pass cannot read where they land.
    */
   equalsWords?: string[];
+  /** The `NAME=value` words before the binary whose value zsh equals-expands as it assigns (S2, N1). */
+  equalsAssignments?: string[];
 }
 
 export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
@@ -10597,6 +10619,7 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
         ...segment.redirects.filter((redirect) => redirect.target.equalsHead === true).map((redirect) => redirect.target.text),
         ...segment.words.slice(cursor + 1).filter((word) => word.equalsHead === true).map((word) => word.text),
       ],
+      equalsAssignments: segment.words.slice(0, cursor).filter((word) => word.assignmentEquals === true).map((word) => word.text),
     };
   });
 }

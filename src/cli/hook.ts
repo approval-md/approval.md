@@ -4338,6 +4338,19 @@ interface LineVariable {
   tainted: boolean;
 }
 
+/**
+ * Why a target word is zsh's equals expansion (S2, N1), or `null`: an
+ * unquoted, unescaped `=` opening it and anything but `=` after it, which zsh
+ * replaces by the path of a program on PATH (unless `NO_EQUALS`). The ONE
+ * check, read wherever this pass places a word. A spelling that only begins
+ * with `=` after a variable is resolved is not this form: zsh does not
+ * equals-expand the result of a parameter expansion (read in a lab).
+ */
+function equalsExpansionOf(shape: CommandSegmentShape | undefined, word: string): string | null {
+  if (!word.startsWith("=") || !(shape?.equalsWords?.includes(word) ?? false)) return null;
+  return `${word} is zsh's equals expansion, the path of a program found on PATH, which this hook does not read`;
+}
+
 /** The variables a line's own words assign, and how far each may be trusted. */
 function lineVariables(shapes: readonly CommandSegmentShape[]): Map<string, LineVariable> {
   const vars = new Map<string, LineVariable>();
@@ -4349,7 +4362,8 @@ function lineVariables(shapes: readonly CommandSegmentShape[]): Map<string, Line
     for (const assignment of shape.assignments) {
       const equals = assignment.indexOf("=");
       const name = assignment.slice(0, equals).replace(/\+$/u, "").replace(/\[.*$/su, "");
-      if (shape.bin !== null || shape.conditional || assignment.slice(0, equals).endsWith("+") || vars.has(name)) {
+      // An assignment zsh equals-expands (`X==tool`) holds a program's path, not its text (S2, N1).
+      if (shape.bin !== null || shape.conditional || assignment.slice(0, equals).endsWith("+") || vars.has(name) || (shape.equalsAssignments?.includes(assignment) ?? false)) {
         taint(name);
         continue;
       }
@@ -5165,9 +5179,8 @@ export function refineWriteLandings(
     if (word.length === 0) return { kind: "in" };
     // S2 (N1): zsh reads an unquoted `=name` as the path of the program
     // `name` on PATH (unless NO_EQUALS is set): where it lands is not read.
-    if (word.startsWith("=") && (shapes[at]?.equalsWords?.includes(word) ?? false)) {
-      return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: `${word} is zsh's equals expansion, the path of a program found on PATH, which this hook does not read` };
-    }
+    const equals = equalsExpansionOf(shapes[at], word);
+    if (equals !== null) return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: equals };
     const resolved = resolveWriteWord(word, at, line);
     if ("unreadable" in resolved) {
       return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: resolved.unreadable };
@@ -5205,7 +5218,8 @@ export function refineWriteLandings(
 
   /** A move or delete at (or above) a named hook script, as a guarded landing, or `null` (S2). */
   const hookScriptMovedOrRemoved = (word: string, at: number): (WriteLanding & { kind: "guarded" }) | null => {
-    if (word.length === 0) return null;
+    // A word this pass cannot place keeps the answer it had (parity ruling).
+    if (word.length === 0 || equalsExpansionOf(shapes[at], word) !== null) return null;
     const resolved = resolveWriteWord(word, at, line);
     if ("unreadable" in resolved) return null;
     const spelled = spellingsOf({ spellings: resolved.spellings.map(staticPrefix) });
