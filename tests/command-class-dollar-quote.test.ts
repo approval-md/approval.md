@@ -71,6 +71,10 @@ test("the brief's table: each dollar-quoted line answers as its plain spelling, 
     ["cat $'.approval/\\x65nv'", "cat .approval/env"],
     ["echo x > .github/workflows/$'\\x63i.yml'", "echo x > .github/workflows/ci.yml"],
     ["echo x > .git/hooks/$'\\x70re-push'", "echo x > .git/hooks/pre-push"],
+    // Main's reading beside is main's answer: there `$'env'` is the parameter `$env`,
+    // and no spliced-word reading (lead ruling L62568) is made of it.
+    ["echo x > .approval/$'env'", "echo x > .approval/env"],
+    ["echo x > $'SP'EC.md", "echo x > SPEC.md"],
   ];
   for (const [command, plain] of rows) {
     assert.deepEqual(classesOf(command), asPlain(command, plain), command);

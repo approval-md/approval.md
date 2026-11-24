@@ -9778,7 +9778,9 @@ function dotGlobNamesGitRule(word: string, inexact: (word: string) => boolean, g
  * raise.
  */
 function splicedNamesGit(word: string, inexact: (word: string) => boolean, glob: GlobReading): boolean {
-  if (mainRulesOnly || glob.off || !inexact(word)) return false;
+  // Off in main's passes: the seam's main rules, and the reading with dollar
+  // quotes kept as main kept them (there `$'env'` is the parameter `$env`).
+  if (mainRulesOnly || dollarQuotesKept || glob.off || !inexact(word)) return false;
   const read = unreadParts(word);
   if (read === null) return false;
   // Quoted glob characters are text, as in {@link splicedGuardClass}.
@@ -10881,7 +10883,8 @@ function splicedGuardClass(
   options: boolean,
   live: boolean,
 ): string | null {
-  if (mainRulesOnly) return null;
+  // Off in main's passes, as {@link splicedNamesGit} is.
+  if (mainRulesOnly || dollarQuotesKept) return null;
   const read = unreadParts(word);
   if (read === null) return null;
   if (read.parts > SPLICED_PARTS_CAP) return "log.mutate";
