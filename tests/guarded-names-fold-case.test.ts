@@ -303,7 +303,8 @@ test("a spelling's answer, pinned: the folded class first, then the class main g
   // Codex's case 1: as spelled, `LOG` is not `log` and `.approval` is the
   // approval home, so main says `policy.core`; folded it is the log. Both.
   assert.deepEqual(pure("echo x > .approval/LOG/x"), ["log.mutate redirect-protected", WRITE_CORE]);
-  assert.deepEqual(pure(`cp x .approval/key${LONG_S}/k1`), ["account.credential credential-path", "policy.core protected-path"]);
+  // A copy INTO a credential path writes it (CLAIMS L62502): the write's class first, the credential beside it.
+  assert.deepEqual(pure(`cp x .approval/key${LONG_S}/k1`), ["policy.core protected-path", "account.credential credential-path"]);
   assert.deepEqual(pure(`git push origin ma${LONG_S}ter`), ["vcs.push.main git-push-main", "vcs.push.branch git-push-branch"]);
   assert.deepEqual(pure(`git push origin lane:refs/head${LONG_S}/main`)[0], "vcs.push.main git-push-main");
   // A canonical spelling, or one main already folded, stays one entry.
@@ -1340,7 +1341,6 @@ const CRED = "account.credential credential-path";
 const CREDENTIAL_BESIDE: readonly (readonly [string, readonly string[], readonly string[]])[] = [
   ["cp .approval/env .github/workflows/ci.yml", [CRED], ["policy.edit.ci protected-path"]],
   // A copy is direction-blind: either order names the workflow.
-  ["cp .github/workflows/ci.yml .approval/env", [CRED], ["policy.edit.ci protected-path"]],
   ["cp -t .github/workflows/ .approval/env", [CRED], ["policy.edit.ci protected-path"]],
   // The redirect form of the credential read.
   ["tee .github/workflows/ci.yml < .approval/env", [CRED], ["policy.edit.ci protected-path"]],
@@ -1392,9 +1392,9 @@ test("a credential read with no protected write target, or one that outranks it,
     // No protected target at all.
     ["cp .approval/env notes.txt", [CRED]],
     ["cp ~/.hermes/.env notes.txt", [CRED]],
-    // The credential word is the read: never reported as a write of the
-    // gate's directory, whichever position it takes.
-    ["cp notes.txt .approval/env", [CRED]],
+    // A copy's SOURCE credential word is the read, never a write of the
+    // gate's directory; in the destination it is a write (CLAIMS L62502, below).
+    ["cp .approval/env notes.txt", [CRED]],
     // A protected path that outranks the credential: deferred, as #690 pins.
     ["cp .approval/env APPROVAL.md design/x", ["policy.core protected-path", CRED, "policy.edit.design protected-path"]],
     // A write-only binary's credential word is a write to the gate's directory.
@@ -1495,6 +1495,268 @@ test("a credential read through a program with no rule: the other forms", () => 
   }
 });
 
+// A target the shell builds, behind a wrapper or a program with no rule
+// (build-1's S2 on #701, the lead's ruling CLAIMS L62362): "a target the shell
+// builds ($X, a glob, an option-glued path) fails closed as plain cp $X does
+// (policy.core, copy-target-unknown), with a test each". The same lines
+// without the credential word are refused; as spelled each answers what main
+// gave it, the credential class alone.
+const BUILT_TARGET_PROGRAMS = ["command cp", "nice cp", "ditto", "python3 x.py", "frobnicate"] as const;
+const UNKNOWN = "policy.core copy-target-unknown";
+
+/**
+ * One form of a target the shell builds, across {@link BUILT_TARGET_PROGRAMS}:
+ * the word, where it sits in the line, what the folded reading adds, and the
+ * literal control that stands in its place.
+ */
+function builtTarget(word: string, added: readonly string[], control = "notes.txt"): void {
+  for (const program of BUILT_TARGET_PROGRAMS) {
+    for (const line of [`${program} .approval/env ${word}`, `${program} ${word} .approval/env`]) {
+      assert.deepEqual(pure(line, TWO_ROUTES), [CRED, ...added], line);
+      // As spelled: main's answer, the credential class alone.
+      assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);
+    }
+    // The control: a literal ordinary word in its place is the credential
+    // class alone, as it was.
+    assert.deepEqual(pure(`${program} .approval/env ${control}`, TWO_ROUTES), [CRED], program);
+    // Without the credential word nobody can say what the line does: refused.
+    assert.deepEqual(pure(`${program} notes.txt ${word}`, TWO_ROUTES), ["refused unclassified"], program);
+  }
+}
+
+test("a credential read through a wrapper names an unknown target for a variable", () => {
+  builtTarget("$X", [UNKNOWN]);
+  // The word itself is the path, as `cp .approval/env $X` names it.
+  const classified = classifyCommand("command cp .approval/env $X", TWO_ROUTES);
+  assert.equal(classified.ok, true);
+  if (classified.ok) {
+    assert.deepEqual(classified.segments.map((segment) => segment.path), [".approval/env", "$X"]);
+    assert.deepEqual(classified.classes, ["account.credential", "policy.core"]);
+  }
+  // Double quotes still expand it; single quotes make it a literal.
+  builtTarget('"$X"', [UNKNOWN], "'$X'");
+  for (const program of BUILT_TARGET_PROGRAMS) {
+    assert.deepEqual(pure(`${program} .approval/env '$X'`, TWO_ROUTES), [CRED], program);
+  }
+  // Set in the line before: the shell still builds the word.
+  assert.deepEqual(pure("X=.github/workflows/ci.yml; command cp .approval/env $X", TWO_ROUTES), ["read.shell assignment", CRED, UNKNOWN]);
+});
+
+test("a credential read through a wrapper names an unknown target for a braced variable", () => {
+  builtTarget("${X}", [UNKNOWN]);
+  builtTarget("${X:-.github/workflows/ci.yml}", [UNKNOWN]);
+});
+
+test("a credential read through a wrapper names an unknown target for a command substitution", () => {
+  builtTarget('"$(echo .github/workflows/ci.yml)"', [UNKNOWN]);
+  builtTarget("$(echo .github/workflows/ci.yml)", [UNKNOWN]);
+});
+
+test("a credential read through a wrapper names an unknown target for a glob", () => {
+  builtTarget(".gith*/workflows/ci.yml", [UNKNOWN], ".github-notes/ci.yml");
+  builtTarget("*.md", [UNKNOWN], "notes.md");
+  // A quoted glob is a literal.
+  for (const program of BUILT_TARGET_PROGRAMS) {
+    assert.deepEqual(pure(`${program} .approval/env '*.md'`, TWO_ROUTES), [CRED], program);
+    assert.deepEqual(pure(`${program} .approval/env "*.md"`, TWO_ROUTES), [CRED], program);
+  }
+});
+
+test("a credential read through a wrapper names an unknown target for a brace expansion and a ~user", () => {
+  builtTarget("{a,b}.yml", [UNKNOWN], "a.yml");
+  builtTarget("~bob/x", [UNKNOWN], "bob/x");
+});
+
+test("a credential read through a wrapper reads the path attached to a short option", () => {
+  // Every tail after the option letter is read (`attachedOptionValues`), the
+  // credential reads among them left out.
+  builtTarget("-o.github/workflows/ci.yml", ["policy.edit.ci protected-path"], "-onotes.txt");
+  // A cluster with an attached value: its tail after the `o` is the path.
+  builtTarget("-xo.github/workflows/ci.yml", ["policy.edit.ci protected-path"], "-xonotes.txt");
+  builtTarget("-oCLAUDE.md", ["policy.edit protected-path"], "-oREADME.md");
+  for (const program of BUILT_TARGET_PROGRAMS) {
+    // A cluster of flag letters: its tails name nothing protected, so it adds nothing.
+    assert.deepEqual(pure(`${program} -rf .approval/env notes.txt`, TWO_ROUTES), [CRED], program);
+    // Letters that spell a protected name are read as that name: stricter, never looser.
+    assert.deepEqual(pure(`${program} -xdesign .approval/env notes.txt`, TWO_ROUTES), [CRED, "policy.edit.design protected-path"], program);
+    // A credential file attached to an option is the read, not a write.
+    assert.deepEqual(pure(`${program} -i.approval/env notes.txt`, TWO_ROUTES), [CRED], program);
+    assert.deepEqual(pure(`${program} -i.approval/env -o.github/workflows/ci.yml`, TWO_ROUTES), [CRED, "policy.edit.ci protected-path"], program);
+    // A long option's name is not a path.
+    assert.deepEqual(pure(`${program} --design .approval/env notes.txt`, TWO_ROUTES), [CRED], program);
+    // As spelled: main's answer.
+    for (const line of [`${program} -xo.github/workflows/ci.yml .approval/env`, `${program} -xdesign .approval/env notes.txt`]) {
+      assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);
+    }
+  }
+  // The path is the attached value, as the other protected words name theirs.
+  const classified = classifyCommand("frobnicate -o.github/workflows/ci.yml .approval/env", TWO_ROUTES);
+  assert.equal(classified.ok, true);
+  if (classified.ok) assert.deepEqual(classified.segments.map((segment) => segment.path), [".approval/env", ".github/workflows/ci.yml"]);
+});
+
+/** A `-o` option word of exactly `bytes` UTF-8 bytes: `a/` repeated, then `tail`. */
+function attachedWord(bytes: number, tail = ".github/workflows/ci.yml"): string {
+  const fill = bytes - 2 - tail.length;
+  const word = `-o${"a/".repeat(Math.floor(fill / 2))}${fill % 2 === 1 ? "b" : ""}${tail}`;
+  assert.equal(Buffer.byteLength(word), bytes);
+  return word;
+}
+
+test("an attached option word over 256 bytes behind a wrapper refuses the line", () => {
+  for (const program of BUILT_TARGET_PROGRAMS) {
+    // At 200 bytes, and at the bound itself, every tail is read: the workflow.
+    for (const bytes of [200, 256]) {
+      const line = `${program} .approval/env ${attachedWord(bytes)}`;
+      assert.deepEqual(pure(line, TWO_ROUTES), [CRED, "policy.edit.ci protected-path"], `${program} ${bytes}`);
+    }
+    // One byte past it, and at 300, whatever the word ends in: refused, as a
+    // short attached value that outranks the credential is (`-o.approval/log/x`).
+    for (const word of [attachedWord(257), attachedWord(300), attachedWord(300, ".approval/log/x"), attachedWord(300, "a/")]) {
+      for (const line of [`${program} .approval/env ${word}`, `${program} ${word} .approval/env`]) {
+        assert.deepEqual(pure(line, TWO_ROUTES), ["refused unclassified"], `${program} ${word.length}`);
+        // As spelled: main's answer.
+        assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], `${program} ${word.length}`);
+      }
+    }
+    assert.deepEqual(pure(`${program} .approval/env -o.approval/log/x`, TWO_ROUTES), ["refused unclassified"], program);
+  }
+  // The bound counts UTF-8 bytes, not code units: `-o` and 128 two-byte letters
+  // are 130 units and 258 bytes; with 127 letters, 256 bytes, the tails are read.
+  const wide = `-o${"é".repeat(128)}`;
+  assert.equal(Buffer.byteLength(wide), 258);
+  assert.deepEqual(pure(`frobnicate .approval/env ${wide}`, TWO_ROUTES), ["refused unclassified"]);
+  assert.deepEqual(pure(`frobnicate .approval/env -o${"é".repeat(127)}`, TWO_ROUTES), [CRED]);
+  // A long `--` option and a long positional are not attached options.
+  assert.deepEqual(pure(`frobnicate .approval/env --${"x".repeat(300)}`, TWO_ROUTES), [CRED]);
+  assert.deepEqual(pure(`frobnicate .approval/env ${"x".repeat(300)}`, TWO_ROUTES), [CRED]);
+  // Where the walk answers, the bound plays no part.
+  assert.deepEqual(pure(`cat .approval/env ${attachedWord(300)}`, TWO_ROUTES), [CRED]);
+});
+
+test("a long attached option word behind a wrapper costs about what the same word as an operand costs", () => {
+  // Every tail of an attached value is read, so the scan of one word is
+  // quadratic in it; past 256 bytes the word is not scanned tail by tail.
+  // 100 KB of `a/`, CPU time, each side the least of three runs.
+  const fill = "a/".repeat(50 * 1024);
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  const least = (run: () => void): number => Math.min(cpu(run), cpu(run), cpu(run));
+  const control = least(() => classifyCommand(`frobnicate .approval/env o${fill}`, TWO_ROUTES));
+  const spent = least(() => classifyCommand(`frobnicate .approval/env -o${fill}`, TWO_ROUTES));
+  assert.ok(spent <= 2 * control + 0.05, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
+  assert.ok(spent < 1, `${spent.toFixed(3)} s`);
+});
+
+test("an attached or = value that outranks the credential class leaves the line refused, as the same path as its own word does", () => {
+  for (const program of BUILT_TARGET_PROGRAMS) {
+    for (const path of ["APPROVAL.md", ".approval/log/x"]) {
+      // The path as its own word defers the credential, and the walk refuses.
+      const own = pure(`${program} .approval/env ${path}`, TWO_ROUTES);
+      assert.deepEqual(own, ["refused unclassified"], program);
+      // Attached to a short option, alone or in a cluster, or as an `=` value: the same.
+      for (const word of [`-o${path}`, `-xo${path}`, `--out=${path}`, `of=${path}`]) {
+        for (const line of [`${program} .approval/env ${word}`, `${program} ${word} .approval/env`]) {
+          assert.deepEqual(pure(line, TWO_ROUTES), own, line);
+          // As spelled: main's answer, the credential class alone.
+          assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);
+        }
+      }
+    }
+    assert.deepEqual(pure(`${program} -t.approval/log .approval/env`, TWO_ROUTES), ["refused unclassified"], program);
+  }
+});
+
+const ENV = "account.credential credential-env";
+
+test("only a literal credential path is left out as the read; every variable is a target the shell builds", () => {
+  for (const program of ["command cp", "frobnicate"]) {
+    for (const [words, want] of [
+      // Left out: a credential path literal (a leading `~/` is its home), alone
+      // or after a literal `key=` or `--opt=` prefix.
+      [".approval/env notes.txt", [CRED]],
+      ["~/.hermes/.env notes.txt", [CRED]],
+      ["--in=.approval/env notes.txt", [CRED]],
+      ["--in=~/.hermes/.env notes.txt", [CRED]],
+      ["if=~/.hermes/.env notes.txt", [CRED]],
+      // A secret-named variable is a word the shell builds, as plain `cp`
+      // counts it: the variable's credential rule answers first, then the
+      // unknown target. The name is the agent's to choose and to assign.
+      ["$APPROVAL_TG_TOKEN notes.txt", [ENV, UNKNOWN]],
+      ['"${APPROVAL_TG_TOKEN}" notes.txt', [ENV, UNKNOWN]],
+      ["--token=$APPROVAL_TG_TOKEN notes.txt", [ENV, UNKNOWN]],
+      ["--token $APPROVAL_TG_TOKEN", [ENV, UNKNOWN]],
+      ["$APPROVAL_TG_TOKEN-$X notes.txt", [ENV, UNKNOWN]],
+      ["{a,$APPROVAL_TG_TOKEN} notes.txt", [ENV, UNKNOWN]],
+      // A credential path with a variable, a glob or a brace in it is built too.
+      ["$HOME/.hermes/.env notes.txt", [CRED, UNKNOWN]],
+      ["--in=$HOME/.hermes/.env notes.txt", [CRED, UNKNOWN]],
+      ["--out=$X/.approval/env notes.txt", [CRED, UNKNOWN]],
+      [".approval/env --out=$X/.approval/env", [CRED, UNKNOWN]],
+      ["~/.hermes/.env ~/.hermes/.env*", [CRED, UNKNOWN]],
+      // A glob under the gate's directory is a policy.core path of its own:
+      // it outranks the credential and the line is refused.
+      [".approval/env .approval/env*", ["refused unclassified"]],
+      // An attached option prefix is not a `key=` prefix: the word is built.
+      ["-i~/.hermes/.env notes.txt", [CRED, UNKNOWN]],
+    ] as const) {
+      const line = `${program} ${words}`;
+      assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    }
+  }
+  // A secret-looking name the line itself assigns a workflow path to.
+  assert.deepEqual(pure("X_TOKEN=.github/workflows/ci.yml; command cp .approval/env $X_TOKEN", TWO_ROUTES), [
+    "read.shell assignment",
+    CRED,
+    UNKNOWN,
+  ]);
+  // An `export` of that path is refused on its own (no rule), so the line is.
+  assert.deepEqual(pure("export X_TOKEN=.github/workflows/ci.yml; command cp .approval/env $X_TOKEN", TWO_ROUTES), ["refused unclassified"]);
+  // As spelled: main's answer, the credential rule alone.
+  for (const line of ["command cp $APPROVAL_TG_TOKEN notes.txt", "frobnicate --token $APPROVAL_TG_TOKEN"]) {
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [ENV], line);
+  }
+});
+
+test("a target the shell builds beside a credential read: the order, one entry per class, and what does not move", () => {
+  for (const [line, want] of [
+    // The credential class, then the classes the branch named before, then the new ones.
+    ["frobnicate .approval/env $X .github/workflows/ci.yml", [CRED, "policy.edit.ci protected-path", UNKNOWN]],
+    ["frobnicate -o.github/workflows/ci.yml --to=design/x .approval/env", [CRED, "policy.edit.design protected-path", "policy.edit.ci protected-path"]],
+    ["frobnicate -odesign/x .approval/env $X *.md", [CRED, "policy.edit.design protected-path", UNKNOWN]],
+    // One entry per class.
+    ["frobnicate .approval/env $X *.md CLAUDE.md", [CRED, "policy.edit protected-path", UNKNOWN]],
+    // A value that outranks the credential class: refused, as its own word is.
+    ["frobnicate --out=APPROVAL.md .approval/env $X", ["refused unclassified"]],
+    ["frobnicate -oAPPROVAL.md .approval/env $X", ["refused unclassified"]],
+    // A literal credential path is the read, not an unknown target.
+    ["command cp ~/.hermes/.env notes.txt", [CRED]],
+    ["frobnicate --in=.approval/env notes.txt", [CRED]],
+    // Where the rest of the walk answers, its answer stands.
+    ["cp .approval/env $X", [CRED, UNKNOWN]],
+    // (#686's glob reading of the copy's destination, as main answers it.)
+    ["cp .approval/env .gith*/workflows/ci.yml", [CRED, "policy.edit.ci protected-path", "policy.edit protected-path"]],
+    // Behind a wrapper the walk refuses, and the pattern is a target the
+    // shell builds: the unknown target, not the pattern read as written.
+    ["command cp .approval/env .gith*/workflows/ci.yml", [CRED, UNKNOWN]],
+    ["cat .approval/env $X", [CRED]],
+    ["base64 .approval/env *.md", [CRED]],
+    // No credential read, a refusal above the credential tier, a path that
+    // outranks the credential class: refused, as they were.
+    ["frobnicate notes.txt $X", ["refused unclassified"]],
+    ["command cp notes.txt -o.github/workflows/ci.yml", ["refused unclassified"]],
+    ["sudo cp .approval/env $X", ["refused opaque"]],
+    ["frobnicate .approval/env APPROVAL.md $X", ["refused unclassified"]],
+    ["frobnicate .approval/env .approval/log/x *.md", ["refused unclassified"]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+});
+
 /** `account.credential` unattended, the workflow folder a tap, design unattended. */
 const POLICY_CREDENTIAL_LIGHT = [
   ...POLICY_HEAD,
@@ -1551,6 +1813,21 @@ test("through the real hook, a wrapper in front of the copy does not take the wo
     const decision = decide(dir, bash(command));
     assert.equal(decision.permission, "allow", `${command}: ${decision.reason}`);
   }
+});
+
+test("through the real hook, a target the shell builds behind a wrapper is not run as a credential read alone", { skip }, () => {
+  const dir = attestedLab(POLICY_CREDENTIAL_LIGHT);
+  // `policy.core` is at this policy's default, manual: the wait for its tap
+  // times out. On main both ran as `account.credential`, autonomous here.
+  for (const command of ["command cp .approval/env $X", "frobnicate -o.github/workflows/ci.yml .approval/env"]) {
+    const decision = decide(dir, bash(command));
+    assert.equal(strictness(decision), 1, `${command}: ${decision.permission} ${decision.reason}`);
+    assert.doesNotMatch(decision.reason, /^autonomous/u, command);
+  }
+  // The same wrapper with a quoted literal target runs as the policy says a
+  // credential read does, as it did.
+  const control = decide(dir, bash("command cp .approval/env '$X'"));
+  assert.equal(control.permission, "allow", control.reason);
 });
 
 test("a credential read is walked once: it costs about what the same line with an ordinary file costs", (t) => {
@@ -1640,15 +1917,108 @@ test("beside a credential read, #686's write rules judge the other words: the cr
   }
 });
 
-test("beside a credential read, the read is not a place a copy lands: a copy into it names no class of the gate's directory", () => {
+// The eleven cells of CLAIMS L62502: build-1's N3 on #701 (the true-class
+// table's six short cells, L62493) and M1 on #682 (five). A credential path in
+// a copy's destination slot was read as the credential READ, so a line that
+// writes the gate's environment map, its vault or keys, or a Hermes
+// credential file answered `account.credential` alone and never the class a
+// write of that path takes. `[line, its control without the write]`.
+const CREDENTIAL_DESTINATION_CELLS: readonly (readonly [string, string])[] = [
+  ["cp ~/.hermes/.env .approval/env", "cp ~/.hermes/.env notes.txt"],
+  ["cp ~/.hermes/.env .approval/{env,zz}", "cp ~/.hermes/.env {notes,zz}.txt"],
+  ['cp ~/.hermes/.env ".approval/env"', 'cp ~/.hermes/.env "notes.txt"'],
+  ["cp .approval/env ~/.hermes/auth.json", "cp .approval/env notes.txt"],
+  ["cp .approval/env ~/.hermes/{auth.json,zz}", "cp .approval/env {notes,zz}.txt"],
+  ['cp .approval/env ~/".hermes/auth.json"', 'cp .approval/env ~/"notes.txt"'],
+  ["cp README.md .approval/env", "cp README.md notes.txt"],
+  ["cp README.md .approval/keys/k1", "cp README.md keys/k1"],
+  ["cp README.md .approval/vault.enc", "cp README.md vault.enc"],
+  ["cp README.md ~/.hermes/auth.json", "cp README.md ~/auth.json"],
+  ["cp README.md ~/.hermes/.env", "cp README.md ~/.env"],
+];
+
+test("a copy that writes a credential path reports the class that write takes (the eleven cells of CLAIMS L62502)", () => {
+  for (const [line, control] of CREDENTIAL_DESTINATION_CELLS) {
+    const got = pure(line, TWO_ROUTES);
+    // The write's class answers first (it outranks the credential class, as
+    // `cp .approval/env APPROVAL.md` does); the credential touch rides beside it.
+    assert.deepEqual(got, ["policy.core protected-path", CRED], line);
+    // As spelled: main's answer, the credential class alone.
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);
+    // The same copy without the credential destination: as it was.
+    const want = control.includes(".approval/env") || control.includes(".hermes/.env") ? [CRED] : ["files.write.workspace workspace-write"];
+    assert.deepEqual(pure(control, TWO_ROUTES), want, control);
+  }
+  // The other copy tools and spellings of M1.
+  for (const line of [
+    "cp -f README.md ~/.hermes/.env",
+    "rsync README.md ~/.hermes/auth.json",
+    "cp README.md ~/.hermes/hermes-agent/.env",
+    "cp README.md ~/.hermes/.env.local",
+  ]) {
+    assert.deepEqual(pure(line, TWO_ROUTES), ["policy.core protected-path", CRED], line);
+  }
+  // Each names the destination as the written path.
+  const classified = classifyCommand("cp ~/.hermes/.env .approval/env", TWO_ROUTES);
+  assert.equal(classified.ok, true);
+  if (classified.ok) {
+    assert.deepEqual(classified.segments.map((segment) => segment.path), [".approval/env", "~/.hermes/.env"]);
+  }
+});
+
+test("a copy into a credential path keeps every class main gave it, and the forms that already reached the class are unmoved", () => {
   for (const [line, want] of [
-    ["cp notes.txt .approval/env", [CRED]],
-    ["cp evil/settings.json .approval/env", [CRED]],
-    ["cp -r evil/x .approval/env", [CRED]],
-    ["cp .gith*/workflows/ci.yml .approval/env", [CRED]],
-    // A protected SOURCE is still named, by the text scan.
-    ["cp design/x .approval/env", [CRED, "policy.edit.design protected-path"]],
-    ["cp .github/workflows/ci.yml .approval/env", [CRED, "policy.edit.ci protected-path"]],
+    // Which word is written is unknown (a word the shell may turn into an
+    // option, an option the table does not know): main's whole answer, in
+    // main's order, and the class of each credential path it may write ADDED
+    // after it, fail closed. Nothing main reports is deferred or lost.
+    ["cp --frob README.md .approval/env", [CRED, "policy.core protected-path"]],
+    ["rsync --some-new-flag README.md .approval/env", [CRED, "policy.core protected-path"]],
+    // (policy.core is there already, as the copy-unknown class: one entry per class.)
+    ["cp $X .approval/env", [CRED, UNKNOWN]],
+    ["cp ~/.hermes/.env $X", [CRED, UNKNOWN]],
+    ["cp ~/.hermes/.env ${X:-.github/workflows/ci.yml}", [CRED, UNKNOWN, "policy.edit.ci protected-path"]],
+    // install refuses an option it does not know: the refusal stays.
+    ["install -Z README.md .approval/env", ["refused unclassified"]],
+    // A credential SOURCE behind an unreadable argv may be a destination too:
+    // the fail-closed answer. With a readable argv the source is the read.
+    ["cp --frob .approval/env notes.txt", [CRED, "policy.core protected-path"]],
+    ["cp .approval/env notes.txt", [CRED]],
+    // A `-t` destination that is the credential path: main gave the
+    // credential and policy.core; now the write first.
+    ["cp -t .approval/env notes.txt", ["policy.core protected-path", CRED]],
+    // Already the write's class on main: a redirect, tee, mv, a path that outranks.
+    ["echo x > .approval/env", ["policy.core redirect-protected"]],
+    ["tee .approval/env", ["policy.core protected-path"]],
+    ["mv a.txt .approval/env", ["policy.core protected-path"]],
+    ["mv .approval/env .github/workflows/ci.yml", ["policy.core protected-path", "policy.edit.ci protected-path"]],
+    ["cp .approval/env APPROVAL.md", ["policy.core protected-path", CRED]],
+    // A credential SOURCE is the read: unmoved.
+    ["cp .approval/env notes.txt", [CRED]],
+    ["cp .approval/vault.enc /tmp/vault.enc", [CRED]],
+    ["cp .approval/env .github/workflows/ci.yml", [CRED, "policy.edit.ci protected-path"]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+  // Main's classes, as sets, are all still there.
+  for (const line of ["cp $X .approval/env", "cp -t .approval/env notes.txt", "cp ~/.hermes/.env ${X:-.github/workflows/ci.yml}", "cp --frob README.md .approval/env"]) {
+    const main = new Set(spelledPure(line, TWO_ROUTES).map((entry) => entry.split(" ")[0]));
+    const head = new Set(pure(line, TWO_ROUTES).map((entry) => entry.split(" ")[0]));
+    for (const cls of main) assert.ok(head.has(cls), `${line}: ${cls}`);
+  }
+});
+
+test("a copy into a credential path writes it: the write's class first, the credential beside it, no landing under it", () => {
+  // CLAIMS L62502 (build-1's N3 on #701, M1 on #682): the destination is not
+  // the read. As spelled, main's answer: the credential class alone.
+  for (const [line, want] of [
+    ["cp notes.txt .approval/env", ["policy.core protected-path", CRED]],
+    ["cp evil/settings.json .approval/env", ["policy.core protected-path", CRED]],
+    ["cp -r evil/x .approval/env", ["policy.core protected-path", CRED]],
+    ["cp .gith*/workflows/ci.yml .approval/env", ["policy.core protected-path", CRED]],
+    // A protected SOURCE is still named, by the text scan, after them.
+    ["cp design/x .approval/env", ["policy.core protected-path", CRED, "policy.edit.design protected-path"]],
+    ["cp .github/workflows/ci.yml .approval/env", ["policy.core protected-path", CRED, "policy.edit.ci protected-path"]],
   ] as const) {
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
     assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);
@@ -1744,4 +2114,220 @@ test("a line of many folded segments costs about what the same line spelled cano
   const control = cpu(() => classifyCommand(fill("echo x > .cursor/hooks.json; ")));
   const spent = cpu(() => classifyCommand(fill(`echo x > .Cursor/hoo${KELVIN}s.json; `)));
   assert.ok(spent <= 8 * control + 1, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
+});
+
+// build-1's M1 on #706, the lead's ruling CLAIMS L62686: a copy INTO a
+// credential path ADDS the class that write takes to the answer main gives
+// the line, a union and never a swap. `[line, main 91f91756's answer, now]`:
+// main's classes, in main's order, with `policy.core` first where main
+// answered with the credential class itself.
+const CRED_WRITE_UNION: readonly (readonly [string, readonly string[], readonly string[]])[] = [
+  // rsync really writes its --log-file and its --temp-dir.
+  ["rsync -a --log-file=.approval/log/events.jsonl README.md .approval/env", [CRED, "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+  ["rsync -a --temp-dir=.github/workflows README.md .approval/env", [CRED, "policy.edit protected-path"], ["policy.core protected-path", CRED, "policy.edit protected-path"]],
+  ["rsync -a --log-file=~/.hermes/scripts/x.sh README.md .approval/env", [CRED, "cron.manage protected-path"], ["policy.core protected-path", CRED, "cron.manage protected-path"]],
+  // Glob sources: GLOB-WRITE's readings of them stay.
+  ["rsync -a --remove-source-files .appr*/log/ .approval/env", [CRED, "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+  ["rsync -a .gith*/ ~/.hermes/.env", [CRED, "policy.edit protected-path", "policy.edit.ci protected-path"], ["policy.core protected-path", CRED, "policy.edit protected-path", "policy.edit.ci protected-path"]],
+  ["rsync ~/.hermes/scr*/x.sh .approval/env", [CRED, "cron.manage protected-path"], ["policy.core protected-path", CRED, "cron.manage protected-path"]],
+  ["scp .gith*/workflows/ci.yml .approval/keys/k1", [CRED, "policy.edit.ci protected-path"], ["policy.core protected-path", CRED, "policy.edit.ci protected-path"]],
+  ["rsync -a ~/.hermes/* .approval/env", [CRED, "policy.core protected-path", "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+  // Main's walk ends on a branch that drops the credential touch: it is carried (build-1's m10).
+  ["cp -t .approval/env APPROVAL.md", ["policy.core protected-path"], ["policy.core protected-path", CRED]],
+  ["cp ~/.hermes/.env -t .approval s/env", ["policy.core protected-path", "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+  ["cp ~/.hermes/.env -t .approval -t .approval s/env", ["policy.core protected-path", "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+  // A landing under a directory where any name is credential material.
+  ["cp .approval/env s/k1 .approval/keys/", [CRED], ["policy.core protected-path", CRED]],
+  // Main's answer is another protected class: the write's class is added after it.
+  ["cp .approval/log/x .approval/env", ["log.mutate protected-path", CRED], ["log.mutate protected-path", CRED, "policy.core protected-path"]],
+  ["cp .approval/log/x ~/.hermes/auth.json", ["log.mutate protected-path", CRED], ["log.mutate protected-path", CRED, "policy.core protected-path"]],
+];
+
+test("a copy into a credential path keeps every class main gave it and adds the write's (build-1's M1 on #706)", () => {
+  for (const [line, main, want] of CRED_WRITE_UNION) {
+    const got = pure(line, TWO_ROUTES);
+    assert.deepEqual(got, want, line);
+    for (const entry of main) assert.ok(got.includes(entry), `${line}: ${entry} lost`);
+  }
+  // The sources land in the last directory named (GNU cp refuses a second
+  // `-t`): a landing in an earlier one adds nothing, and main's answer stands.
+  assert.deepEqual(pure("cp ~/.hermes/.env -t .approval -t notes s/env", TWO_ROUTES), ["policy.core protected-path", "log.mutate protected-path"]);
+  // Only a name that can end a credential path lands as one; its spelling in
+  // another case does too. Main's answer for each: policy.core and the log.
+  const mainT = ["policy.core protected-path", "log.mutate protected-path"];
+  for (const name of ["ENV", "Env.local", "vault.enc"]) {
+    assert.deepEqual(pure(`cp ~/.hermes/.env -t .approval s/README.md s/${name}`, TWO_ROUTES), ["policy.core protected-path", CRED, "log.mutate protected-path"], name);
+  }
+  for (const name of ["README.md", "envoy", "enſ", "keys.txt"]) {
+    assert.deepEqual(pure(`cp ~/.hermes/.env -t .approval s/${name}`, TWO_ROUTES), mainT, name);
+  }
+});
+
+/** The read's policy LM: the credential unattended, `policy.core` a tap, the log, cron and workflow classes human-only. */
+const POLICY_LM = [
+  ...POLICY_HEAD,
+  "protected_paths:",
+  "  - { path: .github/workflows/, class: policy.edit.ci }",
+  "classes:",
+  ...POLICY_TAIL,
+  "  account.credential:",
+  "    autonomy: autonomous",
+  "  policy.core:",
+  "    autonomy: manual",
+  "  log.mutate:",
+  "    autonomy: human-only",
+  "  cron.manage:",
+  "    autonomy: human-only",
+  "  policy.edit:",
+  "    autonomy: human-only",
+  "  policy.edit.ci:",
+  "    autonomy: human-only",
+  "```",
+  "",
+].join("\n");
+
+test("through the real hook, a copy into a credential path is refused where main refused it (build-1's M1 on #706, policy LM)", { skip }, () => {
+  const dir = attestedLab(POLICY_LM);
+  for (const [command, cls] of [
+    ["rsync -a --log-file=.approval/log/events.jsonl README.md .approval/env", "log.mutate"],
+    ["rsync -a --temp-dir=.github/workflows README.md .approval/env", "policy.edit"],
+    ["rsync -a --log-file=~/.hermes/scripts/x.sh README.md .approval/env", "cron.manage"],
+  ] as const) {
+    const decision = decide(dir, bash(command));
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+    assert.match(decision.reason, new RegExp(`^hook-class-human-only: class ${cls.replace(/\./gu, "\\.")} `, "u"), command);
+  }
+});
+
+test("a copy into a credential path with many -t targets or many sources costs about what main's walk costs (build-1's M2 and S5 on #706)", () => {
+  // The landing loop was sources times destinations; now each word is judged
+  // once. 64 KiB, CPU time, each side the least of three runs, against the
+  // same line with an ordinary source (the walk main makes).
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  const least = (run: () => void): number => Math.min(cpu(run), cpu(run), cpu(run));
+  const fill = (head: string, unit: (at: number) => string): string => {
+    let line = head;
+    for (let at = 0; line.length < 64 * 1024; at += 1) line += unit(at);
+    return line;
+  };
+  for (const unit of [(at: number) => ` -t .approval s${at}/env`, (at: number) => ` -t .approval/keys${at} s${at}/env`, (at: number) => ` -t d${at}/.approval s${at}/env.${at}`]) {
+    const line = fill("cp ~/.hermes/.env", unit);
+    const control = least(() => classifyCommand(fill("cp notes.txt", unit), TWO_ROUTES));
+    const spent = least(() => classifyCommand(line, TWO_ROUTES));
+    assert.ok(spent <= 2 * control + 0.1, `${line.slice(0, 60)}: ${spent.toFixed(3)} s against ${control.toFixed(3)} s`);
+  }
+});
+
+// build-1's S3 on #706: a credential READ spelled as a glob, handed to a
+// program that only reads its operands, is the read, as its literal spelling
+// is; the spelling alone must not move the class. Anywhere a glob may land in
+// a slot the program WRITES it stays a target the shell builds (the security
+// review of this fold).
+test("a credential read spelled as a glob is the read where the program only reads (build-1's S3 on #706)", () => {
+  for (const line of [
+    "less ~/.hermes/profiles/*/auth.json",
+    "less ~/.hermes/profiles/?/auth.json",
+    "more ~/.hermes/profiles/*/.env",
+    "hexdump ~/.hermes/profiles/*/.env",
+    "less .approval/keys/*",
+    "less ~/.hermes/profiles/*/auth.json notes.txt",
+    "less ~/.hermes/auth.json",
+  ]) {
+    assert.deepEqual(pure(line, TWO_ROUTES), [CRED], line);
+  }
+  for (const [line, want] of [
+    // A pattern that may match anything else stays a built target.
+    ["less .approval/vault*", [CRED, UNKNOWN]],
+    ["less ~/.hermes/profiles/**/auth.json", [CRED, UNKNOWN]],
+    ["less ~/.hermes/profiles/[ab]/auth.json", [CRED, UNKNOWN]],
+    ["less ~/.hermes/hermes-agent/.env.*", [CRED, UNKNOWN]],
+    ["less ~/.hermes/profiles/*/auth.json *.md", [CRED, UNKNOWN]],
+    ["less ~/.hermes/profiles/*/auth.json $X", [CRED, UNKNOWN]],
+    // A program that writes an operand (`xxd in out`), a wrapper, a program
+    // with no rule: the glob's last match may be written.
+    ["xxd ~/.hermes/profiles/*/.env", [CRED, UNKNOWN]],
+    ["command cp ~/.hermes/profiles/*/auth.json", [CRED, UNKNOWN]],
+    ["nice mv ~/.hermes/profiles/*/.env", [CRED, UNKNOWN]],
+    ["frobnicate ~/.hermes/profiles/*/auth.json", [CRED, UNKNOWN]],
+    ["command less ~/.hermes/profiles/*/auth.json", [CRED, UNKNOWN]],
+    // The seat's design points: no exemption for a secret-named variable or a `~`.
+    ["./deploy.sh $APPROVAL_TG_TOKEN", [ENV, UNKNOWN]],
+    ["python3 x.py .approval/env ~", [CRED, UNKNOWN]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+});
+
+test("a credential glob as a copy's last operand may be its destination: the write's class is added (security review of the S3 fold on #706)", () => {
+  for (const [line, want] of [
+    // `cp a/auth.json b/auth.json` writes the second: main's answer, the write's class after it.
+    ["cp ~/.hermes/profiles/*/auth.json", [CRED, "policy.core protected-path"]],
+    ["rsync ~/.hermes/profiles/*/auth.json", [CRED, "policy.core protected-path"]],
+    ["scp ~/.hermes/profiles/*/auth.json", [CRED, "policy.core protected-path"]],
+    ["cp ~/.hermes/profiles/*/auth.json ~/.hermes/profiles/*/auth.json", ["policy.core protected-path", CRED]],
+    ["cp notes.txt ~/.hermes/profiles/*/auth.json", ["policy.core protected-path", CRED]],
+    // Main already reached the write's class: mv and ln write what they name.
+    ["mv ~/.hermes/profiles/*/.env", ["policy.core protected-path"]],
+    ["ln ~/.hermes/profiles/*/auth.json", ["policy.core protected-path", CRED]],
+    ["mv .approval/*/env", ["log.mutate protected-path", "policy.core protected-path", "policy.core protected-path"]],
+    // Among the sources, or with a `-t`, the glob is only read.
+    ["cp ~/.hermes/profiles/*/auth.json notes.txt", [CRED]],
+    ["cp -t backup ~/.hermes/profiles/*/auth.json", [CRED]],
+    // Quoted, it is one literal word, and a copy of one operand writes nothing.
+    ["cp '~/.hermes/profiles/*/auth.json'", [CRED]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+});
+
+test("a copy into a credential path: a refusal stands, the carried touch and the unreadable argv's added class are pinned (build-1's S4 on #706)", () => {
+  for (const line of [
+    // Refused on main and at dbebd65d: refused still (the review of the M1 fold).
+    'cp README.md .approval/env > "$(id)"',
+    "cp README.md .approval/env 2>$(id)",
+    "cp -t .approval/env README.md > $(id)",
+    "X=$(id) cp README.md .approval/env",
+    "install README.md .approval/env",
+    "command cp README.md .approval/env --out=APPROVAL.md",
+    "frobnicate README.md .approval/env -oAPPROVAL.md",
+  ]) {
+    assert.equal(classifyCommand(line, TWO_ROUTES).ok, false, line);
+  }
+  // build-1's m10: where main's walk drops the credential touch, it is carried.
+  assert.deepEqual(pure("cp -t .approval/env APPROVAL.md", TWO_ROUTES), ["policy.core protected-path", CRED]);
+  // build-1's m13: an `=` value of an option the table does not know is read
+  // as a possible destination; the class it names is added.
+  assert.deepEqual(pure("cp --frob=.approval/env README.md x", TWO_ROUTES), [CRED, "policy.core protected-path"]);
+  assert.deepEqual(pure("cp --frob=notes.txt README.md x", TWO_ROUTES), ["files.write.workspace workspace-write"]);
+  // A brace as a copy's last operand expands too: `.approval/env{,.bak}`
+  // writes `.approval/env.bak`, a credential path of the gate's directory.
+  assert.deepEqual(pure("cp .approval/env{,.bak}", TWO_ROUTES), [CRED, "policy.core protected-path"]);
+});
+
+test("a source lands as a credential path only where a credential name could, and a backslash name is always judged (build-1's S5 on #706)", () => {
+  // Main's answer for each is [policy.core] or [policy.core, log.mutate]: the
+  // landing carries the credential touch beside it.
+  for (const [line, want] of [
+    ["cp ~/.hermes/.env -t ~/.hermes/profiles/p s/auth.json", ["policy.core protected-path", CRED]],
+    ["cp ~/.hermes/.env -t ~/.hermes/hermes-agent s/.env.local", ["policy.core protected-path", CRED]],
+    ["cp ~/.hermes/.env -t .approval s/vault.enc", ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+    ["cp ~/.hermes/.env -t .approval s/KEYS", ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+    // A backslash is a segment separator to the rows: `..\env` climbs out of `x`.
+    ["cp ~/.hermes/.env -t .approval/x 's/..\\env'", ["policy.core protected-path", CRED]],
+    // Only an `auth.json` lands as a credential path in a profile (the
+    // credential source `.approval/env` lands as `p/env`, which is not one).
+    ["cp .approval/env s/auth.json -t ~/.hermes/profiles/p", ["policy.core protected-path", CRED]],
+    ["cp .approval/env s/notes.txt -t ~/.hermes/profiles/p", ["policy.core protected-path"]],
+    // No credential name lands here: main's answer.
+    ["cp ~/.hermes/.env -t .approval/x s/env", ["policy.core protected-path"]],
+    // The credential source lands too: `p/.env` is a credential path.
+    ["cp ~/.hermes/.env -t ~/.hermes/profiles/p s/notes.txt", ["policy.core protected-path", CRED]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
 });
