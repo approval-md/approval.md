@@ -160,6 +160,10 @@ test("the lexer's text: each shared escape decoded, each other one unknown", () 
     ["$'a\\M-ab'c", `a${U}bc`],
     ["$'a\\c\\\\b'c", `a${U}\${__APPROVAL_REST__}`], // a backslash after \c: the shells part (review of 83b52249, M1)
     ["$'a\\M-\\x41b'c", `a${U}Abc`], // after \M- the next escape is decoded
+    ["$'a\\x{41}b'c", `a${U}bc`], // bash 3.2's braced hex: one part, through its brace (L63099)
+    ["$'a\\x{0041z'c", `a${U}zc`], // the brace is optional; the digits run on
+    ["$'a\\x{}b'c", `a${U}\${__APPROVAL_REST__}`], // no digit: bash's NUL
+    ["$'a\\x{100}b'c", `a${U}\${__APPROVAL_REST__}`], // a low byte of 0: bash's NUL
     ["$'\\conformance/../\\x2eapproval/env'", `${U}nformance/../.approval/env`],
     ["$'a\\xc3\\xa9b'", `a${U}b`],
     ["$'a\\u00e9b'", `a${U}b`],
@@ -352,6 +356,30 @@ test("review of b58db9ec (M1): a quote's unknown part ends at its quote, and the
       assert.ok(pure.includes(cls) || pure.includes("log.mutate"), `${line}: ${pure.join(",")}`);
       const hook = classifyForHook(line, [], cwd).result;
       assert.ok(hook.ok && (hook.classes.includes(cls) || hook.classes.includes("log.mutate")), `${line} (hook): ${JSON.stringify(hook)}`);
+    }
+    // bash 3.2 reads \x{H...} as the low byte of its digits (build-2's probe, L63099).
+    for (const [line, cls] of [
+      ["echo x > $'\\x{41}PPROVAL.md'", "policy.core"],
+      ["echo x >> $'\\x{41}PPROVAL.md'", "policy.core"],
+      ["tee $'\\x{41}PPROVAL.md'", "policy.core"],
+      ["touch $'\\x{0041}PPROVAL.md'", "policy.core"],
+      ["sed -i s/a/b/ $'\\x{41}PPROVAL.md'", "policy.core"],
+      ["echo x > $'.claude\\x{2f}settings.json'", "policy.core"],
+      ["cat $'.approval\\x{2f}env'", "account.credential"],
+      ["echo x >> $'.approval/log/events.jsonl\\x{41'", "log.mutate"],
+    ] as const) {
+      assert.ok(classesOf(line).includes(cls), `${line}: ${classesOf(line).join(",")}`);
+      const hook = classifyForHook(line, [], cwd).result;
+      assert.ok(hook.ok && hook.classes.includes(cls), `${line} (hook): ${JSON.stringify(hook)}`);
+    }
+    // A braced hex that is bash's NUL ends the known text: the path's class or the strictest.
+    for (const [line, cls] of [
+      ["echo x > $'\\x{}'APPROVAL.md", "policy.core"],
+      ["echo x > $'\\x{100}junk'APPROVAL.md", "policy.core"],
+      ["cat $'\\x{g}'.approval/env", "account.credential"],
+    ] as const) {
+      const pure = classesOf(line);
+      assert.ok(pure.includes(cls) || pure.includes("log.mutate"), `${line}: ${pure.join(",")}`);
     }
     // After \C- or \M- a backslash is not taken: bash writes \C- as it is and decodes
     // the next escape, so the path below it takes its own class (review of 83b52249, M1).
