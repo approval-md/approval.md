@@ -75,6 +75,9 @@ import {
   foldNameLower,
   inFoldedReadingOnly,
   nameListIncludes,
+  localReadingEnd,
+  localReadingSame,
+  localReadingStart,
   namesReadAsSpelled,
   SUBSTITUTION_SENTINEL,
   takeAmongEqual,
@@ -858,17 +861,61 @@ export function protectedPathClass(
   // claims the classes of the guarded paths inside it, taken after the
   // word's own claims ({@link folderClaimsOfWord}).
   const inside: string[] = [];
-  for (const expansion of expansions) {
-    const own = protectedClaimsOfWord(expansion, extra);
-    for (const cls of own) if (!claims.includes(cls)) claims.push(cls);
-    for (const cls of folderClaimsOfWord(expansion, own, extra)) if (!inside.includes(cls)) inside.push(cls);
-  }
+  for (const expansion of expansions) addExpansionClaims(expansion, extra, claims, inside);
   if (claims.length === 0) return null;
   const ranked = claims
     .map((cls, index) => ({ cls, index }))
     .sort((a, b) => protectedRank(a.cls) - protectedRank(b.cls) || a.index - b.index)
     .map((claim) => claim.cls);
   return takeAmongEqual([...ranked, ...inside.filter((cls) => !ranked.includes(cls))]);
+}
+
+/**
+ * One expansion's claims for {@link protectedPathClass}, added to `claims`
+ * (its own, {@link protectedClaimsOfWord}) and `inside` (the folder's,
+ * {@link folderClaimsOfWord}): judged as if inline, but where its compares
+ * diverge, judged as spelled too, and where both readings answer the same
+ * the caller's reading is not marked ({@link localReadingSame}): a path such
+ * as `/Users/x/.hermes/a` folds `Users` and claims the same either way, so
+ * the caller's line is not read again as spelled for it (cost: the hook's
+ * synthetic line of every entry of a directory, each under the same home).
+ * Whether a GLOB-WRITE rule fired ({@link markGlobWriteFired}) is part of the
+ * answer compared, and the flag the caller sees is the folded run's, as
+ * inline: the as-spelled run's never reaches it.
+ */
+function addExpansionClaims(expansion: string, extra: readonly ProtectedPathEntry[], claims: string[], inside: string[]): void {
+  const before = globWriteFired;
+  globWriteFired = false;
+  let own: readonly string[] = [];
+  let folder: readonly string[] = [];
+  let fired = false;
+  let settle = false;
+  const saved = localReadingStart();
+  try {
+    own = protectedClaimsOfWord(expansion, extra);
+    folder = folderClaimsOfWord(expansion, own, extra);
+    fired = globWriteFired;
+  } finally {
+    settle = localReadingEnd(saved);
+    globWriteFired = before || globWriteFired;
+  }
+  if (settle) {
+    globWriteFired = false;
+    try {
+      const spelledOwn = withNamesAsSpelled(() => protectedClaimsOfWord(expansion, extra));
+      const spelledFolder = withNamesAsSpelled(() => folderClaimsOfWord(expansion, spelledOwn, extra));
+      if (globWriteFired === fired && sameStrings(own, spelledOwn) && sameStrings(folder, spelledFolder)) localReadingSame(saved);
+    } finally {
+      globWriteFired = before || fired;
+    }
+  }
+  for (const cls of own) if (!claims.includes(cls)) claims.push(cls);
+  for (const cls of folder) if (!inside.includes(cls)) inside.push(cls);
+}
+
+/** Are `a` and `b` the same strings in the same order? */
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((each, index) => each === b[index]);
 }
 
 // ===========================================================================

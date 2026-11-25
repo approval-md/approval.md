@@ -179,7 +179,7 @@ import {
 } from "../core/log.js";
 import { settleTerminationGuards } from "../core/log-lock.js";
 import { ANY_NAME, type GlobPattern, globPattern as compiledGlobPattern, zshOptionReading } from "../core/glob-match.js";
-import { eachNameReading, foldFileName, foldNameExact, foldNameLower, inEachEqualTurn, inEveryReading } from "../core/name-fold.js";
+import { eachNameReading, foldFileName, foldNameExact, foldNameLower, inEachEqualTurn, inEveryReading, withLocalReadingsSettled } from "../core/name-fold.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import {
@@ -4816,10 +4816,11 @@ function listWords(shape: CommandSegmentShape): string[] {
  *
  * The classifier's answers this pass asks for (`ownAnswer`, the synthetic
  * lines) and `expandOnDisk` (whose entry test lowers or folds by the reading)
- * are NOT kept: they are asked again in each reading. One exception: whether
- * a synthetic line of plain names earns nothing in every reading
- * (`inertLines`, {@link inEveryReading}); where it is not known to, each
- * reading judges the whole line, as before. Made by
+ * are NOT kept: they are asked again in each reading. One exception: a
+ * synthetic line of plain names, judged once for the call, and its answer and
+ * whether that answer holds in every reading (`plainLines`,
+ * {@link inEveryReading}); where it is not known to, each reading judges the
+ * whole line, as before. Made by
  * {@link classifyForHook} for one call and dropped with it, so nothing here
  * reaches another command, directory, home or policy.
  */
@@ -4831,12 +4832,16 @@ export interface WriteLandingMemo {
   /** {@link resolvedWriteTarget} per directory and destination: the disk alone answers it. */
   readonly writeTarget: (target: string, cwd: string) => string | null;
   /**
-   * Per directory state and synthetic line of plain names: does it earn no
-   * class in any reading? Judged once for the call, in the first reading that
-   * asks ({@link inEveryReading}; the pattern pass's `redirectMatchClasses`).
+   * Per directory state and synthetic line of plain names: the classes it
+   * earns, and whether they are its classes in every reading. Judged once for
+   * the call, in the first reading that asks ({@link inEveryReading}; the
+   * pattern pass's `redirectMatchClasses`).
    */
-  readonly inertLines: Map<string, boolean>;
+  readonly plainLines: Map<string, { readonly value: readonly PlainLineClass[]; readonly invariant: boolean }>;
 }
+
+/** A class a synthetic line earns, as the write pass attaches it ({@link WriteLandingMemo.plainLines}). */
+export type PlainLineClass = { cls: string; rule: string; path: string; why?: string };
 
 /** A fresh {@link WriteLandingMemo}, for one `classifyForHook` call. */
 export function writeLandingMemo(): WriteLandingMemo {
@@ -4848,7 +4853,7 @@ export function writeLandingMemo(): WriteLandingMemo {
     targets.set(key, resolved);
     return resolved;
   };
-  return { landings: new Map(), paths: new Map(), disk: memoDiskReads(), writeTarget, inertLines: new Map() };
+  return { landings: new Map(), paths: new Map(), disk: memoDiskReads(), writeTarget, plainLines: new Map() };
 }
 
 /** How many landings the write pass has judged in this process (not answered from a memo): for tests. */
@@ -5173,12 +5178,14 @@ export function refineWriteLandings(
    * directory are mostly plain ones that earn nothing. So where at least
    * {@link PLAIN_BATCH_NAMES} names end in a plain lower-case name, those
    * names are judged first, as a line of their own, once for the call
-   * ({@link inEveryReading}). When that line earns no class and is the same
-   * in every reading (no name compare in it diverged, no compare offered two
-   * equal claims), the other names' line answers alone, in each reading, and
-   * once per equal claim of its own ({@link inEachEqualTurn}); otherwise the
-   * whole line is judged as before. The plain test only chooses the names;
-   * the classifier and the git-directory pass decide.
+   * ({@link inEveryReading}). When that line is the same in every reading (no
+   * name compare in it diverged, or each one that did left its tier's answer
+   * the same, judged {@link withLocalReadingsSettled}; no compare offered two
+   * equal claims): where it is every name, its answer is the answer in each
+   * reading; where it earns no class, the other names' line answers alone, in
+   * each reading, and once per equal claim of its own ({@link inEachEqualTurn}).
+   * Otherwise the whole line is judged as before. The plain test only chooses
+   * the names; the classifier and the git-directory pass decide.
    *
    * Why the split answers as the whole line does: every word of a synthetic
    * line is single-quoted text after `true`, so no word is a pattern, a
@@ -5194,15 +5201,18 @@ export function refineWriteLandings(
     if (plain.length < PLAIN_BATCH_NAMES) return classesOfSynthetic(redirectLine(names), path);
     const plainText = redirectLine(plain);
     const plainKey = `${fromKey()}\0${plainText}`;
-    let inert = memo.inertLines.get(plainKey);
-    if (inert === undefined) {
-      const judged = inEveryReading(() => judgeSynthetic(plainText, path));
-      inert = judged.invariant && judged.value.length === 0;
-      memo.inertLines.set(plainKey, inert);
+    let judged = memo.plainLines.get(plainKey);
+    if (judged === undefined) {
+      judged = inEveryReading(() => withLocalReadingsSettled(() => judgeSynthetic(plainText, path)));
+      memo.plainLines.set(plainKey, judged);
       // Every name is plain: that line was the whole line, judged in this reading.
-      if (plain.length === names.length) synthetic.set(plainKey, judged.value);
+      if (plain.length === names.length) synthetic.set(plainKey, judged.value as ResolvedClass[]);
     }
-    if (!inert) return classesOfSynthetic(redirectLine(names), path);
+    // Every name is plain and the line answers the same in every reading:
+    // that answer, in each reading (the classes of `~/.hermes/` and a `[` run,
+    // every entry under a home whose path folds).
+    if (judged.invariant && plain.length === names.length) return judged.value as ResolvedClass[];
+    if (!judged.invariant || judged.value.length > 0) return classesOfSynthetic(redirectLine(names), path);
     const rest = names.filter((name) => !plainTail(name));
     if (rest.length === 0) return [];
     const restText = redirectLine(rest);

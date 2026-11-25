@@ -294,6 +294,74 @@ export function inEachEqualTurn<T>(run: () => T): [T, ...T[]] {
   }
 }
 
+/** Is {@link localReadingStart} on? Only inside {@link withLocalReadingsSettled}. */
+let settleLocalReadings = false;
+
+/**
+ * `run`, with {@link localReadingStart}'s runs on: a run of compares whose
+ * divergence leaves its answer the same does not mark the reading. For one
+ * caller: the hook's synthetic line of plain names, whose answer is shared by
+ * every reading where it holds in every reading (`redirectMatchClasses`).
+ * Everywhere else every divergence marks, as before, so no other line's
+ * readings change. The switch is restored afterwards, thrown or not.
+ */
+export function withLocalReadingsSettled<T>(run: () => T): T {
+  const before = settleLocalReadings;
+  settleLocalReadings = true;
+  try {
+    return refusePromise(run());
+  } finally {
+    settleLocalReadings = before;
+  }
+}
+
+/**
+ * The start of a run of compares whose divergence may be undone, where it
+ * turns out not to change what they answer ({@link localReadingEnd},
+ * {@link localReadingSame}). The caller's marks are set aside and handed
+ * back, to give to both; `-1` as spelled, or outside
+ * {@link withLocalReadingsSettled}, where the run marks as inline. Two calls
+ * and a number, not a closure: the protected-path tier asks once per word.
+ */
+export function localReadingStart(): number {
+  if (spelledReading || !settleLocalReadings) return -1;
+  const saved = widestEqual * 2 + (readingsDiverged ? 1 : 0);
+  readingsDiverged = false;
+  widestEqual = 1;
+  return saved;
+}
+
+/**
+ * The end of a run begun by {@link localReadingStart}, called in a `finally`:
+ * the run's marks join the caller's, as if it ran inline. `true` when the run
+ * marked a divergence and offered no claim set wider than one: the caller may
+ * then run the same compares as spelled ({@link withNamesAsSpelled}) and, where
+ * they answer the same, call {@link localReadingSame}.
+ */
+export function localReadingEnd(saved: number): boolean {
+  if (saved < 0) return false;
+  const settle = readingsDiverged && widestEqual === 1;
+  readingsDiverged = (saved & 1) === 1 || readingsDiverged;
+  widestEqual = Math.max(Math.floor(saved / 2), widestEqual);
+  return settle;
+}
+
+/**
+ * The run {@link localReadingEnd} let the caller compare answers the same as
+ * spelled: the caller's reading is left as it was before the run. So a caller
+ * whose names diverge only inside it, with no effect on what it answers, is
+ * not read again as spelled for that alone (the hook's synthetic lines: every
+ * segment of `/Users/x/…` diverges, and the protected-path tier answers the
+ * same in both readings). Sound by {@link eachNameReading}'s own test applied
+ * to the caller: its as-spelled run gets the same value at that point, and
+ * every other compare it makes still marks. The run must answer by its value
+ * alone (a module flag it sets is part of that value: the caller compares it
+ * too, and keeps the folded run's).
+ */
+export function localReadingSame(saved: number): void {
+  if (saved >= 0) readingsDiverged = (saved & 1) === 1;
+}
+
 function refusePromise<T>(value: T): T {
   if (typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function") {
     throw new TypeError("a name reading runs synchronously; a promise would finish in the other reading");
