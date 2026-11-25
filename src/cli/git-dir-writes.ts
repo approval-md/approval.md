@@ -510,6 +510,42 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
     }
     return known;
   };
+  // The disk is read and never written while the hook judges a line, so a
+  // pattern expanded from one directory, or one path walked, answers the
+  // same each time this pass asks: each is read once per pass, as
+  // `gitDirsOf` reads each directory's git directories once. A line whose
+  // segments repeat (`rm -rf ./*; ` again and again), or a segment the
+  // classifier gives several classes (each its own segment here, with the
+  // same text), asked the disk the same question each time (#682's
+  // rm_dot_names cost line). Only the reads are saved: every word is still
+  // placed, from every directory, in the same order, so the first hit and
+  // its note are the ones the walk found before. What an expansion marks on
+  // its way (a name whose readings diverge, a GLOB-WRITE match) only ever
+  // turns on within one name reading, and this pass runs inside one, so the
+  // first ask leaves those marks as every repeat would.
+  const expansions = new Map<string, Map<string, Expansion>>();
+  const expandOnce = (base: string, word: string): Expansion => {
+    let fromBase = expansions.get(base);
+    if (fromBase === undefined) {
+      fromBase = new Map();
+      expansions.set(base, fromBase);
+    }
+    let expansion = fromBase.get(word);
+    if (expansion === undefined) {
+      expansion = expandOnDisk(base, word);
+      fromBase.set(word, expansion);
+    }
+    return expansion;
+  };
+  const landings = new Map<string, ReturnType<typeof physicalLanding>>();
+  const landOnce = (path: string): ReturnType<typeof physicalLanding> => {
+    let walked = landings.get(path);
+    if (walked === undefined) {
+      walked = physicalLanding(path);
+      landings.set(path, walked);
+    }
+    return walked;
+  };
   // Every directory a segment may run in, as TEXT (joined, never normalised,
   // so the physical walk applies each `..`): the hook's own and every place a
   // directory change before it may lead. A failed `cd` leaves the shell where
@@ -609,7 +645,7 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
           hit = { word, landed: `${text} (a pattern that names .git)` };
           break;
         }
-        const expanded = expandOnDisk(dir, spelled);
+        const expanded = expandOnce(dir, spelled);
         if ("giveUp" in expanded) {
           // Cannot be expanded: a sure target the strict way; a possible one
           // was judged by its text just above.
@@ -623,7 +659,7 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
       }
       if (hit !== null) break;
       for (const { word, spelled } of placed) {
-        const walked = physicalLanding(spelled.startsWith("/") ? spelled : `${dir}/${spelled}`);
+        const walked = landOnce(spelled.startsWith("/") ? spelled : `${dir}/${spelled}`);
         if ("unplaceable" in walked) {
           if (sure.has(word) || walked.unplaceable === "ELOOP") {
             hit = { word, landed: `a place this hook cannot determine (${walked.unplaceable})` };
@@ -652,7 +688,7 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
         const spelled = word.startsWith("~/") && home !== undefined ? `${home}/${word.slice(2)}` : word;
         let paths = [spelled.startsWith("/") ? spelled : `${dir}/${spelled}`];
         if (isPattern(spelled)) {
-          const expanded = expandOnDisk(dir, spelled);
+          const expanded = expandOnce(dir, spelled);
           if ("giveUp" in expanded) {
             if (sure.has(word)) {
               hit = { word, landed: `a tree this hook cannot list (${expanded.giveUp})` };

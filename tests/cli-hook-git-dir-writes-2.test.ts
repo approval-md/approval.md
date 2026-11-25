@@ -425,3 +425,52 @@ test("#682's continuation cost line: a word repeated in a segment is placed once
   // A redirection repeated: each is a sure target; the first that lands in .git answers.
   assert.deepEqual(hook(`echo x ${many("> d*/y", 500)}> l?nk/config`, repo).filter((entry) => entry === DIR_WRITE).length > 0, true);
 });
+
+test("#682's rm_dot_names cost line: a pattern is read from the disk once per directory it is expanded from, and every segment is still judged", () => {
+  // `rm -rf ./*; ` x 833 expanded `./*` and walked each of its entries again
+  // for every classified segment of every repeat (each class the glob guard
+  // names is its own segment with the same text): 1.3 to 1.55 times main's
+  // CPU s. The disk does not change while the hook judges a line, so each
+  // expansion (by directory AND word) and each walk is read once per pass,
+  // and its answer reused. Only the reads are saved: every segment is
+  // judged, from every directory it may run in.
+  const at = root();
+  mkdirSync(join(at, "sub"));
+  mkdirSync(join(at, "other", ".git"), { recursive: true });
+  writeFileSync(join(at, "a.txt"), "");
+  // `./*` from `at` lands nowhere near a git directory; from `sub`, its link
+  // `l` lands in one.
+  symlinkSync("../other/.git", join(at, "sub", "l"));
+  // The segments as the pass walks them, each with whether it was raised.
+  const walked = (command: string): { text: string; raised: boolean }[] => {
+    const result = classifyForHook(command, [], at).result;
+    assert.ok(result.ok, command.slice(0, 40));
+    const out: { text: string; raised: boolean }[] = [];
+    for (const segment of result.segments) {
+      if (segment.rule === "git-dir-write") (out.at(-1) as { raised: boolean }).raised = true;
+      else out.push({ text: segment.text, raised: false });
+    }
+    return out;
+  };
+  const raisedTexts = (command: string): string[] => [...new Set(walked(command).filter((each) => each.raised).map((each) => each.text))].sort();
+  // Each repeat its own text (a plain name `n<i>` after the same pattern),
+  // so each one's answer can be read apart from the others.
+  const repeats = (from: number, n: number): string[] => Array.from({ length: n }, (_, index) => `rm -rf ./* n${String(from + index)}`);
+  for (const n of [1, 2, 400]) {
+    const afterCd = repeats(n, n);
+    const segments = walked([...repeats(0, n), "cd sub", ...afterCd].join("; "));
+    const cd = segments.findIndex((each) => each.text === "cd sub");
+    // Walked before the `cd`, from `at` alone: none raised. Every repeat
+    // after it, from `at` AND `sub`, is raised, not only the first, so the
+    // expansion from `at` is never reused for `sub` (keyed by its
+    // directory). (A class the classifier appends after the whole line,
+    // `files.delete.out_of_scope` here, is walked after the `cd` too, as on
+    // main: that answer is not this pass's to read.)
+    assert.deepEqual(segments.slice(0, cd).filter((each) => each.raised), [], `n=${String(n)}`);
+    const raisedAfter = new Set(segments.slice(cd + 1).filter((each) => each.raised).map((each) => each.text));
+    assert.deepEqual(afterCd.filter((text) => !raisedAfter.has(text)), [], `n=${String(n)}`);
+  }
+  // A different word from the same directory is its own expansion.
+  assert.deepEqual(raisedTexts("rm -rf ./*; rm -rf sub/*"), ["rm -rf sub/*"]);
+  assert.deepEqual(raisedTexts("rm -rf sub/*; rm -rf ./*; rm -rf sub/*"), ["rm -rf sub/*"]);
+});
