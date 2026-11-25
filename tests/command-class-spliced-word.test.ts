@@ -198,10 +198,12 @@ test("round two (L62542, for reads too): a word that could be a credential file 
   for (const command of ['grep -n "build.py\\" \\"\\$S\\"|-I build.py|build.py \\$" w/*.sh', 'node q.mjs "echo x > \\$\'A\'*\\$?"']) {
     assert.deepEqual(classesOf(command), mainClasses(command), command);
   }
-  // The decoded reading counts every `$` the spliced reading meets as a
-  // parameter, a quoted or escaped one too (the text alone cannot tell them
-  // apart): a read of a file named `.approval/$F` asks, which is stricter.
-  for (const command of ["cat '.approval/$F'", "cat .approval/\\$F"]) assert.ok(classesOf(command).includes("account.credential"), command);
+  // A `$` the shell reads as text (single-quoted, escaped, in a dollar quote)
+  // is text: the lexed word carries where each sits (coordinator, round two:
+  // `'A$B'`), so a file named `.approval/$F` is that file, as main reads it.
+  for (const command of ["cat '.approval/$F'", "cat .approval/\\$F", 'cat ".approval/\\$F"', "cat < '.approval/$F'", "cat $'.approval/$F'"]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), command);
+  }
   // A write target with every glob and `$` quoted is exact: main's answer.
   assert.deepEqual(classesOf("echo x > 'APPROVAL$E.md'"), mainClasses("echo x > 'APPROVAL$E.md'"));
   // As the plain spelling: `source .approval/env` is refused, and so is this.
@@ -238,23 +240,53 @@ test("round two (automated security review, a): the kept reading reads every unr
   assert.ok(!kept("cat '.approval/$F9'").includes("account.credential"));
   assert.ok(kept("cat .approval/$F9").includes("account.credential"));
   assert.ok(!kept("cat '.approval/$F9'").includes("account.credential"), "the credential reading's memo keys on which `$` are text");
-  // The decoded pass keeps no such record: a quoted `$` there is a parameter.
-  assert.ok(classesOf("cat '.approval/$Q7'").includes("account.credential"));
-  // Two HIGH reviews of b41520bc: the record of a `$` that is text is the
-  // kept pass's alone, never evicted, and never the decoded pass's.
-  // A literal `$` elsewhere on the line does not make a guarded word's `$` text.
+  // The decoded pass reads the same field: a quoted `$` there is text too.
+  assert.deepEqual(classesOf("cat '.approval/$Q7'"), mainClasses("cat '.approval/$Q7'"));
+  // Two HIGH reviews of b41520bc: which `$` is text is the lexed word's own
+  // field, never a record by text. A literal `$` elsewhere on the line does
+  // not make a guarded word's `$` text.
   assert.ok(classesOf("echo '$X'; echo x > APPROVAL$X.md").includes("policy.core"));
   assert.ok(kept("echo '$X'; echo x > APPROVAL$X.md").includes("policy.core"));
   // A brace group holding a quoted `$`.
   assert.ok(classesOf("echo x > {a,'$'}APPROVAL$E.md").includes("policy.core"));
   // A reading made from a word (a default's text) equal to a quoted word's text.
   assert.ok(classesOf("echo 'APPROVAL$E.md'; echo x > ${A:-APPROVAL$E.md}").includes("policy.core"));
-  // Past the record's bound every later `$` is a parameter: a text recorded
-  // as a parameter before the bound is not read as a kept quote's after it.
+  // A long line (once past the old record's bound) changes nothing: each word
+  // carries its own.
   const filler = Array.from({ length: 8300 }, (_, i) => `$'f'${String(i)}`).join(" ");
   const long = `echo x > APPROVAL$E.md; echo ${filler}; echo APPROVAL$'E'.md`;
   assert.ok(kept(long).includes("policy.core"));
   assert.ok(classesOf(`echo ${filler}; echo x > .claude$S/settings.json`).includes("policy.core"));
+});
+
+test("round two (coordinator, `'A$B'`): a `$` the shell reads as text is the lexed word's field; a reading made from the word has none", () => {
+  // The word's own text: single quotes, a backslash, double quotes' `\\$`, a
+  // dollar quote's `$`. Main's answer, in a write target, an argument and a read.
+  for (const command of [
+    "backlog task edit T --append-notes 'A$B'",
+    "echo x > 'APPROVAL$E.md'",
+    "echo x > APPROVAL\\$E.md",
+    'echo x > "APPROVAL\\$E.md"',
+    "echo x > $'APPROVAL$E.md'",
+    "cp a 'APPROVAL$E.md'",
+    "tee 'APPROVAL$E.md'",
+    "cat 'a$B' '.approval/$F'",
+  ]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), command);
+  }
+  // A real parameter beside a literal `$` in the same word still asks.
+  assert.ok(classesOf("echo x > '$'APPROVAL$E.md").includes("policy.core"));
+  // The same text twice, once literal and once a parameter: each word reads its own.
+  assert.ok(classesOf("echo x > 'APPROVAL$E.md' > APPROVAL$E.md").includes("policy.core"));
+  assert.ok(classesOf("echo x > APPROVAL$E.md > 'APPROVAL$E.md'").includes("policy.core"));
+  assert.ok(classesOf("cat '.approval$X/env' .approval$X/env").includes("account.credential"));
+  // A reading made from a word carries no literal `$`: an option's value is
+  // read with every `$` a parameter (fail closed), the quoted one too, and a
+  // value equal to a quoted word's text is not read as that word.
+  assert.ok(classesOf("cat '.approval$X/env' --file=.approval$X/env").includes("account.credential"));
+  assert.ok(classesOf("cat --file='.approval$X/env'").includes("account.credential"));
+  // A folded reading of a quoted word and a default's text read the same way.
+  assert.ok(classesOf("echo 'APPROVAL$E.md'; echo x > ${A:-APPROVAL$E.md}").includes("policy.core"));
 });
 
 test("round two (automated security review, c): every equal claim a spliced word meets is reported", () => {
@@ -326,6 +358,18 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
   for (const command of [`echo x > a$E${"b".repeat(99_000)}`, `cp a $'${"a\\q".repeat(33_000)}'`]) {
     const seconds = cpuSeconds(() => classifyCommand(command, []));
     assert.ok(seconds < scaledBound(0.4), `${command.slice(0, 20)}: ${seconds.toFixed(3)} CPU s (${runner().line})`);
+  }
+  // The judge reads a `\\` as a separator: past the segments bound a word
+  // with a real parameter in it could be any path, and costs a scan.
+  {
+    const command = `tee $a'${"a\\q".repeat(33_000)}'`;
+    let classes: string[] = [];
+    const seconds = cpuSeconds(() => {
+      classes = classesOf(command);
+    });
+    assert.ok(seconds < scaledBound(0.4), `backslashes beside a parameter: ${seconds.toFixed(3)} CPU s (${runner().line})`);
+    assert.ok(classes.includes("log.mutate"), classes.join(","));
+    assert.deepEqual(classesOf(`tee $a'${"a\\q".repeat(30)}'`), mainClasses(`tee $a'${"a\\q".repeat(30)}'`));
   }
   // Nine parts are past the bound: the word could be any path, the log included.
   // (Braced, so the `b` is literal text: `$Eb` would be a parameter of its own.)

@@ -52,8 +52,13 @@ where the word's literal text takes part in it (a `.` in a component counts:
 only where a guarded path ends in its tail by name: `$D/APPROVAL.md`,
 `$D/settings.json`, `.github/$W/ci.yml`, `$W/scripts/run.sh` and `.$X` ask;
 `$OUT`, `$D/$F`, `./$X`, `$D/notes.md`, `$D/env` and `out/$F` keep their
-answer. Past eight unread parts in one word the word could be any path
-(`log.mutate`), and so is a word whose readings pass the candidate bound. On
+answer. A `$` the shell reads as text (single-quoted, escaped, a dollar
+quote's) is text here, where the word is read as lexed: `--append-notes
+'A$B'` keeps its answer; a reading made from a word (an option's value, a
+default's text, a folded name) counts every `$` in it as a parameter. Past
+eight unread parts in one word the word could be any path (`log.mutate`), and
+so is a word with 32 separators (`/` or `\`) or whose readings pass the
+candidate bound. On
 one day's 19,368 Bash calls holding a `$`, 11 answers moved, each stricter: 8
 writes below a `$W/scripts` directory take `cron.manage` beside (W may be the
 Hermes home), one `printf` of a format with more than eight parameters may

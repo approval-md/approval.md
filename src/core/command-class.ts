@@ -1032,43 +1032,14 @@ function zshClobberRefusal(spelled: string): { ok: false; detail: string } {
 
 let dollarQuotesKept = false;
 let dollarQuoteRead = false;
-/**
- * In the KEPT mode only (main's lexing, whose answer rides beside the decoded
- * one): each word's text the lexer made with a `$` in it that is text, not a
- * parameter, and where each such `$` sits: a kept dollar quote's own `$`, one
- * in single quotes, one after a backslash (automated security review of the
- * spliced reading, a). The spliced reading ({@link unreadParts}) reads those
- * as text and every other `$` as an unread part. Keyed by text, so it is
- * never consulted in the decoded reading, where every `$` the spliced
- * reading meets counts as a parameter: whatever the kept pass reads lighter
- * than it should, the decoded pass beside it does not, and the line's answer
- * is the union of both. In the kept pass a text made twice with its literal
- * `$` in different places keeps none, and past {@link LITERAL_DOLLAR_WORDS_CAP}
- * texts on one line every `$` counts as a parameter for the rest of the line
- * (nothing is evicted).
- */
-let literalDollarWords = new Map<string, readonly number[]>();
-/** The record is full: every later `$` on the line is a parameter. */
-let literalDollarOverflow = false;
-/** Most texts {@link literalDollarWords} holds for one line. */
-const LITERAL_DOLLAR_WORDS_CAP = 8192;
-
 /** Run `run` with dollar quotes kept as main's lexer kept them, and restore the mode afterwards. */
 function withDollarQuotesKept<T>(run: () => T): T {
   const saved = dollarQuotesKept;
-  const savedWords = literalDollarWords;
-  const savedOverflow = literalDollarOverflow;
   dollarQuotesKept = true;
-  if (!saved) {
-    literalDollarWords = new Map();
-    literalDollarOverflow = false;
-  }
   try {
     return run();
   } finally {
     dollarQuotesKept = saved;
-    literalDollarWords = savedWords;
-    literalDollarOverflow = savedOverflow;
   }
 }
 
@@ -1764,8 +1735,8 @@ export function isCredentialPath(candidate: string): boolean {
  * ({@link isCredentialPathPlain}), and a word with an unread part spliced
  * into literal text that could be a credential file ({@link splicedCredential}).
  */
-function isCredentialPathAsRead(candidate: string): boolean {
-  return isCredentialPathPlain(candidate) || splicedCredential(candidate);
+function isCredentialPathAsRead(candidate: string, literalAt?: readonly number[]): boolean {
+  return isCredentialPathPlain(candidate) || splicedCredential(candidate, literalAt);
 }
 
 /** The credential rows over `candidate`'s brace expansions, as written. */
@@ -2188,50 +2159,76 @@ function credentialProtectedScanKeeps(basename: string): boolean {
  * credential path; under-reading one costs the property.
  */
 export function credentialReadWords(basename: string, args: readonly string[]): string[] {
+  return credentialReadEntries(basename, args).map((entry) => entry.word);
+}
+
+/** A word {@link credentialReadWords} reads, and, where it is an argument as lexed, that argument's literal `$` ({@link LexWord.literalDollars}). */
+interface CredentialReadEntry {
+  word: string;
+  literalAt?: readonly number[];
+}
+
+/**
+ * {@link credentialReadWords}, each word with the literal `$` of the argument
+ * it IS (`literals`, by argument index); a word read out of an argument (an
+ * option's value, an upload's file, a git path) carries none.
+ */
+function credentialReadEntries(
+  basename: string,
+  args: readonly string[],
+  literals: readonly (readonly number[] | undefined)[] = [],
+): CredentialReadEntry[] {
   if (credentialWritesOnly(basename, args)) return [];
-  const words: string[] = [];
-  for (const arg of args) {
+  const words: CredentialReadEntry[] = [];
+  for (const [index, arg] of args.entries()) {
     if (!isFlag(arg)) {
-      words.push(arg);
+      const literalAt = literals[index];
+      words.push(literalAt === undefined ? { word: arg } : { word: arg, literalAt });
     } else if (arg.startsWith("--")) {
       const equals = arg.indexOf("=");
-      if (equals !== -1 && equals < arg.length - 1) words.push(arg.slice(equals + 1));
+      if (equals !== -1 && equals < arg.length - 1) words.push({ word: arg.slice(equals + 1) });
     } else if (arg.length > 2) {
-      words.push(arg.slice(2));
+      words.push({ word: arg.slice(2) });
       const equals = arg.indexOf("=");
-      if (equals !== -1 && equals < arg.length - 1) words.push(arg.slice(equals + 1));
+      if (equals !== -1 && equals < arg.length - 1) words.push({ word: arg.slice(equals + 1) });
     }
   }
   // A snapshot: the loop appends to `words`.
-  const spelled = words.slice();
+  const spelled = words.map((entry) => entry.word);
   for (const word of spelled) {
     for (let at = word.search(/[@<]/u); at !== -1; ) {
       const rest = (word.slice(at + 1).split(";")[0] ?? "").trim();
-      if (rest.length > 0) words.push(rest);
+      if (rest.length > 0) words.push({ word: rest });
       const next = word.slice(at + 1).search(/[@<]/u);
       at = next === -1 ? -1 : at + 1 + next;
     }
   }
   if (basename !== "git") return words;
-  const out: string[] = [];
-  for (const word of words) {
-    out.push(word);
+  const out: CredentialReadEntry[] = [];
+  for (const entry of words) {
+    out.push(entry);
+    const word = entry.word;
     for (let at = word.indexOf(":"); at !== -1; at = word.indexOf(":", at + 1)) {
       let rest = word.slice(at + 1);
       if (rest.startsWith("(")) {
         const close = rest.indexOf(")");
         rest = close === -1 ? rest.slice(1) : rest.slice(close + 1);
       }
-      if (rest.length > 0) out.push(rest);
+      if (rest.length > 0) out.push({ word: rest });
     }
   }
   return out;
 }
 
-function credentialTouch(basename: string, args: readonly string[]): CredentialOutcome | null {
-  const named = credentialReadWords(basename, args).find((word) => isCredentialPathAsRead(word));
+/** `literals`: each argument's literal `$` ({@link LexWord.literalDollars}), by index; absent, none. */
+function credentialTouch(
+  basename: string,
+  args: readonly string[],
+  literals: readonly (readonly number[] | undefined)[] = [],
+): CredentialOutcome | null {
+  const named = credentialReadEntries(basename, args, literals).find((entry) => isCredentialPathAsRead(entry.word, entry.literalAt));
   if (named !== undefined) {
-    return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
+    return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named.word };
   }
 
   for (const word of args) {
@@ -2284,8 +2281,9 @@ function uploadCredentialTouch(sources: readonly string[], unknown: string | nul
 function redirectCredentialTouch(
   readTargets: readonly string[],
   allTargets: readonly string[],
+  readLiterals: readonly (readonly number[] | undefined)[] = [],
 ): CredentialOutcome | null {
-  const named = readTargets.find((target) => isCredentialPathAsRead(target));
+  const named = readTargets.find((target, index) => isCredentialPathAsRead(target, readLiterals[index]));
   if (named !== undefined) {
     return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
   }
@@ -2359,6 +2357,16 @@ interface LexWord {
    * same `text` as an assignment and is a command word, the program bash runs.
    */
   assignment: boolean;
+  /**
+   * Where in `text` each `$` the shell reads as text sits: one in single
+   * quotes, escaped (`\$`, outside or inside double quotes), left by a decoded
+   * `$'…'`, or a kept dollar quote's own `$`. Every other `$` is an
+   * expansion. Read where an unread part is formed ({@link unreadParts}), only
+   * for this word's own text: a reading made from it (a brace expansion, a
+   * fold, an option's value, a joined path) carries none, so each of its `$`
+   * counts as a parameter (fail closed). Absent: none.
+   */
+  literalDollars?: readonly number[];
 }
 
 interface LexRedirect {
@@ -2525,7 +2533,7 @@ function lex(command: string): LexResult {
     // Where a dollar quote ended the word's text (`endsWord`, see `readDollarQuoted`).
     let cut: number | null = null;
     let unreadParts = 0;
-    // Where in `text` each `$` that is text sits ({@link literalDollarWords}).
+    // Where in `text` each `$` that is text sits ({@link LexWord.literalDollars}).
     const literalDollars: number[] = [];
 
     for (; index < command.length; index += 1) {
@@ -2564,6 +2572,7 @@ function lex(command: string): LexResult {
       if (ch === '"') {
         const scan = readDoubleQuoted(command, index);
         if (scan === null) return null;
+        for (const at of scan.literalDollars) literalDollars.push(text.length + at);
         text += scan.text;
         substitutions.push(...scan.substitutions);
         if (scan.opaque !== null) opaque = scan.opaque;
@@ -2601,6 +2610,7 @@ function lex(command: string): LexResult {
           dollarQuoteRead = true;
           const scan = readDoubleQuoted(command, index + 1);
           if (scan === null) return null;
+          for (const at of scan.literalDollars) literalDollars.push(text.length + at);
           text += scan.text;
           substitutions.push(...scan.substitutions);
           if (scan.opaque !== null) opaque = scan.opaque;
@@ -2613,6 +2623,12 @@ function lex(command: string): LexResult {
           dollarQuoteRead = true;
           const scan = readDollarQuoted(command, index + 1);
           if (scan === null) return null;
+          // A dollar quote expands nothing: each `$` it leaves is text, but for
+          // the sentinel an escape it cannot read stands as (an unread part).
+          for (let at = scan.text.indexOf("$"); at !== -1; at = scan.text.indexOf("$", at + 1)) {
+            if (scan.text.startsWith(SUBSTITUTION_SENTINEL, at)) at += SUBSTITUTION_SENTINEL.length - 1;
+            else literalDollars.push(text.length + at);
+          }
           text += scan.text;
           if (scan.unread) splits = true;
           unreadParts += scan.unreadParts;
@@ -2665,18 +2681,10 @@ function lex(command: string): LexResult {
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
     if (cut !== null) text = text.slice(0, cut);
-    if (dollarQuotesKept && !literalDollarOverflow && text.includes("$")) {
-      // The same text made twice with its literal `$` in different places (or
-      // none: kept `$'X'` and `$X`) keeps none: each `$` a parameter.
-      const seen = literalDollarWords.get(text);
-      if (seen === undefined) {
-        if (literalDollarWords.size >= LITERAL_DOLLAR_WORDS_CAP) literalDollarOverflow = true;
-        else literalDollarWords.set(text, literalDollars);
-      } else if (seen.join(",") !== literalDollars.join(",")) literalDollarWords.set(text, []);
-    }
     const assignment = ASSIGNMENT.test(command.slice(start, index));
     const paramNames = specialParametersOnly(command.slice(start, index));
-    return { text, quoted, substitutions, splits, expands, zshGlob, paramNames, exact, assignment };
+    const literal = literalDollars.filter((at) => at < text.length);
+    return { text, quoted, substitutions, splits, expands, zshGlob, paramNames, exact, assignment, ...(literal.length === 0 ? {} : { literalDollars: literal }) };
   };
 
   while (index < command.length) {
@@ -2953,23 +2961,27 @@ function readDoubleQuoted(
   substitutions: string[];
   opaque: string | null;
   exact: boolean;
+  /** Where in `text` each escaped `\$` sits: text, not an expansion ({@link LexWord.literalDollars}). */
+  literalDollars: number[];
 } | null {
   let text = "";
   const substitutions: string[] = [];
   let opaque: string | null = null;
   // APRV-510, see `LexWord.exact`.
   let exact = true;
+  const literalDollars: number[] = [];
   let index = start + 1;
 
   for (; index < command.length; index += 1) {
     const ch = command[index] as string;
-    if (ch === '"') return { text, end: index, substitutions, opaque, exact };
+    if (ch === '"') return { text, end: index, substitutions, opaque, exact, literalDollars };
     if (ch === "\\") {
       const next = command[index + 1];
       if (next === undefined) break;
       // The shell keeps the backslash before any other character; this lexer
       // drops it, so the text is no longer the shell's bytes.
       if (!DOUBLE_QUOTE_ESCAPES.has(next)) exact = false;
+      if (next === "$") literalDollars.push(text.length);
       if (next !== "\n") text += next;
       index += 1;
       continue;
@@ -9804,6 +9816,7 @@ function strictestProtectedWrite(
   skipProse = false,
   glob: GlobReading = defaultGlobReading(),
   text: ProtectedHit | null = strictestProtected(words, protectedPaths, skipProse),
+  literals: readonly (readonly number[] | undefined)[] = [],
 ): ProtectedHit | null {
   // The text answer (`text`) is kept, for the record of whether a reading raised it.
   let best = text;
@@ -9845,17 +9858,22 @@ function strictestProtectedWrite(
   // where it ran out before: a walk that would have exhausted it answers
   // `log.mutate`, as that walk did.
   const spent = new Map<string, number>();
-  for (const word of words) {
+  for (const [index, word] of words.entries()) {
     // Review-b M1: nothing is stricter than log.mutate, so stop there.
     if (best !== null && (best as { surface: string }).surface === "log.mutate") break;
+    // The word's own literal `$` (a lexed word's, where the caller has it); a
+    // reading made from it carries none.
+    const literalAt = literals[index];
     if (!inexact(word)) {
       // A substitution leaves its word `exact` to the lexer, and its output is
       // an unread part all the same (`APPROVAL$(true).md`).
-      if (word.includes(SUBSTITUTION_SENTINEL) && !(skipProse && /\s/u.test(word))) offerSpliced(splicedGuardClass(word, protectedPaths, glob.budget, glob.options, globLive(glob, word)), word);
+      if (word.includes(SUBSTITUTION_SENTINEL) && !(skipProse && /\s/u.test(word))) offerSpliced(splicedGuardClass(word, protectedPaths, glob.budget, glob.options, globLive(glob, word), literalAt), word);
       continue;
     }
     if (skipProse && /\s/u.test(word)) continue;
-    const steps = spent.get(word);
+    // The same text with other literal `$` is another word here.
+    const spentKey = literalAt === undefined ? word : `${literalAt.join(",")}\u0000${word}`;
+    const steps = spent.get(spentKey);
     if (steps !== undefined) {
       glob.budget.left -= steps;
       if (steps > 0 && glob.budget.left < 0) offer("log.mutate", word);
@@ -9874,9 +9892,9 @@ function strictestProtectedWrite(
       // An unread part spliced into literal text (lead ruling CLAIMS L62568):
       // `APPROVAL$E.md` is the policy file when E is empty, inside double
       // quotes too (the value is spliced in, only not globbed).
-      offerSpliced(splicedGuardClass(reading, protectedPaths, glob.budget, glob.options, globLive(glob, word)), word);
+      offerSpliced(splicedGuardClass(reading, protectedPaths, glob.budget, glob.options, globLive(glob, word), reading === word ? literalAt : undefined), word);
     }
-    spent.set(word, budgetBefore - glob.budget.left);
+    spent.set(spentKey, budgetBefore - glob.budget.left);
   }
   if (best !== text) markGlobWriteFired();
   if (best !== text && glob.tracker !== undefined) glob.tracker.raised = true;
@@ -12382,23 +12400,28 @@ const SPLICED_PARTS_CAP = 8;
  * be `.approval`, `$A.$B` may be `.git`). Otherwise the word with each run of
  * unread parts as one {@link UNREAD_MARK} (`marked`), and as one
  * {@link SUBSTITUTION_SENTINEL} (`asOutputs`, for the `.git` reader), and how
- * many parts it holds. A `$` that opens no expansion is literal, and in the
- * kept mode a `$` main's lexer made as text ({@link literalDollarWords}) is
- * text no guarded name holds ({@link SPLICED_INERT}).
+ * many parts it holds. A `$` that opens no expansion is literal, and a `$`
+ * at one of `literalAt` (the lexed word's own {@link LexWord.literalDollars},
+ * handed in only for that word's own text) is text no guarded name holds
+ * ({@link SPLICED_INERT}).
  */
-function unreadParts(text: string): { marked: string; asOutputs: string; parts: number } | null {
+function unreadParts(text: string, literalAt?: readonly number[]): { marked: string; asOutputs: string; parts: number } | null {
   if (!text.includes("$")) return null;
-  const literalAt = dollarQuotesKept && !literalDollarOverflow ? literalDollarWords.get(text) : undefined;
   let marked = "";
   let asOutputs = "";
   let parts = 0;
   let afterPart = false;
+  // `literalAt` ascends: the next literal `$` at or after `at`.
+  let nextLiteral = 0;
   for (let at = 0; at < text.length; at += 1) {
     const char = text[at] as string;
     let end = -1;
-    if (char === "$" && literalAt !== undefined && literalAt.includes(at)) {
-      // Kept mode: a `$` main's lexer made as text (a kept quote's own, a
-      // quoted or escaped one). A text no guarded name holds.
+    if (char === "$" && literalAt !== undefined) {
+      while (nextLiteral < literalAt.length && (literalAt[nextLiteral] as number) < at) nextLiteral += 1;
+    }
+    if (char === "$" && literalAt !== undefined && literalAt[nextLiteral] === at) {
+      // A `$` the shell reads as text (single-quoted, escaped, a dollar
+      // quote's). A text no guarded name holds.
       marked += SPLICED_INERT;
       asOutputs += SPLICED_INERT;
       afterPart = false;
@@ -12480,16 +12503,17 @@ function splicedGuardClass(
   budget: { left: number },
   options: boolean,
   live: boolean,
+  literalAt?: readonly number[],
 ): { surface: string | null; also: readonly string[] } {
   // Every class a counted candidate takes, not only the strictest: the plain
   // spelling's class rides beside a stricter one (`.$X/settings.json` may be
   // `.approval/log/settings.json` or `.claude/settings.json`).
   const also = new Set<string>();
-  const surface = splicedClass(word, budget, options, live, (path) => protectedPathClass(path, protectedPaths), protectedPaths, "log.mutate", false, also);
+  const surface = splicedClass(word, budget, options, live, (path) => protectedPathClass(path, protectedPaths), protectedPaths, "log.mutate", false, also, literalAt);
   // A word whose literal text and unread parts may join into `.git` (`.$X/hooks/x`)
   // is a git-dir write as well, as {@link splicedNamesGit} reads it alone.
   if (surface !== null) {
-    const read = unreadParts(word);
+    const read = unreadParts(word, literalAt);
     const text = read === null ? null : live ? read.asOutputs : read.asOutputs.replace(/[*?[\]{}()#^<>|]|(?<=.)~/gu, SPLICED_INERT);
     if (read !== null && text !== null && (read.parts > SPLICED_PARTS_CAP || wordJoinsGitAcrossSubstitution(text))) also.add("vcs.history.rewrite");
   }
@@ -12510,17 +12534,19 @@ function splicedGuardClass(
  * (the hook judges a glob against the listing): only the unread parts are
  * read as any text.
  */
-function splicedCredential(word: string): boolean {
+function splicedCredential(word: string, literalAt?: readonly number[]): boolean {
   if (mainRulesOnly || !word.includes("$")) return false;
   return (
     foldedOnlyQuietly(() => {
-      // Keyed by which `$` in it are text in the kept mode, too.
-      const literalAt = dollarQuotesKept && !literalDollarOverflow ? literalDollarWords.get(word) : undefined;
-      const key = `${dollarQuotesKept ? "k" : "d"}${literalAt?.join(",") ?? "-"}|${word}`;
-      const known = splicedCredentialMemo.get(key);
+      // Keyed by which `$` in it are text, too.
+      // A long word is not remembered: the memo holds at most
+      // SPLICED_CREDENTIAL_MEMO_CAP keys of a bounded size.
+      const key = word.length > SPLICED_CREDENTIAL_MEMO_TEXT ? null : `${dollarQuotesKept ? "k" : "d"}${literalAt?.join(",") ?? "-"}|${word}`;
+      const known = key === null ? undefined : splicedCredentialMemo.get(key);
       if (known !== undefined) return known;
       const found =
-        splicedClass(word, { left: SPLICED_CREDENTIAL_STEP_CAP }, true, false, (path) => (isCredentialPathPlain(path) ? CREDENTIAL_CLASS : null), [], CREDENTIAL_CLASS, true) !== null;
+        splicedClass(word, { left: SPLICED_CREDENTIAL_STEP_CAP }, true, false, (path) => (isCredentialPathPlain(path) ? CREDENTIAL_CLASS : null), [], CREDENTIAL_CLASS, true, undefined, literalAt) !== null;
+      if (key === null) return found;
       if (splicedCredentialMemo.size >= SPLICED_CREDENTIAL_MEMO_CAP) splicedCredentialMemo.clear();
       splicedCredentialMemo.set(key, found);
       return found;
@@ -12536,6 +12562,8 @@ function splicedCredential(word: string): boolean {
 const splicedCredentialMemo = new Map<string, boolean>();
 /** Most texts {@link splicedCredentialMemo} holds before it starts again. */
 const SPLICED_CREDENTIAL_MEMO_CAP = 4096;
+/** The longest word {@link splicedCredentialMemo} remembers (its literal positions are shorter). */
+const SPLICED_CREDENTIAL_MEMO_TEXT = 4096;
 /** Matcher steps one credential reading may take; past them the word may be one. */
 const SPLICED_CREDENTIAL_STEP_CAP = 200_000;
 
@@ -12561,12 +12589,20 @@ function splicedClass(
   wide: string,
   directoryKeeps = false,
   also?: Set<string>,
+  literalAt?: readonly number[],
 ): string | null {
   // Off in main's passes, as {@link splicedNamesGit} is.
   if (mainRulesOnly) return null;
-  const read = unreadParts(word);
+  const read = unreadParts(word, literalAt);
   if (read === null) return null;
   if (read.parts > SPLICED_PARTS_CAP) return wide;
+  // The judge reads a `\` as a separator as it reads a `/`: past the segments
+  // bound of the pattern reader the word could be any path, and each of its
+  // candidates would cost the judge a walk of every segment
+  // (`tee $a'a\qa\q…'`, 33,000 of them).
+  let separators = 0;
+  for (const char of read.marked) if (char === "/" || char === "\\") separators += 1;
+  if (separators >= GLOB_GUARD_SEGMENTS_CAP) return wide;
   // A word the shell does not glob (every glob character in it quoted, as in
   // `"$f[1,4]/out"`) has those characters as text: no guarded name holds one,
   // so each stands as a character that matches nothing guarded. A word it may
@@ -13568,6 +13604,12 @@ function classifySegmentWithVerb(
   const everyReadTarget = segment.redirects
     .filter((redirect) => redirect.op === "<")
     .map((redirect) => redirect.target.text);
+  // Each word's and read target's literal `$` (the lexed word's own, by index).
+  const wordLiterals = segment.words.map((word) => word.literalDollars);
+  const everyReadLiterals = segment.redirects.filter((redirect) => redirect.op === "<").map((redirect) => redirect.target.literalDollars);
+  const everyWriteLiterals = segment.redirects
+    .filter((redirect) => redirect.op !== "<" && !isDiscardTarget(redirect.target.text))
+    .map((redirect) => redirect.target.literalDollars);
   const everyRedirectTarget = segment.redirects.map((redirect) => redirect.target.text);
   // A redirection onto a protected path is a write to that path, whatever the
   // command in front of it was going to do. The CLASS says which surface was
@@ -13608,7 +13650,15 @@ function classifySegmentWithVerb(
     off: context.globPatternsOff === true,
     ...(context.globTracker === undefined ? {} : { tracker: context.globTracker }),
   };
-  const redirected = strictestProtectedWrite(everyWriteTarget, protectedPaths, inexact, false, glob);
+  const redirected = strictestProtectedWrite(
+    everyWriteTarget,
+    protectedPaths,
+    inexact,
+    false,
+    glob,
+    strictestProtected(everyWriteTarget, protectedPaths, false),
+    everyWriteLiterals,
+  );
   const bin = words[cursor];
   if (redirected !== null) {
     // APRV-503 recheck (SHOULD-FIX-R1): a segment that writes a protected path
@@ -13620,8 +13670,8 @@ function classifySegmentWithVerb(
     const touched =
       (writer === null
         ? null
-        : credentialTouch(writer, writerArgs)) ??
-      redirectCredentialTouch(everyReadTarget, everyRedirectTarget);
+        : credentialTouch(writer, writerArgs, wordLiterals.slice(cursor + 1))) ??
+      redirectCredentialTouch(everyReadTarget, everyRedirectTarget, everyReadLiterals);
     // The command in front of the redirect may write protected paths of its
     // own (`tee .github/workflows/ci.yml > design/x`): its own answer, the
     // write redirections set aside, is judged beside the redirect's. A reader
@@ -13659,6 +13709,7 @@ function classifySegmentWithVerb(
     .map((redirect) => redirect.target.text)
     .filter((target) => !isDiscardTarget(target));
   const readTargets = redirects.filter((redirect) => redirect.op === "<").map((redirect) => redirect.target.text);
+  const readLiterals = redirects.filter((redirect) => redirect.op === "<").map((redirect) => redirect.target.literalDollars);
   const redirectTargets = redirects.map((redirect) => redirect.target.text);
   // APRV-521 (review-b M1). Every spelling of bash's assignment word is read
   // past by the cursor above ({@link ASSIGNMENT}), and only the plain one is
@@ -13707,7 +13758,7 @@ function classifySegmentWithVerb(
     // Nothing here can outrank it: there are no positionals, and a protected
     // write target has already answered above, so the precedence rule the
     // binary path applies below has nothing to defer to.
-    const bareCredential = redirectCredentialTouch(readTargets, redirectTargets);
+    const bareCredential = redirectCredentialTouch(readTargets, redirectTargets, readLiterals);
     if (bareCredential !== null) return { ok: true, ...bareCredential };
     // APRV-508 refutation S1: an assignment on its own sets a shell variable,
     // and when that variable is already exported (PATH and LANG always are)
@@ -13801,6 +13852,8 @@ function classifySegmentWithVerb(
   }
 
   const positionals = args.filter((arg) => !isFlag(arg));
+  // Each positional's literal `$` (its lexed word's own, by index).
+  const positionalLiterals = args.flatMap((arg, index) => (isFlag(arg) ? [] : [wordLiterals[cursor + 1 + index]]));
   // Lead ruling L62013 (S2), fail closed: the organ-directory rule holds for
   // every command but the release list (redirects above were judged with it).
   organVerbs = !releasedFromOrganRule(segment);
@@ -13922,14 +13975,14 @@ function classifySegmentWithVerb(
   // and redirect targets, git's readers) and APRV-511's upload sources. An
   // upload option word APRV-522 also reads is named by the file it sends, as
   // APRV-511 names it; a positional or an environment reference keeps its own.
-  const argCredential = credentialTouch(basename, args);
+  const argCredential = credentialTouch(basename, args, wordLiterals.slice(cursor + 1));
   const credential =
     argCredential === null
       ? uploadCredential
       : uploadCredential !== null && argCredential.path !== undefined && !positionals.includes(argCredential.path)
         ? uploadCredential
         : argCredential;
-  const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets);
+  const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets, readLiterals);
   const sideScan =
     credential === null && redirectCredential === null
       ? null
@@ -14041,7 +14094,8 @@ function classifySegmentWithVerb(
       fetched.unknown !== null ||
       fetchedOutputProtected !== null ||
       strictestProtected([...lexWords.map((word) => word.text), ...resolvedWords], protectedPaths) !== null ||
-      [...lexWords.map((word) => word.text), ...resolvedWords].some((word) => isCredentialPathAsRead(word)) ||
+      lexWords.some((word) => isCredentialPathAsRead(word.text, word.literalDollars)) ||
+      resolvedWords.some((word) => isCredentialPathAsRead(word)) ||
       // F-12 fold (review-b N2): APFS and the default macOS volume are case-
       // insensitive, so `>> approval.md` is the policy file. Fail closed: a bare
       // word that names a protected file or a credential in ANY case refuses.
@@ -14246,7 +14300,15 @@ function classifySegmentWithVerb(
   // the destination, so the destination is unknown: `policy.core`, unless a
   // named path already earns a class at least as strict (the log).
   if (copyUnknown !== null) {
-    const named = strictestProtectedWrite(copyWords, protectedPaths, writtenInexact, false, glob);
+    const named = strictestProtectedWrite(
+      copyWords,
+      protectedPaths,
+      writtenInexact,
+      false,
+      glob,
+      strictestProtected(copyWords, protectedPaths, false),
+      besideRead === null ? [...positionalLiterals, ...readLiterals] : [],
+    );
     if (named !== null && protectedRank(named.surface) <= protectedRank("policy.core")) {
       return {
         ok: true,
@@ -14336,7 +14398,7 @@ function classifySegmentWithVerb(
     // text answer of them is handed in: the protected scan is made once.
     const operandNamed =
       besideRead === null
-        ? strictestProtectedWrite(judged, protectedPaths, writtenInexact, true, glob)
+        ? strictestProtectedWrite(judged, protectedPaths, writtenInexact, true, glob, strictestProtected(judged, protectedPaths, true), positionalLiterals)
         : strictestProtectedWrite(besideRead.positionals, protectedPaths, writtenInexact, true, glob, besideRead.named);
     // Lead ruling L61195 (b): a copy, move, link or install into a DIRECTORY
     // writes `<dir>/<basename of each source>`, so that file is judged too
@@ -14700,7 +14762,7 @@ function innerPartRefused(part: LexSegment, protectedPaths: readonly ProtectedPa
         DIRECTORY_VERBS.has(word.text.split("/").pop() ?? "") ||
         protectedNameFolded(word.text, protectedPaths) ||
         strictestProtected([word.text], protectedPaths) !== null ||
-        isCredentialPathAsRead(word.text) ||
+        isCredentialPathAsRead(word.text, word.literalDollars) ||
         isCredentialPathAsRead(foldNameLower(word.text)),
     )
   );
