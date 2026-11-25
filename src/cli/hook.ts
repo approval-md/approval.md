@@ -5712,7 +5712,7 @@ export function refineWriteLandings(
     // stops early only once nothing more can be added.
     let guarded: (WriteLanding & { kind: "guarded" }) | undefined =
       unreadable === null ? undefined : { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: shape.text.slice(0, 80), why: unreadable };
-    let out: (WriteLanding & { kind: "out" }) | undefined;
+    let out: (WriteLanding & { kind: "out"; why?: string }) | undefined;
     const take = (judged: WriteLanding): void => {
       if (judged.kind === "guarded") guarded ??= judged;
       else if (judged.kind === "out") out ??= judged;
@@ -5776,6 +5776,9 @@ export function refineWriteLandings(
     // INTO_EXTRA_LANDINGS_CAP of them the rest are not judged and the segment
     // is guarded as unreadable (a cost bound: GNU cp, mv and ln refuse a
     // second `-t`, and a line of many of them reached the hook's deadline).
+    // Under a write_scope it is out of scope as well (lead ruling L63122):
+    // a landing not judged may be outside every root, and a policy that sets
+    // `files.write.out_of_scope` stricter than guarded still decides.
     const namesOf = new Map<string, Array<string | null>>();
     let extraLandings = 0;
     into: for (const [dirAt, { dir, sources, tree }] of intoDirs.entries()) {
@@ -5795,7 +5798,9 @@ export function refineWriteLandings(
           if (dirAt > 0) {
             extraLandings += 1;
             if (extraLandings > INTO_EXTRA_LANDINGS_CAP) {
-              guarded ??= { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: dir, why: `\`${host.slice(0, 80)}\` names ${String(intoDirs.length)} target directories, each with every source, more landings than this hook judges` };
+              const why = `\`${host.slice(0, 80)}\` names ${String(intoDirs.length)} target directories, each with every source, more landings than this hook judges`;
+              guarded ??= { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: dir, why };
+              if (scope.optedIn) out ??= { kind: "out", path: dir, why: `${why}, so whether each lands within a write root (${scope.roots.join(", ")}) is not known` };
               break into;
             }
           }
@@ -5826,7 +5831,8 @@ export function refineWriteLandings(
     if (out !== undefined && scope.optedIn && !(segment?.class.startsWith("files.delete.") ?? false)) {
       // A row main already tightens to `files.delete.*` stays exactly as main
       // has it (decision A is not built).
-      findings.push({ unit: index, text: host, cls: WRITE_OUT_OF_SCOPE_CLASS, rule: WRITE_OUT_OF_SCOPE_RULE, path: out.path, note: `${WRITE_OUT_OF_SCOPE_RULE}: \`${host}\` lands at ${out.path}, outside every write root (${scope.roots.join(", ")}), so it is also ${WRITE_OUT_OF_SCOPE_CLASS}` });
+      const where = out.why ?? `\`${host}\` lands at ${out.path}, outside every write root (${scope.roots.join(", ")})`;
+      findings.push({ unit: index, text: host, cls: WRITE_OUT_OF_SCOPE_CLASS, rule: WRITE_OUT_OF_SCOPE_RULE, path: out.path, note: `${WRITE_OUT_OF_SCOPE_RULE}: ${where}, so it is also ${WRITE_OUT_OF_SCOPE_CLASS}` });
     }
 
     for (const found of resolvedWordClasses(shape, index)) {
