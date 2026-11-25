@@ -28,7 +28,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 
 import { listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
-import { classifyForHook } from "../src/cli/hook.js";
+import { classifyForHook, WRITE_SCOPE_OFF } from "../src/cli/hook.js";
 import { cpuSeconds } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-glob-write-cost-")));
@@ -84,7 +84,7 @@ async function hookSeconds(command: string): Promise<{ seconds: number; classes:
   const listed = process.cpuUsage(startListing);
   let classes: string[] = [];
   const classified = cpuSeconds(() => {
-    const result = classifyForHook(command, [], PROJECT, [], false, [], false, listings).result;
+    const result = classifyForHook(command, [], PROJECT, [], false, [], false, WRITE_SCOPE_OFF, listings).result;
     classes = result.ok ? result.classes : [`refused ${result.code}`];
   });
   return { seconds: (listed.user + listed.system) / 1e6 + classified, classes };

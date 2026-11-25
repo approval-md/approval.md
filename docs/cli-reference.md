@@ -685,6 +685,9 @@ is not manual:
   omits `allow_irreversible` or writes `false`.
 - `load-failure` — the policy could not be loaded at all, so every class is
   manual. `loadFailure` carries a code and a message.
+- `class-minimum` — the class has a built-in minimum (`files.write.guarded`
+  is never lighter than manual) and the policy resolved it lighter; the
+  minimum decided, with provenance `floor`.
 
 The exit codes, at length. `policy check|test` uses only 0, 2 and 4:
 
@@ -728,7 +731,7 @@ channel; policy-authorized execution is never represented as a human grant.
  "outcome":{"autonomy":"supervised","approvers":null,"limits":null,
             "allowIrreversible":false},
  "provenance":"rule"|"default"|"inherited"|"fail-closed"|"floor",
- "manualBecause":null|"matched-rule"|"irreversibility-floor"|"load-failure",
+ "manualBecause":null|"matched-rule"|"irreversibility-floor"|"load-failure"|"class-minimum",
  "loadFailure":null|{"code":"file-missing"|"no-block"|"multiple-blocks"|
                      "yaml-error"|"schema-invalid"|"protected-route-floor"|
                      "sender-ambiguous"|"delegation-not-supported",
@@ -3706,6 +3709,17 @@ The checks, at length:
   nothing beyond the ability to write: no verdict, budget, floor, draw or token
   reads the id. The row reads the policy and one variable's SHAPE, prints no
   value on any path, and asks no running daemon anything.
+- **write-scope** — whether the policy opts in to `files.write.out_of_scope`
+  (design v4, writes outside the workspace): it does when it names that class
+  as a `classes` key or declares a `write_scope` block. A PASS either way, since
+  a policy written before the class existed is not broken: opted in, the row
+  names the roots a write may land in; not opted in, it says the row is missing,
+  that a write outside the workspace keeps the answer it had before the class
+  existed, and the line to add (`files.write.out_of_scope: { autonomy:
+  supervised-retro }`). Either way it says that writes onto the guarded list,
+  and writes to a target the hook cannot read, take `files.write.guarded`,
+  never lighter than manual, under every policy. A SKIP when the policy did not
+  load.
 
 
 

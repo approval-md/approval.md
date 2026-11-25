@@ -24,6 +24,8 @@ classes:
     autonomy: autonomous
   files.write.workspace:
     autonomy: autonomous
+  files.write.out_of_scope:
+    autonomy: supervised-retro
   release.publish:
     autonomy: manual
 ```

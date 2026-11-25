@@ -41,3 +41,11 @@
 
 delete process.env.FORCE_COLOR;
 delete process.env.NO_COLOR;
+
+// Claude Code's config and project folders (S2, write scope): the seats that
+// run this suite set `CLAUDE_CONFIG_DIR` to a real config folder, and the
+// hook's write pass reads the settings in the folder it names. A test that
+// inherited it would judge (and read) the operator's real folder, so a test
+// that wants one sets it explicitly, in its own process or its child's env.
+delete process.env.CLAUDE_CONFIG_DIR;
+delete process.env.CLAUDE_PROJECT_DIR;

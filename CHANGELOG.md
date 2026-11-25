@@ -920,6 +920,28 @@ Bash tool runs on macOS, a line that wrote a protected file was
 
 ### Added
 
+- **Where a write lands is judged: `files.write.guarded` and `write_scope`.**
+  The hook reads where each write of a shell line or a file tool lands, as
+  spelled and as the disk resolves it through links, and adds a class beside
+  the ones the line already has.
+  - `files.write.guarded`: the landing is on a built-in list (`~/.ssh`, shell
+    start files, launch agents, `/etc`, PATH folders such as `~/.local/bin`,
+    credential stores such as `~/.aws`, a git hooks folder, a Claude Code
+    hooks folder, another user's home). The class has a built-in minimum of
+    `manual`: a policy row that sets it lower is a load error
+    (`class-minimum`), and a policy that does not name it still gets `manual`.
+  - A landing the hook cannot read is guarded too: a variable or substitution
+    it cannot resolve, a link made earlier on the same line, a pattern with
+    more than 8,192 matches. A pattern it can read takes the classes its
+    matches take written out.
+  - Trees (`cp -r`, `rsync`, `tar -x`, archive tools) are guarded when the
+    landing is on, inside or above a listed place, or holds a `.git`.
+  - `write_scope.roots` in a policy is opt-in. With it, a write landing
+    outside the gate root, the session scratchpad, the temp roots and the
+    listed roots takes `files.write.out_of_scope` (the scaffold ships it
+    `supervised-retro`). Without it nothing changes for such writes.
+  - `approval doctor` has a `write-scope` row and `approval policy explain`
+    names the built-in minimum. Six new policy-resolution vectors.
 - **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536).**
   `overlay-recipes-check.mjs --expected <expected.json> --tag-corpus <corpus>`
   finds every call that is new or changed against the previous release (a new
