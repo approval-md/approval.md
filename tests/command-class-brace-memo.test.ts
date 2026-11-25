@@ -4,7 +4,7 @@
  * classification call. Pure, so no answer moves; bounded, so no line grows
  * memory past it: at most BRACE_CANDIDATES_MEMO_CHARS characters (each word
  * and every word it expands to), at most BRACE_CANDIDATES_MEMO_ENTRIES
- * entries, no entry over 2,000,000 characters, and nothing left when the
+ * entries, no entry over 4,000,000 characters, and nothing left when the
  * call returns.
  */
 

@@ -457,8 +457,12 @@ export function braceCandidates(word: string): string[] | null {
   // afresh, so a repeated measurement pays the work again. Every word goes
   // through it (a stray `}` alone changes the word: `.op.env}` is `.op.env`).
   if (classifyCallDepth === 0) return braceCandidatesOnce(word);
-  const known = braceCandidatesMemo.get(word);
-  if (known !== undefined) return known === null ? null : [...known];
+  // Keyed by a hash of the whole text: V8 hashes a long string by its length
+  // alone on some versions (node 20), and 1 MB keys of one length then collide.
+  const key = braceMemoKey(word);
+  const bucket = braceCandidatesMemo.get(key);
+  const hit = bucket?.find((entry) => entry.word === word);
+  if (hit !== undefined) return hit.made === null ? null : [...hit.made];
   const made = braceCandidatesOnce(word);
   // What an entry holds: the word and every word it expands to. One over its
   // own bound is not kept, and once the memo is full nothing more is kept
@@ -468,19 +472,31 @@ export function braceCandidates(word: string): string[] | null {
   if (
     size <= BRACE_CANDIDATES_ENTRY_CHARS &&
     braceCandidatesMemoChars + size <= BRACE_CANDIDATES_MEMO_CHARS &&
-    braceCandidatesMemo.size < BRACE_CANDIDATES_MEMO_ENTRIES
+    braceMemoEntries < BRACE_CANDIDATES_MEMO_ENTRIES
   ) {
-    braceCandidatesMemo.set(word, made === null ? null : [...made]);
+    const entry = { word, made: made === null ? null : [...made] };
+    if (bucket === undefined) braceCandidatesMemo.set(key, [entry]);
+    else bucket.push(entry);
+    braceMemoEntries += 1;
     braceCandidatesMemoChars += size;
     braceMemoHeld += word.length + (made ?? []).reduce((sum, each) => sum + each.length, 0);
     if (braceMemoHeld > braceMemoPeak) braceMemoPeak = braceMemoHeld;
-    if (braceCandidatesMemo.size > braceMemoEntriesPeak) braceMemoEntriesPeak = braceCandidatesMemo.size;
+    if (braceMemoEntries > braceMemoEntriesPeak) braceMemoEntriesPeak = braceMemoEntries;
   }
   return made;
 }
 
-/** {@link braceCandidates}' answers by word, for the current classification call. */
-const braceCandidatesMemo = new Map<string, readonly string[] | null>();
+/** {@link braceCandidates}' answers by word (bucketed by {@link braceMemoKey}), for the current classification call. */
+const braceCandidatesMemo = new Map<string, { word: string; made: readonly string[] | null }[]>();
+/** How many words {@link braceCandidatesMemo} holds. */
+let braceMemoEntries = 0;
+
+/** A key for a word from every character of it (FNV-1a over UTF-16 units) and its length. */
+function braceMemoKey(word: string): string {
+  let hash = 0x811c9dc5;
+  for (let at = 0; at < word.length; at += 1) hash = Math.imul(hash ^ word.charCodeAt(at), 0x01000193);
+  return `${String(word.length)}:${String(hash >>> 0)}`;
+}
 /** How deep the exported classification calls are: the outermost starts the memo afresh. */
 let classifyCallDepth = 0;
 /** The characters {@link braceCandidatesMemo} holds, words and expansions, for its bound. */
@@ -492,13 +508,13 @@ let braceMemoEntriesPeak = 0;
 /** Most characters {@link braceCandidatesMemo} holds in one call (words and their expansions). */
 export const BRACE_CANDIDATES_MEMO_CHARS = 8_000_000;
 /** Most characters one entry may hold and still be kept. */
-const BRACE_CANDIDATES_ENTRY_CHARS = 2_000_000;
+const BRACE_CANDIDATES_ENTRY_CHARS = 4_000_000;
 /** Most entries {@link braceCandidatesMemo} holds in one call. */
 export const BRACE_CANDIDATES_MEMO_ENTRIES = 4096;
 
 /** The most characters and entries the brace memo held during the last outermost classification call, and the entries it holds now. */
 export function braceCandidatesMemoPeak(): { peak: number; entriesPeak: number; heldNow: number } {
-  return { peak: braceMemoPeak, entriesPeak: braceMemoEntriesPeak, heldNow: braceCandidatesMemo.size };
+  return { peak: braceMemoPeak, entriesPeak: braceMemoEntriesPeak, heldNow: braceMemoEntries };
 }
 
 /** Run one exported classification call; the outermost starts {@link braceCandidatesMemo} afresh, and ends it. */
@@ -506,6 +522,7 @@ function withClassifyCall<T>(run: () => T): T {
   if (classifyCallDepth === 0) {
     braceCandidatesMemo.clear();
     braceCandidatesMemoChars = 0;
+    braceMemoEntries = 0;
     braceMemoHeld = 0;
     braceMemoPeak = 0;
     braceMemoEntriesPeak = 0;
@@ -518,6 +535,7 @@ function withClassifyCall<T>(run: () => T): T {
     if (classifyCallDepth === 0) {
       braceCandidatesMemo.clear();
       braceCandidatesMemoChars = 0;
+      braceMemoEntries = 0;
       braceMemoHeld = 0;
     }
   }
