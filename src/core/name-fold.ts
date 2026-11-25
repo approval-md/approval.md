@@ -295,17 +295,41 @@ export function foldedOnly<T>(make: () => readonly T[]): readonly T[] {
  * run the as-spelled reading, which has no such answer to compare (for a
  * reading that walks the guarded names themselves, the spliced reading in
  * `command-class.ts`, where every walk meets a name that folds). A set of
- * equal claims it meets still counts (automated security review of the
- * spliced reading, c): the folded reading then takes each claim in turn.
+ * equal claims it meets does not turn the whole line either: the caller takes
+ * every claim inside, with {@link eachEqualClaim} (automated security review
+ * of the spliced reading, c; a line's second turn doubled its cost).
  */
 export function foldedOnlyQuietly<T>(make: () => T): T | null {
   if (spelledReading) return null;
   const diverged = readingsDiverged;
+  const widest = widestEqual;
   try {
     return refusePromise(make());
   } finally {
     readingsDiverged = diverged;
+    widestEqual = widest;
   }
+}
+
+/**
+ * `run`'s answer once per claim of the widest set of equal claims it meets
+ * ({@link takeAmongEqual}), in this call alone: the turns do not reach the
+ * line's {@link eachNameReading}. As spelled, `[run()]`.
+ */
+export function eachEqualClaim<T>(run: () => T): T[] {
+  if (spelledReading) return [refusePromise(run())];
+  const outer = { turn: equalTurn, widest: widestEqual };
+  equalTurn = 0;
+  widestEqual = 1;
+  const answers: T[] = [];
+  try {
+    answers.push(refusePromise(run()));
+    for (equalTurn = 1; equalTurn < widestEqual; equalTurn += 1) answers.push(refusePromise(run()));
+  } finally {
+    equalTurn = outer.turn;
+    widestEqual = outer.widest;
+  }
+  return answers;
 }
 
 /**

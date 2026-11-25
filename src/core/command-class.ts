@@ -69,6 +69,7 @@ import {
   eachNameReading,
   equalClaims,
   foldedOnly,
+  eachEqualClaim,
   foldedOnlyQuietly,
   foldFileName,
   foldNameExact,
@@ -1062,22 +1063,47 @@ export function classifyCommandWithDollarQuotesKept(
  * them: `[decoded]` or `[decoded, asMain]`. Callers join the answers as they
  * join the name readings. Inside the kept mode this is `[run()]`.
  */
-export function eachDollarQuoteReading<T>(run: () => T): [T] | [T, T] {
+export function eachDollarQuoteReading<T>(run: () => T): [T, ...T[]] {
   // Inside an outer reading (the hook's whole chain), the outer one runs the
   // kept pass over everything this run does, and joins it: the decoded
   // answer alone here, the lexer's record of a decoded quote left for it.
-  if (dollarQuotesKept || dollarQuoteReadingOpen) return [run()];
+  if (dollarQuotesKept || zshNulReading || dollarQuoteReadingOpen) return [run()];
   const outer = dollarQuoteRead;
+  const outerNul = zshNulSeen;
   dollarQuoteRead = false;
+  zshNulSeen = false;
   dollarQuoteReadingOpen = true;
   let read = false;
+  let nul = false;
   try {
     const decoded = run();
     read = dollarQuoteRead;
-    return read ? [decoded, withDollarQuotesKept(run)] : [decoded];
+    nul = zshNulSeen;
+    const answers: [T, ...T[]] = [decoded];
+    if (read) answers.push(withDollarQuotesKept(run));
+    // A dollar quote held a NUL: zsh's reading, each such word ending there.
+    if (nul) answers.push(withZshNulReading(run));
+    return answers;
   } finally {
     dollarQuoteReadingOpen = false;
     dollarQuoteRead = outer || read;
+    zshNulSeen = outerNul || nul;
+  }
+}
+
+/** The lexer met a dollar quote zsh may read a NUL in ({@link eachDollarQuoteReading}). */
+let zshNulSeen = false;
+/** The zsh reading is on: a word ends at a dollar quote's NUL. */
+let zshNulReading = false;
+
+/** Run `run` with each word ending where zsh may read a NUL in a dollar quote. */
+function withZshNulReading<T>(run: () => T): T {
+  const saved = zshNulReading;
+  zshNulReading = true;
+  try {
+    return run();
+  } finally {
+    zshNulReading = saved;
   }
 }
 
@@ -1756,11 +1782,7 @@ export function isCredentialPath(candidate: string): boolean {
  * into literal text that could be a credential file ({@link splicedCredential}).
  */
 function isCredentialPathAsRead(candidate: string, facts?: WordFacts): boolean {
-  if (isCredentialPathPlain(candidate) || splicedCredential(candidate, facts?.literalAt)) return true;
-  // zsh's reading of a word that ends at a NUL ({@link WordFacts.zshCut}).
-  if (facts?.zshCut === undefined) return false;
-  const zsh = candidate.slice(0, facts.zshCut);
-  return isCredentialPathPlain(zsh) || splicedCredential(zsh, facts.literalAt?.filter((at) => at < zsh.length));
+  return isCredentialPathPlain(candidate) || splicedCredential(candidate, facts?.literalAt);
 }
 
 /** The credential rows over `candidate`'s brace expansions, as written. */
@@ -2398,13 +2420,6 @@ interface LexWord {
    */
   dollarUnread?: boolean;
   /**
-   * Where zsh's reading of the word ends: a dollar quote there may hold a NUL
-   * (zsh keeps it, and a path ends at it), after literal text. bash reads the
-   * whole word, `text`; zsh reads `text.slice(0, zshCut)`. Read, as
-   * {@link literalDollars} is, only for this word's own text.
-   */
-  zshCut?: number;
-  /**
    * Does the word open with an unquoted, unescaped `=` followed by anything
    * but another `=` (`=mytool`, `=g++`, `="tool"`, `=$X`)? zsh's equals
    * expansion turns it into the path of a program on PATH unless `NO_EQUALS`
@@ -2421,18 +2436,13 @@ interface LexWord {
   assignmentEquals?: boolean;
 }
 
-/** What the spliced reading takes from a lexed word, for its own text only ({@link LexWord.literalDollars}, {@link LexWord.zshCut}). */
+/** What the spliced reading takes from a lexed word, for its own text only ({@link LexWord.literalDollars}). */
 interface WordFacts {
   literalAt?: readonly number[];
-  zshCut?: number;
 }
 
 function wordFacts(word: LexWord): WordFacts | undefined {
-  if (word.literalDollars === undefined && word.zshCut === undefined) return undefined;
-  return {
-    ...(word.literalDollars === undefined ? {} : { literalAt: word.literalDollars }),
-    ...(word.zshCut === undefined ? {} : { zshCut: word.zshCut }),
-  };
+  return word.literalDollars === undefined ? undefined : { literalAt: word.literalDollars };
 }
 
 interface LexRedirect {
@@ -2618,7 +2628,6 @@ function lex(command: string): LexResult {
     // Where zsh's reading of the word ends at a NUL, after literal text: the
     // rest of the word is unknown there ({@link readDollarQuoted}).
     let cut: number | null = null;
-    let zshCut: number | null = null;
     // The placeholders the word's dollar quotes may still add ({@link DOLLAR_QUOTE_PLACEHOLDER_CAP}).
     const placeholders = { left: DOLLAR_QUOTE_PLACEHOLDER_CAP };
     // Where in `text` each `$` that is text sits ({@link LexWord.literalDollars}).
@@ -2724,13 +2733,13 @@ function lex(command: string): LexResult {
             dollarUnread = true;
           }
           // zsh ends the path at a NUL and bash goes on with the word: the
-          // text is bash's, and where literal text comes before the NUL zsh's
-          // shorter reading is kept beside it (`zshCut`; `$'APPROVAL.md\0'.bak`
-          // is APPROVAL.md to zsh). With none (`$'\0'.approval/env`) zsh's path
-          // is a directory or nothing (review of b58db9ec, M1).
-          if (scan.zshNulAt !== null && zshCut === null && cut === null) {
-            const at = quoteAt + scan.zshNulAt;
-            if (/[^./]/u.test(text.slice(0, at).replaceAll(SUBSTITUTION_SENTINEL, ""))) zshCut = at;
+          // text is bash's, and the line is read again as zsh reads it, each
+          // such word ending at its NUL ({@link eachDollarQuoteReading};
+          // `$'APPROVAL.md\0'.bak` is APPROVAL.md to zsh, `git reset
+          // $'--hard\0'x` is `--hard`). Reviews of the M1 fix.
+          if (scan.zshNulAt !== null) {
+            zshNulSeen = true;
+            if (zshNulReading && cut === null) cut = quoteAt + scan.zshNulAt;
           }
           // Past the word's placeholders the rest of the word is unknown, to
           // every reader (an unexpanded variable to the end), and the spliced
@@ -2806,7 +2815,6 @@ function lex(command: string): LexResult {
       ...(assignmentEquals ? { assignmentEquals } : {}),
       ...(literal.length === 0 ? {} : { literalDollars: literal }),
       ...(dollarUnread ? { dollarUnread } : {}),
-      ...(zshCut === null || zshCut >= text.length ? {} : { zshCut }),
     };
   };
 
@@ -10043,12 +10051,6 @@ function strictestProtectedWrite(
     // reading made from it carries none.
     const facts = literals[index];
     const literalAt = facts?.literalAt;
-    // zsh's reading of a word that ends at a NUL, judged beside ({@link WordFacts.zshCut}).
-    if (facts?.zshCut !== undefined) {
-      const zsh = word.slice(0, facts.zshCut);
-      offer(protectedPathClass(zsh, protectedPaths), word);
-      offerSpliced(splicedGuardClass(zsh, protectedPaths, glob.budget, glob.options, globLive(glob, word), literalAt?.filter((at) => at < zsh.length)), word);
-    }
     if (!inexact(word)) {
       // A substitution leaves its word `exact` to the lexer, and its output is
       // an unread part all the same (`APPROVAL$(true).md`).
@@ -12645,9 +12647,14 @@ function unreadPartsOf(text: string, literalAt?: readonly number[]): { marked: s
     // {@link collapseBracedVariables} reads it for those rows; the default's
     // own reading is judged beside ({@link homeDefaultReading}). Any other
     // operator (`${HOME%/*}`, `${HOME:+x}`, `${HOME/x/y}`) is an unread part.
-    // A default holding an expansion of its own is an unread part.
-    const homeOperator = end === -1 ? null : /^\$\{(HOME|HERMES_HOME):?-[^$}]*\}$/u.exec(text.slice(at, end + 1));
-    if (homeOperator !== null || (end !== -1 && /^\$(?:HOME|HERMES_HOME|\{HOME\}|\{HERMES_HOME\})$/u.test(text.slice(at, end + 1)))) {
+    // A default holding an expansion of its own is an unread part. Only as
+    // the word's FIRST component (followed by `/`, or the whole word): an
+    // unset HERMES_HOME is empty, so `APPROVAL${HERMES_HOME}.md` is the
+    // policy file, and anywhere else a home variable is an unread part
+    // (review of b58db9ec, M2).
+    const homePlace = at === 0 && (end + 1 === text.length || text[end + 1] === "/");
+    const homeOperator = end === -1 || !homePlace ? null : /^\$\{(HOME|HERMES_HOME):?-[^$}]*\}$/u.exec(text.slice(at, end + 1));
+    if (homeOperator !== null || (end !== -1 && homePlace && /^\$(?:HOME|HERMES_HOME|\{HOME\}|\{HERMES_HOME\})$/u.test(text.slice(at, end + 1)))) {
       const spelled = homeOperator === null ? text.slice(at, end + 1) : `\${${homeOperator[1] as string}}`;
       marked += spelled;
       asOutputs += spelled;
@@ -12919,8 +12926,14 @@ function splicedClassOf(
       // (`APPROVAL.md`), and a word whose own names do not fold keeps its one
       // name reading; an equal claim it meets still counts. Main's answer, as
       // spelled, has no spliced reading.
-      const found = foldedOnlyQuietly(() => globGuardClass(reading(slashed), protectedPaths, budget, options, undefined, { unreadDirectory, judge, also }));
-      if (found !== null && (strictest === null || protectedRank(found) < protectedRank(strictest))) strictest = found;
+      // Equal claims a candidate meets are each taken here, the walk once per
+      // claim, never by turning the whole line ({@link eachEqualClaim}).
+      const founds = foldedOnlyQuietly(() =>
+        eachEqualClaim(() => globGuardClass(reading(slashed), protectedPaths, budget, options, undefined, { unreadDirectory, judge, also })),
+      );
+      for (const found of founds ?? []) {
+        if (found !== null && (strictest === null || protectedRank(found) < protectedRank(strictest))) strictest = found;
+      }
       if (strictest === "log.mutate" && also === undefined) return strictest;
     }
   }

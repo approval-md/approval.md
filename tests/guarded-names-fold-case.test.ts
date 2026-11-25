@@ -1662,23 +1662,19 @@ test("a word with a substitution runs one reading unless a name in it folds, and
   // Only the placeholder would differ: one reading. Each of these ran two.
   for (const command of [
     'echo x > "$(echo a)"',
+    "echo x > .approval/$(echo a)",
+    "echo x > .git/$(echo a)",
     'git push origin "$(echo main)"',
     "cat $(echo a)/.env",
     "cat .approval/$(echo a)",
   ]) {
     assert.equal(readings(command), 1, command);
   }
-  // Build-6 round two (automated security review of the spliced reading, c):
-  // the spliced reading of an output inside a guarded folder meets a folder
-  // that takes several classes (`.approval/log`, `.git/hooks`), and the
-  // folded reading takes each in turn, as it does for the folder spelled
-  // plain: one more reading, never the as-spelled one.
-  assert.equal(readings("echo x > .approval/$(echo a)"), 2);
-  assert.equal(readings("echo x > .git/$(echo a)"), 2);
-  // A name beside the substitution that does fold still runs the as-spelled
-  // reading too.
-  assert.equal(readings("echo x > .APPROVAL/$(echo a)"), 3);
-  assert.equal(readings("echo x > Approval.MD$(echo a)"), 3);
+  // A name beside the substitution that does fold still runs both. (Build-6:
+  // the spliced reading takes the equal claims it meets inside its own walk,
+  // so it adds no reading of the line; review of b58db9ec, the cost lines.)
+  assert.equal(readings("echo x > .APPROVAL/$(echo a)"), 2);
+  assert.equal(readings("echo x > Approval.MD$(echo a)"), 2);
   // The answers, in both readings, are what they were, except that lead ruling
   // L62568 reads the substitution's output after a guarded folder as any text,
   // `log/x` too: the log's class answers, the folder's rides beside (the

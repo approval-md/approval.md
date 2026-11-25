@@ -3085,6 +3085,31 @@ const commandClassVectors = [
     input: { command: "echo x > .$X" },
   },
   {
+    id: "dollar-quote-nul-then-tail",
+    description: "a dollar quote's NUL ends that quote's text in bash, and the word goes on: $'\\0'.approval/env is .approval/env (review of #709 at b58db9ec, M1)",
+    input: { command: "cat $'\\0'.approval/env" },
+  },
+  {
+    id: "dollar-quote-nul-zsh-reading",
+    description: "zsh ends the path at a dollar quote's NUL: $'APPROVAL.md\\0'.bak is APPROVAL.md to zsh, read beside bash's APPROVAL.md.bak",
+    input: { command: "echo x > $'APPROVAL.md\\0'.bak" },
+  },
+  {
+    id: "dollar-quote-short-u-escape",
+    description: "\\u with fewer than four digits is decoded where the character is ASCII, as zsh reads it (bash 3.2's reading as written is main's, beside)",
+    input: { command: "rm -f $'\\u41'PPROVAL.md" },
+  },
+  {
+    id: "dollar-quote-nested-hash",
+    description: "a nested script in a dollar quote whose # would end a comment in one reading: refused, as the reading as written is (review of #709, S3)",
+    input: { command: "bash -c $'echo hi # ; echo x > \\x41PPROVAL.md'" },
+  },
+  {
+    id: "home-variable-inside-a-word",
+    description: "a home variable is the home only as a word's first component; inside a word an unset HERMES_HOME is empty, so the word may be the policy file (review of #709, M2)",
+    input: { command: "rm -f APPROVAL${HERMES_HOME}.md" },
+  },
+  {
     id: "spliced-credential-read",
     description: "a read of .approval/$F may read the environment map, as cat .approval/env does: the credential's class (lead ruling L62542, for reads too)",
     input: { command: "cat .approval/$F" },

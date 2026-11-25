@@ -315,8 +315,24 @@ test("round two (review of the home-operator reading): only a home default is th
   assert.ok(classesOf("echo x > ${HERMES_HOME-.claude}/settings.json").includes("policy.core"));
   // A default holding an expansion of its own is an unread part.
   assert.ok(classesOf("echo x > ${HOME:-$D}APPROVAL.md").includes("policy.core"));
-  assert.ok(classesOf("cat ${HOME:-$D}.approval/env").includes("account.credential"));
-  assert.ok(!classesOf("cat ${HOME}.approval/env").includes("account.credential"));
+  assert.ok(classesOf("echo x > ${HOME:-$D}/log/events.jsonl").includes("log.mutate"));
+  assert.ok(!classesOf("echo x > ${HOME}/log/events.jsonl").includes("log.mutate"));
+  // Review of b58db9ec (M2): a home variable is the home only as the word's
+  // first component; anywhere else it may be empty (an unset HERMES_HOME).
+  for (const [command, cls] of [
+    ["rm -f APPROVAL${HERMES_HOME}.md", "policy.core"],
+    ["echo x > APPROVAL$HERMES_HOME.md", "policy.core"],
+    ['tee APPROVAL"$HERMES_HOME".md', "policy.core"],
+    ["echo x > .claude$HERMES_HOME/settings.json", "policy.core"],
+    ["echo x > .gi${HERMES_HOME}t/config", "vcs.history.rewrite"],
+    ["echo x > .github${HERMES_HOME}/workflows/ci.yml", "policy.edit"],
+    ["cat ${HOME}.approval/env", "account.credential"],
+  ] as const) {
+    assert.ok(classesOf(command).includes(cls), `${command}: ${classesOf(command).join(",")}`);
+  }
+  for (const command of ["echo x > $HERMES_HOME/workspace/x", "cat $HERMES_HOME/.env", "echo x > $HOME/notes.md", "echo x > ${HOME}/notes.md"]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), command);
+  }
   // The home itself, and a default that names nothing guarded, keep main's answer.
   for (const command of ["echo x >> ${HERMES_HOME:-/x}/notes.md", "echo x > ${HOME}/notes.md", "echo x > ${HOME:-/tmp}/out.txt"]) {
     assert.deepEqual(classesOf(command), mainClasses(command), command);

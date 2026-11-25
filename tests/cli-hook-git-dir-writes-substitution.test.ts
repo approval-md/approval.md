@@ -386,7 +386,7 @@ test("security review d: the other parameter expansion operators", () => {
   // A length and plain expansions do not move. (A transforming operator on a
   // variable the line does not set is strict now: point i below.)
   assert.deepEqual(pure('echo x > "${#X}.txt"'), [REDIRECT]);
-  assert.deepEqual(pure('echo x > "${name}.${ext}"'), ["log.mutate redirect-protected", "policy.core redirect-protected", "policy.edit redirect-protected", REDIRECT, "cron.manage redirect-protected"]);
+  assert.deepEqual(pure('echo x > "${name}.${ext}"'), ["log.mutate redirect-protected", "policy.core redirect-protected", "policy.edit redirect-protected", "cron.manage redirect-protected", REDIRECT]);
 });
 
 test("security review e: a nested expansion in an operator's word is an output that joins", () => {
@@ -394,7 +394,7 @@ test("security review e: a nested expansion in an operator's word is an output t
   assert.deepEqual(pure("echo x >> .g${A:-i}t/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   assert.deepEqual(pure("echo x >> ${A:-.g$(printf i)t}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   assert.deepEqual(pure('echo x > "${OUT:-${HOME}/out}/f"'), [REDIRECT]);
-  assert.deepEqual(pure('echo x > "${OUT:-out}.${EXT:-txt}"'), ["log.mutate redirect-protected", "policy.core redirect-protected", "policy.edit redirect-protected", REDIRECT, "cron.manage redirect-protected"]);
+  assert.deepEqual(pure('echo x > "${OUT:-out}.${EXT:-txt}"'), ["log.mutate redirect-protected", "policy.core redirect-protected", "policy.edit redirect-protected", "cron.manage redirect-protected", REDIRECT]);
 });
 
 test("security review f: an operator after a special parameter is read as the operator", () => {
@@ -456,7 +456,7 @@ test("security review g to q: every operator that transforms a value counts", ()
   assert.deepEqual(pure('echo x > "${#X}.txt"'), [REDIRECT]);
   assert.deepEqual(pure('echo x > "out/${!REF}.txt"'), [REDIRECT]);
   assert.deepEqual(pure('echo x > "${f}.bak"'), [REDIRECT]);
-  assert.deepEqual(pure('echo x > "${name}.${ext}"'), ["log.mutate redirect-protected", "policy.core redirect-protected", "policy.edit redirect-protected", REDIRECT, "cron.manage redirect-protected"]);
+  assert.deepEqual(pure('echo x > "${name}.${ext}"'), ["log.mutate redirect-protected", "policy.core redirect-protected", "policy.edit redirect-protected", "cron.manage redirect-protected", REDIRECT]);
   assert.deepEqual(pure("echo x >> ${VAR:?.git}/config"), [REDIRECT]);
   // A read of a transformed name, or a write to a literal path, does not move.
   assert.deepEqual(pure('cat "${f%.txt}.log"'), [READ_SHELL]);
@@ -659,7 +659,9 @@ test("hook: the gate's spellings in a checkout", { skip }, () => {
 
 test("gate N2 (m11): an ANSI-C string ends at a NUL past the near reader's reach", () => {
   // Past the near reader's five characters, only the NUL end reads it.
-  assert.deepEqual(pure(`echo x > $'.g\\0junk'""""""""it/config`), [DIR_WRITE]);
+  // (Build-6, reviews of the M1 fix: zsh ends the path at the NUL and writes
+  // `.g`, a workspace file, read beside bash's `.git/config`.)
+  assert.deepEqual(pure(`echo x > $'.g\\0junk'""""""""it/config`), [DIR_WRITE, REDIRECT]);
 });
 
 test("gate N2 (m17): %c prints the first character of each word", () => {

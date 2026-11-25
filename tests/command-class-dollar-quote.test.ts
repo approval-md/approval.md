@@ -346,6 +346,32 @@ function asPlainOrMain(line: string): string[] {
   return classesOf(plain[line] ?? line);
 }
 
+test("reviews of the M1 fix: where a dollar quote holds a NUL the line is read as zsh reads it too", () => {
+  // zsh ends a path at the NUL: each reader sees zsh's word, the verb rules included.
+  for (const [line, cls] of [
+    ["tee $'APPROVAL.md\\0'x", "policy.core"],
+    ["cp a $'.approval/env\\0'z", "account.credential"],
+    ["sed -i s/a/b/ $'CLAUDE.md\\0'q", "policy.edit"],
+    ["echo x > $'APPROVAL.md\\0'.bak", "policy.core"],
+    ["git reset $'--hard\\0'x", "vcs.history.rewrite"],
+    ["gh pr $'merge\\0'z 1", "vcs.push.main"],
+  ] as const) {
+    assert.ok(classesOf(line).includes(cls), `${line}: ${classesOf(line).join(",")}`);
+  }
+  // As zsh reads `-D`, the plain spelling's answer is there.
+  for (const each of classesOf("git branch -D main")) assert.ok(classesOf("git branch $'-D\\0'q main").includes(each), each);
+  // A prefix that is only a substitution's output: at least as strict as the substitution alone.
+  for (const [line, alone] of [
+    ["echo x > $(printf APPROVAL.md)$'\\0'junk", "echo x > $(printf APPROVAL.md)"],
+    ["cat $(echo .approval/env)$'\\0'x", "cat $(echo .approval/env)"],
+  ] as const) {
+    const head = classifyCommand(line, []);
+    const sub = classifyCommand(alone, []);
+    if (!sub.ok) assert.equal(head.ok, false, line);
+    else if (head.ok) for (const each of sub.classes) assert.ok(head.classes.includes(each), `${line}: ${each}`);
+  }
+});
+
 test("review of b58db9ec (M3): repeated unread quotes in one word are linear, as main is", () => {
   const bound = scaledBound(1);
   const control = cpuSeconds(() => classifyCommand(`tee ${"a$'b'".repeat(17_000)}`, []));
