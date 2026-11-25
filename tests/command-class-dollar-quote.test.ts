@@ -332,6 +332,11 @@ test("review of b58db9ec (M1): a quote's unknown part ends at its quote, and the
       ["echo x > $'APPROVAL.md\\c@junk'", "policy.core"],
       ["rm -f $'APPROVAL.md\\c`x'", "policy.core"],
       ["tee $'.claude/settings.json\\c x'", "policy.core"],
+      // bash takes \c of a character's first UTF-8 byte (U+0801 starts 0xE0, a NUL): after \c,
+      // any non-ASCII character ends the known text, whatever its first byte.
+      ["echo x > $'APPROVAL.md\\c\u0801junk'", "policy.core"],
+      ["echo x > $'APPROVAL.md\\c\u00e9junk'", "policy.core"],
+      ["echo x > $'APPROVAL.md\\c\u{1F600}junk'", "policy.core"],
     ] as const) {
       const pure = classesOf(line);
       assert.ok(pure.includes(cls) || pure.includes("log.mutate"), `${line}: ${pure.join(",")}`);

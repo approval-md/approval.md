@@ -6204,7 +6204,14 @@ function readDollarQuoted(
       // this quote, while zsh reads `c@` and goes on: the two readings part
       // for the rest of the WORD, so it is unknown from here, to every reader
       // (the overflow's end marker; review of the \c fix).
-      if (next === "c" && at + 2 < close && (((command[at + 2] as string).toUpperCase().charCodeAt(0) & 0x1f) === 0)) {
+      // bash applies \c to the next character's first UTF-8 byte, so any non-ASCII character
+      // may be a NUL too (U+0800-U+0FFF start 0xE0): it ends the known text the same way.
+      if (
+        next === "c" &&
+        at + 2 < close &&
+        ((command.codePointAt(at + 2) as number) > 0x7f ||
+          (((command[at + 2] as string).toUpperCase().charCodeAt(0) & 0x1f) === 0))
+      ) {
         overflow = true;
         break;
       }
