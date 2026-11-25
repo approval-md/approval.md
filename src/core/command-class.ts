@@ -81,6 +81,7 @@ import {
   localReadingEnd,
   localReadingSame,
   localReadingStart,
+  localReadingsSettling,
   namesReadAsSpelled,
   readingsDivergedNow,
   SUBSTITUTION_SENTINEL,
@@ -958,7 +959,22 @@ export function protectedPathClass(
   // claims the classes of the guarded paths inside it, taken after the
   // word's own claims ({@link folderClaimsOfWord}).
   const inside: string[] = [];
-  for (const expansion of expansions) addExpansionClaims(expansion, extra, claims, inside);
+  // Outside the hook's settled plain-name line nothing can be settled
+  // ({@link localReadingsSettling}), and {@link addExpansionClaims} would
+  // answer as this inline loop does: so every other caller keeps the loop as
+  // it was before 49199b6b. Cost: the write-target pattern reader's walk asks
+  // here once per candidate, and through the wrapper the call that first made
+  // this hot paid for a larger optimizing compile, counted in its CPU time
+  // (node 22: `echo x > ~/.hermes/*/` and 2,000 `*`, 23 to 33 CPU ms a call).
+  if (localReadingsSettling()) {
+    for (const expansion of expansions) addExpansionClaims(expansion, extra, claims, inside);
+  } else {
+    for (const expansion of expansions) {
+      const own = protectedClaimsOfWord(expansion, extra);
+      for (const cls of own) if (!claims.includes(cls)) claims.push(cls);
+      for (const cls of folderClaimsOfWord(expansion, own, extra)) if (!inside.includes(cls)) inside.push(cls);
+    }
+  }
   if (claims.length === 0) return null;
   const ranked = claims
     .map((cls, index) => ({ cls, index }))

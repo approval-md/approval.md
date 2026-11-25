@@ -330,6 +330,15 @@ export function withLocalReadingsSettled<T>(run: () => T): T {
 }
 
 /**
+ * Would {@link localReadingStart} start a run here (folded, inside
+ * {@link withLocalReadingsSettled})? Where it would not, the run marks as
+ * inline and nothing is settled, so a caller may judge inline.
+ */
+export function localReadingsSettling(): boolean {
+  return settleLocalReadings && !spelledReading;
+}
+
+/**
  * The start of a run of compares whose divergence may be undone, where it
  * turns out not to change what they answer ({@link localReadingEnd},
  * {@link localReadingSame}). The caller's marks are set aside and handed
