@@ -212,7 +212,8 @@ test("round two (L62542, for reads too): a word that could be a credential file 
   // A wholly unread directory keeps main's pure answer, as a write there does:
   // the hook judges the tail by its name (`credential-path-resolved`).
   // `cat x$F/*`: the glob is judged by the hook's listing, as main judges it.
-  for (const command of ["cat x$F/*", "cat $D/env", "cat $H/keys", "cat $D/notes.md", "cat $X.txt", "cat src/$X.ts", "cat ./$X", "cat out/$F", "grep -n x $P/*.sh", "grep -h x $D/*"]) {
+  // A wholly unread directory after a `./` or `../` step is one too (`./$D/env`).
+  for (const command of ["cat x$F/*", "cat $D/env", "cat ./$D/env", "cat ../$D/env", "cp ./$D/keys /tmp/x", "cat $H/keys", "cat $D/notes.md", "cat $X.txt", "cat src/$X.ts", "cat ./$X", "cat out/$F", "grep -n x $P/*.sh", "grep -h x $D/*"]) {
     assert.deepEqual(classesOf(command), mainClasses(command), command);
   }
 });

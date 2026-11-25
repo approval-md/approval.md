@@ -325,6 +325,19 @@ test("review of b58db9ec (M1): a quote's unknown part ends at its quote, and the
       const hook = classifyForHook(line, [], cwd).result;
       assert.ok(hook.ok && hook.classes.includes(cls), `${line} (hook): ${JSON.stringify(hook)}`);
     }
+    // bash's \c@, \c` and \c<space> are a NUL that ends bash's quote, while zsh reads on:
+    // the rest of the word is unknown to every reader, so the path's class or the strictest.
+    for (const [line, cls] of [
+      ["cat $'.approval/env\\c@x'", "account.credential"],
+      ["echo x > $'APPROVAL.md\\c@junk'", "policy.core"],
+      ["rm -f $'APPROVAL.md\\c`x'", "policy.core"],
+      ["tee $'.claude/settings.json\\c x'", "policy.core"],
+    ] as const) {
+      const pure = classesOf(line);
+      assert.ok(pure.includes(cls) || pure.includes("log.mutate"), `${line}: ${pure.join(",")}`);
+      const hook = classifyForHook(line, [], cwd).result;
+      assert.ok(hook.ok && (hook.classes.includes(cls) || hook.classes.includes("log.mutate")), `${line} (hook): ${JSON.stringify(hook)}`);
+    }
     // Past 32 unread parts the word could be any path: never lighter than one unread part.
     for (const [tail, cls] of [["APPROVAL.md", "policy.core"], [".approval/env", "account.credential"]] as const) {
       const verb = tail === "APPROVAL.md" ? "echo x >" : "cat";

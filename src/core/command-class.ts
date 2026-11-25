@@ -6200,6 +6200,14 @@ function readDollarQuoted(
       // zsh may read a NUL here (`\C-@`; `\x`, `\u` or `\U` with no digit).
       if (/[CMxuU]/u.test(next) && zshNulAt === null) zshNulAt = text.length;
       unknown();
+      // bash's `\c@`, `` \c` `` and `\c ` are a NUL, which ends bash's text of
+      // this quote, while zsh reads `c@` and goes on: the two readings part
+      // for the rest of the WORD, so it is unknown from here, to every reader
+      // (the overflow's end marker; review of the \c fix).
+      if (next === "c" && at + 2 < close && (((command[at + 2] as string).toUpperCase().charCodeAt(0) & 0x1f) === 0)) {
+        overflow = true;
+        break;
+      }
       // The last character this escape takes (a backslash pair counts as one).
       let last = at + 1;
       if (next === "c") last = at + 2;
