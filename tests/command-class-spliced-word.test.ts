@@ -287,6 +287,13 @@ test("round two (coordinator, `'A$B'`): a `$` the shell reads as text is the lex
   assert.ok(classesOf("cat --file='.approval$X/env'").includes("account.credential"));
   // A folded reading of a quoted word and a default's text read the same way.
   assert.ok(classesOf("echo 'APPROVAL$E.md'; echo x > ${A:-APPROVAL$E.md}").includes("policy.core"));
+  // A reading with a `${…}` default put in moves the text after the default:
+  // the word's literal positions would mark other `$`s there (a real `$X` read
+  // as text, a quoted `$` read as a parameter), so that reading takes none.
+  // `A` may hold `.approval/log/`; `$X` may be empty beside `.git`.
+  // (The second lane's survivor patch for E3.)
+  assert.ok(classesOf("echo x > ${A:-}'$X'/APP$XROVAL.md").includes("log.mutate"));
+  assert.ok(classesOf("echo x > ${A:-.approval/}\\$abcde$X.git/config").includes("vcs.history.rewrite"));
 });
 
 test("round two (review of the home-operator reading): only a home default is the home, and its default is read beside", () => {
