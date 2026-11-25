@@ -6015,15 +6015,17 @@ const SUITES = [
     // (`cp ./*.md docs/` is now `policy.core`: the landing `docs/*.md` may be
     // `docs/APPROVAL.md`) and `a-deeper-match-than-the-head-is-unmoved` (the
     // `APPROVAL.md` destination also names `policy.edit` on the landing
-    // `.../APPROVAL.md/a.md`). Against 0.4.8's 354 vectors the file has 410,
-    // fifty-six new and none removed: sixteen from #676, five from #677 and
-    // seven from #680 (the 1.10.0 to 1.12.0 minors), then, with 1.12.0
+    // `.../APPROVAL.md/a.md`). Against 0.4.8's 354 vectors the file has 432,
+    // seventy-eight new and none removed: sixteen from #676, five from #677
+    // and seven from #680 (the 1.10.0 to 1.12.0 minors), then, with 1.12.0
     // standing, ten from #688, three from #690, three from #700, four from
-    // #686, four from #701 and five from #695, and one from #706, merged
-    // into the release branch with 2.0.0 standing (the release sets the
-    // number once). #686 also replaced #700's two
-    // refused `zsh-clobber-*` vectors and moved #688's
-    // `guarded-name-fold-approval-home-case`, none of them released. If
+    // #686, four from #701 and five from #695, and one from #706 and
+    // twenty-two from #709, merged into the release branch with 2.0.0
+    // standing (the release sets the number once). #686 also replaced #700's
+    // two refused `zsh-clobber-*` vectors and moved #688's
+    // `guarded-name-fold-approval-home-case`, and #709 moved #680's
+    // `git-dir-write-split-across-substitution` and
+    // `git-dir-write-ansi-c-quoting`, none of them released. If
     // another lane's number merges first, the collision rule (1.4.0, the
     // number is claimed at merge) applies on regeneration.
     vectors_version: "2.0.0",

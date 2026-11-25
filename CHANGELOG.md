@@ -23,25 +23,28 @@ glob or a `${X:-…}` default in a write target, a guarded name in another lette
 case or Unicode fold, zsh's `>!` clobber forms, a write into `.git` or a `git
 remote` change that arms a later push, deleting or locking an organ directory
 or a parent of one, and a second protected path, or a credential read's own
-write, that the class left unnamed. Each entry below says what such a line
-answers now and what is left as a known limit. The hook also answers within a
-deadline of its own (15 seconds, or less under a shorter harness ceiling): a
-call it cannot read in time is refused `hook-deadline` instead of running
-ungated when the harness gives up on the hook. New: the `files.write.guarded`
-class, with a built-in minimum of `manual`, and the opt-in `write_scope` policy
-block (#695); `approval propose --irreversible` (APRV-537, #681); and the
-CLASS-DIFF and NEW-CALLS release checks for the overlay (#678, #679). `SPEC.md`
-and `APPROVAL.md` are unchanged since 0.4.8; `conformance/` gains vectors.
-**Rollout notes:** a core older than 0.4.9 refuses the `write_scope` key (the
-policy schema admits no unknown key) and fails the whole policy closed, so a
-policy gains it only after every core that reads it runs 0.4.9. A core older
-than 0.4.9 refuses `approval propose --irreversible` (usage error; `approval
-serve` answers 403), and a box must not be rolled back past 0.4.9 while a key
-that flag floored is open.
+write, that the class left unnamed. A guarded path spelled in a dollar quote
+(`echo x >> $'\x41PPROVAL.md'`) is now read as the shell reads it, and a
+guarded name with a parameter or a substitution spliced into it (`echo x >
+APPROVAL$E.md`) takes the guarded path's class (#709). Each entry below says
+what such a line answers now and what is left as a known limit. The hook also
+answers within a deadline of its own (15 seconds, or less under a shorter
+harness ceiling): a call it cannot read in time is refused `hook-deadline`
+instead of running ungated when the harness gives up on the hook. New: the
+`files.write.guarded` class, with a built-in minimum of `manual`, and the
+opt-in `write_scope` policy block (#695); `approval propose --irreversible`
+(APRV-537, #681); and the CLASS-DIFF and NEW-CALLS release checks for the
+overlay (#678, #679). `SPEC.md` and `APPROVAL.md` are unchanged since 0.4.8;
+`conformance/` gains vectors. **Rollout notes:** a core older than 0.4.9
+refuses the `write_scope` key (the policy schema admits no unknown key) and
+fails the whole policy closed, so a policy gains it only after every core that
+reads it runs 0.4.9. A core older than 0.4.9 refuses `approval propose
+--irreversible` (usage error; `approval serve` answers 403), and a box must not
+be rolled back past 0.4.9 while a key that flag floored is open.
 
 ### Security
 
-**A dollar-quoted word is read as the text the shell makes of it.**
+**A dollar-quoted word is read as the text the shell makes of it (#709).**
 `echo x >> $'\x41PPROVAL.md'` writes the policy file in bash and zsh, and was
 an ordinary `files.write.workspace` (main's lexer kept the `$` and read the
 word as an unknown variable); `cat $".approval/env"` was `read.shell`. The
@@ -58,7 +61,7 @@ rides beside, so nothing answers lighter than it did: `rm $'\x41PPROVAL.md'`
 is `policy.core` with the earlier `files.delete.out_of_scope` beside it, and a
 dollar-quoted program word (`$'rm' -rf x`) keeps its refusal.
 
-**An unread part spliced into a guarded name asks.** `echo x > APPROVAL$E.md`,
+**An unread part spliced into a guarded name asks (#709).** `echo x > APPROVAL$E.md`,
 `echo x > .claude$S/settings.json`, `echo x >> .appro${x}val/env` and
 `echo x > {APPROVAL,x}$E.md` write the guarded file when the parameter is
 empty, and were workspace writes; `cat .approval/$F` and `cat
@@ -1311,11 +1314,12 @@ Bash tool runs on macOS, a line that wrote a protected file was
   `cp-dot-slash-glob-is-unmoved` and `a-deeper-match-than-the-head-is-unmoved`
   (#686's entry above names the first two; in the third, a `cp` onto
   `.github/workflows/sub dir/APPROVAL.md` also names `policy.edit` on the
-  landing `.../APPROVAL.md/a.md`). Its fifty-six new vectors, net (354 to
-  410), came from #676 (sixteen), #677 (five), #680 (seven), #688 (ten), #690
-  (three), #700 (three; #686 replaced two of them), #686 (four), #701 (four),
-  #695 (five) and #706 (one). `refusal-unions` 32.0.0 (from 31.0.0), a major because a
-  pinned union grew: `hook_deny_codes` gained `hook-deadline` (#693).
+  landing `.../APPROVAL.md/a.md`). Its seventy-eight new vectors, net (354
+  to 432), came from #676 (sixteen), #677 (five), #680 (seven), #688 (ten),
+  #690 (three), #700 (three; #686 replaced two of them), #686 (four), #701
+  (four), #695 (five), #706 (one) and #709 (twenty-two). `refusal-unions`
+  32.0.0 (from 31.0.0), a major because a pinned union grew: `hook_deny_codes`
+  gained `hook-deadline` (#693).
   `policy-resolution` 5.1.0 (from 5.0.0), a minor: six new vectors for
   `files.write.guarded` (#695), no expectation moved, and the `algorithm` line
   is unchanged. The regeneration moved only the three version fields and their
