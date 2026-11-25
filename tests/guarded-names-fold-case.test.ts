@@ -1690,7 +1690,10 @@ test("only a literal credential path is left out as the read; every variable is 
       ['"${APPROVAL_TG_TOKEN}" notes.txt', [ENV, UNKNOWN]],
       ["--token=$APPROVAL_TG_TOKEN notes.txt", [ENV, UNKNOWN]],
       ["--token $APPROVAL_TG_TOKEN", [ENV, UNKNOWN]],
-      ["$APPROVAL_TG_TOKEN-$X notes.txt", [ENV, UNKNOWN]],
+      // Two unread parts around a `-` may spell a credential path (#709: an
+      // unread part is any text, `/` included), which answers before the
+      // variable's own rule: the same classes, the path's reason.
+      ["$APPROVAL_TG_TOKEN-$X notes.txt", [CRED, UNKNOWN]],
       ["{a,$APPROVAL_TG_TOKEN} notes.txt", [ENV, UNKNOWN]],
       // A credential path with a variable, a glob or a brace in it is built too.
       ["$HOME/.hermes/.env notes.txt", [CRED, UNKNOWN]],
