@@ -1220,11 +1220,12 @@ Bash tool runs on macOS, a line that wrote a protected file was
 
 - **Tests that went red under load or on another runner now wait on events
   and measure against their own runner (#694, #697, #698, #702, #703,
-  #705).** A cost test's CPU bound follows the runner it is measured on; the
+  #705, #707).** A cost test's CPU bound follows the runner it is measured on; the
   real-clock deadline read is sized by search; the lock-reclaim, `policy
   amend` signal and slow-pipe follow tests wait on events, not on a clock;
-  the ZZZ mock closes each connection; and the walked-once cost case gives
-  every word its own name. Tests only, with one doc comment in
+  the ZZZ mock closes each connection; and the two walked-once cost cases
+  give every word its own name and read the median of back-to-back pairs,
+  with their bounds unchanged. Tests only, with one doc comment in
   `src/core/log.ts` reworded to say what the lock wait does; the runtime is
   unchanged. The zsh clobber paragraph above was reworded to match the code
   (#704, words only).
