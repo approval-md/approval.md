@@ -308,6 +308,8 @@ test("round two (review of the home-operator reading): only a home default is th
   assert.ok(classesOf("echo x > ${HERMES_HOME-.claude}/settings.json").includes("policy.core"));
   // A default holding an expansion of its own is an unread part.
   assert.ok(classesOf("echo x > ${HOME:-$D}APPROVAL.md").includes("policy.core"));
+  assert.ok(classesOf("cat ${HOME:-$D}.approval/env").includes("account.credential"));
+  assert.ok(!classesOf("cat ${HOME}.approval/env").includes("account.credential"));
   // The home itself, and a default that names nothing guarded, keep main's answer.
   for (const command of ["echo x >> ${HERMES_HOME:-/x}/notes.md", "echo x > ${HOME}/notes.md", "echo x > ${HOME:-/tmp}/out.txt"]) {
     assert.deepEqual(classesOf(command), mainClasses(command), command);
