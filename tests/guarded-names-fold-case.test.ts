@@ -2295,3 +2295,22 @@ test("a copy into a credential path: a refusal stands, the carried touch and the
   // writes `.approval/env.bak`, a credential path of the gate's directory.
   assert.deepEqual(pure("cp .approval/env{,.bak}", TWO_ROUTES), [CRED, "policy.core protected-path"]);
 });
+
+test("a source lands as a credential path only where a credential name could, and a backslash name is always judged (build-1's S5 on #706)", () => {
+  // Main's answer for each is [policy.core] or [policy.core, log.mutate]: the
+  // landing carries the credential touch beside it.
+  for (const [line, want] of [
+    ["cp ~/.hermes/.env -t ~/.hermes/profiles/p s/auth.json", ["policy.core protected-path", CRED]],
+    ["cp ~/.hermes/.env -t ~/.hermes/hermes-agent s/.env.local", ["policy.core protected-path", CRED]],
+    ["cp ~/.hermes/.env -t .approval s/vault.enc", ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+    ["cp ~/.hermes/.env -t .approval s/KEYS", ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+    // A backslash is a segment separator to the rows: `..\env` climbs out of `x`.
+    ["cp ~/.hermes/.env -t .approval/x 's/..\\env'", ["policy.core protected-path", CRED]],
+    // No credential name lands here: main's answer.
+    ["cp ~/.hermes/.env -t .approval/x s/env", ["policy.core protected-path"]],
+    // The credential source lands too: `p/.env` is a credential path.
+    ["cp ~/.hermes/.env -t ~/.hermes/profiles/p s/notes.txt", ["policy.core protected-path", CRED]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+});

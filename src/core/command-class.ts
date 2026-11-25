@@ -8646,16 +8646,22 @@ interface CredentialWrites {
 
 const NO_CREDENTIAL_WRITES: CredentialWrites = { words: new Set(), landings: [], possible: [] };
 
-function credentialWrites(basename: string, args: readonly string[], flags: readonly ArgExpansion[]): CredentialWrites {
+function credentialWrites(
+  basename: string,
+  args: readonly string[],
+  flags: readonly ArgExpansion[],
+  argsPlan: () => CopyPlan | null,
+  argvUnknown: () => string | null,
+): CredentialWrites {
   if (COPY_OPTION_TABLES[basename] === undefined) return NO_CREDENTIAL_WRITES;
-  const plan = copyPlan(basename, args);
+  const plan = argsPlan();
   // A word the shell may still turn into an option (`cp $X .approval/env`:
   // the copy family's own test, {@link copyArgvUnknown}), or an option the
   // table does not know (`cp --frob README.md .approval/env`), makes every
   // operand a destination and a source alike: which word is written is
   // unknown. Every credential path among the words may be written, so its
   // class is ADDED to main's whole answer (`possible`), never deferring it.
-  if (plan === null || plan.unknown !== null || copyArgvUnknown(args, flags) !== null) {
+  if (plan === null || plan.unknown !== null || argvUnknown() !== null) {
     const possible = args.flatMap((arg) => {
       const equals = arg.indexOf("=");
       return [arg, ...(equals === -1 ? [] : [arg.slice(equals + 1)])].filter((word) => isCredentialPathAsRead(word));
@@ -8699,8 +8705,17 @@ function credentialWrites(basename: string, args: readonly string[], flags: read
     // that can END a credential path ({@link mayEndCredentialPath}) can make
     // one, so no other name is judged at all.
     const anyName = isCredentialPathAsRead(`${into}/x`);
+    // Nor can any name land as one where no name of each credential row's
+    // kind would ({@link CREDENTIAL_LANDING_NAMES}) and no source name holds
+    // a backslash (a segment separator to the rows, so `..\env` may climb):
+    // then the loop is skipped, and a long copy pays no test per word
+    // (build-1's S5 on #706).
+    const mayLand =
+      anyName ||
+      CREDENTIAL_LANDING_NAMES.some((name) => isCredentialPathAsRead(`${into}/${name}`)) ||
+      plan.sources.some((source) => source.includes("\\"));
     const judged = new Set<string>();
-    for (const source of plan.sources) {
+    for (const source of mayLand ? plan.sources : []) {
       if (!settled(source)) continue;
       const base = landingName(source);
       if (base === null || judged.has(base)) continue;
@@ -8738,6 +8753,14 @@ function landingName(source: string): string | null {
  * ASCII (folded spellings such as `ENſ`) or holds a backslash (a segment
  * separator to the rows) is always judged.
  */
+/**
+ * One name of each kind {@link mayEndCredentialPath} lets through, for the
+ * test of the destination directory: where none of these lands as a
+ * credential path, no name of their kinds can either (the rows read a fixed
+ * name or a fixed prefix, folded).
+ */
+const CREDENTIAL_LANDING_NAMES: readonly string[] = ["vault", "keys", "env", "env.x", ".env", ".env.x", "auth.json", ".op.env", ".op.env.x"];
+
 function mayEndCredentialPath(name: string): boolean {
   if (!/^[\x20-\x5b\x5d-\x7e]*$/u.test(name)) return true;
   return /^(?:vault|keys$|env$|env\.|\.env$|\.env\.|auth\.json$|\.op\.env$|\.op\.env\.)/u.test(name.toLowerCase());
@@ -13432,12 +13455,19 @@ function classifySegmentWithVerb(
         ? uploadCredential
         : argCredential;
   const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets);
+  // The copy table's reading of the argv and the copy family's unknown-word
+  // test, made once for the credential tier and the walk (build-1's S5 on
+  // #706: the credential copy read the argv a second time).
+  let planMemo: { value: CopyPlan | null } | undefined;
+  const argsPlan = (): CopyPlan | null => (planMemo ??= { value: copyPlan(basename, args) }).value;
+  let unknownMemo: { value: string | null } | undefined;
+  const argvUnknown = (): string | null => (unknownMemo ??= { value: copyArgvUnknown(args, argFlags) }).value;
   // The credential paths a copy WRITES ({@link credentialWrites}): folded
   // reading only, as the rest of this tier's additions (as spelled, main's).
   const copyWrites =
     credential === null && redirectCredential === null
       ? NO_CREDENTIAL_WRITES
-      : (foldedOnly(() => [credentialWrites(basename, args, argFlags)])[0] ?? NO_CREDENTIAL_WRITES);
+      : (foldedOnly(() => [credentialWrites(basename, args, argFlags, argsPlan, argvUnknown)])[0] ?? NO_CREDENTIAL_WRITES);
   const sideScan =
     credential === null && redirectCredential === null
       ? null
@@ -13741,7 +13771,7 @@ function classifySegmentWithVerb(
   // still read them ({@link globWriteOperands}).
   // Review of 039b840a (finding 2): a copy tool's argv read by its option
   // table, so an option's value is never taken for the destination.
-  const plan = copyPlan(basename, args);
+  const plan = argsPlan();
   // Lead ruling L61587: a recursive delete, move or chmod of a PARENT of an
   // organ directory (`rm -rf .`, `mv "$PWD" ../x`, `chmod -R 000 ~`), decided
   // by the hook's listing of it ({@link organParentClass}).
@@ -13809,7 +13839,7 @@ function classifySegmentWithVerb(
     false,
     glob,
   );
-  const copyUnknown = copyFamily ? copyArgvUnknown(args, argFlags) : null;
+  const copyUnknown = copyFamily ? argvUnknown() : null;
   // The effectful scan by text, as `laterProtected` reads it: the positionals
   // (and an upload's sources) with the prose skip, and the `<` targets.
   // Beside a credential answer taken above it is the scan {@link
