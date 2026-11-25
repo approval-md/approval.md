@@ -282,6 +282,29 @@ function startsWithFolded(have: readonly string[], want: readonly string[]): boo
 }
 
 /**
+ * {@link startsWithFolded} on segments already folded (`haveFolded` is
+ * `have.map(foldFileName)`): the same answer, without folding each of a
+ * path's segments again for every entry it is tested against (the cost line
+ * of a pattern matching every entry of a directory, each entry a landing).
+ */
+function foldedStartsWith(haveFolded: readonly string[], want: readonly string[]): boolean {
+  if (want.length === 0 || haveFolded.length < want.length) return false;
+  return want.every((segment, index) => foldedWant(segment) === haveFolded[index]);
+}
+
+/** The folds of the entries' own segments and the homes' (a few names, the same every call). */
+const foldedWants = new Map<string, string>();
+
+function foldedWant(segment: string): string {
+  let folded = foldedWants.get(segment);
+  if (folded === undefined) {
+    folded = foldFileName(segment);
+    foldedWants.set(segment, folded);
+  }
+  return folded;
+}
+
+/**
  * The guarded entry an absolute, `..`-free path is at or under, or `null`.
  *
  * `homes` is every spelling of the current user's home this caller knows (as
@@ -318,11 +341,11 @@ export function guardedEntryOf(path: string, homes: readonly string[], configDir
     if (isClaudeConfigFolderName(at) && next === "plugins") return CLAUDE_PLUGINS_FOLDER_ENTRY;
   }
   for (const entry of GUARDED_ABSOLUTE_ENTRIES) {
-    if (startsWithFolded(have, entry.segments)) return entry.name;
+    if (foldedStartsWith(folded, entry.segments)) return entry.name;
   }
   for (const dir of configDirs) {
     const anchor = segmentsOf(dir);
-    if (anchor.length === 0 || !startsWithFolded(have, anchor)) continue;
+    if (anchor.length === 0 || !foldedStartsWith(folded, anchor)) continue;
     const entry = configFolderEntryOf(folded.slice(anchor.length));
     if (entry !== null) return entry;
   }
@@ -330,13 +353,12 @@ export function guardedEntryOf(path: string, homes: readonly string[], configDir
   let underOwnHome = false;
   for (const home of homes) {
     const anchor = segmentsOf(home);
-    if (anchor.length === 0 || !startsWithFolded(have, anchor)) continue;
+    if (anchor.length === 0 || !foldedStartsWith(folded, anchor)) continue;
     underOwnHome = true;
-    const rest = have.slice(anchor.length);
-    for (const entry of GUARDED_HOME_ENTRIES) {
-      if (startsWithFolded(rest, entry.segments)) return entry.name;
-    }
     const restFolded = folded.slice(anchor.length);
+    for (const entry of GUARDED_HOME_ENTRIES) {
+      if (foldedStartsWith(restFolded, entry.segments)) return entry.name;
+    }
     if (restFolded[0] !== undefined && isClaudeConfigFolderName(restFolded[0])) {
       const entry = configFolderEntryOf(restFolded.slice(1));
       if (entry !== null) return entry;
@@ -345,14 +367,14 @@ export function guardedEntryOf(path: string, homes: readonly string[], configDir
   if (underOwnHome) return null;
 
   for (const parent of HOME_PARENTS) {
-    if (!startsWithFolded(have, parent)) continue;
+    if (!foldedStartsWith(folded, parent)) continue;
     const child = have[parent.length];
     if (child === undefined) continue;
     if (NOT_A_HOME.includes(foldFileName(child))) continue;
     return "another user's home";
   }
   for (const rootHome of ROOT_HOMES) {
-    if (startsWithFolded(have, rootHome)) return "another user's home";
+    if (foldedStartsWith(folded, rootHome)) return "another user's home";
   }
   return null;
 }

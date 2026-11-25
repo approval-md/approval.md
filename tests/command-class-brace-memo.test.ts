@@ -36,7 +36,11 @@ test("a word with a stray `}` alone is expanded as before: the brace reader stri
   // Unquoted beside an unread part: the shell keeps a stray `}` (the word
   // is `APPROVAL}…`), so it is not the policy file; the spliced reading's
   // other readings answer, as they did before the memo (ed2e354a).
-  assert.deepEqual(classesOf("echo x > APPROVAL}$E.md"), ["log.mutate", "policy.edit", "files.write.workspace"]);
+  // With #682's reader (merge of #682 and #709) the pattern reading of the
+  // word with its variable masked is unknown, and names every class a guarded
+  // name it could match carries (review-b N1 at bcb1be08), policy.core and
+  // cron.manage among them, beside the spliced reading's.
+  assert.deepEqual(classesOf("echo x > APPROVAL}$E.md"), ["log.mutate", "policy.core", "policy.edit", "cron.manage", "files.write.workspace"]);
 });
 
 test("the memo is bounded in characters and entries, and does not outlive the call", () => {

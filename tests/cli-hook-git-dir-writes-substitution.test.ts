@@ -168,7 +168,16 @@ test("rule 2: literal text and a substitution's output that join into .git name 
   // GLOB-WRITE (22 Nov 2026): an output beside a glob construct may hold a
   // `/` and so name any directory, the approval log's among them: the stricter
   // `log.mutate` answers before the `.git` reader.
-  assert.deepEqual(pure("echo x >> .g$(printf i)?/config"), ["log.mutate redirect-protected", DIR_WRITE, "vcs.history.rewrite redirect-protected"]);
+  // Every class such a pattern may name is judged too (#682's reader; review-b
+  // N1 at bcb1be08), beside the spliced reading's (merge of #682 and #709).
+  assert.deepEqual(pure("echo x >> .g$(printf i)?/config"), [
+    "log.mutate redirect-protected",
+    DIR_WRITE,
+    "policy.core redirect-protected",
+    "vcs.history.rewrite redirect-protected",
+    "cron.manage redirect-protected",
+    "policy.edit redirect-protected",
+  ]);
   assert.deepEqual(pure("echo x >> .g{x,$(printf it)}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   // git's own write option, and a script a shell wrapper runs.
   assert.deepEqual(pure("git log --output=.g$(printf it)/config"), [DIR_WRITE]);
@@ -616,6 +625,8 @@ test("gate M3: zsh subscripts and modifiers count", () => {
     // (Build-6 round two, L62568: the unread value beside the pattern may
     // hold a `/`, and every guarded class it may reach rides beside.)
     const globbed = /\$\w+\[/u.test(line) && !line.includes('"');
+    // Every class that pattern may name is judged (#682's reader; review-b N1
+    // at bcb1be08), and the spliced reading's beside it (#709).
     const SPLICED_BESIDE = ["policy.core redirect-protected", "cron.manage redirect-protected", "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"];
     assert.deepEqual(pure(line), globbed ? [ASSIGNMENT, "log.mutate redirect-protected", DIR_WRITE, ...SPLICED_BESIDE] : [ASSIGNMENT, DIR_WRITE], line);
   }

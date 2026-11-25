@@ -58,6 +58,8 @@ import {
   foldedOnly,
   foldFileName,
   foldNameExact,
+  inEachEqualTurn,
+  inEveryReading,
   namesReadAsSpelled,
   takeAmongEqual,
   withNamesAsSpelled,
@@ -174,6 +176,24 @@ test("foldFileName: ASCII lower case is unchanged, ASCII upper case lowers, and 
   }
   assert.equal(foldFileName("APPROVAL.md"), "approval.md");
   assert.equal(foldFileName(""), "");
+});
+
+test("foldFileName: ASCII text folds exactly as the full fold does (its one-pass reading; build-5, the unclosed-`[` cost line)", () => {
+  // The full fold, as name-fold.ts spells it for text that is not ASCII alone.
+  const full = (text: string): string =>
+    text.replace(/[‌-‏‪-‮⁪-⁯﻿]/gu, "").normalize("NFD").toLowerCase().toUpperCase().toLowerCase();
+  for (let code = 0; code < 128; code += 1) {
+    const char = String.fromCharCode(code);
+    for (const text of [char, `${char}Ab.${char}`, `A${char}Z${char}`]) {
+      assert.equal(foldFileName(text), full(text), `U+${code.toString(16).padStart(4, "0")} in ${JSON.stringify(text)}`);
+    }
+  }
+  assert.equal(foldFileName(`${"Q".repeat(250)}.MD`), `${"q".repeat(250)}.md`);
+  // One code point past ASCII takes the full fold, the whole word with it.
+  assert.equal(foldFileName(`APPROVA${LONG_S}.md`), "approvas.md");
+  assert.equal(foldFileName("APPRO‍VAL.MD"), "approval.md");
+  // The placeholder a substitution leaves is kept as written, as before.
+  assert.equal(foldFileName(`A${SUBSTITUTION_SENTINEL}B`), `a${SUBSTITUTION_SENTINEL}b`);
 });
 
 test("foldFileName: the dotless i is the one stricter case; the rest APFS keeps apart stays apart", () => {
@@ -488,6 +508,41 @@ test("routes of the same depth that all match one path are all reported, however
     "policy.edit.closed redirect-protected",
     "policy.edit.cd redirect-protected",
   ]);
+});
+
+test("inEveryReading: invariant only folded with no divergence and no claim set wider than one; its marks reach the caller", () => {
+  assert.deepEqual(eachNameReading(() => inEveryReading(() => foldNameExact("readme.md"))), [{ value: "readme.md", invariant: true }]);
+  // A diverging name: not invariant, and the caller still reads it as spelled.
+  assert.deepEqual(eachNameReading(() => inEveryReading(() => foldNameExact("README.md"))), [
+    { value: "readme.md", invariant: false },
+    { value: "README.md", invariant: false },
+  ]);
+  // Equal claims: not invariant, and the caller still takes each in turn.
+  assert.deepEqual(
+    eachNameReading(() => inEveryReading(() => takeAmongEqual(["a", "b"]))),
+    [
+      { value: "a", invariant: false },
+      { value: "b", invariant: false },
+    ],
+  );
+  // As spelled nothing is marked, so nothing is called invariant.
+  assert.deepEqual(withNamesAsSpelled(() => inEveryReading(() => foldNameExact("readme.md"))), { value: "readme.md", invariant: false });
+  // A divergence the caller marked before stays.
+  assert.equal(eachNameReading(() => `${foldNameExact("K")}${String(inEveryReading(() => 1).invariant)}`).length, 2);
+});
+
+test("inEachEqualTurn: every claim its run offers, without another turn of the caller; a divergence still reaches it", () => {
+  const claims = ["a", "b", "c"];
+  assert.deepEqual(eachNameReading(() => inEachEqualTurn(() => takeAmongEqual(claims)).join("")), ["abc"]);
+  assert.deepEqual(inEachEqualTurn(() => takeAmongEqual(claims)), ["a", "b", "c"]);
+  assert.deepEqual(withNamesAsSpelled(() => inEachEqualTurn(() => takeAmongEqual(claims))), ["a"]);
+  // The caller's own claims still widen its reading, and its turn is restored.
+  assert.deepEqual(
+    eachNameReading(() => `${takeAmongEqual(["x", "y"])}${inEachEqualTurn(() => takeAmongEqual(claims)).join("")}`),
+    ["xabc", "yabc"],
+  );
+  // A divergence inside reaches the caller: it is read as spelled too.
+  assert.deepEqual(eachNameReading(() => inEachEqualTurn(() => foldNameExact("K")).join("")), ["k", "K"]);
 });
 
 test("equal claims: the folded reading takes each in turn, the as-spelled one the first, and a throw restores the turn", () => {
@@ -2134,7 +2189,12 @@ const CRED_WRITE_UNION: readonly (readonly [string, readonly string[], readonly 
   ["rsync -a .gith*/ ~/.hermes/.env", [CRED, "policy.edit protected-path", "policy.edit.ci protected-path"], ["policy.core protected-path", CRED, "policy.edit protected-path", "policy.edit.ci protected-path"]],
   ["rsync ~/.hermes/scr*/x.sh .approval/env", [CRED, "cron.manage protected-path"], ["policy.core protected-path", CRED, "cron.manage protected-path"]],
   ["scp .gith*/workflows/ci.yml .approval/keys/k1", [CRED, "policy.edit.ci protected-path"], ["policy.core protected-path", CRED, "policy.edit.ci protected-path"]],
-  ["rsync -a ~/.hermes/* .approval/env", [CRED, "policy.core protected-path", "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+  // GLOB-WRITE reads every rsync operand as a write target, so this pure read
+  // judges `~/.hermes/*` with no listing. #682's unknown answer (build-1's M2,
+  // lead ruling L62483) says such a pattern may name any guarded name: main's
+  // log.mutate and policy.core plus cron.manage (Hermes' scripts), policy.edit
+  // and each route. That is stricter than main, never looser, as at L62588.
+  ["rsync -a ~/.hermes/* .approval/env", [CRED, "policy.core protected-path", "log.mutate protected-path"], ["policy.core protected-path", CRED, "cron.manage protected-path", "policy.edit protected-path", "policy.edit.spec protected-path", "policy.edit.design protected-path", "log.mutate protected-path", "policy.edit.ci protected-path"]],
   // Main's walk ends on a branch that drops the credential touch: it is carried (build-1's m10).
   ["cp -t .approval/env APPROVAL.md", ["policy.core protected-path"], ["policy.core protected-path", CRED]],
   ["cp ~/.hermes/.env -t .approval s/env", ["policy.core protected-path", "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],

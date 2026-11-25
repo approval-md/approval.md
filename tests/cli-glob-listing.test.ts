@@ -114,8 +114,11 @@ test("without listings (every synchronous caller) the strict answer stands", () 
   const cwd = project({ dist: ["a.js"] });
   const result = classifyForHook("rm -rf dist/*", [], cwd, []).result;
   assert.ok(result.ok);
-  // Main's class rides beside (lead ruling L61926).
-  assert.deepEqual(result.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope", "log.mutate"]);
+  // Main's class rides beside (lead ruling L61926). Every class a candidate
+  // names is judged, not the strictest alone (#682's reader; review-b N1 at
+  // bcb1be08): `dist/*` may be `dist/AGENTS.md` (policy.edit) and
+  // `dist/.hermes`, whose cron folder goes with it (cron.manage).
+  assert.deepEqual(result.segments.map((segment) => segment.class), ["policy.core", "policy.edit", "files.delete.out_of_scope", "log.mutate", "cron.manage"]);
 });
 
 test("lister: names, a missing directory, the entry cap and the timeout", async () => {
@@ -153,7 +156,7 @@ test("an unlistable directory keeps the strict answer through the hook", async (
   assert.equal(listings.get(join(cwd, "dist")), "unreadable");
   const result = classifyForHook("rm -rf dist/*", [], cwd, [], false, [], false, WRITE_SCOPE_OFF, listings).result;
   assert.ok(result.ok);
-  assert.deepEqual(result.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope", "log.mutate"]);
+  assert.deepEqual(result.segments.map((segment) => segment.class), ["policy.core", "policy.edit", "files.delete.out_of_scope", "log.mutate", "cron.manage"]);
 });
 
 test("the CLI route lists before it classifies (hook classify)", () => {
@@ -181,7 +184,7 @@ test("review of 6e3cbc9e: a relative pattern is placed only when the cwd is know
   // Another directory the command may start in (Claude Code's envelope cwd differing from the hook's).
   const unsure = classifyForHook("rm -rf dist/*", [], cwd, [], false, [join(scratch, "elsewhere")], false, WRITE_SCOPE_OFF, listings).result;
   assert.ok(unsure.ok);
-  assert.deepEqual(unsure.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope", "log.mutate"]);
+  assert.deepEqual(unsure.segments.map((segment) => segment.class), ["policy.core", "policy.edit", "files.delete.out_of_scope", "log.mutate", "cron.manage"]);
   const sure = classifyForHook("rm -rf dist/*", [], cwd, [], false, [], false, WRITE_SCOPE_OFF, listings).result;
   assert.ok(sure.ok);
   assert.deepEqual(sure.segments.map((segment) => segment.class), ["files.delete.out_of_scope"]);
@@ -722,8 +725,10 @@ test("review-b A686-FOLD7 S2 (lead ruling L62219), through the real hook: a long
     const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
     return { permission: output.permissionDecision, reason: output.permissionDecisionReason };
   };
-  // Stopped at the deadline: refused, never a pass.
-  const stopped = decide({ [DESCRIBE_DEADLINE_ENV]: "200" });
+  // Stopped at the deadline: refused, never a pass. 20 ms: since the write
+  // pass reads each path once per call (build-5, the unclosed-`[` cost line)
+  // this line is read in full inside the 200 ms it was given here.
+  const stopped = decide({ [DESCRIBE_DEADLINE_ENV]: "20" });
   assert.notEqual(stopped.permission, "allow", stopped.reason);
   assert.equal(stopped.permission, "deny", stopped.reason);
   assert.match(stopped.reason, /^hook-deadline: /u);
