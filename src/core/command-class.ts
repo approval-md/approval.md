@@ -8576,7 +8576,8 @@ interface CredentialWrites {
   /**
    * Where the argv cannot be read (an option the table does not know, a word
    * the shell may still turn into an option): every credential path among
-   * the operands and option values may be a destination. These are not taken
+   * the operands and option values may be a destination; and a credential
+   * glob as the last operand with no `-t`, whose last match is written. These are not taken
    * out of the read and defer nothing; their protected class is ADDED beside
    * the answer main gives (fail closed, never lighter).
    */
@@ -8601,8 +8602,25 @@ function credentialWrites(basename: string, args: readonly string[], flags: read
     });
     return possible.length === 0 ? NO_CREDENTIAL_WRITES : { words: new Set(), landings: [], possible };
   }
+  // A glob as the last operand, with no `-t`, may expand to several words,
+  // and the last of them is written (`cp ~/.hermes/profiles/*/auth.json`
+  // runs `cp a/auth.json b/auth.json`; `ln` links the last one): a credential
+  // path it spells may be a destination, so its class is ADDED as for an
+  // unreadable argv (the security review of the S3 fold on #706). A glob
+  // anywhere else expands among the sources.
+  const lastOperand = plan.operands[plan.operands.length - 1];
+  const targeted = plan.dests.length > 0 && plan.sources.length === plan.operands.length && plan.implicitDest !== true;
+  const lastFlags = lastOperand === undefined ? undefined : flags[args.lastIndexOf(lastOperand)];
+  const possible =
+    lastOperand !== undefined &&
+    !targeted &&
+    lastFlags?.expands === true &&
+    !((basename === "rsync" || basename === "scp") && remoteOperand(lastOperand)) &&
+    isCredentialPathAsRead(lastOperand)
+      ? [lastOperand]
+      : [];
   const last = plan.dests[plan.dests.length - 1];
-  if (last === undefined) return NO_CREDENTIAL_WRITES;
+  if (last === undefined) return possible.length === 0 ? NO_CREDENTIAL_WRITES : { words: new Set(), landings: [], possible };
   // Linear in the words (build-1's M2 and S5 on #706, the lead's ruling CLAIMS
   // L62686: no sources times destinations). Each destination word is judged
   // once, a repeated `-t` included.
@@ -8632,7 +8650,7 @@ function credentialWrites(basename: string, args: readonly string[], flags: read
       if (isCredentialPathAsRead(landing)) landings.push(landing);
     }
   }
-  return words.size === 0 && landings.length === 0 ? NO_CREDENTIAL_WRITES : { words, landings, possible: [] };
+  return words.size === 0 && landings.length === 0 && possible.length === 0 ? NO_CREDENTIAL_WRITES : { words, landings, possible };
 }
 
 /**
@@ -8711,12 +8729,61 @@ function isCredentialReadWord(word: string, protectedPaths: readonly ProtectedPa
  * variable included: the name is the agent's to choose and to assign
  * (`X_TOKEN=.github/workflows/ci.yml; command cp .approval/env $X_TOKEN`),
  * and plain `cp` counts every variable word as an unknown target.
+ *
+ * One glob form is the read too (build-1's S3 on #706): a pattern that can
+ * match only credential paths, handed to a program that only reads its
+ * operands ({@link GLOB_READ_BINS}), so that the spelling alone does not move
+ * the class (`less ~/.hermes/profiles/*\/auth.json` reads what `less
+ * ~/.hermes/auth.json` reads). See {@link isCredentialGlobRead}. Anywhere
+ * else a glob may put a credential path in a slot the program WRITES (`command
+ * cp ~/.hermes/profiles/*\/auth.json` expands to `cp a/auth.json
+ * b/auth.json`; `xxd in out` writes `out`): it stays a built target.
  */
-function isCredentialArgWord(word: LexWord, protectedPaths: readonly ProtectedPathEntry[]): boolean {
-  if (word.substitutions.length > 0 || word.splits || word.expands) return false;
+function isCredentialArgWord(word: LexWord, protectedPaths: readonly ProtectedPathEntry[], readsEveryOperand: boolean): boolean {
+  if (word.substitutions.length > 0 || word.splits) return false;
   const prefix = /^(?:--?[A-Za-z0-9][A-Za-z0-9_-]*|[A-Za-z_][A-Za-z0-9_]*)=/u.exec(word.text);
   const value = prefix === null ? word.text : word.text.slice(prefix[0].length);
+  if (word.expands) return readsEveryOperand && isCredentialGlobRead(value, protectedPaths);
   return !/[$`~*?[\]{}]/u.test(value.replace(/^~(?=\/)/u, "")) && isCredentialReadWord(value, protectedPaths);
+}
+
+/**
+ * Programs with no rule that only READ every operand they are handed (the
+ * pagers and dumpers the credential tier names rather than refuses), for
+ * {@link isCredentialArgWord}'s glob form. Not `xxd` (`xxd in out` writes
+ * `out`), `base64` (GNU's takes one file, others an output operand), or any
+ * copy, move, link or editor.
+ */
+const GLOB_READ_BINS: ReadonlySet<string> = new Set(["less", "more", "most", "hexdump", "od", "strings", "file"]);
+
+/**
+ * Can every match of this glob only be a credential read? (build-1's S3 on
+ * #706.) Narrow by design, so a pattern that might match anything else stays
+ * a target the shell builds: the only characters that may vary are `*` and
+ * `?`, each in a segment of its own made of them alone (no `**`, which may
+ * match no segment or several), and nothing else may (no `$`, backtick,
+ * bracket, brace, `~` but a leading `~/`, backslash, or zsh and ksh pattern
+ * syntax). Such a segment matches one name, never `.` or `..`, and a name
+ * starting with a dot only under `dotglob`; so the word is the read when it
+ * is a credential read with each such segment filled by an ordinary name and
+ * by a dot name (`~/.hermes/profiles/x/auth.json` and
+ * `~/.hermes/profiles/.x/auth.json`). `~/.hermes/*\/.env` (a match may be
+ * any directory) and `.approval/env*` (a match may be `.approval/envoy`) are
+ * not.
+ */
+function isCredentialGlobRead(value: string, protectedPaths: readonly ProtectedPathEntry[]): boolean {
+  const rest = value.replace(/^~(?=\/)/u, "");
+  if (/[$`~[\]{}()\\#^|<>!@+]/u.test(rest)) return false;
+  const segments = value.split("/");
+  let globbed = false;
+  for (const segment of segments) {
+    if (!/[*?]/u.test(segment)) continue;
+    if (!/^[*?]+$/u.test(segment) || segment.includes("**")) return false;
+    globbed = true;
+  }
+  if (!globbed) return false;
+  const fill = (name: string): string => segments.map((segment) => (/[*?]/u.test(segment) ? name : segment)).join("/");
+  return isCredentialReadWord(fill("x"), protectedPaths) && isCredentialReadWord(fill(".x"), protectedPaths);
 }
 
 /**
@@ -13405,7 +13472,7 @@ function classifySegmentWithVerb(
         .find(
           (word) =>
             (word.splits || word.expands || !word.exact || word.substitutions.length > 0) &&
-            !isCredentialArgWord(word, protectedPaths),
+            !isCredentialArgWord(word, protectedPaths, GLOB_READ_BINS.has(basename)),
         );
       const named = [sideScan?.found ?? null, optionHit, attachedHit];
       const unknown: ProtectedBeside[] =

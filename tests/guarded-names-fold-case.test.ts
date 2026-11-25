@@ -2173,3 +2173,65 @@ test("a copy into a credential path with many -t targets or many sources costs a
     assert.ok(spent <= 2 * control + 0.1, `${line.slice(0, 60)}: ${spent.toFixed(3)} s against ${control.toFixed(3)} s`);
   }
 });
+
+// build-1's S3 on #706: a credential READ spelled as a glob, handed to a
+// program that only reads its operands, is the read, as its literal spelling
+// is; the spelling alone must not move the class. Anywhere a glob may land in
+// a slot the program WRITES it stays a target the shell builds (the security
+// review of this fold).
+test("a credential read spelled as a glob is the read where the program only reads (build-1's S3 on #706)", () => {
+  for (const line of [
+    "less ~/.hermes/profiles/*/auth.json",
+    "less ~/.hermes/profiles/?/auth.json",
+    "more ~/.hermes/profiles/*/.env",
+    "hexdump ~/.hermes/profiles/*/.env",
+    "less .approval/keys/*",
+    "less ~/.hermes/profiles/*/auth.json notes.txt",
+    "less ~/.hermes/auth.json",
+  ]) {
+    assert.deepEqual(pure(line, TWO_ROUTES), [CRED], line);
+  }
+  for (const [line, want] of [
+    // A pattern that may match anything else stays a built target.
+    ["less .approval/vault*", [CRED, UNKNOWN]],
+    ["less ~/.hermes/profiles/**/auth.json", [CRED, UNKNOWN]],
+    ["less ~/.hermes/profiles/[ab]/auth.json", [CRED, UNKNOWN]],
+    ["less ~/.hermes/hermes-agent/.env.*", [CRED, UNKNOWN]],
+    ["less ~/.hermes/profiles/*/auth.json *.md", [CRED, UNKNOWN]],
+    ["less ~/.hermes/profiles/*/auth.json $X", [CRED, UNKNOWN]],
+    // A program that writes an operand (`xxd in out`), a wrapper, a program
+    // with no rule: the glob's last match may be written.
+    ["xxd ~/.hermes/profiles/*/.env", [CRED, UNKNOWN]],
+    ["command cp ~/.hermes/profiles/*/auth.json", [CRED, UNKNOWN]],
+    ["nice mv ~/.hermes/profiles/*/.env", [CRED, UNKNOWN]],
+    ["frobnicate ~/.hermes/profiles/*/auth.json", [CRED, UNKNOWN]],
+    ["command less ~/.hermes/profiles/*/auth.json", [CRED, UNKNOWN]],
+    // The seat's design points: no exemption for a secret-named variable or a `~`.
+    ["./deploy.sh $APPROVAL_TG_TOKEN", [ENV, UNKNOWN]],
+    ["python3 x.py .approval/env ~", [CRED, UNKNOWN]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+});
+
+test("a credential glob as a copy's last operand may be its destination: the write's class is added (security review of the S3 fold on #706)", () => {
+  for (const [line, want] of [
+    // `cp a/auth.json b/auth.json` writes the second: main's answer, the write's class after it.
+    ["cp ~/.hermes/profiles/*/auth.json", [CRED, "policy.core protected-path"]],
+    ["rsync ~/.hermes/profiles/*/auth.json", [CRED, "policy.core protected-path"]],
+    ["scp ~/.hermes/profiles/*/auth.json", [CRED, "policy.core protected-path"]],
+    ["cp ~/.hermes/profiles/*/auth.json ~/.hermes/profiles/*/auth.json", ["policy.core protected-path", CRED]],
+    ["cp notes.txt ~/.hermes/profiles/*/auth.json", ["policy.core protected-path", CRED]],
+    // Main already reached the write's class: mv and ln write what they name.
+    ["mv ~/.hermes/profiles/*/.env", ["policy.core protected-path"]],
+    ["ln ~/.hermes/profiles/*/auth.json", ["policy.core protected-path", CRED]],
+    ["mv .approval/*/env", ["log.mutate protected-path", "policy.core protected-path", "policy.core protected-path"]],
+    // Among the sources, or with a `-t`, the glob is only read.
+    ["cp ~/.hermes/profiles/*/auth.json notes.txt", [CRED]],
+    ["cp -t backup ~/.hermes/profiles/*/auth.json", [CRED]],
+    // Quoted, it is one literal word, and a copy of one operand writes nothing.
+    ["cp '~/.hermes/profiles/*/auth.json'", [CRED]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+});
