@@ -41,6 +41,53 @@ that flag floored is open.
 
 ### Security
 
+**A dollar-quoted word is read as the text the shell makes of it.**
+`echo x >> $'\x41PPROVAL.md'` writes the policy file in bash and zsh, and was
+an ordinary `files.write.workspace` (main's lexer kept the `$` and read the
+word as an unknown variable); `cat $".approval/env"` was `read.shell`. The
+lexer now reads `$"…"` as a double-quoted string and decodes `$'…'` where bash
+(3.2 and 5) and zsh decode alike: the letter escapes, `\xH`, `\xHH`, `\uHHHH`
+and octal (as a byte). An escape the shells read differently (`\cX`, `\U…`,
+`\u` with fewer than four digits, `\x` with none, `\q`), a character outside
+ASCII, and the rest of a word after a decoded NUL are unknown, the way `$X` is.
+Inside `$'…'` a `\'` no longer ends the string, so `echo $'\'' ; rm -rf
+APPROVAL.md #'` reads the `rm` bash and zsh run (it was one `echo` word).
+Wherever the lexer decoded a dollar quote, the line (and the hook's whole
+chain) is classified again with dollar quotes kept as before, and that answer
+rides beside, so nothing answers lighter than it did: `rm $'\x41PPROVAL.md'`
+is `policy.core` with the earlier `files.delete.out_of_scope` beside it, and a
+dollar-quoted program word (`$'rm' -rf x`) keeps its refusal.
+
+**An unread part spliced into a guarded name asks.** `echo x > APPROVAL$E.md`,
+`echo x > .claude$S/settings.json`, `echo x >> .appro${x}val/env` and
+`echo x > {APPROVAL,x}$E.md` write the guarded file when the parameter is
+empty, and were workspace writes; `cat .approval/$F` and `cat
+.appro${x}val/env` were `read.shell` to the pure classifier. A word whose
+literal text holds an unread part (a parameter, a substitution's output, an
+unread dollar-quote escape) is now read with each part as any text, a `/`
+included, against every guarded path and `.git` (brace groups expanded
+first); a possible match takes that path's class (the strictest where several
+match, every other one beside it), with the earlier answer beside it, and a
+word read as a credential
+file (`cat`, `grep`, `<`, a copy's source) takes `account.credential`, with
+the line's earlier answer joined so a refusal stands. A match counts only
+where the word's literal text takes part in it (a `.` in a component counts:
+`.$X` may be `.approval`), and a word whose directory is wholly unread asks
+only where a guarded path ends in its tail by name: `$D/APPROVAL.md`,
+`$D/settings.json`, `.github/$W/ci.yml`, `$W/scripts/run.sh` and `.$X` ask;
+`$OUT`, `$D/$F`, `./$X`, `$D/notes.md`, `$D/env` and `out/$F` keep their
+answer. A `$` the shell reads as text (single-quoted, escaped, a dollar
+quote's) is text here, where the word is read as lexed: `--append-notes
+'A$B'` keeps its answer; a reading made from a word (an option's value, a
+default's text, a folded name) counts every `$` in it as a parameter. Past
+eight unread parts in one word the word could be any path (`log.mutate`), and
+so is a word with 32 `/` or 1,024 `\` in it or whose readings pass the
+candidate bound. On
+one day's 19,368 Bash calls holding a `$`, 11 answers moved, each stricter: 8
+writes below a `$W/scripts` directory take `cron.manage` beside (W may be the
+Hermes home), one `printf` of a format with more than eight parameters may
+read a credential, and two refusals changed their code.
+
 **A glob in a write target to a guarded path stays guarded (GLOB-WRITE, #686).**
 `echo x > ~/.hermes/auth.json` was `policy.core`, and the same write with a
 glob in any component (`~/.hermes/[!Z]uth.json`, `~/.[!Z]ermes/auth.json`,
