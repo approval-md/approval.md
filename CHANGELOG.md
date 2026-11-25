@@ -15,9 +15,39 @@ before a tag.
 
 ## Unreleased
 
+## 0.4.9 — 2026-11-25
+
+0.4.9 carries everything merged since 0.4.8. Most of it closes ways a command
+line could write a guarded file while the hook read it as an ordinary write: a
+glob or a `${X:-…}` default in a write target, a guarded name in another letter
+case or Unicode fold, zsh's `>!` clobber forms, a write into `.git` or a `git
+remote` change that arms a later push, deleting or locking an organ directory
+or a parent of one, and a second protected path, or a credential read's own
+write, that the class left unnamed. A guarded path spelled in a dollar quote
+(`echo x >> $'\x41PPROVAL.md'`) is now read as the shell reads it, and a
+guarded name with a parameter or a substitution spliced into it (`echo x >
+APPROVAL$E.md`) takes the guarded path's class (#709). A credential read
+through a negated bracket in its path (`cat ~/.hermes/[!x]uth.json`) is now
+`account.credential`, and the hook matches a glob in linear time, with no
+backtracking (#682). Each entry below says what such a line answers now and
+what is left as a known limit. The hook also answers within a deadline of its
+own (15 seconds, or less under a shorter harness ceiling): a call it cannot
+read in time is refused `hook-deadline` instead of running ungated when the
+harness gives up on the hook. New: the `files.write.guarded` class, with a
+built-in minimum of `manual`, and the opt-in `write_scope` policy block (#695);
+`approval propose --irreversible` (APRV-537, #681); and the CLASS-DIFF and
+NEW-CALLS release checks for the overlay (#678, #679). `SPEC.md` and
+`APPROVAL.md` are unchanged since 0.4.8; `conformance/` gains vectors.
+**Rollout notes:** a core older than 0.4.9 refuses the `write_scope` key (the
+policy schema admits no unknown key) and fails the whole policy closed, so a
+policy gains it only after every core that reads it runs 0.4.9. A core older
+than 0.4.9 refuses `approval propose --irreversible` (usage error; `approval
+serve` answers 403), and a box must not be rolled back past 0.4.9 while a key
+that flag floored is open.
+
 ### Security
 
-**A dollar-quoted word is read as the text the shell makes of it.**
+**A dollar-quoted word is read as the text the shell makes of it (#709).**
 `echo x >> $'\x41PPROVAL.md'` writes the policy file in bash and zsh, and was
 an ordinary `files.write.workspace` (main's lexer kept the `$` and read the
 word as an unknown variable); `cat $".approval/env"` was `read.shell`. The
@@ -34,7 +64,7 @@ rides beside, so nothing answers lighter than it did: `rm $'\x41PPROVAL.md'`
 is `policy.core` with the earlier `files.delete.out_of_scope` beside it, and a
 dollar-quoted program word (`$'rm' -rf x`) keeps its refusal.
 
-**An unread part spliced into a guarded name asks.** `echo x > APPROVAL$E.md`,
+**An unread part spliced into a guarded name asks (#709).** `echo x > APPROVAL$E.md`,
 `echo x > .claude$S/settings.json`, `echo x >> .appro${x}val/env` and
 `echo x > {APPROVAL,x}$E.md` write the guarded file when the parameter is
 empty, and were workspace writes; `cat .approval/$F` and `cat
@@ -64,7 +94,7 @@ writes below a `$W/scripts` directory take `cron.manage` beside (W may be the
 Hermes home), one `printf` of a format with more than eight parameters may
 read a credential, and two refusals changed their code.
 
-**A glob in a write target to a guarded path stays guarded (GLOB-WRITE).**
+**A glob in a write target to a guarded path stays guarded (GLOB-WRITE, #686).**
 `echo x > ~/.hermes/auth.json` was `policy.core`, and the same write with a
 glob in any component (`~/.hermes/[!Z]uth.json`, `~/.[!Z]ermes/auth.json`,
 `~/.hermes/?uth.json`, `~/.h*/auth.json`, `.appr*/env`, `APPROVAL.m?`) was an
@@ -222,8 +252,8 @@ bcb1be08), so `echo x > A*.md` is `policy.core` and `policy.edit`.
   `cp-dot-slash-glob-is-unmoved` (`cp ./*.md docs/`, `policy.core`: the
   landing `docs/*.md` may be `docs/APPROVAL.md`) and
   `prose-opening-with-a-protected-path-under-cp` (a destination under
-  `.github`, `policy.edit`); the suite's `vectors_version` is left for the
-  release seat.
+  `.github`, `policy.edit`); the suite's `vectors_version` was bumped at the
+  0.4.9 release cut.
 
 **Deleting, moving or locking an organ directory is that directory's class
 (lead ruling L61587; review-b A686-FOLD3 M1).** `rm -rf .claude` was an
@@ -316,7 +346,7 @@ path under it. Not covered, a follow-up: a parent of an organ directory
   pattern past a cap is the unknown answer above, not `log.mutate` alone.
 
 **Deleting, moving or locking a PARENT of an organ directory is that
-directory's class (lead ruling L61587).** `rm -rf "$PWD"`, `rm -rf ~`, `chmod
+directory's class (lead ruling L61587; #689).** `rm -rf "$PWD"`, `rm -rf ~`, `chmod
 -R 000 .` and `mv "$PWD" ../x` remove or lock every organ directory under
 them, and were `files.delete.out_of_scope` or an ordinary write. A recursive
 `rm`, a `mv` source, or a `chmod` (with or without `-R`: `chmod 000 .` locks
@@ -487,7 +517,7 @@ guarded one (`cp a.js .gItHuB/WoRkFlOwS/Ci.yMl` is `policy.edit` and
 glob matcher folds each whole name before it matches, and reads a pattern
 character whose fold is not one character as any run (strict).
 
-**Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
+**Push holes open in 0.4.8, closed here (APRV-518, #676; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),
 and the `git push m` after it read as an implicit `vcs.push.main` while it was
 a mirror push that deleted remote branches: a two-step way around
@@ -592,7 +622,7 @@ ordinary workspace write.
   main's 354 are byte-identical. The fleet's 63 overlay recipes are unmoved.
 
 **More ways to `.git` closed, and a read of `.git` no longer counted as a
-write into it (APRV-518 follow-up).** Each of these was as loose on 0.4.8 as
+write into it (APRV-518 follow-up, #677).** Each of these was as loose on 0.4.8 as
 on the change above.
 
 - **A glob or brace target.** A write or `cd` target segment holding `*`,
@@ -623,7 +653,7 @@ on the change above.
 - **A tree that carries `.git`.** In the hook, a copy or move whose source
   holds a `.git` entry at its top (`cp -R /x/. .`, `rsync -a /x/ .`) is
   `git-dir-write`.
-- **`.git` spelled by a substitution.** Two more spellings count as the line
+- **`.git` spelled by a substitution (#680).** Two more spellings count as the line
   spelling `.git`. The first is git's own answer: a substitution that runs
   `git rev-parse` with `--git-dir`, `--absolute-git-dir`,
   `--git-common-dir`, `--git-path`, `--resolve-git-dir` or
@@ -649,7 +679,7 @@ on the change above.
   operator that transforms a value (removal, substring, replacement, case,
   `@`) counts, on any parameter. That one costs: `echo x >
   "${f%.txt}.log"` or `"${1%.md}.html"` becomes `git-dir-write`.
-- **The fold of #680's gate.** printf is read only when its format is a
+- **The fold of #680's gate (#683).** printf is read only when its format is a
   literal word using `%s`, `%b`, `%c` and `%d` alone and every word after it
   keeps its place (a literal word or a fully quoted plain scalar); every `echo`
   only when every word does; `printf` and `echo` named by the system's path
@@ -693,7 +723,7 @@ on the change above.
   are each read once (each took 64 to 174 s through the hook before). A
   word with outputs in it is brace-expanded to 16 alternatives, and past
   that counts (`{a,b}$(pwd)` to 1 MB took 39 s at 1,024).
-- **A word of unclosed `${` cannot make the path readers slow.** The reader
+- **A word of unclosed `${` cannot make the path readers slow (#687).** The reader
   that collapses `${NAME:-…}` to `${NAME}` before a path is split, and the
   hook's two copies of it in its credential pass, scanned to the word's end
   from every `${` with no `}` after it: a 1 MB redirect target took 105 s
@@ -745,7 +775,7 @@ on the change above.
   and 10,000 levels of nesting each take under half a second of CPU through
   the hook.
 
-**A credential read names the protected paths it writes.** A segment that
+**A credential read names the protected paths it writes (#701).** A segment that
 reads credential material answered `account.credential` alone whenever no
 protected path it names outranks that class (`log.mutate`, `policy.core`).
 So with `.github/workflows/` routed to `policy.edit.ci`, `cp .approval/env
@@ -780,11 +810,12 @@ other segments, and the hook judges each.
   guarded destinations, a read's own output. `cp .approval/env
   .gith*/workflows/ci.yml` is the credential class, then `policy.edit.ci`
   and `policy.edit`; `sort -o .github/workflows/ci.yml .approval/env` names
-  the workflow. The credential read is not a place a copy lands: `cp
-  notes.txt .approval/env` is the credential class alone. Through a wrapper
-  or a program with no rule (next) the words are read as written, so a
-  pattern there is not judged (`command cp .approval/env
-  .gith*/workflows/ci.yml` is the credential class alone).
+  the workflow. A copy onto a credential path is a write (#706, below): `cp
+  notes.txt .approval/env` is `policy.core` with the credential class.
+  Through a wrapper or a program with no rule (next) the words are read as
+  written, so a pattern there is not judged for its own class (`command cp
+  .approval/env .gith*/workflows/ci.yml` is the credential class and, since
+  #706, `policy.core` for the target the shell builds, not `policy.edit.ci`).
 - **A wrapper or a program with no rule** (`command cp .approval/env
   .github/workflows/ci.yml`, `nice cp …`, `ditto …`, `python3 x.py …`):
   the credential class answers, as before, and nobody can say what such a
@@ -793,7 +824,7 @@ other segments, and the hook judges each.
   (`--out=.github/workflows/ci.yml`). Before,
   one word in front of `cp` left the workflow write unnamed. Without the
   credential word these lines are refused, as they were.
-- **Behind a wrapper, a target the shell builds fails closed** as `cp
+- **Behind a wrapper, a target the shell builds fails closed (#706)** as `cp
   .approval/env $X` does: a variable, a command substitution, a glob, a
   brace expansion or a `~` in a word of the line (`command cp .approval/env
   $X`, `"$(…)"`, `.gith*/workflows/ci.yml`, `{a,b}.yml`, `~bob/x`) reports
@@ -817,7 +848,7 @@ other segments, and the hook judges each.
   secret variable now also waits on `policy.core`; under the policy
   `approval init` writes both classes are manual and no decision moves.
   Before, these lines were the credential class alone.
-- **A copy INTO a credential path writes it.** A credential path in a
+- **A copy INTO a credential path writes it (#706).** A credential path in a
   copy's destination slot (by the copy tool's own option table: `cp`, `mv`,
   `ln`, `install`, `rsync`, `scp`) was read as the credential read, so `cp
   README.md .approval/env`, `cp ~/.hermes/.env .approval/env` and `cp
@@ -844,7 +875,7 @@ other segments, and the hook judges each.
   A credential glob as a copy's last operand with no `-t` may expand into
   its destination (`cp ~/.hermes/profiles/*/auth.json`, `cp
   .approval/env{,.bak}`): that path's class is added too.
-- **A credential read spelled as a glob is still the read** where the
+- **A credential read spelled as a glob is still the read (#706)** where the
   program only reads its operands (`less`, `more`, `most`, `hexdump`, `od`,
   `strings`, `file`) and every match of the glob is a credential path (`less
   ~/.hermes/profiles/*/auth.json`, as `less ~/.hermes/auth.json`). Anywhere
@@ -863,7 +894,7 @@ other segments, and the hook judges each.
 - Conformance: five new `command-class` vectors; the 400 before them are
   byte-identical.
 
-**Every protected path a command writes is judged.** A segment that named
+**Every protected path a command writes is judged (#690).** A segment that named
 two protected paths took the class of one of them: the stricter by the
 classifier's own precedence (`log.mutate`, `policy.core`, then `policy.edit`
 and every routed sub-class together), and on equal rank the first named. So
@@ -902,7 +933,7 @@ and the strictest decision answers.
 - Conformance: three new `command-class` vectors; the 392 before them are
   byte-identical.
 
-**The hook answers before the harness stops listening.** A hook the harness
+**The hook answers before the harness stops listening (#693).** A hook the harness
 kills at its timeout is a tool call that proceeds, and reading one long word
 could take that long: `cat b/b/b/…/env`, a path of 100 KB that names nothing
 guarded, took 76 CPU seconds to classify, past Claude Code's default 60 second
@@ -940,7 +971,7 @@ else was on it.
 - Still slow, and now refused rather than passed: a megabyte of many short
   path words takes about 20 seconds to read, which is past the deadline.
 
-**Guarded names fold case on every platform.** The guards compared a path's
+**Guarded names fold case on every platform (#688).** The guards compared a path's
 names with the guarded names by exact letter case, while APFS, macOS's
 default volume, opens a name under full Unicode case folding. So `echo x >
 Approval.MD`, `rm -rf .APPROVAL`, `echo x > .APPROVAL/log/events.jsonl`,
@@ -1022,7 +1053,7 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   strictest decision answers, for every spelling of the path. The most
   specific route still wins over a shallower one. One more classification
   pass per tied entry, on lines that name such a path.
-- **The placeholder a `$(…)` leaves in a word is not folded.** It is spelled
+- **The placeholder a `$(…)` leaves in a word is not folded (#691).** It is spelled
   in capitals, so folding it like a name made every word with a substitution
   count as a name whose two readings differ, and the whole as-spelled reading
   ran for it: about twice the cost on any line with a `$(…)` in a path word,
@@ -1043,9 +1074,10 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   bash and zsh on APFS in a scratch folder, each case and fold spelling tried
   landed on the guarded file, and the dotless i and a fullwidth a did not.
   Conformance: ten new `command-class` vectors; main's 382 are
-  byte-identical. The vectors version is bumped once, at the release cut.
+  byte-identical. The vectors version was bumped once, at the 0.4.9 release
+  cut.
 
-**zsh's clobber redirections are refused (open in 0.4.8).** In zsh `>!`,
+**zsh's clobber redirections are refused (open in 0.4.8; #700).** In zsh `>!`,
 `>>!` and `>&!` are each one operator, and the word after it is the file:
 `echo x >! APPROVAL.md` overwrites the policy file. bash reads the same text
 as a redirection onto a file named `!`, with `APPROVAL.md` an argument of
@@ -1075,7 +1107,8 @@ Bash tool runs on macOS, a line that wrote a protected file was
 
 ### Added
 
-- **Where a write lands is judged: `files.write.guarded` and `write_scope`.**
+- **Where a write lands is judged: `files.write.guarded` and `write_scope`
+  (#695).**
   The hook reads where each write of a shell line or a file tool lands, as
   spelled and as the disk resolves it through links, and adds a class beside
   the ones the line already has.
@@ -1097,7 +1130,12 @@ Bash tool runs on macOS, a line that wrote a protected file was
     `supervised-retro`). Without it nothing changes for such writes.
   - `approval doctor` has a `write-scope` row and `approval policy explain`
     names the built-in minimum. Six new policy-resolution vectors.
-- **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536).**
+  - Known limit: a `cp` with many `-t` landings is slow through the hook.
+    Every landing is judged, under every policy, and the work grows with the
+    square of their number: a line of about 8 KiB of arguments takes several
+    seconds, and a longer one can meet the hook's deadline and be refused
+    `hook-deadline`. It fails closed. A fix (#711) is planned for 0.4.10.
+- **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536, #679).**
   `overlay-recipes-check.mjs --expected <expected.json> --tag-corpus <corpus>`
   finds every call that is new or changed against the previous release (a new
   recipe, other command bytes, or a call the CLASS-DIFF moved between the
@@ -1170,7 +1208,7 @@ Bash tool runs on macOS, a line that wrote a protected file was
     writer that appears, disappears or changes its class, one whose class
     cannot be read, and a plugin with such a propose and no writer all fail.
     `getattr(x, "propose")(...)` is now read as a propose too.
-- **CLASS-DIFF against the core the boxes run (B-167 release gate).**
+- **CLASS-DIFF against the core the boxes run (B-167 release gate, #678).**
   `overlay-recipes-check.mjs --diff <baseline core>` classifies the same corpus
   at a baseline core and at this one, over every recipe plus every `tools:`
   line of the template (the box harness calls), and reports each call whose
@@ -1259,7 +1297,7 @@ Bash tool runs on macOS, a line that wrote a protected file was
   APRV-518 git rules above) the pinned corpus reads `class-diff: none`: all
   304 calls unchanged, and the box check's 96 denied runs are the seven
   entries' own.
-- **`approval propose --irreversible` (APRV-537).** An agent can now say that
+- **`approval propose --irreversible` (APRV-537, #681).** An agent can now say that
   the action it proposes cannot be undone, and a person then decides under every
   setting short of human-only. Until this, a proposal could not declare
   `reversible: false`, so under `autonomous`, `supervised-retro` and
@@ -1319,7 +1357,7 @@ Bash tool runs on macOS, a line that wrote a protected file was
 ### Changed
 
 - **`approval policy amend --as agent:<id>` no longer loses a stop request
-  sent during its proposal (APRV-479).** A SIGINT, SIGTERM or SIGHUP that
+  sent during its proposal (APRV-479, #699).** A SIGINT, SIGTERM or SIGHUP that
   landed while the `policy.proposed` append held the log lock was held by the
   lock's guard and then dropped when the attestation wait began, so the verb
   slept out its whole `--wait` (15 minutes by default). The verb now turns the
@@ -1327,6 +1365,38 @@ Bash tool runs on macOS, a line that wrote a protected file was
   with the lock released and the record whole, and the wait sleeps on a timer,
   so a signal at any later point ends it at once. What the verb writes, prints
   and exits with is unchanged.
+- **Conformance `vectors_version`, set once at the release cut (lead ruling
+  L62887).** By `conformance/README.md`'s rule (a new vector is a minor bump,
+  a changed expectation a major one): `command-class` 2.0.0 (from 1.12.0;
+  0.4.8 shipped 1.9.0), a major because three expectations 0.4.8 released
+  moved to the stricter answer in #686: `prose-opening-with-a-protected-path-under-cp`,
+  `cp-dot-slash-glob-is-unmoved` and `a-deeper-match-than-the-head-is-unmoved`
+  (#686's entry above names the first two; in the third, a `cp` onto
+  `.github/workflows/sub dir/APPROVAL.md` also names `policy.edit` on the
+  landing `.../APPROVAL.md/a.md`). Its seventy-eight new vectors, net (354
+  to 432), came from #676 (sixteen), #677 (five), #680 (seven), #688 (ten),
+  #690 (three), #700 (three; #686 replaced two of them), #686 (four), #701
+  (four), #695 (five), #706 (one) and #709 (twenty-two). `refusal-unions`
+  32.0.0 (from 31.0.0), a major because a pinned union grew: `hook_deny_codes`
+  gained `hook-deadline` (#693).
+  `policy-resolution` 5.1.0 (from 5.0.0), a minor: six new vectors for
+  `files.write.guarded` (#695), no expectation moved, and the `algorithm` line
+  is unchanged. The regeneration moved only the three version fields and their
+  three manifest hashes.
+
+### Tests
+
+- **Tests that went red under load or on another runner now wait on events
+  and measure against their own runner (#694, #697, #698, #702, #703,
+  #705, #707).** A cost test's CPU bound follows the runner it is measured on; the
+  real-clock deadline read is sized by search; the lock-reclaim, `policy
+  amend` signal and slow-pipe follow tests wait on events, not on a clock;
+  the ZZZ mock closes each connection; and the two walked-once cost cases
+  give every word its own name and read the median of back-to-back pairs,
+  with their bounds unchanged. Tests only, with one doc comment in
+  `src/core/log.ts` reworded to say what the lock wait does; the runtime is
+  unchanged. The zsh clobber paragraph above was reworded to match the code
+  (#704, words only).
 
 ## 0.4.8 — 2026-11-20
 
