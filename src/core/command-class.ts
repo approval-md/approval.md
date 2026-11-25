@@ -1752,7 +1752,11 @@ const CREDENTIAL_CLASS = "account.credential";
  * current one only.
  */
 export function isCredentialPath(candidate: string): boolean {
-  return eachNameReading(() => isCredentialPathAsRead(candidate)).some((credential) => credential);
+  // The credential rows alone: the hook judges paths it resolved itself
+  // (a cwd joined, a home expanded), and those are not a word the line
+  // spelled; the spliced reading ({@link splicedCredential}) is the
+  // classifier's own, over the words it lexed.
+  return eachNameReading(() => isCredentialPathPlain(candidate)).some((credential) => credential);
 }
 
 /**
@@ -12408,6 +12412,16 @@ function unreadParts(text: string): { marked: string; asOutputs: string; parts: 
         while (end + 1 < text.length && /[A-Za-z0-9_]/u.test(text[end + 1] as string)) end += 1;
       } else if (next !== undefined && /[0-9?#*@!$-]/u.test(next)) end = at + 1;
     }
+    // The home variables are read as the home, as the organ and credential
+    // rows read them (`$HERMES_HOME/workspace/x` is the home's workspace):
+    // text here, not an unread part.
+    if (end !== -1 && /^\$(?:HOME|HERMES_HOME|\{HOME\}|\{HERMES_HOME\})$/u.test(text.slice(at, end + 1))) {
+      marked += text.slice(at, end + 1);
+      asOutputs += text.slice(at, end + 1);
+      afterPart = false;
+      at = end;
+      continue;
+    }
     if (end === -1) {
       marked += char;
       asOutputs += char;
@@ -12787,7 +12801,11 @@ function globGuardClass(
       // reading.
       const tail = segments.length - 1;
       if (spliced !== false && tail > 0 && (segments[tail] as string).includes(UNREAD_MARK) && (segments[tail] as string).replaceAll(UNREAD_MARK, "").length === 0) {
-        const spans: string[][] = [[], ...names.map((name) => [name]), ...names.flatMap((first) => names.map((second) => [first, second]))];
+        // Two names are two real names: a `..` that climbs out of the literal
+        // directory and back down is the reading of `..` the text does not
+        // follow (as {@link credentialSegmentsAsWrittenOrResolved} reads one
+        // the line spells), not a part's own.
+        const spans: string[][] = [[], ...names.map((name) => [name]), ...notDots.flatMap((first) => notDots.map((second) => [first, second]))];
         total = (total / (choices[tail] as string[][]).length) * spans.length;
         choices[tail] = spans;
       }
