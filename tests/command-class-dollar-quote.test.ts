@@ -7,7 +7,11 @@
  * `$\x41PPROVAL.md`, a workspace write, and the hook allowed it under a policy
  * where workspace writes run on their own: bash and zsh write the policy file.
  * The lexer now decodes `$'…'` where bash (3.2 and 5) and zsh decode alike,
- * reads `$"…"` as `"…"`, and leaves anything else unknown, the way `$X` is.
+ * and `\uH…` and `\UH…` where the character is ASCII, as zsh 5.9 (and bash
+ * 4.2 on) reads them; bash 3.2 keeps those as written, and main's reading,
+ * beside, reads them as written too (review of b58db9ec, S3). It reads `$"…"`
+ * as `"…"`, and leaves anything else unknown, the way `$X` is: an unknown
+ * part may be empty, and the word goes on after the quote (M1).
  * Wherever it decoded one, main's reading of the line rides beside
  * (`classifyCommandWithDollarQuotesKept`), so no line answers lighter than main.
  *
@@ -140,20 +144,30 @@ test("the lexer's text: each shared escape decoded, each other one unknown", () 
     ['$"$X.md"', "$X.md"],
     ["$'APPRO\\VAL.md'", `APPRO${U}AL.md`],
     ["$'a\\qb'", `a${U}b`],
-    ["$'a\\cAb'", `a${U}`],
-    ["$'a\\U00000041b'", `a${U}`],
-    ["$'a\\u41b'", `a${U}`],
-    ["$'a\\xgb'", `a${U}`],
-    ["$'a\\C-ab'", `a${U}`],
-    ["$'a\\M-ab'", `a${U}`],
+    // Review of b58db9ec (M1): an unknown part is the rest of its QUOTE at
+    // most, and the word goes on after it.
+    ["$'a\\cAb'c", `a${U}c`],
+    ["$'a\\U00000041b'", "aAb"],
+    ["$'a\\U41'b", "aAb"],
+    ["$'a\\U41b'", `a${U}`], // U+041B: outside ASCII
+    ["$'a\\U2e'c", "a.c"],
+    ["$'a\\u41'b", "aAb"],
+    ["$'a\\u41b'", `a${U}`], // U+041B
+    ["$'\\u2e'approval", ".approval"],
+    ["$'a\\u0'c", "ac"], // a NUL: bash ends the quote there
+    ["$'a\\xgb'c", `a${U}gbc`],
+    ["$'a\\C-ab'c", `a${U}c`],
+    ["$'a\\M-ab'c", `a${U}c`],
     ["$'a\\xc3\\xa9b'", `a${U}b`],
     ["$'a\\u00e9b'", `a${U}b`],
-    ["$'a\\0b'c", `a${U}`],
-    ["$'a\\x00b'c", `a${U}`],
-    ["$'a\\400b'c", `a${U}`],
+    ["$'a\\0b'c", "ac"],
+    ["$'a\\x00b'c", "ac"],
+    ["$'a\\400b'c", "ac"],
+    ["$'\\0'.approval/env", ".approval/env"],
     ["x$'a'$'b'\"c\"'d'", "xabcd"],
     [`$'${"\\q".repeat(40)}'tail`, `${U}tail`], // one unread run
-    [`$'${"a\\q".repeat(40)}'tail`, `a${U}`.repeat(33)], // past the bound: the rest of the word is unknown
+    // Past 32 placeholders the rest of the word is unknown to every reader (M3).
+    [`$'${"a\\q".repeat(40)}'tail`, `${`a${U}`.repeat(32)}a\${__APPROVAL_REST__}`],
   ];
   for (const [word, text] of cases) assert.equal(targetText(word), text, word);
   // The program word and a read operand are read the same way.
@@ -171,8 +185,6 @@ test("an escape the shells read differently, a non-ASCII character or a NUL leav
   for (const spelling of [
     "$'APPRO\\VAL.md'", // bash keeps `\V`, zsh drops the backslash
     "$'APPROVAL\\cA.md'", // bash only
-    "$'\\U00000041PPROVAL.md'", // bash 3.2 keeps it
-    "$'\\u41PPROVAL.md'", // fewer than four digits: bash 3.2 keeps it
     "$'\\xPPROVAL.md'", // `\x` with no digit: zsh decodes it
     "$'\\C-APPROVAL.md'", // zsh only
     "$'\\M-APPROVAL.md'", // zsh only
@@ -185,6 +197,8 @@ test("an escape the shells read differently, a non-ASCII character or a NUL leav
     const head = classesOf(`cp notes.txt ${spelling}`);
     assert.ok(head.includes("policy.core"), `${spelling}: ${head.join(",")}`);
   }
+  // Read as zsh and bash 4.2 read it; bash 3.2's reading as written is main's, beside.
+  for (const spelling of ["$'\\U00000041PPROVAL.md'", "$'\\u41PPROVAL.md'"]) assert.ok(classesOf(`cp notes.txt ${spelling}`).includes("policy.core"), spelling);
   // The `.git` reading of #680 still reads a NUL both ways.
   assert.ok(classesOf("echo x > $'.g\\0junk'it/config").includes("vcs.history.rewrite"));
 });
@@ -259,6 +273,91 @@ test("through the hook: the policy file spelled as a dollar quote is not a works
     assert.ok(read.result.ok && read.result.classes.includes("account.credential"));
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("review of b58db9ec (M1): a quote's unknown part ends at its quote, and the word goes on", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "approval-md-dollar-quote-m1-"));
+  try {
+    for (const [line, cls] of [
+      ["cat $'\\0'.approval/env", "account.credential"],
+      ["cat $'\\u2e'approval/env", "account.credential"],
+      ["cat < $'\\0'.approval/env", "account.credential"],
+      ["grep K $'\\0'.approval/env", "account.credential"],
+      ["head -1 $'\\u2e'approval/env", "account.credential"],
+      ["cat ./$'\\0'.approval/env", "account.credential"],
+      ["cat src/$'\\u2e'approval/env", "account.credential"],
+      ["cat src/$'\\0'.approval/env", "account.credential"],
+      ["cat $'\\cA'.approval/env", "account.credential"],
+      ["rm -f $'\\0'APPROVAL.md", "policy.core"],
+      ["rm -f $'\\u41'PPROVAL.md", "policy.core"],
+      ["echo x > $'\\0'APPROVAL.md", "policy.core"],
+      ["tee $'\\0'APPROVAL.md", "policy.core"],
+      ["touch $'\\0'APPROVAL.md", "policy.core"],
+      ["sed -i s/a/b/ $'\\0'APPROVAL.md", "policy.core"],
+      ["echo x >> $'\\0'.approval/log/events.jsonl", "log.mutate"],
+      ["truncate -s0 $'\\0'.approval/log/events.jsonl", "log.mutate"],
+      ["echo x > $'\\0'.claude/settings.json", "policy.core"],
+      ["tee -a $'\\u2e'/$'\\x41PPROVAL.md'", "policy.core"],
+      ["echo x > $'\\x'APPROVAL.md", "policy.core"],
+      ["git reset $'\\u2d'-hard", "vcs.history.rewrite"],
+      ["git commit $'\\u2d'-amend -m x", "vcs.history.rewrite"],
+      ["gh pr $'\\u6d'erge 1", "vcs.push.main"],
+      // zsh ends the path at the NUL: APPROVAL.md; bash writes APPROVAL.md.bak.
+      ["echo x > $'APPROVAL.md\\0'.bak", "policy.core"],
+    ] as const) {
+      assert.ok(classesOf(line).includes(cls), `${line}: ${classesOf(line).join(",")}`);
+      const hook = classifyForHook(line, [], cwd).result;
+      assert.ok(hook.ok && hook.classes.includes(cls), `${line} (hook): ${JSON.stringify(hook)}`);
+    }
+    // Past 32 unread parts the word could be any path: never lighter than one unread part.
+    for (const [tail, cls] of [["APPROVAL.md", "policy.core"], [".approval/env", "account.credential"]] as const) {
+      const verb = tail === "APPROVAL.md" ? "echo x >" : "cat";
+      const one = classesOf(`${verb} $'\\q'${tail}`);
+      assert.ok(one.includes(cls), `${verb} one: ${one.join(",")}`);
+      for (const n of [32, 33, 40]) {
+        const many = classesOf(`${verb} ${"$'\\q'a".repeat(n)}${tail}`);
+        assert.ok(many.includes(cls) || many.includes("log.mutate"), `${verb} ${String(n)}: ${many.join(",")}`);
+      }
+    }
+    assert.ok(classesOf(`echo x > ${"$'\\q'".repeat(33)}$'/../\\x41PPROVAL.md'`).some((cls) => cls === "policy.core" || cls === "log.mutate"));
+    // A git or gh flag or subcommand holding an escape the shells read differently refuses.
+    for (const line of ["git reset $'\\q'-hard", "gh pr $'\\q'erge 1", "git $'\\q'ush --force"]) {
+      assert.equal(classifyCommand(line, []).ok, false, line);
+    }
+    // Ordinary dollar-quoted lines keep their answer.
+    for (const line of ["git commit -m $'a\\n\\nb'", "printf $'%s\\n' x", "grep $'\\t' f", "sort -t $'\\t' -k1 f", "echo x > $'notes\\0junk'.md"]) {
+      assert.deepEqual(classesOf(line), asPlainOrMain(line), line);
+    }
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+/** The plain-spelled answer for the ordinary lines above. */
+function asPlainOrMain(line: string): string[] {
+  const plain: Record<string, string> = {
+    "git commit -m $'a\\n\\nb'": "git commit -m x",
+    "printf $'%s\\n' x": "printf x x",
+    "grep $'\\t' f": "grep x f",
+    "sort -t $'\\t' -k1 f": "sort -t x -k1 f",
+    "echo x > $'notes\\0junk'.md": "echo x > notes.md",
+  };
+  return classesOf(plain[line] ?? line);
+}
+
+test("review of b58db9ec (M3): repeated unread quotes in one word are linear, as main is", () => {
+  const bound = scaledBound(1);
+  const control = cpuSeconds(() => classifyCommand(`tee ${"a$'b'".repeat(17_000)}`, []));
+  for (const [label, command] of [
+    ["a$'\\q' repeated", `tee ${"a$'\\q'".repeat(16_000)}`],
+    ["a$'\\0' repeated", `tee ${"a$'\\0'".repeat(16_000)}`],
+    [".appr$'\\q' repeated", `cat ${".appr$'\\q'".repeat(9_000)}/env`],
+  ] as const) {
+    assert.ok(command.length <= 100_000, label);
+    const seconds = cpuSeconds(() => classifyCommand(command, []));
+    assert.ok(seconds < bound, `${label}: ${seconds.toFixed(3)} CPU s, bound ${bound.toFixed(2)}, control ${control.toFixed(3)} (${runner().line})`);
+    assert.ok(seconds < Math.max(0.2, 8 * control), `${label}: ${seconds.toFixed(3)} CPU s against a control of ${control.toFixed(3)}`);
   }
 });
 

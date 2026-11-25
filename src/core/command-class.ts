@@ -1755,8 +1755,12 @@ export function isCredentialPath(candidate: string): boolean {
  * ({@link isCredentialPathPlain}), and a word with an unread part spliced
  * into literal text that could be a credential file ({@link splicedCredential}).
  */
-function isCredentialPathAsRead(candidate: string, literalAt?: readonly number[]): boolean {
-  return isCredentialPathPlain(candidate) || splicedCredential(candidate, literalAt);
+function isCredentialPathAsRead(candidate: string, facts?: WordFacts): boolean {
+  if (isCredentialPathPlain(candidate) || splicedCredential(candidate, facts?.literalAt)) return true;
+  // zsh's reading of a word that ends at a NUL ({@link WordFacts.zshCut}).
+  if (facts?.zshCut === undefined) return false;
+  const zsh = candidate.slice(0, facts.zshCut);
+  return isCredentialPathPlain(zsh) || splicedCredential(zsh, facts.literalAt?.filter((at) => at < zsh.length));
 }
 
 /** The credential rows over `candidate`'s brace expansions, as written. */
@@ -2185,7 +2189,7 @@ export function credentialReadWords(basename: string, args: readonly string[]): 
 /** A word {@link credentialReadWords} reads, and, where it is an argument as lexed, that argument's literal `$` ({@link LexWord.literalDollars}). */
 interface CredentialReadEntry {
   word: string;
-  literalAt?: readonly number[];
+  facts?: WordFacts;
 }
 
 /**
@@ -2196,14 +2200,14 @@ interface CredentialReadEntry {
 function credentialReadEntries(
   basename: string,
   args: readonly string[],
-  literals: readonly (readonly number[] | undefined)[] = [],
+  literals: readonly (WordFacts | undefined)[] = [],
 ): CredentialReadEntry[] {
   if (credentialWritesOnly(basename, args)) return [];
   const words: CredentialReadEntry[] = [];
   for (const [index, arg] of args.entries()) {
     if (!isFlag(arg)) {
-      const literalAt = literals[index];
-      words.push(literalAt === undefined ? { word: arg } : { word: arg, literalAt });
+      const facts = literals[index];
+      words.push(facts === undefined ? { word: arg } : { word: arg, facts });
     } else if (arg.startsWith("--")) {
       const equals = arg.indexOf("=");
       if (equals !== -1 && equals < arg.length - 1) words.push({ word: arg.slice(equals + 1) });
@@ -2244,9 +2248,9 @@ function credentialReadEntries(
 function credentialTouch(
   basename: string,
   args: readonly string[],
-  literals: readonly (readonly number[] | undefined)[] = [],
+  literals: readonly (WordFacts | undefined)[] = [],
 ): CredentialOutcome | null {
-  const named = credentialReadEntries(basename, args, literals).find((entry) => isCredentialPathAsRead(entry.word, entry.literalAt));
+  const named = credentialReadEntries(basename, args, literals).find((entry) => isCredentialPathAsRead(entry.word, entry.facts));
   if (named !== undefined) {
     return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named.word };
   }
@@ -2301,7 +2305,7 @@ function uploadCredentialTouch(sources: readonly string[], unknown: string | nul
 function redirectCredentialTouch(
   readTargets: readonly string[],
   allTargets: readonly string[],
-  readLiterals: readonly (readonly number[] | undefined)[] = [],
+  readLiterals: readonly (WordFacts | undefined)[] = [],
 ): CredentialOutcome | null {
   const named = readTargets.find((target, index) => isCredentialPathAsRead(target, readLiterals[index]));
   if (named !== undefined) {
@@ -2388,6 +2392,19 @@ interface LexWord {
    */
   literalDollars?: readonly number[];
   /**
+   * A dollar quote in the word holds an escape the shells read differently
+   * ({@link readDollarQuoted}'s unread parts). Read by the verb check: a
+   * flag or subcommand holding one refuses.
+   */
+  dollarUnread?: boolean;
+  /**
+   * Where zsh's reading of the word ends: a dollar quote there may hold a NUL
+   * (zsh keeps it, and a path ends at it), after literal text. bash reads the
+   * whole word, `text`; zsh reads `text.slice(0, zshCut)`. Read, as
+   * {@link literalDollars} is, only for this word's own text.
+   */
+  zshCut?: number;
+  /**
    * Does the word open with an unquoted, unescaped `=` followed by anything
    * but another `=` (`=mytool`, `=g++`, `="tool"`, `=$X`)? zsh's equals
    * expansion turns it into the path of a program on PATH unless `NO_EQUALS`
@@ -2402,6 +2419,20 @@ interface LexWord {
    * hook's write pass alone.
    */
   assignmentEquals?: boolean;
+}
+
+/** What the spliced reading takes from a lexed word, for its own text only ({@link LexWord.literalDollars}, {@link LexWord.zshCut}). */
+interface WordFacts {
+  literalAt?: readonly number[];
+  zshCut?: number;
+}
+
+function wordFacts(word: LexWord): WordFacts | undefined {
+  if (word.literalDollars === undefined && word.zshCut === undefined) return undefined;
+  return {
+    ...(word.literalDollars === undefined ? {} : { literalAt: word.literalDollars }),
+    ...(word.zshCut === undefined ? {} : { zshCut: word.zshCut }),
+  };
 }
 
 interface LexRedirect {
@@ -2582,9 +2613,14 @@ function lex(command: string): LexResult {
     let exact = true;
     const substitutions: string[] = [];
     const start = index;
-    // Where a dollar quote ended the word's text (`endsWord`, see `readDollarQuoted`).
+    // A dollar quote in the word holds a part no shell-independent reading has.
+    let dollarUnread = false;
+    // Where zsh's reading of the word ends at a NUL, after literal text: the
+    // rest of the word is unknown there ({@link readDollarQuoted}).
     let cut: number | null = null;
-    let unreadParts = 0;
+    let zshCut: number | null = null;
+    // The placeholders the word's dollar quotes may still add ({@link DOLLAR_QUOTE_PLACEHOLDER_CAP}).
+    const placeholders = { left: DOLLAR_QUOTE_PLACEHOLDER_CAP };
     // Where in `text` each `$` that is text sits ({@link LexWord.literalDollars}).
     const literalDollars: number[] = [];
 
@@ -2673,8 +2709,9 @@ function lex(command: string): LexResult {
         }
         if (next === "'") {
           dollarQuoteRead = true;
-          const scan = readDollarQuoted(command, index + 1);
+          const scan = readDollarQuoted(command, index + 1, placeholders);
           if (scan === null) return null;
+          const quoteAt = text.length;
           // A dollar quote expands nothing: each `$` it leaves is text, but for
           // the sentinel an escape it cannot read stands as (an unread part).
           for (let at = scan.text.indexOf("$"); at !== -1; at = scan.text.indexOf("$", at + 1)) {
@@ -2682,10 +2719,26 @@ function lex(command: string): LexResult {
             else literalDollars.push(text.length + at);
           }
           text += scan.text;
-          if (scan.unread) splits = true;
-          unreadParts += scan.unreadParts;
-          if (unreadParts > DOLLAR_QUOTE_UNREAD_CAP && !text.endsWith(SUBSTITUTION_SENTINEL)) text += SUBSTITUTION_SENTINEL;
-          if ((scan.endsWord || unreadParts > DOLLAR_QUOTE_UNREAD_CAP) && cut === null) cut = text.length;
+          if (scan.unread) {
+            splits = true;
+            dollarUnread = true;
+          }
+          // zsh ends the path at a NUL and bash goes on with the word: the
+          // text is bash's, and where literal text comes before the NUL zsh's
+          // shorter reading is kept beside it (`zshCut`; `$'APPROVAL.md\0'.bak`
+          // is APPROVAL.md to zsh). With none (`$'\0'.approval/env`) zsh's path
+          // is a directory or nothing (review of b58db9ec, M1).
+          if (scan.zshNulAt !== null && zshCut === null && cut === null) {
+            const at = quoteAt + scan.zshNulAt;
+            if (/[^./]/u.test(text.slice(0, at).replaceAll(SUBSTITUTION_SENTINEL, ""))) zshCut = at;
+          }
+          // Past the word's placeholders the rest of the word is unknown, to
+          // every reader (an unexpanded variable to the end), and the spliced
+          // reading reads it as any path (review of the M3 fix).
+          if (scan.overflow && cut === null) {
+            text += DOLLAR_QUOTE_REST;
+            cut = text.length;
+          }
           quoted = true;
           exact = false;
           index = scan.end;
@@ -2738,7 +2791,7 @@ function lex(command: string): LexResult {
     const paramNames = specialParametersOnly(raw);
     const equalsHead = raw.length > 1 && raw[0] === "=" && raw[1] !== "=";
     const assignmentEquals = assignment && /^[^=]*=(?:=[^=]|.*:=[^=])/su.test(raw);
-    const literal = literalDollars.filter((at) => at < text.length);
+    const literal = cut === null ? literalDollars : literalDollars.filter((at) => at < text.length);
     return {
       text,
       quoted,
@@ -2752,6 +2805,8 @@ function lex(command: string): LexResult {
       ...(equalsHead ? { equalsHead } : {}),
       ...(assignmentEquals ? { assignmentEquals } : {}),
       ...(literal.length === 0 ? {} : { literalDollars: literal }),
+      ...(dollarUnread ? { dollarUnread } : {}),
+      ...(zshCut === null || zshCut >= text.length ? {} : { zshCut }),
     };
   };
 
@@ -6023,11 +6078,21 @@ function ansiCQuoteEnd(command: string, open: number): number | null {
 }
 
 /**
- * Most unread parts one word's dollar quotes may hold before the rest of the
- * word is unknown (`endsWord`): each stands in the text as a placeholder, and
- * a word of thousands of them made every later reader pay for each.
+ * Most placeholders one word's dollar quotes put in its text: past them an
+ * unread part stands as nothing (the word already holds more unread parts
+ * than the spliced reading takes one by one, so it is read as any path), and
+ * the word's text stays linear in the line (review of b58db9ec, M3; a
+ * placeholder is a braced name, and a word of thousands of them made every
+ * later reader pay for each).
  */
-const DOLLAR_QUOTE_UNREAD_CAP = 32;
+const DOLLAR_QUOTE_PLACEHOLDER_CAP = 32;
+
+/**
+ * What ends a word past {@link DOLLAR_QUOTE_PLACEHOLDER_CAP}: an unexpanded
+ * variable to every rule, and to the spliced reading ({@link unreadParts})
+ * a word that could be any path.
+ */
+const DOLLAR_QUOTE_REST = "${__APPROVAL_REST__}";
 
 /** The letter escapes bash and zsh decode alike inside `$'…'` (measured on bash 3.2 and zsh 5.9). */
 const ANSI_C_SHARED_LETTERS = new Set(["a", "b", "e", "E", "f", "n", "r", "t", "v", "\\", "'", '"', "?"]);
@@ -6037,26 +6102,27 @@ const ANSI_C_SHARED_LETTERS = new Set(["a", "b", "e", "E", "f", "n", "r", "t", "
  * the shells the hook stands beside read it: bash (3.2, as macOS ships it, and
  * 5) and zsh 5.9, each measured. Its text is the decoded string where they
  * agree: the letter escapes ({@link ANSI_C_SHARED_LETTERS}), `\xH` and
- * `\xHH`, `\uHHHH` (exactly four digits), and octal `\N`, `\NN`, `\NNN` (a
- * byte: `\777` is 0xFF and `\400` a NUL to both), each decoded by
- * {@link decodeBackslashEscapes} on its own text.
+ * `\xHH`, and octal `\N`, `\NN`, `\NNN` (a byte: `\777` is 0xFF and `\400` a
+ * NUL to both), each decoded by {@link decodeBackslashEscapes} on its own
+ * text. `\uH` to `\uHHHH` and `\UH` to `\UHHHHHHHH` are decoded where the
+ * character is ASCII, as zsh 5.9 (and bash 4.2 on) reads them; bash 3.2 keeps
+ * them as written, and main's reading of the line, which rides beside
+ * ({@link withDollarQuotesKept}), reads them as written too.
  *
  * What it cannot read for every shell is UNREAD (`unread`), and stands in the
- * text as {@link SUBSTITUTION_SENTINEL}, an unknown value the way `$X` is:
+ * text as {@link SUBSTITUTION_SENTINEL}, an unknown value the way `$X` is,
+ * that may be empty:
  *
  * - a decoded character outside ASCII (`\x80` to `\xFF` and octal above
  *   `\177` are bytes, `\u00E9` a character the locale encodes);
  * - an escape bash keeps whole and zsh drops the backslash of (`\q`, `\8`,
- *   `\-`, any other letter or sign): the backslash and that character;
- * - a decoded NUL, and an escape after which one shell may decode a NUL or
- *   take more characters (`\cX` in bash; `\C-X`, `\M-X`, `\UHHHHHHHH`, `\u`
- *   with fewer than four digits, `\x` with none in zsh): bash ends the quote's
- *   text at a NUL and keeps the word going after it, zsh keeps the NUL and a
- *   path ends there, so the rest of the WORD is unknown (`endsWord`: the
- *   caller drops whatever the word holds after this string).
- *
- * Past {@link DOLLAR_QUOTE_UNREAD_CAP} unread parts (`unreadParts` counts
- * them) the rest of the word is unknown too.
+ *   `\-`, any other letter or sign), and `\x`, `\u`, `\U` with no digit (zsh
+ *   reads a NUL): the backslash and that character;
+ * - from a decoded NUL, or an escape one shell reads with what follows
+ *   (`\cX` in bash; `\C-X`, `\M-X` in zsh), to the end of THIS quote: bash
+ *   ends the quote's text at a NUL, zsh keeps it. The word goes on after the
+ *   quote (review of b58db9ec, M1: `$'\0'.approval/env` is `.approval/env`
+ *   to bash).
  *
  * `null` when the quote does not close (the line is unparseable). Linear in
  * the body: each escape is read once.
@@ -6064,18 +6130,25 @@ const ANSI_C_SHARED_LETTERS = new Set(["a", "b", "e", "E", "f", "n", "r", "t", "
 function readDollarQuoted(
   command: string,
   open: number,
-): { text: string; end: number; unread: boolean; endsWord: boolean; unreadParts: number } | null {
+  placeholders: { left: number } = { left: DOLLAR_QUOTE_PLACEHOLDER_CAP },
+): { text: string; end: number; unread: boolean; unreadParts: number; zshNulAt: number | null; overflow: boolean } | null {
   const close = ansiCQuoteEnd(command, open);
   if (close === null) return null;
   let text = "";
   let unread = false;
-  let endsWord = false;
+  // Where in `text` zsh may read a NUL, where a path it hands the system ends.
+  let zshNulAt: number | null = null;
+  // The word's placeholders ran out: the rest of the word is unknown.
+  let overflow = false;
   let unreadParts = 0;
   // Whether the text ends in the placeholder: a flag, as in {@link unreadParts}.
   let atPlaceholder = false;
   const unknown = (): void => {
     if (!atPlaceholder) {
-      text += SUBSTITUTION_SENTINEL;
+      if (placeholders.left > 0) {
+        text += SUBSTITUTION_SENTINEL;
+        placeholders.left -= 1;
+      } else overflow = true;
       unreadParts += 1;
     }
     atPlaceholder = true;
@@ -6086,7 +6159,7 @@ function readDollarQuoted(
     while (end < close && end - from < most && /[0-9A-Fa-f]/u.test(command[end] as string)) end += 1;
     return end - from;
   };
-  for (let at = open + 1; at < close; at += 1) {
+  for (let at = open + 1; at < close && !overflow; at += 1) {
     const char = command[at] as string;
     if (char !== "\\") {
       text += char;
@@ -6095,49 +6168,53 @@ function readDollarQuoted(
     }
     const next = command[at + 1] as string;
     let length: number;
+    // `\u` and `\U` with their digits: one character, by code point.
+    let codePoint: number | null = null;
     if (ANSI_C_SHARED_LETTERS.has(next)) length = 2;
     else if (next === "x") length = hexRun(at + 2, 2) === 0 ? 0 : 2 + hexRun(at + 2, 2);
-    else if (next === "u") length = hexRun(at + 2, 4) === 4 ? 6 : 0;
-    else if (/[0-7]/u.test(next)) {
+    else if (next === "u" || next === "U") {
+      const digits = hexRun(at + 2, next === "u" ? 4 : 8);
+      length = digits === 0 ? 0 : 2 + digits;
+      if (digits > 0) codePoint = Number.parseInt(command.slice(at + 2, at + 2 + digits), 16);
+    } else if (/[0-7]/u.test(next)) {
       length = 2;
       while (length < 4 && at + length < close && /[0-7]/u.test(command[at + length] as string)) length += 1;
     } else length = 0;
     if (length === 0) {
-      // Unread. Where one shell may decode a NUL here (`\c@` in bash; `\C-@`,
-      // `\U0`, `\u0`, `\x` with no digit in zsh) or take characters after it
-      // (`\cX`, `\M-X`, `\UHHHHHHHH`), the rest of the word is unknown, as
-      // after a NUL. Any other letter or sign is the backslash and itself to
-      // bash, itself alone to zsh.
+      // Unread. Where one shell reads the characters after it with it (`\cX`
+      // in bash, `\C-X` and `\M-X` in zsh), the rest of this quote is
+      // unknown. Any other letter or sign is the backslash and itself to bash,
+      // itself alone to zsh (`\x`, `\u`, `\U` with no digit a NUL to zsh).
+      // zsh may read a NUL here (`\C-@`; `\x`, `\u` or `\U` with no digit).
+      if (/[CMxuU]/u.test(next) && zshNulAt === null) zshNulAt = text.length;
       unknown();
-      if (/[cCMUux]/u.test(next) || unreadParts > DOLLAR_QUOTE_UNREAD_CAP) {
-        endsWord = true;
-        break;
-      }
+      if (next === "c" || next === "C" || next === "M") break;
       at += 1;
       continue;
     }
     const escape = command.slice(at, at + length);
-    let decoded = decodeBackslashEscapes(escape, false);
-    // An octal escape is a byte: `\777` is 0xFF and `\400` a NUL to both shells.
-    if (/^\\[0-7]/u.test(escape)) decoded = String.fromCharCode(Number.parseInt(escape.slice(1), 8) & 0xff);
+    let decoded: string;
+    if (codePoint !== null) decoded = codePoint > 0x7f ? "\u0080" : String.fromCharCode(codePoint);
+    else {
+      decoded = decodeBackslashEscapes(escape, false);
+      // An octal escape is a byte: `\777` is 0xFF and `\400` a NUL to both shells.
+      if (/^\\[0-7]/u.test(escape)) decoded = String.fromCharCode(Number.parseInt(escape.slice(1), 8) & 0xff);
+    }
     at += length - 1;
     if (decoded === "\0") {
-      unknown();
-      endsWord = true;
+      // bash ends this quote's text here and goes on with the word after it;
+      // zsh keeps the NUL, where a path ends. Both readings are known.
+      if (zshNulAt === null) zshNulAt = text.length;
       break;
     }
     if ((decoded.codePointAt(0) ?? 0) > 0x7f) {
       unknown();
-      if (unreadParts > DOLLAR_QUOTE_UNREAD_CAP) {
-        endsWord = true;
-        break;
-      }
       continue;
     }
     text += decoded;
     atPlaceholder = false;
   }
-  return { text, end: close, unread, endsWord, unreadParts };
+  return { text, end: close, unread, unreadParts, zshNulAt, overflow };
 }
 
 /**
@@ -9917,7 +9994,7 @@ function strictestProtectedWrite(
   skipProse = false,
   glob: GlobReading = defaultGlobReading(),
   text: ProtectedHit | null = strictestProtected(words, protectedPaths, skipProse),
-  literals: readonly (readonly number[] | undefined)[] = [],
+  literals: readonly (WordFacts | undefined)[] = [],
 ): ProtectedHit | null {
   // The text answer (`text`) is kept, for the record of whether a reading raised it.
   let best = text;
@@ -9964,7 +10041,14 @@ function strictestProtectedWrite(
     if (best !== null && (best as { surface: string }).surface === "log.mutate") break;
     // The word's own literal `$` (a lexed word's, where the caller has it); a
     // reading made from it carries none.
-    const literalAt = literals[index];
+    const facts = literals[index];
+    const literalAt = facts?.literalAt;
+    // zsh's reading of a word that ends at a NUL, judged beside ({@link WordFacts.zshCut}).
+    if (facts?.zshCut !== undefined) {
+      const zsh = word.slice(0, facts.zshCut);
+      offer(protectedPathClass(zsh, protectedPaths), word);
+      offerSpliced(splicedGuardClass(zsh, protectedPaths, glob.budget, glob.options, globLive(glob, word), literalAt?.filter((at) => at < zsh.length)), word);
+    }
     if (!inexact(word)) {
       // A substitution leaves its word `exact` to the lexer, and its output is
       // an unread part all the same (`APPROVAL$(true).md`).
@@ -12524,6 +12608,8 @@ const unreadPartsRecent: { text: string; literalKey: string; read: { marked: str
 const UNREAD_PARTS_RECENT = 4;
 
 function unreadPartsOf(text: string, literalAt?: readonly number[]): { marked: string; asOutputs: string; parts: number } | null {
+  // A word whose dollar quotes ran past their placeholders could be any path.
+  if (text.includes(DOLLAR_QUOTE_REST)) return { marked: UNREAD_MARK, asOutputs: SUBSTITUTION_SENTINEL, parts: SPLICED_PARTS_CAP + 1 };
   let marked = "";
   let asOutputs = "";
   let parts = 0;
@@ -13771,6 +13857,21 @@ function classifySegmentWithVerb(
     cursor += found.skip;
   }
 
+  // Review of b58db9ec (M1, c): a flag or subcommand of git or gh that holds
+  // a dollar-quote escape the shells read differently may be any flag or
+  // subcommand (`git reset $'\q'-hard`): refused, not read as an unknown word.
+  const verbWord = words[cursor];
+  const verbName = verbWord === undefined ? null : (pathSegments(verbWord).slice(-1)[0] ?? verbWord);
+  if (verbName === "git" || verbName === "gh") {
+    let operands = 0;
+    for (const word of segment.words.slice(cursor + 1)) {
+      const flagLike = word.text.startsWith("-") || word.text.startsWith(SUBSTITUTION_SENTINEL);
+      if (word.dollarUnread === true && (flagLike || operands < (verbName === "gh" ? 2 : 1))) {
+        return { ok: false, code: "unclassified", detail: `a ${verbName} flag or subcommand holds a dollar-quote escape the shells read differently` };
+      }
+      if (!flagLike) operands += 1;
+    }
+  }
   const everyWriteTarget = segment.redirects
     .filter((redirect) => redirect.op !== "<")
     .map((redirect) => redirect.target.text)
@@ -13785,11 +13886,11 @@ function classifySegmentWithVerb(
     .filter((redirect) => redirect.op === "<")
     .map((redirect) => redirect.target.text);
   // Each word's and read target's literal `$` (the lexed word's own, by index).
-  const wordLiterals = segment.words.map((word) => word.literalDollars);
-  const everyReadLiterals = segment.redirects.filter((redirect) => redirect.op === "<").map((redirect) => redirect.target.literalDollars);
+  const wordLiterals = segment.words.map(wordFacts);
+  const everyReadLiterals = segment.redirects.filter((redirect) => redirect.op === "<").map((redirect) => wordFacts(redirect.target));
   const everyWriteLiterals = segment.redirects
     .filter((redirect) => redirect.op !== "<" && !isDiscardTarget(redirect.target.text))
-    .map((redirect) => redirect.target.literalDollars);
+    .map((redirect) => wordFacts(redirect.target));
   const everyRedirectTarget = segment.redirects.map((redirect) => redirect.target.text);
   // A redirection onto a protected path is a write to that path, whatever the
   // command in front of it was going to do. The CLASS says which surface was
@@ -13889,7 +13990,7 @@ function classifySegmentWithVerb(
     .map((redirect) => redirect.target.text)
     .filter((target) => !isDiscardTarget(target));
   const readTargets = redirects.filter((redirect) => redirect.op === "<").map((redirect) => redirect.target.text);
-  const readLiterals = redirects.filter((redirect) => redirect.op === "<").map((redirect) => redirect.target.literalDollars);
+  const readLiterals = redirects.filter((redirect) => redirect.op === "<").map((redirect) => wordFacts(redirect.target));
   const redirectTargets = redirects.map((redirect) => redirect.target.text);
   // APRV-521 (review-b M1). Every spelling of bash's assignment word is read
   // past by the cursor above ({@link ASSIGNMENT}), and only the plain one is
@@ -14274,7 +14375,7 @@ function classifySegmentWithVerb(
       fetched.unknown !== null ||
       fetchedOutputProtected !== null ||
       strictestProtected([...lexWords.map((word) => word.text), ...resolvedWords], protectedPaths) !== null ||
-      lexWords.some((word) => isCredentialPathAsRead(word.text, word.literalDollars)) ||
+      lexWords.some((word) => isCredentialPathAsRead(word.text, wordFacts(word))) ||
       resolvedWords.some((word) => isCredentialPathAsRead(word)) ||
       // F-12 fold (review-b N2): APFS and the default macOS volume are case-
       // insensitive, so `>> approval.md` is the policy file. Fail closed: a bare
@@ -14942,7 +15043,7 @@ function innerPartRefused(part: LexSegment, protectedPaths: readonly ProtectedPa
         DIRECTORY_VERBS.has(word.text.split("/").pop() ?? "") ||
         protectedNameFolded(word.text, protectedPaths) ||
         strictestProtected([word.text], protectedPaths) !== null ||
-        isCredentialPathAsRead(word.text, word.literalDollars) ||
+        isCredentialPathAsRead(word.text, wordFacts(word)) ||
         isCredentialPathAsRead(foldNameLower(word.text)),
     )
   );

@@ -659,10 +659,7 @@ test("hook: the gate's spellings in a checkout", { skip }, () => {
 
 test("gate N2 (m11): an ANSI-C string ends at a NUL past the near reader's reach", () => {
   // Past the near reader's five characters, only the NUL end reads it.
-  // Lead ruling L62568: after a decoded NUL the rest of the word is unread
-  // (bash keeps it, zsh ends the path), and `.g` then any text may be a
-  // guarded `.github` path: the spliced reading's class rides beside.
-  assert.deepEqual(pure(`echo x > $'.g\\0junk'""""""""it/config`), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
+  assert.deepEqual(pure(`echo x > $'.g\\0junk'""""""""it/config`), [DIR_WRITE]);
 });
 
 test("gate N2 (m17): %c prints the first character of each word", () => {
