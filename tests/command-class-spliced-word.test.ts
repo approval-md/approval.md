@@ -230,6 +230,9 @@ test("round two (automated security review, a): the kept reading reads every unr
   // parameter, in either order on the line.
   assert.ok(kept("echo x > A$PPROVAL$E.md; echo A$'P'PROVAL$E.md").includes("policy.core"));
   assert.ok(kept("echo A$'P'PROVAL$E.md; echo x > A$PPROVAL$E.md").includes("policy.core"));
+  // A read judges the word's own text: a kept quote's `$F` earlier on the
+  // line does not make the read's `$F` text.
+  assert.ok(kept("echo .approval/$'F'; cat .approval/$F").includes("account.credential"));
   // In the kept pass a single-quoted `$` is text: a file named `$F9`, read,
   // is no credential there (the decoded pass beside it still asks).
   assert.ok(!kept("cat '.approval/$F9'").includes("account.credential"));
