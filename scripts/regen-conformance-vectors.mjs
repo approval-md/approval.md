@@ -3974,6 +3974,16 @@ const commandClassVectors = [
     input: { command: "cat ~/.hermes/.op.env}" },
   },
   {
+    id: "brace-unmatched-close-approval-credential-read",
+    description: "a stray } after the approval home's environment map: the brace reader strips it, and the read is the credential's (build-6, the brace memo's review)",
+    input: { command: "cat .approval/env}" },
+  },
+  {
+    id: "brace-unmatched-close-policy-file-write",
+    description: "a stray } after the policy file's name: the brace reader strips it, and the write is the policy file's (build-6, the brace memo's review)",
+    input: { command: "echo x > APPROVAL.md}" },
+  },
+  {
     id: "brace-stray-in-ordinary-text-is-unmoved",
     description:
       "braces in ordinary text stay ordinary",

@@ -454,17 +454,28 @@ export function braceCandidates(word: string): string[] | null {
   // line's main pass at the seam, each name reading), and a 1 MB word of
   // groups costs seconds each time. Pure, so a hit is exactly what the
   // expansion would give; a copy, so no caller shares it. A new call starts
-  // afresh, so a repeated measurement pays the work again.
+  // afresh, so a repeated measurement pays the work again. Every word goes
+  // through it (a stray `}` alone changes the word: `.op.env}` is `.op.env`).
   if (classifyCallDepth === 0) return braceCandidatesOnce(word);
   const known = braceCandidatesMemo.get(word);
   if (known !== undefined) return known === null ? null : [...known];
   const made = braceCandidatesOnce(word);
-  braceCandidatesMemoChars += word.length;
-  if (braceCandidatesMemoChars > BRACE_CANDIDATES_MEMO_CHARS) {
-    braceCandidatesMemo.clear();
-    braceCandidatesMemoChars = word.length;
+  // What an entry holds: the word and every word it expands to. One over its
+  // own bound is not kept, and once the memo is full nothing more is kept
+  // (what it holds stays until the call ends).
+  let size = word.length;
+  for (const each of made ?? []) size += each.length;
+  if (
+    size <= BRACE_CANDIDATES_ENTRY_CHARS &&
+    braceCandidatesMemoChars + size <= BRACE_CANDIDATES_MEMO_CHARS &&
+    braceCandidatesMemo.size < BRACE_CANDIDATES_MEMO_ENTRIES
+  ) {
+    braceCandidatesMemo.set(word, made === null ? null : [...made]);
+    braceCandidatesMemoChars += size;
+    braceMemoHeld += word.length + (made ?? []).reduce((sum, each) => sum + each.length, 0);
+    if (braceMemoHeld > braceMemoPeak) braceMemoPeak = braceMemoHeld;
+    if (braceCandidatesMemo.size > braceMemoEntriesPeak) braceMemoEntriesPeak = braceCandidatesMemo.size;
   }
-  braceCandidatesMemo.set(word, made === null ? null : [...made]);
   return made;
 }
 
@@ -472,12 +483,32 @@ export function braceCandidates(word: string): string[] | null {
 const braceCandidatesMemo = new Map<string, readonly string[] | null>();
 /** How deep the exported classification calls are: the outermost starts the memo afresh. */
 let classifyCallDepth = 0;
+/** The characters {@link braceCandidatesMemo} holds, words and expansions, for its bound. */
+let braceCandidatesMemoChars = 0;
+/** The same, counted apart for {@link braceCandidatesMemoPeak} (what a test reads). */
+let braceMemoHeld = 0;
+let braceMemoPeak = 0;
+let braceMemoEntriesPeak = 0;
+/** Most characters {@link braceCandidatesMemo} holds in one call (words and their expansions). */
+export const BRACE_CANDIDATES_MEMO_CHARS = 8_000_000;
+/** Most characters one entry may hold and still be kept. */
+const BRACE_CANDIDATES_ENTRY_CHARS = 2_000_000;
+/** Most entries {@link braceCandidatesMemo} holds in one call. */
+export const BRACE_CANDIDATES_MEMO_ENTRIES = 4096;
+
+/** The most characters and entries the brace memo held during the last outermost classification call, and the entries it holds now. */
+export function braceCandidatesMemoPeak(): { peak: number; entriesPeak: number; heldNow: number } {
+  return { peak: braceMemoPeak, entriesPeak: braceMemoEntriesPeak, heldNow: braceCandidatesMemo.size };
+}
 
 /** Run one exported classification call; the outermost starts {@link braceCandidatesMemo} afresh, and ends it. */
 function withClassifyCall<T>(run: () => T): T {
   if (classifyCallDepth === 0) {
     braceCandidatesMemo.clear();
     braceCandidatesMemoChars = 0;
+    braceMemoHeld = 0;
+    braceMemoPeak = 0;
+    braceMemoEntriesPeak = 0;
   }
   classifyCallDepth += 1;
   try {
@@ -487,13 +518,10 @@ function withClassifyCall<T>(run: () => T): T {
     if (classifyCallDepth === 0) {
       braceCandidatesMemo.clear();
       braceCandidatesMemoChars = 0;
+      braceMemoHeld = 0;
     }
   }
 }
-/** The characters of the words {@link braceCandidatesMemo} holds. */
-let braceCandidatesMemoChars = 0;
-/** Most characters of words {@link braceCandidatesMemo} holds before it starts again. */
-const BRACE_CANDIDATES_MEMO_CHARS = 8_000_000;
 
 function braceCandidatesOnce(word: string): string[] | null {
   const expanded = braceExpansions(word) ?? numericRepresentative(word);
