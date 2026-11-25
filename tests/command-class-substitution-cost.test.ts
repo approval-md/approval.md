@@ -173,20 +173,30 @@ test("cost: the answers of the bounded walk are the old window reading's", () =>
   const READ_OUT = "$(pwd)";
   // Each is timed too, so a slow build fails here at once, not after hours.
   // Spellings across an output's edge still count, however many outputs.
-  assert.deepEqual(bounded(`echo x >> ${READ_OUT.repeat(1000)}.g${READ_OUT}it/config`, "answer 1"), [DIR_WRITE]);
-  assert.deepEqual(bounded(`echo x >> .g${READ_OUT.repeat(1000)}t/config`, "answer 2"), [DIR_WRITE]);
+  // Lead ruling L62568: past eight unread parts a word could be any path, so
+  // the spliced reading's strictest class rides beside the `.git` write.
+  // (Build-6 round two: past eight unread parts the word may be any path, so
+  // git's own files' class rides beside as well.)
+  const GIT_BESIDE = "vcs.history.rewrite redirect-protected";
+  assert.deepEqual(bounded(`echo x >> ${READ_OUT.repeat(1000)}.g${READ_OUT}it/config`, "answer 1"), ["log.mutate redirect-protected", DIR_WRITE, GIT_BESIDE]);
+  assert.deepEqual(bounded(`echo x >> .g${READ_OUT.repeat(1000)}t/config`, "answer 2"), ["log.mutate redirect-protected", DIR_WRITE, GIT_BESIDE]);
   // GLOB-WRITE (22 Nov 2026): an output beside a glob construct may hold a `/`
   // and name any directory, the approval log's among them.
   // Every class such a directory may name is judged (#682's reader; review-b N1 at bcb1be08).
+  // (Build-6 round two, L62568: every guarded class the output may reach rides beside.)
   assert.deepEqual(bounded(`echo x >> .${"*".repeat(500)}${READ_OUT}t/config`, "answer 3"), [
     "log.mutate redirect-protected",
     "vcs.history.rewrite git-dir-write",
     "policy.core redirect-protected",
     "cron.manage redirect-protected",
     "policy.edit redirect-protected",
+    GIT_BESIDE,
   ]);
-  // And ordinary words do not, however many outputs.
-  assert.deepEqual(bounded(`echo x > out/${`${READ_OUT}-`.repeat(1000)}.txt`, "answer 4"), ["files.write.workspace redirect-write"]);
+  // And ordinary words do not, however many outputs, up to the spliced
+  // reading's bound (lead ruling L62568: past eight unread parts a word could
+  // be any path, and asks with the strictest class; main's answer beside).
+  assert.deepEqual(bounded(`echo x > out/${`${READ_OUT}-`.repeat(8)}.txt`, "answer 4"), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(bounded(`echo x > out/${`${READ_OUT}-`.repeat(1000)}.txt`, "answer 4, past the bound"), ["log.mutate redirect-protected", GIT_BESIDE, "files.write.workspace redirect-write"]);
 });
 
 test("cost: a run of glob characters in a target is bounded", () => {
@@ -335,7 +345,9 @@ test("cost: review-b's M2 on 2f4100fc, brace groups beside outputs to 1 MB, is b
   for (const n of [5000, 20000]) {
     bounded(`${P}echo x > "$(printf '${"\\x7ba..a\\x7d".repeat(n)}*')"`, `a printed glob of one-alternative groups, n=${String(n)}`);
   }
-  assert.deepEqual(pure("echo x >> .g{i..i}$(pwd)t/config"), [DIR_WRITE]);
+  // (Build-6 round two, L62568: the output may hold a `/`, so the word may
+  // also be `.g…/hooks/…t/config`; that class rides beside the `.git` one.)
+  assert.deepEqual(pure("echo x >> .g{i..i}$(pwd)t/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   // The step bound: 63 groups of one alternative finish, 64 count; in a word
   // an outputs' join reads, and in a word a default rewrites (bash 3.2 reads
   // `${a:-out}/{a..a}{a..a}.log` as `out/aa.log`).
@@ -344,7 +356,7 @@ test("cost: review-b's M2 on 2f4100fc, brace groups beside outputs to 1 MB, is b
   assert.deepEqual(pure(`echo x > out/${"{a..a}".repeat(63)}$(pwd).log`), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure(`echo x > out/${"{a..a}".repeat(64)}$(pwd).log`), [DIR_WRITE]);
   // Under the bound the expansion answers as before; past 16 alternatives, the strict side.
-  assert.deepEqual(pure("echo x >> .g{i,}$(pwd)t/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> .g{i,}$(pwd)t/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   assert.deepEqual(pure(`echo x > out/${"{a,b}".repeat(4)}$(pwd).log`), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure(`echo x > out/${"{a,b}".repeat(5)}$(pwd).log`), [DIR_WRITE]);
 });

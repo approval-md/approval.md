@@ -724,9 +724,13 @@ test("a variable spliced inside a guarded name is read where the line sets it, a
       const seen = see(command, scope, repo);
       assert.ok(seen.classes.includes(cls), `${command}: ${JSON.stringify(seen.segments)}`);
     }
-    // `.gi$x/config` with x empty is `.gi/config`, which is no git directory.
+    // `.gi$x/config` with x empty is `.gi/config`, which is no git directory:
+    // no guarded entry. The spliced reading does not follow the line's
+    // assignments, so `$x` may be `t` and `.git/config`'s class rides beside
+    // the workspace write (lead ruling L62568; stricter, nothing main gave lost).
     const plain = see("x=; echo x >> .gi$x/config", scope, repo);
-    assert.ok(!plain.classes.includes("vcs.history.rewrite") && !plain.classes.includes(GUARDED), JSON.stringify(plain.segments));
+    assert.ok(!plain.classes.includes(GUARDED) && plain.classes.includes("files.write.workspace"), JSON.stringify(plain.segments));
+    assert.ok(plain.classes.includes("vcs.history.rewrite"), JSON.stringify(plain.segments));
   }
 });
 

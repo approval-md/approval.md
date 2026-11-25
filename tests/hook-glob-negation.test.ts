@@ -1087,7 +1087,6 @@ test("build-1's S1 at 64c43399: a brace group the shell expands anyway, beside a
     "mkdir -p dist/{css,js}$V",
     "touch log{1,2}.$USER",
     "mkdir -p out/{a,b}_$(date +%s)",
-    "mkdir -p {a,b}${SUFFIX}",
     "mkdir -p ~/proj/{src,test}$X",
   ]) {
     assert.equal(zshOptionCommandReading(command, null), null, command);
@@ -1098,6 +1097,14 @@ test("build-1's S1 at 64c43399: a brace group the shell expands anyway, beside a
     // asks a human, and the hook would wait its whole window for each).
     assert.deepEqual([...new Set(classes(command))].sort(), ["files.write.guarded", "files.write.workspace"], command);
   }
+  // `{a,b}${SUFFIX}` is no any-name reading under zsh's options either, but
+  // `a${SUFFIX}` is an unread part spliced after literal text, which #709's
+  // spliced reading (lead ruling L62568, main 2ac58ec5) reads as text the
+  // part may complete into a guarded name or path (`a` + `pproval.md`,
+  // folded, among them): main's answer since then, beside the write pass's
+  // guarded class.
+  assert.equal(zshOptionCommandReading("mkdir -p {a,b}${SUFFIX}", null), null);
+  assert.deepEqual([...new Set(classes("mkdir -p {a,b}${SUFFIX}"))].sort(), ["files.write.guarded", "files.write.workspace", "log.mutate", "policy.core", "policy.edit"]);
   // The guarded twins keep the any-name reading: `{A}` is a braceccl group
   // (`A`), a `^` is a negation, `{1..$N}` is no sequence until the parameter is
   // read, and a group cut by a quote is not one.

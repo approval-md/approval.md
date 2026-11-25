@@ -297,12 +297,14 @@ test("any other unexpanded variable may be the home: its organ and credential ro
   for (const command of ["cat $X/.env", 'cat "$D/.op.env"', "cat ${D}/auth.json"]) {
     assert.deepEqual(classesOf(command), ["account.credential"], command);
   }
-  // Not the bare home, not the scheduler: `$OUT` alone and `$OUT/scripts/x`
-  // are ordinary work far more often (the Hermes hook's disk pass judges a
-  // variable that decides the directory policy.core on its own).
-  for (const command of ['echo x > "$OUT"', "echo x > $OUT/scripts/build.sh", "echo x > $OUT/notes.md"]) {
+  // Not the bare home: `$OUT` alone and `$OUT/notes.md` are ordinary work far
+  // more often (the Hermes hook's disk pass judges a variable that decides
+  // the directory policy.core on its own).
+  for (const command of ['echo x > "$OUT"', "echo x > $OUT/notes.md"]) {
     assert.deepEqual(classesOf(command), ["files.write.workspace"], command);
   }
+  // `$OUT/scripts/x` may be the scheduler's directory: cron.manage beside the write (rulings L62568, L62801).
+  assert.deepEqual(classesOf("echo x > $OUT/scripts/build.sh"), ["cron.manage", "files.write.workspace"]);
 });
 
 test("spelling variants the loaders honour: case, ./, trailing slash, .., env-file names", () => {

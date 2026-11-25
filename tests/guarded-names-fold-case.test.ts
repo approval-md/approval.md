@@ -665,7 +665,11 @@ test("the hook's own passes fold: a home or key folder spelled with the long s",
   try {
     for (const [canonical, spelled] of volumeFolds ? [...byText, ...onDisk] : byText) {
       const want = hook(canonical);
-      assert.ok(want.includes(RESOLVED), `${canonical}: ${want.join(" ; ")}`);
+      // Build-6 round two (L62542): the pure classifier now reads
+      // `$X/.hermes/$F` as a possible credential file itself, before the
+      // hook's pass resolves it; the class is the same.
+      const pureDecides = canonical === "cat $X/.hermes/$F";
+      assert.ok(pureDecides ? want.includes("account.credential credential-path") : want.includes(RESOLVED), `${canonical}: ${want.join(" ; ")}`);
       // The canonical line's answer, then what main gave the spelling.
       const got = hook(spelled);
       for (const entry of want) assert.ok(got.includes(entry), `${spelled}: ${entry} in ${got.join(" ; ")}`);
@@ -1741,7 +1745,10 @@ test("only a literal credential path is left out as the read; every variable is 
       ['"${APPROVAL_TG_TOKEN}" notes.txt', [ENV, UNKNOWN]],
       ["--token=$APPROVAL_TG_TOKEN notes.txt", [ENV, UNKNOWN]],
       ["--token $APPROVAL_TG_TOKEN", [ENV, UNKNOWN]],
-      ["$APPROVAL_TG_TOKEN-$X notes.txt", [ENV, UNKNOWN]],
+      // Two unread parts around a `-` may spell a credential path (#709: an
+      // unread part is any text, `/` included), which answers before the
+      // variable's own rule: the same classes, the path's reason.
+      ["$APPROVAL_TG_TOKEN-$X notes.txt", [CRED, UNKNOWN]],
       ["{a,$APPROVAL_TG_TOKEN} notes.txt", [ENV, UNKNOWN]],
       // A credential path with a variable, a glob or a brace in it is built too.
       ["$HOME/.hermes/.env notes.txt", [CRED, UNKNOWN]],
@@ -2124,14 +2131,23 @@ test("a word with a substitution runs one reading unless a name in it folds, and
   ]) {
     assert.equal(readings(command), 1, command);
   }
-  // A name beside the substitution that does fold still runs both.
+  // A name beside the substitution that does fold still runs both. (Build-6:
+  // the spliced reading takes the equal claims it meets inside its own walk,
+  // so it adds no reading of the line; review of b58db9ec, the cost lines.)
   assert.equal(readings("echo x > .APPROVAL/$(echo a)"), 2);
   assert.equal(readings("echo x > Approval.MD$(echo a)"), 2);
-  // The answers, in both readings, are what they were.
+  // The answers, in both readings, are what they were, except that lead ruling
+  // L62568 reads the substitution's output after a guarded folder as any text,
+  // `log/x` too: the log's class answers, the folder's rides beside (the
+  // spliced reading is the folded reading's alone).
+  const LOG = "log.mutate redirect-protected";
   for (const [command, want] of [
     ['echo x > "$(echo a)"', ["files.write.workspace redirect-write"]],
-    ["echo x > .approval/$(echo a)", [WRITE_CORE]],
-    ["echo x > .APPROVAL/$(echo a)", [WRITE_CORE, "files.write.workspace redirect-write"]],
+    // Build-6 round two (automated security review, c): the spliced raise no
+    // longer skips the segment's plain pass, whose class rides beside again
+    // (#690's `patternAlso`), here the folder's own.
+    ["echo x > .approval/$(echo a)", [LOG, WRITE_CORE, WRITE_CORE]],
+    ["echo x > .APPROVAL/$(echo a)", [LOG, WRITE_CORE, WRITE_CORE, "files.write.workspace redirect-write"]],
     ["cat $(echo a)/.env", ["account.credential credential-path"]],
   ] as const) {
     assert.deepEqual(pure(command), want, command);
