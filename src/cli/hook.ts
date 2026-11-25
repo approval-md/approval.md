@@ -5769,15 +5769,36 @@ export function refineWriteLandings(
       if (!tree || !(contents || !existingDirectory(dir, index))) continue;
       take(judgeWord(dir, index, true));
     }
-    // A copy or move INTO a directory writes `<dir>/<source name>` too.
-    for (const { dir, sources, tree } of intoDirs) {
+    // A copy or move INTO a directory writes `<dir>/<source name>` too. A
+    // source's names do not depend on the directory: read once per segment.
+    // Each `-t` after the first is a further directory every source is judged
+    // in, so those landings are directories times names: past
+    // INTO_EXTRA_LANDINGS_CAP of them the rest are not judged and the segment
+    // is guarded as unreadable (a cost bound: GNU cp, mv and ln refuse a
+    // second `-t`, and a line of many of them reached the hook's deadline).
+    const namesOf = new Map<string, Array<string | null>>();
+    let extraLandings = 0;
+    into: for (const [dirAt, { dir, sources, tree }] of intoDirs.entries()) {
       for (const source of sources) {
-        for (const name of settled() ? [] : intoNames(source, index)) {
+        if (settled()) continue;
+        let names = namesOf.get(source);
+        if (names === undefined) {
+          names = intoNames(source, index);
+          namesOf.set(source, names);
+        }
+        for (const name of names) {
           if (name === null) {
             guarded ??= { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: source, why: `${source}'s name cannot be read, so where it lands in ${dir} cannot be tested against the guarded list` };
             continue;
           }
           if (name.length === 0 || name === "." || name === "..") continue;
+          if (dirAt > 0) {
+            extraLandings += 1;
+            if (extraLandings > INTO_EXTRA_LANDINGS_CAP) {
+              guarded ??= { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: dir, why: `\`${host.slice(0, 80)}\` names ${String(intoDirs.length)} target directories, each with every source, more landings than this hook judges` };
+              break into;
+            }
+          }
           take(judgeWord(`${dir.replace(/\/+$/u, "")}/${name}`, index, tree));
         }
       }
@@ -5888,6 +5909,14 @@ export function refineWriteLandings(
 
 /** The longest spelling this pass lands on the disk; longer is guarded (cost bound). */
 const MAX_LANDING_BYTES = 4096;
+
+/**
+ * The most `<dir>/<source name>` landings one copy, move or link segment is
+ * judged at in its target directories after the first (each further `-t`); past
+ * it the segment is guarded as unreadable (a cost bound: those landings are
+ * directories times sources, so they grow as the square of the line).
+ */
+const INTO_EXTRA_LANDINGS_CAP = 1024;
 
 /** Milliseconds one glob expansion may take before the write is guarded (point 6). */
 const GLOB_TIME_LIMIT_MS = 250;
