@@ -30,7 +30,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
-import { classifyCommand, classifyCommandWithDollarQuotesKept, classifyCommandWithMainRules } from "../src/core/command-class.js";
+import { classifyCommand, classifyCommandWithDollarQuotesKept, classifyCommandWithMainRules, splicedCredentialMemoHeld } from "../src/core/command-class.js";
 import { cpuSeconds, runner, scaledBound } from "./cost-runner.js";
 
 const ROUTES = [
@@ -370,7 +370,16 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
     assert.ok(seconds < scaledBound(0.4), `backslashes beside a parameter: ${seconds.toFixed(3)} CPU s (${runner().line})`);
     assert.ok(classes.includes("log.mutate"), classes.join(","));
     assert.deepEqual(classesOf(`tee $a'${"a\\q".repeat(30)}'`), mainClasses(`tee $a'${"a\\q".repeat(30)}'`));
+    // A `\\` counts toward that bound only past 1,024 of them: a pattern's
+    // escapes (`grep` words of a few dozen) keep their answer.
+    for (const command of [`echo x > out/$X'${"\\q".repeat(40)}'`, `grep -n 'a@b'$X'${"\\|x".repeat(40)}' f`]) {
+      assert.deepEqual(classesOf(command), mainClasses(command), command);
+    }
   }
+  // The credential reading remembers no long word: its memo stays small
+  // however long the words it judged.
+  for (let at = 0; at < 20; at += 1) classesOf(`cat .approval/$F${"x".repeat(200_000)}${String(at)}`);
+  assert.ok(splicedCredentialMemoHeld() < 1_000_000, `memo holds ${String(splicedCredentialMemoHeld())} characters`);
   // Nine parts are past the bound: the word could be any path, the log included.
   // (Braced, so the `b` is literal text: `$Eb` would be a parameter of its own.)
   assert.ok(classesOf(`echo x > a${"${E}".repeat(9)}b`).includes("log.mutate"));

@@ -12547,8 +12547,12 @@ function splicedCredential(word: string, literalAt?: readonly number[]): boolean
       const found =
         splicedClass(word, { left: SPLICED_CREDENTIAL_STEP_CAP }, true, false, (path) => (isCredentialPathPlain(path) ? CREDENTIAL_CLASS : null), [], CREDENTIAL_CLASS, true, undefined, literalAt) !== null;
       if (key === null) return found;
-      if (splicedCredentialMemo.size >= SPLICED_CREDENTIAL_MEMO_CAP) splicedCredentialMemo.clear();
+      if (splicedCredentialMemo.size >= SPLICED_CREDENTIAL_MEMO_CAP) {
+        splicedCredentialMemo.clear();
+        splicedCredentialMemoChars = 0;
+      }
       splicedCredentialMemo.set(key, found);
+      splicedCredentialMemoChars += key.length;
       return found;
     }) === true &&
     // Main's answer for the line joins this one (the seam): the credential
@@ -12560,6 +12564,12 @@ function splicedCredential(word: string, literalAt?: readonly number[]): boolean
 
 /** {@link splicedCredential}'s answers by text and reading (it reads no policy and no disk). */
 const splicedCredentialMemo = new Map<string, boolean>();
+let splicedCredentialMemoChars = 0;
+
+/** For tests: the characters {@link splicedCredentialMemo}'s keys hold now. */
+export function splicedCredentialMemoHeld(): number {
+  return splicedCredentialMemoChars;
+}
 /** Most texts {@link splicedCredentialMemo} holds before it starts again. */
 const SPLICED_CREDENTIAL_MEMO_CAP = 4096;
 /** The longest word {@link splicedCredentialMemo} remembers (its literal positions are shorter). */
