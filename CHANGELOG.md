@@ -190,8 +190,8 @@ option, case folded), and takes the strictest class among them.
   `cp-dot-slash-glob-is-unmoved` (`cp ./*.md docs/`, `policy.core`: the
   landing `docs/*.md` may be `docs/APPROVAL.md`) and
   `prose-opening-with-a-protected-path-under-cp` (a destination under
-  `.github`, `policy.edit`); the suite's `vectors_version` is left for the
-  release seat.
+  `.github`, `policy.edit`); the suite's `vectors_version` was bumped at the
+  0.4.9 release cut.
 
 **Deleting, moving or locking an organ directory is that directory's class
 (lead ruling L61587; review-b A686-FOLD3 M1).** `rm -rf .claude` was an
@@ -912,7 +912,8 @@ opens as ASCII letters: `.claude/<U+017F>ettings.json`,
   bash and zsh on APFS in a scratch folder, each case and fold spelling tried
   landed on the guarded file, and the dotless i and a fullwidth a did not.
   Conformance: ten new `command-class` vectors; main's 382 are
-  byte-identical. The vectors version is bumped once, at the release cut.
+  byte-identical. The vectors version was bumped once, at the 0.4.9 release
+  cut.
 
 **zsh's clobber redirections are refused (open in 0.4.8; #700).** In zsh `>!`,
 `>>!` and `>&!` are each one operator, and the word after it is the file:
@@ -1197,6 +1198,23 @@ Bash tool runs on macOS, a line that wrote a protected file was
   with the lock released and the record whole, and the wait sleeps on a timer,
   so a signal at any later point ends it at once. What the verb writes, prints
   and exits with is unchanged.
+- **Conformance `vectors_version`, set once at the release cut (lead ruling
+  L62886).** By `conformance/README.md`'s rule (a new vector is a minor bump,
+  a changed expectation a major one): `command-class` 2.0.0 (from 1.12.0;
+  0.4.8 shipped 1.9.0), a major because three expectations 0.4.8 released
+  moved to the stricter answer in #686: `prose-opening-with-a-protected-path-under-cp`,
+  `cp-dot-slash-glob-is-unmoved` and `a-deeper-match-than-the-head-is-unmoved`
+  (#686's entry above names the first two; in the third, a `cp` onto
+  `.github/workflows/sub dir/APPROVAL.md` also names `policy.edit` on the
+  landing `.../APPROVAL.md/a.md`). Its fifty-five new vectors, net (354 to
+  409), came from #676 (sixteen), #677 (five), #680 (seven), #688 (ten), #690
+  (three), #700 (three; #686 replaced two of them), #686 (four), #701 (four)
+  and #695 (five). `refusal-unions` 32.0.0 (from 31.0.0), a major because a
+  pinned union grew: `hook_deny_codes` gained `hook-deadline` (#693).
+  `policy-resolution` 5.1.0 (from 5.0.0), a minor: six new vectors for
+  `files.write.guarded` (#695), no expectation moved, and the `algorithm` line
+  is unchanged. The regeneration moved only the three version fields and their
+  three manifest hashes.
 
 ### Tests
 

@@ -182,6 +182,12 @@ which is why it is registered here as the relay's union is. If another branch
 claims 31.0.0 first, the collision rule below gives this change the next major
 at merge.
 
+It is **32.0.0** since 0.4.9, for #693: `hook_deny_codes` gained
+`hook-deadline`, after `hook-harness-cap-too-short`, the refusal of a call the
+hook could not read within its own deadline, given instead of letting the call
+run ungated when the harness stops listening. #693 merged with the number
+standing at 31.0.0, and the release cut set it.
+
 ## Changing the suite
 
 The vectors are generated, never hand-edited:
@@ -242,6 +248,27 @@ fails `schema-invalid` even though the block is switched on, because a
 relationship failure is checked before the reservation and wins over it. If
 another branch claims 5.0.0 first, the collision rule below gives this change
 the next major at merge.
+
+`policy-resolution` is **5.1.0** since 0.4.9, a minor: #695 added six vectors
+for the `files.write.guarded` class and moved no expectation, and the
+`algorithm` line is unchanged. Five pin the class's built-in minimum of
+`manual` (clamping a `files.*` wildcard row, an irreversible action and the
+default), a `human-only` row standing, and `files.write.out_of_scope`
+resolving by its own row; a control pins a `files.write.guarded` row below the
+minimum, which fails the whole policy closed as `class-minimum`. #695 merged
+with the number standing at 5.0.0, and the release cut set it.
+
+`command-class` reached **2.0.0** at 0.4.9, a major because three
+expectations 0.4.8 released under 1.9.0 moved in #686 (a glob in a write
+target to a guarded path stays guarded), each to the stricter answer:
+`prose-opening-with-a-protected-path-under-cp` (a `cp` destination under
+`.github` is `policy.edit`), `cp-dot-slash-glob-is-unmoved` (`cp ./*.md
+docs/` is `policy.core`, because the landing `docs/*.md` may be
+`docs/APPROVAL.md`) and `a-deeper-match-than-the-head-is-unmoved` (the
+`APPROVAL.md` destination also names `policy.edit` on the landing
+`.../APPROVAL.md/a.md`). An implementation that passed 1.9.0 does not pass
+this. The release's other changes to the file only added vectors: 354 in
+0.4.8, 409 now.
 
 `policy-resolution` reached **3.0.0** at APRV-317. A class rule may now
 explicitly retain autonomous or supervised behavior for a truthful

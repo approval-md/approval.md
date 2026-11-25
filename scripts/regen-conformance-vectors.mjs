@@ -5232,7 +5232,15 @@ const SUITES = [
     // on the box branches on these strings. Stacked on 30.0.0; if another
     // lane's major merges first, the collision rule above applies and this
     // takes the next major on regeneration.
-    vectors_version: "31.0.0",
+    //
+    // 32.0.0 (#693, the hook's own deadline; set at the 0.4.9 release cut,
+    // lead ruling L62886): `hook_deny_codes` gains `hook-deadline`, after
+    // `hook-harness-cap-too-short`: the refusal of a call the hook could not
+    // read within its own deadline, given instead of letting the call run
+    // ungated when the harness stops listening. Major for the same reason as
+    // every bump here: the vector pins the whole array in definition order.
+    // #693 merged with the number standing at 31.0.0; the release cut set it.
+    vectors_version: "32.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -5272,7 +5280,16 @@ const SUITES = [
     // and it cannot produce the new failure class `delegation-not-supported`.
     // The block's relationship checks (exact class keys, the max_autonomy pin)
     // fail as `schema-invalid` and win over the reservation.
-    vectors_version: "5.0.0",
+    // 5.1.0 (#695, `files.write.guarded` and `write_scope`; set at the 0.4.9
+    // release cut, lead ruling L62886): a MINOR bump. Six new vectors, no
+    // existing expectation moved, and the `algorithm` line is unchanged: the
+    // guarded class's built-in minimum of `manual` clamping a `files.*`
+    // wildcard row, an irreversible action and the default; a `human-only`
+    // `files.write.guarded` row standing; `files.write.out_of_scope`
+    // resolving by its own row; and a control, a `files.write.guarded` row
+    // below the minimum, which fails the whole policy closed as
+    // `class-minimum`. #695 merged with the number standing at 5.0.0.
+    vectors_version: "5.1.0",
     algorithm:
       "SPEC.md §5.2 class matching, specificity and unanimous irreversible permission, the policy.edit sub-class inheritance rule, the harness.tool.unmapped default from defaults.unmapped_tool, the tools-entry load checks, the reserved delegation block, §7 irreversibility floor",
     description:
@@ -5847,7 +5864,8 @@ const SUITES = [
     // ligature that APFS opens as the ASCII name, a credential read through a
     // long-s home, and a control, `approval-notes.md`, which stays a workspace
     // write. Regenerating over main's 382 leaves them byte-identical. The
-    // number is bumped once, at the release cut, for every change it carries.
+    // number was bumped once, at the 0.4.9 release cut, for every change it
+    // carries.
     // zsh's clobber redirections: five more in the same unreleased 1.12.0,
     // `>!` and `1>>!` read at zsh's target (lead ruling L62319), `bash -c`
     // and a two-digit descriptor refused (controls), and `>|`, which reads as
@@ -5858,7 +5876,25 @@ const SUITES = [
     // policy.core folded and keep their workspace class as spelled (both
     // reported); a bare `.claude-` folder and a file beside the settings
     // stay workspace writes.
-    vectors_version: "1.12.0",
+    //
+    // 2.0.0 (the 0.4.9 release cut, lead ruling L62886): a MAJOR bump,
+    // because three expectations 0.4.8 released under 1.9.0 moved in #686
+    // (GLOB-WRITE), each to the stricter answer:
+    // `prose-opening-with-a-protected-path-under-cp` (a `cp` destination
+    // under `.github` is now `policy.edit`), `cp-dot-slash-glob-is-unmoved`
+    // (`cp ./*.md docs/` is now `policy.core`: the landing `docs/*.md` may be
+    // `docs/APPROVAL.md`) and `a-deeper-match-than-the-head-is-unmoved` (the
+    // `APPROVAL.md` destination also names `policy.edit` on the landing
+    // `.../APPROVAL.md/a.md`). Against 0.4.8's 354 vectors the file has 409,
+    // fifty-five new and none removed: sixteen from #676, five from #677 and
+    // seven from #680 (the 1.10.0 to 1.12.0 minors), then, with 1.12.0
+    // standing, ten from #688, three from #690, three from #700, four from
+    // #686, four from #701 and five from #695. #686 also replaced #700's two
+    // refused `zsh-clobber-*` vectors and moved #688's
+    // `guarded-name-fold-approval-home-case`, none of them released. If
+    // another lane's number merges first, the collision rule (1.4.0, the
+    // number is claimed at merge) applies on regeneration.
+    vectors_version: "2.0.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:
