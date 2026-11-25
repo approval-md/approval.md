@@ -5079,10 +5079,19 @@ function globElementsMatch(pattern: string, name: string): boolean {
   // GLOB-WRITE reading, and main's pass reads the line again as main did
   // ({@link markGlobWriteFired}; review-b's M1 at 3774fdd4: `echo x >
   // .[\!g]it/config` keeps main's workspace write beside the `.git` write).
-  if (matched && !mainRulesOnly && /\[[!^]/u.test(pattern) && !walkGlobElements(globElements(pattern, true), name)) {
+  if (matched && !mainRulesOnly && negatesAClass(pattern) && !walkGlobElements(globElements(pattern, true), name)) {
     markGlobWriteFired();
   }
   return matched;
+}
+
+/** The last pattern {@link negatesAClass} read: a disk walk tests one pattern against every name. */
+let negatesCache: { pattern: string; negates: boolean } | null = null;
+
+/** Does `pattern` hold a `[!` or `[^`? Read once per pattern, not once per name tested. */
+function negatesAClass(pattern: string): boolean {
+  if (negatesCache === null || negatesCache.pattern !== pattern) negatesCache = { pattern, negates: /\[[!^]/u.test(pattern) };
+  return negatesCache.negates;
 }
 
 /** The position walk over `elements`; `null` elements match any name, the strict side. */

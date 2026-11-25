@@ -176,6 +176,24 @@ test("foldFileName: ASCII lower case is unchanged, ASCII upper case lowers, and 
   assert.equal(foldFileName(""), "");
 });
 
+test("foldFileName: ASCII text folds exactly as the full fold does (its one-pass reading; build-5, the unclosed-`[` cost line)", () => {
+  // The full fold, as name-fold.ts spells it for text that is not ASCII alone.
+  const full = (text: string): string =>
+    text.replace(/[‌-‏‪-‮⁪-⁯﻿]/gu, "").normalize("NFD").toLowerCase().toUpperCase().toLowerCase();
+  for (let code = 0; code < 128; code += 1) {
+    const char = String.fromCharCode(code);
+    for (const text of [char, `${char}Ab.${char}`, `A${char}Z${char}`]) {
+      assert.equal(foldFileName(text), full(text), `U+${code.toString(16).padStart(4, "0")} in ${JSON.stringify(text)}`);
+    }
+  }
+  assert.equal(foldFileName(`${"Q".repeat(250)}.MD`), `${"q".repeat(250)}.md`);
+  // One code point past ASCII takes the full fold, the whole word with it.
+  assert.equal(foldFileName(`APPROVA${LONG_S}.md`), "approvas.md");
+  assert.equal(foldFileName("APPRO‍VAL.MD"), "approval.md");
+  // The placeholder a substitution leaves is kept as written, as before.
+  assert.equal(foldFileName(`A${SUBSTITUTION_SENTINEL}B`), `a${SUBSTITUTION_SENTINEL}b`);
+});
+
 test("foldFileName: the dotless i is the one stricter case; the rest APFS keeps apart stays apart", () => {
   // Stricter than the filesystem on one code point: APFS opens `.g<U+0131>t`
   // as a different name, and the fold calls it `.git`. That costs a prompt.

@@ -62,7 +62,7 @@ const LINK_LIMIT = 40;
  * kernel applies it. Any other failure (EACCES, ENAMETOOLONG, a link loop,
  * an unreadable link) is `unplaceable`, with its code.
  */
-function physicalLanding(path: string): { landed: string; links: string[] } | { unplaceable: string } {
+function physicalLanding(path: string, read: (path: string) => PathEntry = readPathEntry): GitDirLanding {
   // The components still to walk, LAST FIRST: taking the next one is a pop.
   // Taking it from the front of a long array moved every other component each
   // time, so a word of n components cost n squared.
@@ -78,33 +78,26 @@ function physicalLanding(path: string): { landed: string; links: string[] } | { 
       continue;
     }
     const next = current === "/" ? `/${part}` : `${current}/${part}`;
-    let stat;
-    try {
-      stat = lstatSync(next);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code ?? "an error";
+    const entry = read(next);
+    if ("error" in entry) {
       // A missing component: the kernel sees nothing there either, so the
       // rest applies as text. Anything else (EACCES, ENAMETOOLONG, ELOOP, …)
       // hides whether a link is there: the path cannot be placed.
-      if (code === "ENOENT") {
+      if (entry.error === "ENOENT") {
         current = next;
         continue;
       }
-      return { unplaceable: code };
+      return { unplaceable: entry.error };
     }
-    if (!stat.isSymbolicLink()) {
+    if ("link" in entry && entry.link === null) {
       current = next;
       continue;
     }
     followed += 1;
     if (followed > LINK_LIMIT) return { unplaceable: "ELOOP" };
-    let target: string;
-    try {
-      target = readlinkSync(next);
-    } catch (error) {
-      // A confirmed link whose target cannot be read cannot be placed.
-      return { unplaceable: (error as NodeJS.ErrnoException).code ?? "an unreadable link" };
-    }
+    // A confirmed link whose target cannot be read cannot be placed.
+    if ("unreadableLink" in entry) return { unplaceable: entry.unreadableLink };
+    const target = entry.link as string;
     links.push(target);
     if (target.startsWith("/")) current = "/";
     const pieces = target.split("/").filter((piece) => piece.length > 0);
@@ -112,6 +105,32 @@ function physicalLanding(path: string): { landed: string; links: string[] } | { 
   }
   return { landed: current, links };
 }
+
+/**
+ * What {@link physicalLanding} reads of one path: its lstat error code, or
+ * `link` (`null` for anything but a symlink, else the link's target as
+ * written), or the code reading a confirmed link's target gave.
+ */
+export type PathEntry = { error: string } | { link: string | null } | { unreadableLink: string };
+
+/** One lstat of `path`, and the readlink of a link: {@link PathEntry}. */
+export function readPathEntry(path: string): PathEntry {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    return { error: (error as NodeJS.ErrnoException).code ?? "an error" };
+  }
+  if (!stat.isSymbolicLink()) return { link: null };
+  try {
+    return { link: readlinkSync(path) };
+  } catch (error) {
+    return { unreadableLink: (error as NodeJS.ErrnoException).code ?? "an unreadable link" };
+  }
+}
+
+/** Where {@link physicalLanding} lands a path and the links it read on the way, or why it cannot. */
+export type GitDirLanding = { landed: string; links: string[] } | { unplaceable: string };
 
 /** {@link physicalLanding}'s place alone, or `null`. */
 function landing(path: string): string | null {
@@ -529,7 +548,25 @@ export interface GitDirWriteRefinement {
  * `cwd` is the directory the command runs in, the one every other impure pass
  * of `classifyForHook` reads.
  */
-export function refineGitDirWrites(result: CommandClassification, cwd: string): GitDirWriteRefinement {
+export function refineGitDirWrites(
+  result: CommandClassification,
+  cwd: string,
+  /**
+   * Each path's lstat and link ({@link PathEntry}). The hook passes its
+   * per-call memo ({@link memoDiskReads} in hook.ts), so a path every
+   * reading and every synthetic line of one call lands, and the ancestors
+   * all of a directory's entries share, are read once (the cost line of
+   * `echo x >` and a 2,000-character `[` run, which names every entry of the
+   * directory); the disk does not change while a command is judged.
+   */
+  read: (path: string) => PathEntry = readPathEntry,
+  /**
+   * Each path's walk, kept for as long as the caller keeps this map (the
+   * hook: one call, every reading); a fresh one for this pass when absent.
+   * A walk reads the disk alone, through `read`.
+   */
+  landings: Map<string, GitDirLanding> = new Map(),
+): GitDirWriteRefinement {
   if (!result.ok) return { result, notes: [] };
   const notes: string[] = [];
   const added = new Map<number, ClassifiedSegment>();
@@ -569,11 +606,10 @@ export function refineGitDirWrites(result: CommandClassification, cwd: string): 
     }
     return expansion;
   };
-  const landings = new Map<string, ReturnType<typeof physicalLanding>>();
-  const landOnce = (path: string): ReturnType<typeof physicalLanding> => {
+  const landOnce = (path: string): GitDirLanding => {
     let walked = landings.get(path);
     if (walked === undefined) {
-      walked = physicalLanding(path);
+      walked = physicalLanding(path, read);
       landings.set(path, walked);
     }
     return walked;

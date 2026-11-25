@@ -74,7 +74,17 @@ export function foldFileName(text: string): string {
   return text.split(SUBSTITUTION_SENTINEL).map(foldText).join(SUBSTITUTION_SENTINEL);
 }
 
+/** Is `text` made of ASCII alone ({@link foldText}'s fast path)? */
+function asciiOnly(text: string): boolean {
+  for (let at = 0; at < text.length; at += 1) if (text.charCodeAt(at) > 0x7f) return false;
+  return true;
+}
+
 function foldText(text: string): string {
+  // ASCII alone holds no ignored code point, NFD leaves it as it is, and its
+  // lower, upper, lower round trip is its lower case: the same fold, read in
+  // one pass (cost: a guard folds every segment of every path it tests).
+  if (asciiOnly(text)) return text.toLowerCase();
   return text.replace(HFS_IGNORED, "").normalize("NFD").toLowerCase().toUpperCase().toLowerCase();
 }
 

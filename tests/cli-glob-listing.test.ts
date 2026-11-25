@@ -725,8 +725,10 @@ test("review-b A686-FOLD7 S2 (lead ruling L62219), through the real hook: a long
     const output = (JSON.parse(ran.stdout) as { hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string } }).hookSpecificOutput;
     return { permission: output.permissionDecision, reason: output.permissionDecisionReason };
   };
-  // Stopped at the deadline: refused, never a pass.
-  const stopped = decide({ [DESCRIBE_DEADLINE_ENV]: "200" });
+  // Stopped at the deadline: refused, never a pass. 20 ms: since the write
+  // pass reads each path once per call (build-5, the unclosed-`[` cost line)
+  // this line is read in full inside the 200 ms it was given here.
+  const stopped = decide({ [DESCRIBE_DEADLINE_ENV]: "20" });
   assert.notEqual(stopped.permission, "allow", stopped.reason);
   assert.equal(stopped.permission, "deny", stopped.reason);
   assert.match(stopped.reason, /^hook-deadline: /u);

@@ -243,7 +243,7 @@ import {
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
-import { expandOnDisk, listDirectory, refineGitDirWrites } from "./git-dir-writes.js";
+import { expandOnDisk, listDirectory, readPathEntry, refineGitDirWrites, type GitDirLanding, type PathEntry } from "./git-dir-writes.js";
 import { refinePushRepo } from "./push-repo.js";
 import { jsonStringLeaves, readJsonDocument } from "./settings-json.js";
 import { HOOK_GROK_HELP, HOOK_HELP, HOOK_HERMES_HELP, HOOK_MUSE_HELP } from "./help.js";
@@ -3815,6 +3815,12 @@ export function refineWriteScope(
   result: CommandClassification,
   roots: readonly string[],
   cwd: string,
+  /**
+   * Where a destination really is ({@link resolvedWriteTarget}), from the
+   * disk alone: the hook's call passes one that keeps each answer for the
+   * call ({@link WriteLandingMemo}), so every name reading asks the disk once.
+   */
+  resolveTarget: (target: string, cwd: string) => string | null = resolvedWriteTarget,
 ): RefinedClassification {
   if (!result.ok) return { result, notes: [] };
   if (roots.length === 0) return { result, notes: [] };
@@ -3852,7 +3858,7 @@ export function refineWriteScope(
     };
 
     for (const candidate of writeCandidates(parsed.args)) {
-      const resolved = resolvedWriteTarget(candidate, cwd);
+      const resolved = resolveTarget(candidate, cwd);
       if (resolved === null) {
         return reject(
           candidate,
@@ -4224,7 +4230,11 @@ export function judgeWriteLanding(
     const parent = kernelLanding(dirname(spelled), null, disk);
     if (parent !== null) forms.push(join(parent, tail));
   }
-  for (const form of forms) {
+  // Each form once, in order: the readings of a plain path are often the same
+  // path, and every test below answers by the form alone (cost: a pattern
+  // matching every entry of a directory lands each entry).
+  const distinct = [...new Set(forms)];
+  for (const form of distinct) {
     const entry = guardedEntryOf(form, homes, configDirs);
     if (entry !== null) {
       return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `${form} is on the guarded list (${entry})` };
@@ -4234,7 +4244,7 @@ export function judgeWriteLanding(
   // nothing above has guarded the landing.
   const scripts = guard.hookScripts();
   if (scripts.size > 0) {
-    for (const form of forms) {
+    for (const form of distinct) {
       if (scripts.has(foldedPathKey(form))) {
         return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `${form} is on the guarded list (${HOOK_SCRIPT_ENTRY})` };
       }
@@ -4244,7 +4254,7 @@ export function judgeWriteLanding(
   // archive, a clone) holds names this hook never reads: an entry under it is
   // within reach.
   if (tree !== false) {
-    for (const form of forms) {
+    for (const form of distinct) {
       const entry = guardedEntryBelow(form, homes, configDirs);
       if (entry !== null) {
         return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can hold ${entry}, which is on the guarded list` };
@@ -4255,7 +4265,7 @@ export function judgeWriteLanding(
     // (`tree === true`), not rule A's list words: `git add .` at a project
     // root whose settings name a script under it stays as it was.
     if (tree === true) {
-      for (const form of forms) {
+      for (const form of distinct) {
         if (hookScriptAtOrUnder(form, scripts)) {
           return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can replace ${HOOK_SCRIPT_ENTRY}, which is on the guarded list` };
         }
@@ -4266,7 +4276,7 @@ export function judgeWriteLanding(
     // not exist yet holds none today (what the tree itself carries is not
     // read: see the hand-back).
     if (TREE_AT_A_CHECKOUT_IS_GUARDED && tree === true) {
-      for (const form of new Set([...landing.paths, ...forms])) {
+      for (const form of new Set([...landing.paths, ...distinct])) {
         try {
           lstatSync(join(form, ".git"));
         } catch {
@@ -4815,11 +4825,21 @@ export interface WriteLandingMemo {
   /** `landingPaths` per spelling: the lexical and the kernel landing, from the disk alone. */
   readonly paths: Map<string, { paths: string[]; unknown: boolean }>;
   readonly disk: DiskReads;
+  /** {@link resolvedWriteTarget} per directory and destination: the disk alone answers it. */
+  readonly writeTarget: (target: string, cwd: string) => string | null;
 }
 
 /** A fresh {@link WriteLandingMemo}, for one `classifyForHook` call. */
 export function writeLandingMemo(): WriteLandingMemo {
-  return { landings: new Map(), paths: new Map(), disk: memoDiskReads() };
+  const targets = new Map<string, string | null>();
+  const writeTarget = (target: string, cwd: string): string | null => {
+    const key = `${cwd}\u0000${target}`;
+    if (targets.has(key)) return targets.get(key) as string | null;
+    const resolved = resolvedWriteTarget(target, cwd);
+    targets.set(key, resolved);
+    return resolved;
+  };
+  return { landings: new Map(), paths: new Map(), disk: memoDiskReads(), writeTarget };
 }
 
 /** How many landings the write pass has judged in this process (not answered from a memo): for tests. */
@@ -4957,7 +4977,7 @@ export function refineWriteLandings(
     const context = { scratchRoots: resolveScratchRoots(hookCwd) };
     const asMain = classifyCommandInThisReadingWithMainRules(shape.text, protectedPaths, context);
     const pure = asMain.ok ? asMain : classifyCommandInThisReading(shape.text, protectedPaths, context);
-    const raised = refineWriteScope(pure, resolveWriteRoots(hookCwd), hookCwd).result;
+    const raised = refineWriteScope(pure, resolveWriteRoots(hookCwd), hookCwd, memo.writeTarget).result;
     const answer = raised.ok ? (raised.segments[0] ?? null) : null;
     ownAnswers.set(shape.text, answer);
     return answer;
@@ -5111,7 +5131,7 @@ export function refineWriteLandings(
       return out;
     }
     for (const from of here) {
-      const raised = refineGitDirWrites(plain, from).result;
+      const raised = refineGitDirWrites(plain, from, memo.disk.entry, memo.disk.gitDirLandings).result;
       if (!raised.ok) {
         unreadable();
         continue;
@@ -5283,11 +5303,7 @@ export function refineWriteLandings(
               if (each.from !== "match") continue;
               // A literal segment after a pattern one is joined unseen: only a
               // name that is there is a word the shell makes.
-              try {
-                lstatSync(each.path);
-              } catch {
-                continue;
-              }
+              if ("error" in memo.disk.entry(each.path)) continue;
               const name = absolute ? each.path : each.path.split("/").filter((part) => part.length > 0).slice(kept).join("/");
               if (name.length === 0 || seen.has(name)) continue;
               seen.add(name);
@@ -6531,7 +6547,7 @@ function classifyForHookAsRead(
   // directory not named `.git`. First, so the push pass below sees a segment
   // it raises as the write it is, and the history-rewrite and write-scope
   // passes do not lower or narrow it again.
-  const gitWrites = refineGitDirWrites(classified, cwd);
+  const gitWrites = refineGitDirWrites(classified, cwd, landings.disk.entry, landings.disk.gitDirLandings);
   const pushed = refinePushRepo(gitWrites.result, cwd, command);
   const rewritten = refineRewrite(pushed.result, cwd);
   const scratched = refineScratchDelete(rewritten.result, roots);
@@ -6541,7 +6557,7 @@ function classifyForHookAsRead(
   // of the working directory and the scratch roots. Last in the chain because
   // it is the narrowest, and because nothing after it would re-read a segment
   // it has already tightened.
-  const written = refineWriteScope(scoped.result, resolveWriteRoots(cwd), cwd);
+  const written = refineWriteScope(scoped.result, resolveWriteRoots(cwd), cwd, landings.writeTarget);
   // APRV-502. Touches only the two skill-script rules, which no pass above
   // reads, so its place in the chain changes nothing for any other segment.
   const scripted = refineSkillScripts(written.result, cwd, protectedPaths);
@@ -12048,6 +12064,12 @@ function canonicalPathOnDisk(path: string, disk: DiskReads): string {
 export interface DiskReads {
   realpath(path: string): string | null;
   link(path: string): string | null | undefined;
+  /** The lstat and link the git-directory pass walks by ({@link readPathEntry}). */
+  entry(path: string): PathEntry;
+  /** The git-directory pass's walks, by path (kept by a memo; fresh per pass when absent). */
+  readonly gitDirLandings?: Map<string, GitDirLanding>;
+  /** {@link kernelLanding}'s answers with no volatile test, by spelling (kept by a memo). */
+  readonly kernelLandings?: Map<string, string | null>;
   /** A directory's entries, or the error code reading it gave ({@link listDirectory}). */
   list(path: string): Dirent[] | string;
 }
@@ -12070,6 +12092,7 @@ const DIRECT_DISK: DiskReads = {
     }
   },
   list: listDirectory,
+  entry: readPathEntry,
 };
 
 /**
@@ -12081,12 +12104,21 @@ const DIRECT_DISK: DiskReads = {
  */
 export function memoDiskReads(): DiskReads {
   const reals = new Map<string, string | null>();
-  const links = new Map<string, string | null | undefined>();
-  const link = (path: string): string | null | undefined => {
-    if (links.has(path)) return links.get(path);
-    const found = DIRECT_DISK.link(path);
-    links.set(path, found);
+  // One lstat per path for both readers of it: `link` (the write pass) and
+  // `entry` (the git-directory pass, which keeps the error code).
+  const entries = new Map<string, PathEntry>();
+  const entry = (path: string): PathEntry => {
+    let found = entries.get(path);
+    if (found === undefined) {
+      found = readPathEntry(path);
+      entries.set(path, found);
+    }
     return found;
+  };
+  // As DIRECT_DISK.link: `undefined` when the lstat fails or a link's target cannot be read.
+  const link = (path: string): string | null | undefined => {
+    const found = entry(path);
+    return "link" in found ? found.link : undefined;
   };
   const realpath = (path: string): string | null => {
     if (reals.has(path)) return reals.get(path) as string | null;
@@ -12121,7 +12153,7 @@ export function memoDiskReads(): DiskReads {
     lists.set(path, found);
     return found;
   };
-  return { realpath, link, list };
+  return { realpath, link, list, entry, gitDirLandings: new Map(), kernelLandings: new Map() };
 }
 
 /** How many components {@link canonicalPath} climbs one at a time before it halves. */
@@ -12200,6 +12232,19 @@ function spelledAbsolute(from: string, text: string): string {
  * cannot see, and `..` out of it lands wherever the link will point.
  */
 function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | null = null, disk: DiskReads = DIRECT_DISK): string | null {
+  // With no volatile test the answer is the disk's alone: kept for the call
+  // where the disk reads are (every entry of a listed directory lands its
+  // parent again).
+  const kept = volatile === null ? disk.kernelLandings : undefined;
+  if (kept === undefined) return kernelLandingWalk(spelled, volatile, disk);
+  const known = kept.get(spelled);
+  if (known !== undefined) return known;
+  const walked = kernelLandingWalk(spelled, null, disk);
+  kept.set(spelled, walked);
+  return walked;
+}
+
+function kernelLandingWalk(spelled: string, volatile: ((path: string) => boolean) | null, disk: DiskReads): string | null {
   const queue = spelled.split("/").filter((part) => part.length > 0 && part !== ".");
   if (
     queue[0] === "proc" &&

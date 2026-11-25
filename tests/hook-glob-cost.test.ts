@@ -14,7 +14,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -157,6 +157,60 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
         assert.ok(ms < BOUND_MS * 2, `${command.slice(0, 30)} (${String(word.length)} characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
       }
     }
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});
+
+test("a guarded name after or among unclosed `[` still takes its class: the entries a long run is judged to match keep theirs (build-5, the unclosed-`[` cost line)", () => {
+  // Past 1,024 glob characters a pattern segment is judged to match every
+  // name (the strict side), so the write pass lands, and writes out as a
+  // synthetic line, every entry of the directory: the cost the test above
+  // bounds. Its disk reads are kept for the call and shared by the readings
+  // and passes; each entry must still answer as it does written by name.
+  const dir = join(scratch, "unclosed");
+  const home = join(scratch, "unclosed-home");
+  for (const each of [".approval", ".git/hooks", ".claude", "sub/.approval", "plain"]) mkdirSync(join(dir, each), { recursive: true });
+  for (const each of ["APPROVAL.md", ".approval/env", ".git/config", ".git/HEAD", ".claude/settings.json", "sub/.approval/env", "README.md", "plain/a.txt"]) {
+    writeFileSync(join(dir, each), "x\n", "utf8");
+  }
+  symlinkSync(join(dir, ".git"), join(dir, "lnk"));
+  symlinkSync(join(dir, ".git", "hooks"), join(dir, "hk"));
+  for (let index = 0; index < 40; index += 1) writeFileSync(join(dir, `${String(index).padStart(3, "0")}${"a".repeat(247)}`), "x\n", "utf8");
+  mkdirSync(join(home, ".hermes"), { recursive: true });
+  for (const name of ["auth.json", "config.yaml"]) writeFileSync(join(home, ".hermes", name), "x\n", "utf8");
+  const savedHome = process.env["HOME"];
+  process.env["HOME"] = home;
+  try {
+    const classesOf = (command: string): string[] => {
+      const { result } = classifyForHook(command, [], dir, [], false, [dir]);
+      assert.ok(result.ok, command.slice(0, 40));
+      return [...new Set(result.classes)].sort();
+    };
+    const run = "[".repeat(2_000);
+    // Each entry written by name, through the same passes.
+    assert.deepEqual(classesOf("echo x > APPROVAL.md"), ["policy.core"]);
+    assert.deepEqual(classesOf("echo x > .approval"), ["log.mutate", "policy.core"]);
+    assert.deepEqual(classesOf("echo x > lnk/config"), ["files.write.guarded", "files.write.workspace", "vcs.history.rewrite"]);
+    assert.deepEqual(classesOf("echo x > hk/pre-commit"), ["files.write.guarded", "files.write.workspace", "vcs.history.rewrite"]);
+    // A few unclosed `[` read as text, as the shells read them: the name with
+    // them in it, not the guarded one.
+    assert.deepEqual(classesOf("echo x > [[[APPROVAL.md"), ["files.write.workspace"]);
+    assert.deepEqual(classesOf("echo x > .git/[config"), ["vcs.history.rewrite"]);
+    // The long run: every entry, so every entry's class.
+    for (const command of [`echo x > ${run}`, `echo x > ${"[".repeat(1_100)}APPROVAL.md`, `cp README.md ${run}`, `tee ${run} < README.md`]) {
+      assert.deepEqual(classesOf(command), ["files.write.guarded", "log.mutate", "policy.core", "vcs.history.rewrite"], command.slice(0, 40));
+    }
+    // Under a link into `.git` (the git-directory pass's walk) and into its
+    // hooks (the guarded list), from the walks the call keeps.
+    assert.deepEqual(classesOf(`echo x > lnk/${run}`), ["files.write.guarded", "vcs.history.rewrite"]);
+    assert.deepEqual(classesOf(`echo x > hk/${run}`), ["files.write.guarded", "vcs.history.rewrite"]);
+    assert.deepEqual(classesOf(`echo x > plain/${run}`), ["vcs.history.rewrite"]);
+    // A long run ending in a guarded name: the entry that holds it.
+    assert.deepEqual(classesOf(`echo x > ${run}/.approval/env`), ["files.write.guarded", "policy.core", "vcs.history.rewrite"]);
+    assert.deepEqual(classesOf(`echo x > sub/${run}/env`), ["policy.core", "vcs.history.rewrite"]);
+    assert.deepEqual(classesOf(`echo x > ~/.hermes/${run}`), ["policy.core", "vcs.history.rewrite"]);
   } finally {
     if (savedHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = savedHome;
