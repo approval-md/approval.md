@@ -719,7 +719,7 @@ other segments, and the hook judges each.
   (`--out=.github/workflows/ci.yml`). Before,
   one word in front of `cp` left the workflow write unnamed. Without the
   credential word these lines are refused, as they were.
-- **Behind a wrapper, a target the shell builds fails closed** as `cp
+- **Behind a wrapper, a target the shell builds fails closed (#706)** as `cp
   .approval/env $X` does: a variable, a command substitution, a glob, a
   brace expansion or a `~` in a word of the line (`command cp .approval/env
   $X`, `"$(…)"`, `.gith*/workflows/ci.yml`, `{a,b}.yml`, `~bob/x`) reports
@@ -743,7 +743,7 @@ other segments, and the hook judges each.
   secret variable now also waits on `policy.core`; under the policy
   `approval init` writes both classes are manual and no decision moves.
   Before, these lines were the credential class alone.
-- **A copy INTO a credential path writes it.** A credential path in a
+- **A copy INTO a credential path writes it (#706).** A credential path in a
   copy's destination slot (by the copy tool's own option table: `cp`, `mv`,
   `ln`, `install`, `rsync`, `scp`) was read as the credential read, so `cp
   README.md .approval/env`, `cp ~/.hermes/.env .approval/env` and `cp
@@ -770,7 +770,7 @@ other segments, and the hook judges each.
   A credential glob as a copy's last operand with no `-t` may expand into
   its destination (`cp ~/.hermes/profiles/*/auth.json`, `cp
   .approval/env{,.bak}`): that path's class is added too.
-- **A credential read spelled as a glob is still the read** where the
+- **A credential read spelled as a glob is still the read (#706)** where the
   program only reads its operands (`less`, `more`, `most`, `hexdump`, `od`,
   `strings`, `file`) and every match of the glob is a credential path (`less
   ~/.hermes/profiles/*/auth.json`, as `less ~/.hermes/auth.json`). Anywhere
@@ -1263,10 +1263,10 @@ Bash tool runs on macOS, a line that wrote a protected file was
   `cp-dot-slash-glob-is-unmoved` and `a-deeper-match-than-the-head-is-unmoved`
   (#686's entry above names the first two; in the third, a `cp` onto
   `.github/workflows/sub dir/APPROVAL.md` also names `policy.edit` on the
-  landing `.../APPROVAL.md/a.md`). Its fifty-five new vectors, net (354 to
-  409), came from #676 (sixteen), #677 (five), #680 (seven), #688 (ten), #690
-  (three), #700 (three; #686 replaced two of them), #686 (four), #701 (four)
-  and #695 (five). `refusal-unions` 32.0.0 (from 31.0.0), a major because a
+  landing `.../APPROVAL.md/a.md`). Its fifty-six new vectors, net (354 to
+  410), came from #676 (sixteen), #677 (five), #680 (seven), #688 (ten), #690
+  (three), #700 (three; #686 replaced two of them), #686 (four), #701 (four),
+  #695 (five) and #706 (one). `refusal-unions` 32.0.0 (from 31.0.0), a major because a
   pinned union grew: `hook_deny_codes` gained `hook-deadline` (#693).
   `policy-resolution` 5.1.0 (from 5.0.0), a minor: six new vectors for
   `files.write.guarded` (#695), no expectation moved, and the `algorithm` line

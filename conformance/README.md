@@ -268,7 +268,7 @@ docs/` is `policy.core`, because the landing `docs/*.md` may be
 `APPROVAL.md` destination also names `policy.edit` on the landing
 `.../APPROVAL.md/a.md`). An implementation that passed 1.9.0 does not pass
 this. The release's other changes to the file only added vectors: 354 in
-0.4.8, 409 now.
+0.4.8, 410 now.
 
 `policy-resolution` reached **3.0.0** at APRV-317. A class rule may now
 explicitly retain autonomous or supervised behavior for a truthful
