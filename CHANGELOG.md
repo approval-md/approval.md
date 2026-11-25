@@ -1199,7 +1199,7 @@ Bash tool runs on macOS, a line that wrote a protected file was
   so a signal at any later point ends it at once. What the verb writes, prints
   and exits with is unchanged.
 - **Conformance `vectors_version`, set once at the release cut (lead ruling
-  L62886).** By `conformance/README.md`'s rule (a new vector is a minor bump,
+  L62887).** By `conformance/README.md`'s rule (a new vector is a minor bump,
   a changed expectation a major one): `command-class` 2.0.0 (from 1.12.0;
   0.4.8 shipped 1.9.0), a major because three expectations 0.4.8 released
   moved to the stricter answer in #686: `prose-opening-with-a-protected-path-under-cp`,

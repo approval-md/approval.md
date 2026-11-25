@@ -5234,7 +5234,7 @@ const SUITES = [
     // takes the next major on regeneration.
     //
     // 32.0.0 (#693, the hook's own deadline; set at the 0.4.9 release cut,
-    // lead ruling L62886): `hook_deny_codes` gains `hook-deadline`, after
+    // lead ruling L62887): `hook_deny_codes` gains `hook-deadline`, after
     // `hook-harness-cap-too-short`: the refusal of a call the hook could not
     // read within its own deadline, given instead of letting the call run
     // ungated when the harness stops listening. Major for the same reason as
@@ -5281,7 +5281,7 @@ const SUITES = [
     // The block's relationship checks (exact class keys, the max_autonomy pin)
     // fail as `schema-invalid` and win over the reservation.
     // 5.1.0 (#695, `files.write.guarded` and `write_scope`; set at the 0.4.9
-    // release cut, lead ruling L62886): a MINOR bump. Six new vectors, no
+    // release cut, lead ruling L62887): a MINOR bump. Six new vectors, no
     // existing expectation moved, and the `algorithm` line is unchanged: the
     // guarded class's built-in minimum of `manual` clamping a `files.*`
     // wildcard row, an irreversible action and the default; a `human-only`
@@ -5877,7 +5877,7 @@ const SUITES = [
     // reported); a bare `.claude-` folder and a file beside the settings
     // stay workspace writes.
     //
-    // 2.0.0 (the 0.4.9 release cut, lead ruling L62886): a MAJOR bump,
+    // 2.0.0 (the 0.4.9 release cut, lead ruling L62887): a MAJOR bump,
     // because three expectations 0.4.8 released under 1.9.0 moved in #686
     // (GLOB-WRITE), each to the stricter answer:
     // `prose-opening-with-a-protected-path-under-cp` (a `cp` destination
