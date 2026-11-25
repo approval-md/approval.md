@@ -13133,19 +13133,18 @@ function globGuardClass(
       // `out/APPROVAL.md`), which a word with no literal text would reach as
       // well: main's answer for an unknown word stands there. A component of
       // only `.` or `..` is a step, not literal text; any other `.` is.
-      // Where the word's directory is WHOLLY unread (`$D/tail`), the tail
-      // must also end a guarded path by name, as the brief's edge has it
-      // (`$D/APPROVAL.md`, `$D/settings.json` count): a candidate just as
-      // guarded with its last name replaced (`$D/env` as `.approval/env`,
-      // `$D/log/x.txt` as `.approval/log/x.txt`) comes from the directory the
-      // unread part names, not the tail. A directory with literal text in it
-      // (`.github/$W/ci.yml`) is read as any other part.
+      // Where the word's directory is WHOLLY unread (`$D/tail`), the tail is
+      // its only literal text, so this same test asks the tail to end a
+      // guarded path by name, as the brief's edge has it (`$D/APPROVAL.md`,
+      // `$D/settings.json` count; `$D/env` as `.approval/env` comes from the
+      // directory the unread part names, not the tail). A directory with
+      // literal text in it (`.github/$W/ci.yml`) is read as any other part.
+      // (A second test of the tail alone was the same path, and is gone: the
+      // second lane's B3, 16,660 probes, no difference.)
       const judge = spliced === false ? (path: string): string | null => protectedPathClass(path, protectedPaths) : spliced.judge;
       const bearing = segments.map(
         (segment) => spliced !== false && segment !== "." && segment !== ".." && segment.replaceAll(UNREAD_MARK, "").length > 0,
       );
-      const lastBearing = bearing[bearing.length - 1] === true;
-      const unreadDirectory = spliced !== false && spliced.unreadDirectory;
       const lighterWithout = (found: string, path: string): boolean => {
         const without = judge(path);
         return without === null || protectedRank(without) > protectedRank(found);
@@ -13157,7 +13156,6 @@ function globGuardClass(
           const found = judge(path);
           if (spliced !== false && found !== null) {
             if (!lighterWithout(found, neutral.join("/"))) return false;
-            if (unreadDirectory && lastBearing && !lighterWithout(found, [...parts.slice(0, -1), SPLICED_NEUTRAL].join("/"))) return false;
             // A candidate inside a `.git` is a write to git's own files, as
             // the plain spelling's git-dir rule reads it: that class rides beside.
             if (gather !== undefined && path.split("/").includes(".git")) gather.add("vcs.history.rewrite");
