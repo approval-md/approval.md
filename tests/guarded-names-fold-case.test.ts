@@ -2173,7 +2173,12 @@ const CRED_WRITE_UNION: readonly (readonly [string, readonly string[], readonly 
   ["rsync -a .gith*/ ~/.hermes/.env", [CRED, "policy.edit protected-path", "policy.edit.ci protected-path"], ["policy.core protected-path", CRED, "policy.edit protected-path", "policy.edit.ci protected-path"]],
   ["rsync ~/.hermes/scr*/x.sh .approval/env", [CRED, "cron.manage protected-path"], ["policy.core protected-path", CRED, "cron.manage protected-path"]],
   ["scp .gith*/workflows/ci.yml .approval/keys/k1", [CRED, "policy.edit.ci protected-path"], ["policy.core protected-path", CRED, "policy.edit.ci protected-path"]],
-  ["rsync -a ~/.hermes/* .approval/env", [CRED, "policy.core protected-path", "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+  // GLOB-WRITE reads every rsync operand as a write target, so this pure read
+  // judges `~/.hermes/*` with no listing. #682's unknown answer (build-1's M2,
+  // lead ruling L62483) says such a pattern may name any guarded name: main's
+  // log.mutate and policy.core plus cron.manage (Hermes' scripts), policy.edit
+  // and each route. That is stricter than main, never looser, as at L62588.
+  ["rsync -a ~/.hermes/* .approval/env", [CRED, "policy.core protected-path", "log.mutate protected-path"], ["policy.core protected-path", CRED, "cron.manage protected-path", "policy.edit protected-path", "policy.edit.spec protected-path", "policy.edit.design protected-path", "log.mutate protected-path", "policy.edit.ci protected-path"]],
   // Main's walk ends on a branch that drops the credential touch: it is carried (build-1's m10).
   ["cp -t .approval/env APPROVAL.md", ["policy.core protected-path"], ["policy.core protected-path", CRED]],
   ["cp ~/.hermes/.env -t .approval s/env", ["policy.core protected-path", "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
