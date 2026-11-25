@@ -209,7 +209,8 @@ test("round two (L62542, for reads too): a word that could be a credential file 
   // No credential reading, or a glob (judged against the listing by the hook, as main judges it).
   // A wholly unread directory keeps main's pure answer, as a write there does:
   // the hook judges the tail by its name (`credential-path-resolved`).
-  for (const command of ["cat $D/env", "cat $H/keys", "cat $D/notes.md", "cat $X.txt", "cat src/$X.ts", "cat ./$X", "cat out/$F", "grep -n x $P/*.sh", "grep -h x $D/*"]) {
+  // `cat x$F/*`: the glob is judged by the hook's listing, as main judges it.
+  for (const command of ["cat x$F/*", "cat $D/env", "cat $H/keys", "cat $D/notes.md", "cat $X.txt", "cat src/$X.ts", "cat ./$X", "cat out/$F", "grep -n x $P/*.sh", "grep -h x $D/*"]) {
     assert.deepEqual(classesOf(command), mainClasses(command), command);
   }
 });
@@ -225,8 +226,17 @@ test("round two (automated security review, a): the kept reading reads every unr
   assert.ok(kept("echo $'a' > .approval/$F").includes("log.mutate"));
   // A kept quote's `$` names no parameter: main's answer.
   assert.deepEqual(kept("echo x > $'A'PPROVAL.md"), ["files.write.workspace"]);
-  // The same text made by a kept quote and by a parameter: each `$` a parameter.
+  // The same text made by a kept quote and by a parameter: each `$` a
+  // parameter, in either order on the line.
   assert.ok(kept("echo x > A$PPROVAL$E.md; echo A$'P'PROVAL$E.md").includes("policy.core"));
+  assert.ok(kept("echo A$'P'PROVAL$E.md; echo x > A$PPROVAL$E.md").includes("policy.core"));
+  // In the kept pass a single-quoted `$` is text: a file named `$F9`, read,
+  // is no credential there (the decoded pass beside it still asks).
+  assert.ok(!kept("cat '.approval/$F9'").includes("account.credential"));
+  assert.ok(kept("cat .approval/$F9").includes("account.credential"));
+  assert.ok(!kept("cat '.approval/$F9'").includes("account.credential"), "the credential reading's memo keys on which `$` are text");
+  // The decoded pass keeps no such record: a quoted `$` there is a parameter.
+  assert.ok(classesOf("cat '.approval/$Q7'").includes("account.credential"));
   // Two HIGH reviews of b41520bc: the record of a `$` that is text is the
   // kept pass's alone, never evicted, and never the decoded pass's.
   // A literal `$` elsewhere on the line does not make a guarded word's `$` text.
