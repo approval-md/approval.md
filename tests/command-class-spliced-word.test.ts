@@ -388,6 +388,38 @@ test("through the hook: a spliced write is not allowed alone, and a spliced cred
   }
 });
 
+/**
+ * A line and its control run back to back, the order turning each round (as
+ * the walked-once cases in guarded-names-fold-case time theirs): the median
+ * of the pairs' ratios, and the line's median call in CPU seconds.
+ */
+function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number): { ratio: number; spent: number } {
+  // Once each, untimed: the first call pays for the compiler.
+  controlRun();
+  spentRun();
+  const ratios: number[] = [];
+  const spents: number[] = [];
+  for (let round = 0; round < rounds; round += 1) {
+    let control: number;
+    let spent: number;
+    if (round % 2 === 0) {
+      control = cpuSeconds(controlRun);
+      spent = cpuSeconds(spentRun);
+    } else {
+      spent = cpuSeconds(spentRun);
+      control = cpuSeconds(controlRun);
+    }
+    ratios.push(spent / Math.max(control, 1e-6));
+    spents.push(spent);
+  }
+  const median = (values: number[]): number => {
+    values.sort((left, right) => left - right);
+    const middle = values.length >> 1;
+    return values.length % 2 === 1 ? values[middle]! : (values[middle - 1]! + values[middle]!) / 2;
+  };
+  return { ratio: median(ratios), spent: median(spents) };
+}
+
 test("cost: a word of 3,000 unread parts is bounded, and past the bound could be any path", () => {
   const bound = scaledBound(1);
   for (const [label, command, strict] of [
@@ -404,11 +436,23 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
     if (strict) assert.ok(classes.some((cls) => GUARDED.has(cls)), `${label}: ${classes.join(",")}`);
     else assert.deepEqual(classes, mainClasses(command), label);
   }
-  // A 100 KB literal component beside an unread part costs a scan, not a walk
-  // (0.03 to 0.09 CPU s measured on a laptop).
-  for (const command of [`echo x > a$E${"b".repeat(99_000)}`, `cp a $'${"a\\q".repeat(33_000)}'`]) {
-    const seconds = cpuSeconds(() => classifyCommand(command, []));
-    assert.ok(seconds < scaledBound(0.4), `${command.slice(0, 20)}: ${seconds.toFixed(3)} CPU s (${runner().line})`);
+  // A 100 KB literal component beside an unread part costs a scan, not a walk.
+  // One cold call sat at its bound on CI's runner (0.405 of 0.4, run
+  // 45640084358; 0.19 to 0.26 s on a laptop, most of it the first call's
+  // compile). So each line is timed as the walked-once cases are (lead ruling
+  // L63127): back to back with a control of the same size, the order turning,
+  // 21 pairs. The median call stays under the same 0.4 bound, and the median
+  // ratio to the control is bounded too. Measured on a laptop: the escapes
+  // line 1.11 (node 26) and 1.40 (node 20) of the same line with `\n`; the
+  // parameter line 2.8 to 3.5 of the line without it.
+  for (const [command, control, most] of [
+    [`echo x > a$E${"b".repeat(99_000)}`, `echo x > ab${"b".repeat(99_000)}`, 8],
+    [`cp a $'${"a\\q".repeat(33_000)}'`, `cp a $'${"a\\n".repeat(33_000)}'`, 3],
+  ] as const) {
+    const { ratio, spent } = pairedCost(() => classifyCommand(control, []), () => classifyCommand(command, []), 21);
+    const label = `${command.slice(0, 20)}: median ${spent.toFixed(3)} CPU s, ${ratio.toFixed(2)} of its control (${runner().line})`;
+    assert.ok(spent < scaledBound(0.4), label);
+    assert.ok(ratio <= most, label);
   }
   // The judge reads a `\\` as a separator: past the segments bound a word
   // with a real parameter in it could be any path, and costs a scan.
