@@ -5,14 +5,14 @@
     "conformance/run.mjs": "6b1b58c6e190244b0ace06ac7f2ae272b8161c267d8ce2e192f2eab219f19457",
     "conformance/vectors/bridge-decisions.v1.json": "99133576c3e23c58f8d5f81be145a570f49a2616d1485e222c9b32346e224b62",
     "conformance/vectors/chain-verification.v1.json": "4b567bac245af0eaf039af51a88598496e917e65b87b7e56b288cf9b66bf5212",
-    "conformance/vectors/command-class.v1.json": "9be8b6f92793e01e53eb6ca96129a543d4a56b2e26a5af7495988a5165370605",
+    "conformance/vectors/command-class.v1.json": "6b0829641034ccdcab42a1075b1fd4db19949652bd3c560701e3dd09d2c5858b",
     "conformance/vectors/gate-verdicts.v1.json": "99c63b91b5f606c5ddab3538cd38b12808dda5d4db6ca35110b7e0e728deb757",
     "conformance/vectors/hook-exec-code.v1.json": "20a804844fef99d99983ca8e5c9aadddc659aff4369f2060ff9de80578b5fcd5",
     "conformance/vectors/hook-read-scope.v1.json": "6bbf4a5e4941fdde260e3f8bc39314ade3c7832a29477df721b57ccfad807f44",
     "conformance/vectors/hook-tool-map.v1.json": "1b24277f47cc1e996b336ba2ff3c8633c5502188667e8896d88fc03f28fea9c0",
     "conformance/vectors/jcs-canonicalization.v1.json": "c077cfc2c7712e747dbff261a7e1f5f12d63323b943a9a898134215d4ffac37f",
-    "conformance/vectors/policy-resolution.v1.json": "37aa92ab5a808b4f64caebbc54bcca4cc24cfe48bcd2ee031d54ba2faaea6fb0",
-    "conformance/vectors/refusal-unions.v1.json": "2dadd81623b10787f422193d33fa1e31f5b381a3303729f22394e2b30f4835bd",
+    "conformance/vectors/policy-resolution.v1.json": "3c91cfd6bd8e4a2283bb2e942015c5bef74f9315bf123a6729a89e728bfe93f8",
+    "conformance/vectors/refusal-unions.v1.json": "b76ee756f39f40a9f63b350de77aa6848f5029f566f37ddc1b636f892924ff26",
     "conformance/vectors/schema-validation.v1.json": "0cdbbadad27ab88e2e164dc2b3d9b88bd4f0712c8819715212af2729f8391558",
     "tests/conformance-harness.ts": "9edac267ef2822ba561386a16b10d244c219c6aacf83bf4cd1fdb65862a09ff2"
   }
