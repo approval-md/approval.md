@@ -289,6 +289,31 @@ test("round two (coordinator, `'A$B'`): a `$` the shell reads as text is the lex
   assert.ok(classesOf("echo 'APPROVAL$E.md'; echo x > ${A:-APPROVAL$E.md}").includes("policy.core"));
 });
 
+test("round two (review of the home-operator reading): only a home default is the home, and its default is read beside", () => {
+  // Any other operator's text can be anything: never lighter than an unread part there.
+  for (const [command, unread] of [
+    ["echo x > ${HOME%/*}/.ssh/k", "echo x > $X/.ssh/k"],
+    ["echo x > ${HOME:+.ssh}/authorized_keys", "echo x > $X/authorized_keys"],
+    ["cat ${HOME/x/y}/.hermes/.env", "cat $X/.hermes/.env"],
+    ["echo x > ${HOME:+.claude}/settings.json", "echo x > $X.claude/settings.json"],
+    ["echo x > ${HOME#/Users}APPROVAL.md", "echo x > ${X}APPROVAL.md"],
+    ["echo x > ${HOME:0:1}APPROVAL.md", "echo x > ${X}APPROVAL.md"],
+  ] as const) {
+    const head = classesOf(command);
+    for (const each of classesOf(unread).filter((cls) => GUARDED.has(cls))) assert.ok(head.includes(each), `${command}: ${head.join(",")} lacks ${each}`);
+    for (const each of mainClasses(command)) assert.ok(head.includes(each), `${command}: main's ${each}`);
+  }
+  // A default is the home where the variable is set, and its own text beside.
+  assert.ok(classesOf("cat ${HOME:-.approval}/env").includes("account.credential"));
+  assert.ok(classesOf("echo x > ${HERMES_HOME-.claude}/settings.json").includes("policy.core"));
+  // A default holding an expansion of its own is an unread part.
+  assert.ok(classesOf("echo x > ${HOME:-$D}APPROVAL.md").includes("policy.core"));
+  // The home itself, and a default that names nothing guarded, keep main's answer.
+  for (const command of ["echo x >> ${HERMES_HOME:-/x}/notes.md", "echo x > ${HOME}/notes.md", "echo x > ${HOME:-/tmp}/out.txt"]) {
+    assert.deepEqual(classesOf(command), mainClasses(command), command);
+  }
+});
+
 test("round two (automated security review, c): every equal claim a spliced word meets is reported", () => {
   // `.github` bare takes the class of every routed entry inside it; so does `.gith${X}ub`.
   const plain = classifyCommand("echo x > .github", ROUTES);

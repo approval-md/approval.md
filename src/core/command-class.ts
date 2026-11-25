@@ -12498,10 +12498,17 @@ function unreadParts(text: string, literalAt?: readonly number[]): { marked: str
     }
     // The home variables are read as the home, as the organ and credential
     // rows read them (`$HERMES_HOME/workspace/x` is the home's workspace):
-    // text here, not an unread part.
-    if (end !== -1 && /^\$(?:HOME|HERMES_HOME|\{HOME\}|\{HERMES_HOME\})$/u.test(text.slice(at, end + 1))) {
-      marked += text.slice(at, end + 1);
-      asOutputs += text.slice(at, end + 1);
+    // text here, not an unread part. A default (`${HERMES_HOME:-/x}`,
+    // `${HOME-x}`) is the home where the variable is set, as
+    // {@link collapseBracedVariables} reads it for those rows; the default's
+    // own reading is judged beside ({@link homeDefaultReading}). Any other
+    // operator (`${HOME%/*}`, `${HOME:+x}`, `${HOME/x/y}`) is an unread part.
+    // A default holding an expansion of its own is an unread part.
+    const homeOperator = end === -1 ? null : /^\$\{(HOME|HERMES_HOME):?-[^$}]*\}$/u.exec(text.slice(at, end + 1));
+    if (homeOperator !== null || (end !== -1 && /^\$(?:HOME|HERMES_HOME|\{HOME\}|\{HERMES_HOME\})$/u.test(text.slice(at, end + 1)))) {
+      const spelled = homeOperator === null ? text.slice(at, end + 1) : `\${${homeOperator[1] as string}}`;
+      marked += spelled;
+      asOutputs += spelled;
       afterPart = false;
       at = end;
       continue;
@@ -12653,6 +12660,46 @@ const SPLICED_CREDENTIAL_STEP_CAP = 200_000;
  * also `*` then a component of its own then `*` (the part holding a `/`).
  */
 function splicedClass(
+  word: string,
+  budget: { left: number },
+  options: boolean,
+  live: boolean,
+  judge: (path: string) => string | null,
+  protectedPaths: readonly ProtectedPathEntry[],
+  wide: string,
+  directoryKeeps = false,
+  also?: Set<string>,
+  literalAt?: readonly number[],
+): string | null {
+  const own = splicedClassOf(word, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also, literalAt);
+  // A home variable's default (`${HOME:-/x}`), read as the home in `own`, is
+  // read as its default too: the strictest of the two answers, every class
+  // either reached beside (review of the home-operator reading).
+  const defaulted = mainRulesOnly ? null : homeDefaultReading(word);
+  if (defaulted === null) return own;
+  const other =
+    unreadParts(defaulted) === null
+      ? judge(defaulted)
+      : splicedClassOf(defaulted, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also);
+  if (other !== null) also?.add(other);
+  if (own === null) return other;
+  if (other === null) return own;
+  return protectedRank(other) < protectedRank(own) ? other : own;
+}
+
+/**
+ * The word with each home variable's default (`${HOME:-w}`, `${HOME-w}`,
+ * `HERMES_HOME` the same) replaced by its default text `w`, or `null` when it
+ * has none. A default holding a `}` or a `$` is not read here (it stays the
+ * home, and its own expansions are judged as the word's other readings).
+ */
+function homeDefaultReading(word: string): string | null {
+  if (!word.includes("HOME")) return null;
+  const read = word.replace(/\$\{(?:HOME|HERMES_HOME):?-([^}$]*)\}/gu, (_, value: string) => value);
+  return read === word ? null : read;
+}
+
+function splicedClassOf(
   word: string,
   budget: { left: number },
   options: boolean,
