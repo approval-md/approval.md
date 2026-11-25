@@ -74,7 +74,10 @@ import {
   foldNameExact,
   foldNameLower,
   inFoldedReadingOnly,
+  markReadingsDiverged,
   nameListIncludes,
+  namesReadAsSpelled,
+  readingsDivergedNow,
   SUBSTITUTION_SENTINEL,
   takeAmongEqual,
   withNamesAsSpelled,
@@ -1060,18 +1063,26 @@ export function classifyCommandWithDollarQuotesKept(
  * join the name readings. Inside the kept mode this is `[run()]`.
  */
 export function eachDollarQuoteReading<T>(run: () => T): [T] | [T, T] {
-  if (dollarQuotesKept) return [run()];
+  // Inside an outer reading (the hook's whole chain), the outer one runs the
+  // kept pass over everything this run does, and joins it: the decoded
+  // answer alone here, the lexer's record of a decoded quote left for it.
+  if (dollarQuotesKept || dollarQuoteReadingOpen) return [run()];
   const outer = dollarQuoteRead;
   dollarQuoteRead = false;
+  dollarQuoteReadingOpen = true;
   let read = false;
   try {
     const decoded = run();
     read = dollarQuoteRead;
     return read ? [decoded, withDollarQuotesKept(run)] : [decoded];
   } finally {
+    dollarQuoteReadingOpen = false;
     dollarQuoteRead = outer || read;
   }
 }
+
+/** An {@link eachDollarQuoteReading} is running: an inner one reads the decoded pass alone. */
+let dollarQuoteReadingOpen = false;
 
 /** A GLOB-WRITE rule changed this line's answer: the main pass must run. */
 function markGlobWriteFired(): void {
@@ -6740,6 +6751,36 @@ function expansionWordNamesGit(text: string): boolean {
  * levels; a deeper one counts as naming `.git`, the strict side, so the
  * reading's cost and its depth on the call stack stay bounded.
  */
+/**
+ * {@link ansiCQuotingSpellsGit} or {@link ansiCQuotingNearSpellsGit} of a
+ * segment's raw text, remembered for the last text in each name reading: the
+ * text is the same in every pass over one line (dollar quotes decoded or
+ * kept, main's rules, the hook's landing pass), and on a 100 KB line of dollar
+ * quotes the two scans were half its cost. One entry per reading, so it holds
+ * one text. A scan that saw a name whose readings differ records that again
+ * when it is remembered ({@link readingsDivergedNow}).
+ */
+function segmentTextSpellsGit(text: string): boolean {
+  const spelled = namesReadAsSpelled();
+  const last = spelled ? lastTextSpellsGit.spelled : lastTextSpellsGit.folded;
+  if (last !== null && last.text === text) {
+    if (last.diverged) markReadingsDiverged();
+    return last.answer;
+  }
+  const before = readingsDivergedNow();
+  const answer = ansiCQuotingSpellsGit(text) || ansiCQuotingNearSpellsGit(text);
+  // Only where this scan's own record can be told apart from the run's.
+  const entry = before && !spelled ? null : { text, answer, diverged: !spelled && readingsDivergedNow() };
+  if (spelled) lastTextSpellsGit.spelled = entry;
+  else lastTextSpellsGit.folded = entry;
+  return answer;
+}
+
+const lastTextSpellsGit: {
+  folded: { text: string; answer: boolean; diverged: boolean } | null;
+  spelled: { text: string; answer: boolean; diverged: boolean } | null;
+} = { folded: null, spelled: null };
+
 function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): boolean {
   // A substitution body's words, each read as a path the shell may still
   // expand (`$(echo .gi?)`); its own segments read as a line of their own
@@ -6776,8 +6817,7 @@ function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): bo
     const assignments = bashAssignmentCount(segment.words);
     const words = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
     return (
-      ansiCQuotingSpellsGit(segment.text) ||
-      ansiCQuotingNearSpellsGit(segment.text) ||
+      segmentTextSpellsGit(segment.text) ||
       assignsByPrinter(segment) ||
       segment.bodySubstitutions.some(bodyNamesGit) ||
       words.some((word, index) => {
@@ -12468,6 +12508,22 @@ const SPLICED_PARTS_CAP = 8;
  */
 function unreadParts(text: string, literalAt?: readonly number[]): { marked: string; asOutputs: string; parts: number } | null {
   if (!text.includes("$")) return null;
+  // The same word is read in every pass over a line (each name and
+  // dollar-quote reading, main's rules, the hook's landing pass): the last
+  // few answers are remembered (a pure function of the text and positions).
+  const literalKey = literalAt === undefined ? "" : literalAt.join(",");
+  for (const entry of unreadPartsRecent) if (entry.text === text && entry.literalKey === literalKey) return entry.read;
+  const read = unreadPartsOf(text, literalAt);
+  unreadPartsRecent.unshift({ text, literalKey, read });
+  if (unreadPartsRecent.length > UNREAD_PARTS_RECENT) unreadPartsRecent.pop();
+  return read;
+}
+
+/** {@link unreadParts}'s last answers, newest first: at most {@link UNREAD_PARTS_RECENT}. */
+const unreadPartsRecent: { text: string; literalKey: string; read: { marked: string; asOutputs: string; parts: number } | null }[] = [];
+const UNREAD_PARTS_RECENT = 4;
+
+function unreadPartsOf(text: string, literalAt?: readonly number[]): { marked: string; asOutputs: string; parts: number } | null {
   let marked = "";
   let asOutputs = "";
   let parts = 0;

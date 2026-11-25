@@ -143,6 +143,20 @@ export function namesReadAsSpelled(): boolean {
 }
 
 /**
+ * Has a name compare in the current folded run seen a name whose two readings
+ * differ? With {@link markReadingsDiverged}, for a caller that remembers a
+ * pure scan's answer and must leave this record as the scan itself would.
+ */
+export function readingsDivergedNow(): boolean {
+  return readingsDiverged;
+}
+
+/** Record what a remembered scan recorded when it ran: see {@link readingsDivergedNow}. */
+export function markReadingsDiverged(): void {
+  readingsDiverged = true;
+}
+
+/**
  * A guarded name at a compare that was EXACT before names folded: folded in
  * the folded reading, the name itself in the as-spelled one.
  */
