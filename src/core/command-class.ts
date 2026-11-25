@@ -455,7 +455,6 @@ export function braceCandidates(word: string): string[] | null {
   // groups costs seconds each time. Pure, so a hit is exactly what the
   // expansion would give; a copy, so no caller shares it. A new call starts
   // afresh, so a repeated measurement pays the work again.
-  if (!word.includes("{")) return [word];
   if (classifyCallDepth === 0) return braceCandidatesOnce(word);
   const known = braceCandidatesMemo.get(word);
   if (known !== undefined) return known === null ? null : [...known];
