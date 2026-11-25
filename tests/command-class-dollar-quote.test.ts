@@ -160,8 +160,9 @@ test("the lexer's text: each shared escape decoded, each other one unknown", () 
     ["$'a\\M-ab'c", `a${U}bc`],
     ["$'a\\c\\\\b'c", `a${U}\${__APPROVAL_REST__}`], // a backslash after \c: the shells part (review of 83b52249, M1)
     ["$'a\\M-\\x41b'c", `a${U}Abc`], // after \M- the next escape is decoded
-    ["$'a\\x{41}b'c", `a${U}bc`], // bash 3.2's braced hex: one part, through its brace (L63099)
-    ["$'a\\x{0041z'c", `a${U}zc`], // the brace is optional; the digits run on
+    ["$'a\\x{41}b'c", "aAbc"], // bash 3.2's braced hex, decoded as bash reads it (L63099; review of 7c1c2b06, M1)
+    ["$'a\\x{e9}b'c", `a${U}bc`], // a byte past ASCII is one unread part
+    ["$'a\\x{0041z'c", "aAzc"], // the brace is optional; the digits run on, the low byte kept
     ["$'a\\x{}b'c", `a${U}\${__APPROVAL_REST__}`], // no digit: bash's NUL
     ["$'a\\x{100}b'c", `a${U}\${__APPROVAL_REST__}`], // a low byte of 0: bash's NUL
     ["$'\\conformance/../\\x2eapproval/env'", `${U}nformance/../.approval/env`],
@@ -367,6 +368,10 @@ test("review of b58db9ec (M1): a quote's unknown part ends at its quote, and the
       ["echo x > $'.claude\\x{2f}settings.json'", "policy.core"],
       ["cat $'.approval\\x{2f}env'", "account.credential"],
       ["echo x >> $'.approval/log/events.jsonl\\x{41'", "log.mutate"],
+      // A word of braced escapes only is read as bash reads it (review of 7c1c2b06, M1).
+      ["cat $'\\x{2e}\\x{61}\\x{70}\\x{70}\\x{72}\\x{6f}\\x{76}\\x{61}\\x{6c}\\x{2f}\\x{65}\\x{6e}\\x{76}'", "account.credential"],
+      ["echo x > $'\\x{41}\\x{50}\\x{50}\\x{52}\\x{4f}\\x{56}\\x{41}\\x{4c}\\x{2e}\\x{6d}\\x{64}'", "policy.core"],
+      ["rm -f $'\\x{2e}\\x{63}\\x{6c}\\x{61}\\x{75}\\x{64}\\x{65}\\x{2f}\\x{73}\\x{65}\\x{74}\\x{74}\\x{69}\\x{6e}\\x{67}\\x{73}\\x{2e}\\x{6a}\\x{73}\\x{6f}\\x{6e}'", "policy.core"],
     ] as const) {
       assert.ok(classesOf(line).includes(cls), `${line}: ${classesOf(line).join(",")}`);
       const hook = classifyForHook(line, [], cwd).result;

@@ -6202,6 +6202,31 @@ function readDollarQuoted(
       continue;
     }
     const next = command[at + 1] as string;
+    // bash 3.2 reads `\x{H...}`: any number of hex digits, the closing `}`
+    // optional, the low byte kept (`$'\x{41}PPROVAL.md'` is `APPROVAL.md`), so
+    // it is decoded as bash reads it (review of 7c1c2b06, M1: a word of braced
+    // escapes only read as one unread part, like `$X`). zsh reads `\x` with no
+    // digit as a NUL, so the line is read as zsh reads it too. A low byte of 0,
+    // or no digit, is bash's NUL, which ends the known text (as `\c@` does); a
+    // byte past ASCII is one unread part (build-2's probe of 83439855, L63099).
+    if (next === "x" && command[at + 2] === "{") {
+      if (zshNulAt === null) zshNulAt = text.length;
+      let end = at + 3;
+      while (end < close && /[0-9A-Fa-f]/u.test(command[end] as string)) end += 1;
+      const low = end > at + 3 ? Number.parseInt(command.slice(Math.max(at + 3, end - 2), end), 16) : 0;
+      if (low === 0) {
+        unknown();
+        overflow = true;
+        break;
+      }
+      if (low > 0x7f) unknown();
+      else {
+        text += String.fromCharCode(low);
+        atPlaceholder = false;
+      }
+      at = Math.min(command[end] === "}" ? end : end - 1, close - 1);
+      continue;
+    }
     let length: number;
     // `\u` and `\U` with their digits: one character, by code point.
     let codePoint: number | null = null;
@@ -6245,22 +6270,6 @@ function readDollarQuoted(
       ) {
         overflow = true;
         break;
-      }
-      // bash 3.2 reads `\x{H...}`: any number of hex digits, the closing `}`
-      // optional, the low byte kept (`$'\x{41}PPROVAL.md'` is `APPROVAL.md`);
-      // zsh reads `\x` with no digit (a NUL, above). The one placeholder covers
-      // the digits and the `}`; a low byte of 0, or no digit, is bash's NUL,
-      // which ends the known text as above (build-2's probe of 83439855, L63099).
-      if (next === "x" && command[at + 2] === "{") {
-        let end = at + 3;
-        while (end < close && /[0-9A-Fa-f]/u.test(command[end] as string)) end += 1;
-        const low = end > at + 3 ? Number.parseInt(command.slice(Math.max(at + 3, end - 2), end), 16) : 0;
-        if (low === 0) {
-          overflow = true;
-          break;
-        }
-        at = Math.min(command[end] === "}" ? end : end - 1, close - 1);
-        continue;
       }
       // The last character this escape takes. After `\C-` or `\M-` a backslash
       // is never taken: bash writes `\C-` as it is and decodes the escape that
