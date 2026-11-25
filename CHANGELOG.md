@@ -738,6 +738,20 @@ other segments, and the hook judges each.
   copy now also waits on `policy.core`. A credential source is still the
   read (`cp .approval/env notes.txt` is the credential class alone), and
   the redirect, `tee` and `mv` forms answered `policy.core` already.
+  The write's class is ADDED to the answer the line had: every class it
+  reported stays, so `rsync -a --log-file=.approval/log/events.jsonl
+  README.md .approval/env` keeps `log.mutate` (likewise rsync's
+  `--temp-dir`, and a glob source's readings), and a refusal of the rest of
+  the walk stands. The sources land in the last target directory named.
+  A credential glob as a copy's last operand with no `-t` may expand into
+  its destination (`cp ~/.hermes/profiles/*/auth.json`, `cp
+  .approval/env{,.bak}`): that path's class is added too.
+- **A credential read spelled as a glob is still the read** where the
+  program only reads its operands (`less`, `more`, `most`, `hexdump`, `od`,
+  `strings`, `file`) and every match of the glob is a credential path (`less
+  ~/.hermes/profiles/*/auth.json`, as `less ~/.hermes/auth.json`). Anywhere
+  a match may be written (`xxd in out`, a wrapper, a program with no rule)
+  the glob is a target the shell builds, as above.
 - **Not changed:** a protected path that outranks the credential class
   still answers first with the credential beside it, except in a copy's
   joined target-directory flag (`cp --target-directory=.approval/log
