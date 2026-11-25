@@ -3011,6 +3011,120 @@ const commandClassVectors = [
     description: "beside the ones above: `>|` is the clobber operator bash and zsh share, and its target is read as any redirection target is",
     input: { command: "echo x >| APPROVAL.md" },
   },
+  // --- dollar-quoted words: the text the shell makes of them ----------------
+  // Lead ruling CLAIMS L62542: `$'…'` is decoded where bash and zsh decode it
+  // alike and `$"…"` is a double-quoted string; what the shells read
+  // differently is unknown, the way `$X` is. Where a dollar quote was read,
+  // the answer with dollar quotes kept as before rides beside.
+  {
+    id: "dollar-quote-ansi-c-names-the-policy-file",
+    description:
+      "`$'\\x41PPROVAL.md'` is `APPROVAL.md` to bash and zsh: the append is the policy file's write, and the earlier reading (a write to an unknown variable) rides beside",
+    input: { command: "echo x >> $'\\x41PPROVAL.md'" },
+  },
+  {
+    id: "dollar-quote-locale-string-names-a-credential",
+    description: "`$\"…\"` is a double-quoted string (the locale translation is the identity without a catalog): the read is the credential read it spells",
+    input: { command: 'cat $".approval/env"' },
+  },
+  {
+    id: "dollar-quote-escaped-quote-does-not-end-it",
+    description:
+      "inside `$'…'` a `\\'` is a quote character, so the string closes at the next quote and the words after it are commands bash and zsh run: the `rm` is read",
+    input: { command: "echo $'\\'' ; rm -rf APPROVAL.md #'" },
+  },
+  {
+    id: "dollar-quote-ordinary-message-is-unmoved",
+    description: "a commit message with escaped newlines keeps the class it had",
+    input: { command: "git commit -m $'fix\\n\\nbody'" },
+  },
+  {
+    id: "dollar-quote-escape-the-shells-read-differently-is-unknown",
+    description:
+      "bash keeps `\\V` and zsh drops its backslash, so the copy target is not settled by the text: the escape is an unread part spliced into the policy file's name (lead ruling L62568), and the copy asks with that file's class",
+    input: { command: "cp notes.txt $'APPRO\\VAL.md'" },
+  },
+  {
+    id: "dollar-quote-program-word-is-refused",
+    description: "a program spelled as a dollar quote keeps the refusal the earlier reading gives it",
+    input: { command: "$'rm' -rf x" },
+    control: true,
+  },
+  // --- an unread part spliced into a guarded name ----------------------------
+  // Lead ruling CLAIMS L62568: each unread part counts as any text, a `/`
+  // included, and the word is matched against every guarded path; a match
+  // counts where the word's literal text takes part in it, and a word opening
+  // with an unread directory asks where a guarded path ends in its tail.
+  {
+    id: "spliced-parameter-in-the-policy-file-name",
+    description: "with E empty the shell writes APPROVAL.md: the policy file's class, every other guarded class the word may reach (E holding a `/`), and the earlier workspace answer beside it",
+    input: { command: "echo x > APPROVAL$E.md" },
+  },
+  {
+    id: "spliced-parameter-after-a-guarded-folder-name",
+    description: "with S empty the write is .claude/settings.json: the settings file's class",
+    input: { command: "echo x > .claude$S/settings.json" },
+  },
+  {
+    id: "spliced-unread-directory-before-a-guarded-name",
+    description: "an unread directory whose literal tail ends a guarded path by name (.claude/settings.json) asks",
+    input: { command: "echo x > $D/settings.json" },
+  },
+  {
+    id: "spliced-unread-directory-before-an-ordinary-name-is-unmoved",
+    description: "an unread directory whose tail no guarded path ends in keeps the workspace answer (the directory alone could be .approval, which a word with no literal text reaches as well)",
+    input: { command: "echo x > $D/notes.md" },
+  },
+  {
+    id: "spliced-word-of-unread-parts-only-is-unmoved",
+    description: "a word with no literal text but `/` keeps main's answer for an unknown target",
+    input: { command: "echo x > $D/$F" },
+  },
+  {
+    id: "spliced-unread-directory-after-a-literal-folder",
+    description: "an unread directory below a literal guarded folder, with a literal tail, may be .github/workflows/ci.yml: the workflow's class (the literal text takes part)",
+    input: { command: "echo x > .github/$W/ci.yml" },
+  },
+  {
+    id: "spliced-dot-is-literal-text",
+    description: "a `.` in a component is literal text: .$X may be .approval, and the write asks with the strictest class it could reach, every other one beside it",
+    input: { command: "echo x > .$X" },
+  },
+  {
+    id: "dollar-quote-nul-then-tail",
+    description: "a dollar quote's NUL ends that quote's text in bash, and the word goes on: $'\\0'.approval/env is .approval/env (review of #709 at b58db9ec, M1)",
+    input: { command: "cat $'\\0'.approval/env" },
+  },
+  {
+    id: "dollar-quote-nul-zsh-reading",
+    description: "zsh ends the path at a dollar quote's NUL: $'APPROVAL.md\\0'.bak is APPROVAL.md to zsh, read beside bash's APPROVAL.md.bak",
+    input: { command: "echo x > $'APPROVAL.md\\0'.bak" },
+  },
+  {
+    id: "dollar-quote-short-u-escape",
+    description: "\\u with fewer than four digits is decoded where the character is ASCII, as zsh reads it (bash 3.2's reading as written is main's, beside)",
+    input: { command: "rm -f $'\\u41'PPROVAL.md" },
+  },
+  {
+    id: "dollar-quote-nested-hash",
+    description: "a nested script in a dollar quote whose # would end a comment in one reading: refused, as the reading as written is (review of #709, S3)",
+    input: { command: "bash -c $'echo hi # ; echo x > \\x41PPROVAL.md'" },
+  },
+  {
+    id: "home-variable-inside-a-word",
+    description: "a home variable is the home only as a word's first component; inside a word an unset HERMES_HOME is empty, so the word may be the policy file (review of #709, M2)",
+    input: { command: "rm -f APPROVAL${HERMES_HOME}.md" },
+  },
+  {
+    id: "spliced-credential-read",
+    description: "a read of .approval/$F may read the environment map, as cat .approval/env does: the credential's class (lead ruling L62542, for reads too)",
+    input: { command: "cat .approval/$F" },
+  },
+  {
+    id: "spliced-read-of-an-ordinary-name-is-unmoved",
+    description: "a read whose literal text no credential file holds keeps main's answer",
+    input: { command: "cat out/$F.txt" },
+  },
   {
     id: "redirect-read-of-an-ordinary-file-is-a-read",
     description: "an ordinary file on stdin is the read it always was",
@@ -3988,6 +4102,16 @@ const commandClassVectors = [
     description:
       "a stray } after a credential name",
     input: { command: "cat ~/.hermes/.op.env}" },
+  },
+  {
+    id: "brace-unmatched-close-approval-credential-read",
+    description: "a stray } after the approval home's environment map: the brace reader strips it, and the read is the credential's (build-6, the brace memo's review)",
+    input: { command: "cat .approval/env}" },
+  },
+  {
+    id: "brace-unmatched-close-policy-file-write",
+    description: "a stray } after the policy file's name: the brace reader strips it, and the write is the policy file's (build-6, the brace memo's review)",
+    input: { command: "echo x > APPROVAL.md}" },
   },
   {
     id: "brace-stray-in-ordinary-text-is-unmoved",

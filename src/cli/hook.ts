@@ -114,6 +114,7 @@ import {
   CODE_EXECUTING_RULES,
   CONTRIBUTOR_SUFFIX,
   credentialReadWords,
+  eachDollarQuoteReading,
   GATE_SELF_CLASS,
   gitVerbIndex,
   isCredentialPath,
@@ -6236,14 +6237,21 @@ export function classifyForHook(
    */
   globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): RefinedClassification {
-  // The write pass's landings and disk lookups, shared by this call's name
-  // readings and by nothing else (cost: the COST686 lines).
-  const landings = writeLandingMemo();
-  const [folded, ...others] = eachNameReading(() =>
-    classifyForHookAsRead(command, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments, writeScope, globListings, landings),
-  );
-  if (others.length === 0) return folded;
-  const notes = [...folded.notes];
+  // Every pass below reads words from the classifier's lexer, which reads a
+  // dollar-quoted word as the shell does (`$'\x41PPROVAL.md'` is the policy
+  // file). Where it read one, the whole chain runs again with dollar quotes
+  // kept as main kept them, and the two join as the name readings do, so no
+  // pass that narrows a class answers lighter than main did.
+  // The write pass's landings and disk lookups are shared by one dollar-quote
+  // reading's name readings and by nothing else (cost: the COST686 lines).
+  const [first, ...others] = eachDollarQuoteReading(() => {
+    const landings = writeLandingMemo();
+    return eachNameReading(() =>
+      classifyForHookAsRead(command, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments, writeScope, globListings, landings),
+    );
+  }).flat() as [RefinedClassification, ...RefinedClassification[]];
+  if (others.length === 0) return first;
+  const notes = [...first.notes];
   const seen = new Set(notes);
   for (const other of others) {
     for (const note of other.notes) {
@@ -6252,7 +6260,7 @@ export function classifyForHook(
       notes.push(note);
     }
   }
-  return { result: unionNameReadings([folded.result, ...others.map((other) => other.result)]), notes };
+  return { result: unionNameReadings([first.result, ...others.map((other) => other.result)]), notes };
 }
 
 /** {@link classifyForHook} in the current name reading. */
@@ -10188,7 +10196,11 @@ function resolvedPathClasses(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
   const found: string[] = [];
-  for (const reading of eachNameReading(() => resolvedPathClassesAsRead(raw, segments, cwd, protectedPaths, readRoots, env))) {
+  // Dollar quotes as the shell reads them and as main kept them (`eachDollarQuoteReading`): both add.
+  const readings = eachDollarQuoteReading(() =>
+    eachNameReading(() => resolvedPathClassesAsRead(raw, segments, cwd, protectedPaths, readRoots, env)),
+  ).flat();
+  for (const reading of readings) {
     for (const cls of reading) if (!found.includes(cls)) found.push(cls);
   }
   return found;
