@@ -1130,6 +1130,11 @@ Bash tool runs on macOS, a line that wrote a protected file was
     `supervised-retro`). Without it nothing changes for such writes.
   - `approval doctor` has a `write-scope` row and `approval policy explain`
     names the built-in minimum. Six new policy-resolution vectors.
+  - Known limit: a `cp` with many `-t` landings is slow through the hook.
+    Every landing is judged, under every policy, and the work grows with the
+    square of their number: a line of about 8 KiB of arguments takes several
+    seconds, and a longer one can meet the hook's deadline and be refused
+    `hook-deadline`. It fails closed. A fix (#711) is planned for 0.4.10.
 - **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536, #679).**
   `overlay-recipes-check.mjs --expected <expected.json> --tag-corpus <corpus>`
   finds every call that is new or changed against the previous release (a new
