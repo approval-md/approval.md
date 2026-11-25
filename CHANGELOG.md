@@ -26,21 +26,24 @@ or a parent of one, and a second protected path, or a credential read's own
 write, that the class left unnamed. A guarded path spelled in a dollar quote
 (`echo x >> $'\x41PPROVAL.md'`) is now read as the shell reads it, and a
 guarded name with a parameter or a substitution spliced into it (`echo x >
-APPROVAL$E.md`) takes the guarded path's class (#709). Each entry below says
-what such a line answers now and what is left as a known limit. The hook also
-answers within a deadline of its own (15 seconds, or less under a shorter
-harness ceiling): a call it cannot read in time is refused `hook-deadline`
-instead of running ungated when the harness gives up on the hook. New: the
-`files.write.guarded` class, with a built-in minimum of `manual`, and the
-opt-in `write_scope` policy block (#695); `approval propose --irreversible`
-(APRV-537, #681); and the CLASS-DIFF and NEW-CALLS release checks for the
-overlay (#678, #679). `SPEC.md` and `APPROVAL.md` are unchanged since 0.4.8;
-`conformance/` gains vectors. **Rollout notes:** a core older than 0.4.9
-refuses the `write_scope` key (the policy schema admits no unknown key) and
-fails the whole policy closed, so a policy gains it only after every core that
-reads it runs 0.4.9. A core older than 0.4.9 refuses `approval propose
---irreversible` (usage error; `approval serve` answers 403), and a box must not
-be rolled back past 0.4.9 while a key that flag floored is open.
+APPROVAL$E.md`) takes the guarded path's class (#709). A credential read
+through a negated bracket in its path (`cat ~/.hermes/[!x]uth.json`) is now
+`account.credential`, and the hook matches a glob in linear time, with no
+backtracking (#682). Each entry below says what such a line answers now and
+what is left as a known limit. The hook also answers within a deadline of its
+own (15 seconds, or less under a shorter harness ceiling): a call it cannot
+read in time is refused `hook-deadline` instead of running ungated when the
+harness gives up on the hook. New: the `files.write.guarded` class, with a
+built-in minimum of `manual`, and the opt-in `write_scope` policy block (#695);
+`approval propose --irreversible` (APRV-537, #681); and the CLASS-DIFF and
+NEW-CALLS release checks for the overlay (#678, #679). `SPEC.md` and
+`APPROVAL.md` are unchanged since 0.4.8; `conformance/` gains vectors.
+**Rollout notes:** a core older than 0.4.9 refuses the `write_scope` key (the
+policy schema admits no unknown key) and fails the whole policy closed, so a
+policy gains it only after every core that reads it runs 0.4.9. A core older
+than 0.4.9 refuses `approval propose --irreversible` (usage error; `approval
+serve` answers 403), and a box must not be rolled back past 0.4.9 while a key
+that flag floored is open.
 
 ### Security
 
