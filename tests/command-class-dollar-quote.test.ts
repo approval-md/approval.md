@@ -158,7 +158,8 @@ test("the lexer's text: each shared escape decoded, each other one unknown", () 
     ["$'a\\xgb'c", `a${U}gbc`],
     ["$'a\\C-ab'c", `a${U}bc`],
     ["$'a\\M-ab'c", `a${U}bc`],
-    ["$'a\\c\\\\b'c", `a${U}bc`], // \c takes a backslash pair
+    ["$'a\\c\\\\b'c", `a${U}\${__APPROVAL_REST__}`], // a backslash after \c: the shells part (review of 83b52249, M1)
+    ["$'a\\M-\\x41b'c", `a${U}Abc`], // after \M- the next escape is decoded
     ["$'\\conformance/../\\x2eapproval/env'", `${U}nformance/../.approval/env`],
     ["$'a\\xc3\\xa9b'", `a${U}b`],
     ["$'a\\u00e9b'", `a${U}b`],
@@ -337,11 +338,34 @@ test("review of b58db9ec (M1): a quote's unknown part ends at its quote, and the
       ["echo x > $'APPROVAL.md\\c\u0801junk'", "policy.core"],
       ["echo x > $'APPROVAL.md\\c\u00e9junk'", "policy.core"],
       ["echo x > $'APPROVAL.md\\c\u{1F600}junk'", "policy.core"],
+      // A backslash after \c parts them too: zsh reads c and decodes the escape (review of 83b52249, M1).
+      ["rm -f $'\\c\\x2fAPPROVAL.md'", "policy.core"],
+      ["rm -f $'\\c\\x2f.claude/settings.json'", "policy.core"],
+      ["rm -f $'\\c\\x2f.approval/log/events.jsonl'", "log.mutate"],
+      ["echo x > $'\\c\\057APPROVAL.md'", "policy.core"],
+      ["echo x >> $'\\c\\u2f.approval/log/events.jsonl'", "log.mutate"],
+      ["echo x > $'\\c\\x2f.github/workflows/ci.yml'", "policy.edit"],
+      ["tee $'\\c\\x2f.claude/settings.json'", "policy.core"],
+      ["cat $'\\c\\x2f.approval/env'", "account.credential"],
     ] as const) {
       const pure = classesOf(line);
       assert.ok(pure.includes(cls) || pure.includes("log.mutate"), `${line}: ${pure.join(",")}`);
       const hook = classifyForHook(line, [], cwd).result;
       assert.ok(hook.ok && (hook.classes.includes(cls) || hook.classes.includes("log.mutate")), `${line} (hook): ${JSON.stringify(hook)}`);
+    }
+    // After \C- or \M- a backslash is not taken: bash writes \C- as it is and decodes
+    // the next escape, so the path below it takes its own class (review of 83b52249, M1).
+    for (const [line, cls] of [
+      ["rm -f $'\\M-\\x2fAPPROVAL.md'", "policy.core"],
+      ["rm -f $'\\C-\\x2f.claude/settings.json'", "policy.core"],
+      ["echo x > $'\\M-\\057APPROVAL.md'", "policy.core"],
+      ["tee $'\\C-\\u2f.approval/log/events.jsonl'", "log.mutate"],
+      ["echo x > $'\\M-\\x2f.github/workflows/ci.yml'", "policy.edit"],
+      ["cat $'\\M-\\x2f.approval/env'", "account.credential"],
+    ] as const) {
+      assert.ok(classesOf(line).includes(cls), `${line}: ${classesOf(line).join(",")}`);
+      const hook = classifyForHook(line, [], cwd).result;
+      assert.ok(hook.ok && hook.classes.includes(cls), `${line} (hook): ${JSON.stringify(hook)}`);
     }
     // Past 32 unread parts the word could be any path: never lighter than one unread part.
     for (const [tail, cls] of [["APPROVAL.md", "policy.core"], [".approval/env", "account.credential"]] as const) {

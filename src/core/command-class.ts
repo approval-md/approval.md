@@ -6206,20 +6206,28 @@ function readDollarQuoted(
       // (the overflow's end marker; review of the \c fix).
       // bash applies \c to the next character's first UTF-8 byte, so any non-ASCII character
       // may be a NUL too (U+0800-U+0FFF start 0xE0): it ends the known text the same way.
+      // A backslash after `\c` parts them too: bash takes it as `\c`'s
+      // character and reads on as text, zsh reads `c` and decodes the escape
+      // (`$'\c\x2fAPPROVAL.md'` is `c/APPROVAL.md` to zsh; review of 83b52249, M1).
       if (
         next === "c" &&
         at + 2 < close &&
-        ((command.codePointAt(at + 2) as number) > 0x7f ||
+        (command[at + 2] === "\\" ||
+          (command.codePointAt(at + 2) as number) > 0x7f ||
           (((command[at + 2] as string).toUpperCase().charCodeAt(0) & 0x1f) === 0))
       ) {
         overflow = true;
         break;
       }
-      // The last character this escape takes (a backslash pair counts as one).
+      // The last character this escape takes. After `\C-` or `\M-` a backslash
+      // is never taken: bash writes `\C-` as it is and decodes the escape that
+      // follows, so the reading goes on from that backslash (zsh's reading is
+      // one control or non-ASCII byte, which no guarded name holds).
       let last = at + 1;
       if (next === "c") last = at + 2;
-      else if ((next === "C" || next === "M") && command[at + 2] === "-") last = at + 3;
-      if (last > at + 1 && command[last] === "\\") last += 1;
+      else if ((next === "C" || next === "M") && command[at + 2] === "-") {
+        last = command[at + 3] === "\\" ? at + 2 : at + 3;
+      }
       at = Math.min(last, close - 1);
       continue;
     }
