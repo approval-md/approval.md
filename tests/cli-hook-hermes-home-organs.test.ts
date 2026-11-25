@@ -365,9 +365,14 @@ test("CUSTODY recheck M1': every variable spelling through the hook, home known 
     }
   }
   // A variable inside a final name after a literal prefix leaves the
-  // directory known: ordinary work stays ordinary.
+  // directory known, so it takes no organ class. Design v4, decision B: the
+  // line does not set `$N`, so the target cannot be read and the write is
+  // files.write.guarded, never lighter than manual (a 30s Hermes ceiling
+  // cannot wait for a human, so the hook refuses it).
   const run = ask(dir, { tool: "terminal", input: { command: 'echo hi > "out_$N.txt"', workdir: join(home, "workspace") } });
-  assert.equal(verdictOf(run).permission, "allow", run.stdout);
+  assert.equal(verdictOf(run).permission, "deny", run.stdout);
+  assert.match(run.stdout, /files\.write\.guarded/u, run.stdout);
+  assert.ok(!classesOf(run).includes("policy.core"), run.stdout);
 });
 
 test("review round 3: where a write lands, through every write tool, both symlink directions, and an unreadable organ", (t) => {

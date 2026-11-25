@@ -162,6 +162,10 @@ export const DOCTOR_ROW_ORDER = [
   // key exists for, the tenant's policy names a daemon on somebody else's machine
   // and a red row on every tenant's laptop is a red row people learn to skip.
   "daemon-identity",
+  // Design v4 (writes outside the workspace): whether the policy opts in to
+  // `files.write.out_of_scope`, and the row to add when it does not. Never a
+  // fail: a policy written before the class existed is not broken.
+  "write-scope",
 ] as const;
 
 /**

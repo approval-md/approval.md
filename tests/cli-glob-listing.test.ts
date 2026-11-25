@@ -18,7 +18,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { GlobListingDeadline, listGlobDirectory, listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
-import { classifyForHook, DESCRIBE_DEADLINE_ENV } from "../src/cli/hook.js";
+import { classifyForHook, DESCRIBE_DEADLINE_ENV, WRITE_SCOPE_OFF } from "../src/cli/hook.js";
 import { CANONICAL_POLICY } from "../src/cli/scaffold.js";
 
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -39,7 +39,7 @@ function project(files: Record<string, string[]>): string {
 
 async function hookClasses(command: string, cwd: string): Promise<string[]> {
   const listings = await listGlobWriteDirsFor(command, [cwd]);
-  const result = classifyForHook(command, [], cwd, [], false, [], false, listings).result;
+  const result = classifyForHook(command, [], cwd, [], false, [], false, WRITE_SCOPE_OFF, listings).result;
   assert.ok(result.ok, `${command}: ${result.ok ? "" : result.detail}`);
   return result.segments.map((segment) => segment.class);
 }
@@ -151,7 +151,7 @@ test("an unlistable directory keeps the strict answer through the hook", async (
   const cwd = project({ dist: ["a.js"] });
   const listings = await listGlobWriteDirsFor("rm -rf dist/*", [cwd], { entryCap: 0 });
   assert.equal(listings.get(join(cwd, "dist")), "unreadable");
-  const result = classifyForHook("rm -rf dist/*", [], cwd, [], false, [], false, listings).result;
+  const result = classifyForHook("rm -rf dist/*", [], cwd, [], false, [], false, WRITE_SCOPE_OFF, listings).result;
   assert.ok(result.ok);
   assert.deepEqual(result.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope", "log.mutate"]);
 });
@@ -179,10 +179,10 @@ test("review of 6e3cbc9e: a relative pattern is placed only when the cwd is know
   const cwd = project({ dist: ["a.js"] });
   const listings = await listGlobWriteDirsFor("rm -rf dist/*", [cwd]);
   // Another directory the command may start in (Claude Code's envelope cwd differing from the hook's).
-  const unsure = classifyForHook("rm -rf dist/*", [], cwd, [], false, [join(scratch, "elsewhere")], false, listings).result;
+  const unsure = classifyForHook("rm -rf dist/*", [], cwd, [], false, [join(scratch, "elsewhere")], false, WRITE_SCOPE_OFF, listings).result;
   assert.ok(unsure.ok);
   assert.deepEqual(unsure.segments.map((segment) => segment.class), ["policy.core", "files.delete.out_of_scope", "log.mutate"]);
-  const sure = classifyForHook("rm -rf dist/*", [], cwd, [], false, [], false, listings).result;
+  const sure = classifyForHook("rm -rf dist/*", [], cwd, [], false, [], false, WRITE_SCOPE_OFF, listings).result;
   assert.ok(sure.ok);
   assert.deepEqual(sure.segments.map((segment) => segment.class), ["files.delete.out_of_scope"]);
 });

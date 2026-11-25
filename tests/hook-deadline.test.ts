@@ -333,7 +333,8 @@ test("the two walks that take components from a list still take them in order: a
   assert.deepEqual(classes("cat k/../.op.env"), ["read.shell", "account.credential"]);
   assert.deepEqual(classes("cat p/../.op.env"), ["read.shell"]);
   // The git-directory pass's walk (`physicalLanding` in git-dir-writes).
-  assert.deepEqual(classes("echo x > g/pre-push"), ["files.write.workspace", "vcs.history.rewrite"]);
+  // The landing is `.git/hooks`, which is also on the write-scope guarded list.
+  assert.deepEqual(classes("echo x > g/pre-push"), ["files.write.workspace", "vcs.history.rewrite", "files.write.guarded"]);
   assert.deepEqual(classes("echo x > p/pre-push"), ["files.write.workspace"]);
   // A link whose target has several pieces: they are walked first piece first.
   // A checkout whose git directory is named by a `.git` FILE, so no `.git`

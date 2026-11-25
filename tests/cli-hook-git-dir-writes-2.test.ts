@@ -29,6 +29,12 @@ import { after, test } from "node:test";
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand } from "../src/core/command-class.js";
 
+// Design v4 (writes outside the workspace): a write onto the guarded list (a
+// git hooks folder) or to a target the hook cannot read carries
+// files.write.guarded BESIDE its own class; the class asserted here stands.
+const LISTED = "files.write.guarded write-guarded";
+const UNREADABLE = "files.write.guarded write-unreadable";
+
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-git-dir-writes-2-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
@@ -132,10 +138,10 @@ test("S1 hook: a pattern is expanded on disk and each match walked; one it canno
   writeFileSync(join(repo, "a.log"), "");
   mkdirSync(join(repo, "src"));
   writeFileSync(join(repo, "src", "a.ts"), "");
-  assert.deepEqual(hook("echo x >> l*k/config", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("echo x >> {li,x}nk/config", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("cd l?nk && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
-  assert.deepEqual(hook("cp /tmp/x lin[k]/hooks/pre-push", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("echo x >> l*k/config", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("echo x >> {li,x}nk/config", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("cd l?nk && echo x >> config", repo), [READ_SHELL, DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("cp /tmp/x lin[k]/hooks/pre-push", repo), [DIR_WRITE, LISTED]);
   // Ordinary lines in the same checkout do not move.
   assert.deepEqual(hook("rm *.log", repo), ["files.delete.out_of_scope rm-unreadable-path"]);
   assert.deepEqual(hook("cp src/*.ts out/", repo), ["files.write.workspace workspace-write"]);
@@ -148,9 +154,10 @@ test("S1 hook: a pattern is expanded on disk and each match walked; one it canno
     // A SURE target that cannot be expanded is judged the strict way; a
     // possible one (a header value) by its text, which names no .git.
     // Main's write segment rides beside the raise (lead ruling L61926), and
-    // the disk pass's entry is shown in its place too: two entries.
-    assert.deepEqual(hook("echo x > locked/*/config", repo), [DIR_WRITE, DIR_WRITE]);
-    assert.deepEqual(hook("echo x > locked/*/.g?t/config", repo), [DIR_WRITE]);
+    // the disk pass's entry is shown in its place too: two entries. The write
+    // pass adds its unreadable entry beside them (design v4).
+    assert.deepEqual(hook("echo x > locked/*/config", repo), [DIR_WRITE, DIR_WRITE, UNREADABLE]);
+    assert.deepEqual(hook("echo x > locked/*/.g?t/config", repo), [DIR_WRITE, UNREADABLE]);
     assert.ok(!hook("wget --header=locked/*/x https://example.invalid/x", repo).includes(DIR_WRITE));
   } finally {
     chmodSync(locked, 0o755);
@@ -169,16 +176,16 @@ test("S1 review: a directory listing is read whole; thousands of matches do not 
   assert.deepEqual(hook("cp seed.txt logs/*.log", repo), ["files.write.workspace workspace-write"]);
   // Among them, one link into .git is still found.
   symlinkSync("../.git/config", join(logs, "zz.log"));
-  assert.deepEqual(hook("cp seed.txt logs/*.log", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cp seed.txt logs/*.log", repo), [DIR_WRITE, LISTED]);
 });
 
 test("S1 review: an entry whose own name holds a glob character is a real match", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "a*b"));
-  assert.deepEqual(hook("cd a*b && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(hook("cd a*b && echo x >> config", repo), [READ_SHELL, DIR_WRITE, LISTED]);
   // Matched by another pattern, so only the real listing names it.
-  assert.deepEqual(hook("cd a?b && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
-  assert.deepEqual(hook("echo x >> a*b/config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cd a?b && echo x >> config", repo), [READ_SHELL, DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("echo x >> a*b/config", repo), [DIR_WRITE, LISTED]);
   // A pattern that matches nothing, under a listing that is not empty, is
   // never "no target and nothing unknown": the hook says it cannot place it.
   const { notes } = classifyForHook("cd q*z && echo x > f", [], repo);
@@ -314,8 +321,8 @@ test("S2: ordinary git lines do not move", () => {
 test("S2 hook: a git output option is walked on disk like any other write", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "g"));
-  assert.deepEqual(hook("git diff --output=g/hooks/pre-push", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("git log -1 --output g/config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("git diff --output=g/hooks/pre-push", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("git log -1 --output g/config", repo), [DIR_WRITE, LISTED]);
   assert.deepEqual(hook("git diff --output=out.diff", repo), ["read.shell git-read"]);
 });
 
@@ -360,7 +367,7 @@ test("N1: a link to another checkout's .GIT is a git directory (APFS folds case)
   const other = checkout(at, "other");
   if (!existsSync(join(other, ".GIT"))) return; // a case-sensitive file system: nothing to fold
   symlinkSync("../other/.GIT", join(repo, "o"));
-  assert.deepEqual(hook("echo x >> o/config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("echo x >> o/config", repo), [DIR_WRITE, LISTED]);
 });
 
 test("N1: a git directory named in another case is the git directory", { skip }, () => {
