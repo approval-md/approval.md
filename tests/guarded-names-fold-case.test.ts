@@ -1262,25 +1262,61 @@ test("through the real hook, a command that writes a design file and a workflow 
   }
 });
 
-test("a segment with a protected redirection is walked once: it costs about what it costs without the redirection", () => {
-  // The command in front of a protected redirection is asked for its own
-  // answer. That is the walk every segment takes, made once. A ratio of CPU
-  // time, like the tests around it, over 1 MiB of plain words. Measured five
-  // times each: with one walk the line costs 0.59 to 0.73 of the control;
-  // with the walk made twice, 1.04 to 1.34. The bound sits between, and each
-  // side is the least of three runs, so one slow run does not decide it.
-  const SIZE = 1024 * 1024;
-  const words = "x ".repeat(SIZE / 2);
+/**
+ * How the two walked-once cost cases below are timed. A CI runner's speed
+ * moves in phases of seconds: inside one run of a test the same call took
+ * 0.96 to 2.07 s. Two sides each timed as the least of a few long calls read
+ * 0.83 to 1.17 on GitHub's runner with the code unchanged (18 samples, sd
+ * 0.08), and both cases went red on main that way (runs 45498760237 and
+ * 45552817928). So a line and its control are run back to back, in a short
+ * pair that one phase covers, the order turning each round, and the answer is
+ * the MEDIAN of the pairs' ratios: on the same runner, beside a shard's other
+ * files, 120 pairs read 0.92 to 1.00 (18 samples, sd 0.02, run 45557906118).
+ */
+function medianCostRatio(controlRun: () => void, spentRun: () => void, rounds: number): number {
   const cpu = (run: () => void): number => {
     const start = process.cpuUsage();
     run();
     const used = process.cpuUsage(start);
     return (used.user + used.system) / 1e6;
   };
-  const least = (run: () => void): number => Math.min(cpu(run), cpu(run), cpu(run));
-  const control = least(() => classifyCommand(`tee design/x ${words}`, TWO_ROUTES));
-  const spent = least(() => classifyCommand(`tee design/x ${words}> .github/workflows/ci.yml`, TWO_ROUTES));
-  assert.ok(spent <= 0.9 * control, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
+  // Once each, untimed: the first call pays for the compiler.
+  controlRun();
+  spentRun();
+  const ratios: number[] = [];
+  for (let round = 0; round < rounds; round += 1) {
+    let control: number;
+    let spent: number;
+    if (round % 2 === 0) {
+      control = cpu(controlRun);
+      spent = cpu(spentRun);
+    } else {
+      spent = cpu(spentRun);
+      control = cpu(controlRun);
+    }
+    ratios.push(spent / control);
+  }
+  ratios.sort((left, right) => left - right);
+  const middle = ratios.length >> 1;
+  return ratios.length % 2 === 1 ? ratios[middle]! : (ratios[middle - 1]! + ratios[middle]!) / 2;
+}
+
+test("a segment with a protected redirection is walked once: it costs about what it costs without the redirection", (t) => {
+  // The command in front of a protected redirection is asked for its own
+  // answer. That is the walk every segment takes, made once. A ratio of CPU
+  // time over 64 KiB of plain words, the median of 120 back-to-back pairs
+  // (medianCostRatio above). With one walk the line costs 0.59 to 0.75 of
+  // the control; with the walk made twice, 1.04 to 1.34. The bound sits
+  // between.
+  const SIZE = 64 * 1024;
+  const words = "x ".repeat(SIZE / 2);
+  const ratio = medianCostRatio(
+    () => classifyCommand(`tee design/x ${words}`, TWO_ROUTES),
+    () => classifyCommand(`tee design/x ${words}> .github/workflows/ci.yml`, TWO_ROUTES),
+    120,
+  );
+  t.diagnostic(`cost ratio, the median of 120 pairs: ${ratio.toFixed(3)} (bound 0.9)`);
+  assert.ok(ratio <= 0.9, `the median of 120 pairs is ${ratio.toFixed(3)} of the control`);
   assert.deepEqual(pure(`tee design/x ${"x ".repeat(8)}> .github/workflows/ci.yml`, TWO_ROUTES), [
     "policy.edit.ci redirect-protected",
     "policy.edit.design protected-path",
@@ -1513,48 +1549,45 @@ test("through the real hook, a wrapper in front of the copy does not take the wo
   }
 });
 
-test("a credential read is walked once: it costs about what the same line with an ordinary file costs", () => {
+test("a credential read is walked once: it costs about what the same line with an ordinary file costs", (t) => {
   // The credential answer goes on with the walk it would have taken without
   // the credential word, and its protected scan is the one the credential
   // tier already made, so the line is walked once. A ratio of CPU time over
-  // 512 KiB of plain words, each side the least of three runs. Measured on
-  // this change: 0.93 to 1.04 of the control; with the protected scan made a
-  // second time, 1.43 to 1.55. The rest of the walk without that scan costs
-  // too little beside the lexing to show here, made once or twice.
+  // 64 KiB of plain words. With the protected scan made a second time the
+  // line costs 1.3 to 1.6 of its control; the rest of the walk without that
+  // scan costs too little beside the lexing to show here, made once or twice.
   //
   // Every word is distinct (`x0 x1 x2 …`). The control's credential check
   // judges each of its words, as the credential line's side scan judges each
   // of its own. With one word repeated, a check that judges a word once
-  // (#682's, in `credentialTouch`) skipped all but one on the control alone:
-  // the control became cheaper than the work it stands for, and the node
-  // ratio rose from about 0.97 to about 1.1 here and 1.24 to 1.29 under CI's
-  // load, with the credential line no slower.
-  const SIZE = 512 * 1024;
+  // (#682's, in `credentialTouch`) skipped all but one on the control alone,
+  // and the control became cheaper than the work it stands for.
+  //
+  // Timed by medianCostRatio (above): on GitHub's runner 120 pairs read 0.92
+  // to 1.00; with the credential side given 1.5 times the work, 40 pairs read
+  // 1.40 to 1.57 (18 samples each, run 45557906118).
+  const SIZE = 64 * 1024;
   let words = "";
   for (let at = 0; words.length < SIZE; at += 1) words += `x${at} `;
-  const cpu = (run: () => void): number => {
-    const start = process.cpuUsage();
-    run();
-    const used = process.cpuUsage(start);
-    return (used.user + used.system) / 1e6;
-  };
-  const least = (run: () => void): number => Math.min(cpu(run), cpu(run), cpu(run));
-  const control = least(() => classifyCommand(`cp notes.txt design/x ${words}`, TWO_ROUTES));
-  const spent = least(() => classifyCommand(`cp .approval/env design/x ${words}`, TWO_ROUTES));
-  assert.ok(spent <= 1.2 * control, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
+  const copy = medianCostRatio(
+    () => classifyCommand(`cp notes.txt design/x ${words}`, TWO_ROUTES),
+    () => classifyCommand(`cp .approval/env design/x ${words}`, TWO_ROUTES),
+    40,
+  );
+  assert.ok(copy <= 1.2, `cp: the median of 40 pairs is ${copy.toFixed(3)} of the control`);
   assert.deepEqual(pure(`cp .approval/env design/x ${"x ".repeat(8)}`, TWO_ROUTES), [CRED, "policy.edit.design protected-path"]);
   // With #686 in, a copy's landings cost the control most of its time, so a
-  // second text scan no longer shows on the copy (0.92 to 1.02 with it, 0.75
-  // to 0.81 without). A program with no copy plan has no landings: there the
-  // line costs 0.91 to 1.02 of its control with one scan, and 1.32 to 1.86
-  // with the scan made twice (this Mac, merge of 9122cb3e). With distinct
-  // words: 0.76 to 0.96 with one scan, on main 03931ea2 and on #682 alike
-  // (102 runs, 72 of them beside 3 or 15 more copies of this test); 1.36 to
-  // 1.48 with the protected scan made twice, 1.46 to 1.58 with the whole side
-  // scan made twice (this Mac, main 03931ea2).
-  const plainControl = least(() => classifyCommand(`node x.js notes.txt design/x ${words}`, TWO_ROUTES));
-  const plainSpent = least(() => classifyCommand(`node x.js .approval/env design/x ${words}`, TWO_ROUTES));
-  assert.ok(plainSpent <= 1.2 * plainControl, `node: ${plainSpent.toFixed(3)} s against a control of ${plainControl.toFixed(3)} s`);
+  // second text scan no longer shows on the copy (the pair reads 0.69 to 0.79
+  // on the runner either way). A program with no copy plan has no landings:
+  // there a scan made twice shows, so that pair is the one that guards it,
+  // and it takes the 120 rounds.
+  const plain = medianCostRatio(
+    () => classifyCommand(`node x.js notes.txt design/x ${words}`, TWO_ROUTES),
+    () => classifyCommand(`node x.js .approval/env design/x ${words}`, TWO_ROUTES),
+    120,
+  );
+  t.diagnostic(`cost ratios, the medians of the pairs: cp ${copy.toFixed(3)}, node ${plain.toFixed(3)} (bound 1.2)`);
+  assert.ok(plain <= 1.2, `node: the median of 120 pairs is ${plain.toFixed(3)} of the control`);
   assert.deepEqual(pure(`node x.js .approval/env design/x ${"x ".repeat(8)}`, TWO_ROUTES), [CRED, "policy.edit.design protected-path"]);
 });
 
