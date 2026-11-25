@@ -1517,7 +1517,7 @@ test("a credential read is walked once: it costs about what the same line with a
   // The credential answer goes on with the walk it would have taken without
   // the credential word, and its protected scan is the one the credential
   // tier already made, so the line is walked once. A ratio of CPU time over
-  // 512 KiB of plain words, each side the least of three runs. Measured on
+  // 512 KiB of plain words, each side the least of five runs, taken in turn. Measured on
   // this change: 0.93 to 1.04 of the control; with the protected scan made a
   // second time, 1.43 to 1.55. The rest of the walk without that scan costs
   // too little beside the lexing to show here, made once or twice.
@@ -1538,9 +1538,25 @@ test("a credential read is walked once: it costs about what the same line with a
     const used = process.cpuUsage(start);
     return (used.user + used.system) / 1e6;
   };
-  const least = (run: () => void): number => Math.min(cpu(run), cpu(run), cpu(run));
-  const control = least(() => classifyCommand(`cp notes.txt design/x ${words}`, TWO_ROUTES));
-  const spent = least(() => classifyCommand(`cp .approval/env design/x ${words}`, TWO_ROUTES));
+  // The two sides are timed in turn (control, credential, control, …), each
+  // the least of five. Timed one after the other, three and three, a swing in
+  // the runner's load between the two halves moved one side alone: main
+  // 91f91756 failed its own run at 0.820 s against 0.680 s (1.21), and #682 at
+  // 1.641 s against 1.349 s, with no ratio over 1.05 in 120 quiet runs of the
+  // same trees. In turn, a swing falls on both sides.
+  const pair = (controlRun: () => void, spentRun: () => void): [number, number] => {
+    let leastControl = Infinity;
+    let leastSpent = Infinity;
+    for (let round = 0; round < 5; round += 1) {
+      leastControl = Math.min(leastControl, cpu(controlRun));
+      leastSpent = Math.min(leastSpent, cpu(spentRun));
+    }
+    return [leastControl, leastSpent];
+  };
+  const [control, spent] = pair(
+    () => classifyCommand(`cp notes.txt design/x ${words}`, TWO_ROUTES),
+    () => classifyCommand(`cp .approval/env design/x ${words}`, TWO_ROUTES),
+  );
   assert.ok(spent <= 1.2 * control, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
   assert.deepEqual(pure(`cp .approval/env design/x ${"x ".repeat(8)}`, TWO_ROUTES), [CRED, "policy.edit.design protected-path"]);
   // With #686 in, a copy's landings cost the control most of its time, so a
@@ -1552,8 +1568,10 @@ test("a credential read is walked once: it costs about what the same line with a
   // (102 runs, 72 of them beside 3 or 15 more copies of this test); 1.36 to
   // 1.48 with the protected scan made twice, 1.46 to 1.58 with the whole side
   // scan made twice (this Mac, main 03931ea2).
-  const plainControl = least(() => classifyCommand(`node x.js notes.txt design/x ${words}`, TWO_ROUTES));
-  const plainSpent = least(() => classifyCommand(`node x.js .approval/env design/x ${words}`, TWO_ROUTES));
+  const [plainControl, plainSpent] = pair(
+    () => classifyCommand(`node x.js notes.txt design/x ${words}`, TWO_ROUTES),
+    () => classifyCommand(`node x.js .approval/env design/x ${words}`, TWO_ROUTES),
+  );
   assert.ok(plainSpent <= 1.2 * plainControl, `node: ${plainSpent.toFixed(3)} s against a control of ${plainControl.toFixed(3)} s`);
   assert.deepEqual(pure(`node x.js .approval/env design/x ${"x ".repeat(8)}`, TWO_ROUTES), [CRED, "policy.edit.design protected-path"]);
 });
