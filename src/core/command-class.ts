@@ -13447,6 +13447,14 @@ function classifySegmentWithVerb(
     const more = foldedOnly((): ProtectedBeside[] => {
       const rest = restOfWalk();
       if (rest.ok) return protectedBeside(rest);
+      // A copy that WRITES a credential path, and whose walk refuses: the
+      // refusal stands (the review of the M1 fold on #706). Its answer at
+      // dbebd65d was that walk, deferred; a refusal is the strictest answer,
+      // so the union of main's answer and the write's class is the refusal.
+      if (copyWrites.words.size > 0 || copyWrites.landings.length > 0) {
+        refused.outcome = rest;
+        return [];
+      }
       const optionValues = args.flatMap((arg) => {
         const equals = arg.indexOf("=");
         if (equals === -1) return [];

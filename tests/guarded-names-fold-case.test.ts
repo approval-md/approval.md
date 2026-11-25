@@ -2235,3 +2235,27 @@ test("a credential glob as a copy's last operand may be its destination: the wri
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
   }
 });
+
+test("a copy into a credential path: a refusal stands, the carried touch and the unreadable argv's added class are pinned (build-1's S4 on #706)", () => {
+  for (const line of [
+    // Refused on main and at dbebd65d: refused still (the review of the M1 fold).
+    'cp README.md .approval/env > "$(id)"',
+    "cp README.md .approval/env 2>$(id)",
+    "cp -t .approval/env README.md > $(id)",
+    "X=$(id) cp README.md .approval/env",
+    "install README.md .approval/env",
+    "command cp README.md .approval/env --out=APPROVAL.md",
+    "frobnicate README.md .approval/env -oAPPROVAL.md",
+  ]) {
+    assert.equal(classifyCommand(line, TWO_ROUTES).ok, false, line);
+  }
+  // build-1's m10: where main's walk drops the credential touch, it is carried.
+  assert.deepEqual(pure("cp -t .approval/env APPROVAL.md", TWO_ROUTES), ["policy.core protected-path", CRED]);
+  // build-1's m13: an `=` value of an option the table does not know is read
+  // as a possible destination; the class it names is added.
+  assert.deepEqual(pure("cp --frob=.approval/env README.md x", TWO_ROUTES), [CRED, "policy.core protected-path"]);
+  assert.deepEqual(pure("cp --frob=notes.txt README.md x", TWO_ROUTES), ["files.write.workspace workspace-write"]);
+  // A brace as a copy's last operand expands too: `.approval/env{,.bak}`
+  // writes `.approval/env.bak`, a credential path of the gate's directory.
+  assert.deepEqual(pure("cp .approval/env{,.bak}", TWO_ROUTES), [CRED, "policy.core protected-path"]);
+});
