@@ -1186,6 +1186,22 @@ test("past the -t landings cap: files.write.out_of_scope beside files.write.guar
   assert.ok(!few.classes.includes(GUARDED) && !few.classes.includes(OUT), few.classes.join(","));
 });
 
+test("the -t landings cap: the first directory is never capped, and the edge is exact (1,024 judged, 1,025 guarded) (build-1's N1 and N2 on #711)", () => {
+  const files = (n: number): string => Array.from({ length: n }, (_, i) => `f${String(i)}`).join(" ");
+  // One -t: every landing is in the first directory, which the cap does not count.
+  for (const n of [1100, 3000]) {
+    const one = see(`cp -t d0 ${files(n)}`);
+    assert.ok(one.ok && !one.classes.includes(GUARDED), `one -t, ${String(n)} files: ${one.classes.join(",")}`);
+  }
+  // Two -t: the second directory takes every source, the second -t value among them, so n files land n + 1 times
+  // there. 1,023 files: 1,024 landings, all judged (inside the workspace, no guarded class). 1,024 files: 1,025, past
+  // INTO_EXTRA_LANDINGS_CAP, so the segment is guarded as unreadable.
+  const at = see(`cp -t d0 -t d1 ${files(1023)}`);
+  assert.ok(at.ok && !at.classes.includes(GUARDED), `at the cap: ${at.classes.join(",")}`);
+  const past = see(`cp -t d0 -t d1 ${files(1024)}`);
+  assert.ok(past.ok && past.classes.includes(GUARDED), `one past the cap: ${past.classes.join(",")}`);
+});
+
 test("past the -t landings cap through the real hook: out_of_scope human-only denies the line, not a guarded request (lead ruling L63122)", () => {
   const dir = gate(["  files.write.workspace: { autonomy: autonomous }", `  ${OUT}: { autonomy: human-only }`]);
   let n = 0;
