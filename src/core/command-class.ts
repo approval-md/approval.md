@@ -72,6 +72,7 @@ import {
   foldFileName,
   foldNameExact,
   foldNameLower,
+  inFoldedReadingOnly,
   nameListIncludes,
   SUBSTITUTION_SENTINEL,
   takeAmongEqual,
@@ -1227,15 +1228,23 @@ function protectedClassOfWord(candidate: string, extra: readonly ProtectedPathEn
     // map, queue. The bare `.approval` directory itself lands here too.
     if (segment === ".approval") return "policy.core";
     // The harness's own settings, which is where a hook is installed or removed.
+    // A `.claude-<suffix>` folder (one or more characters after the dash) is a
+    // config folder too: every account run with `CLAUDE_CONFIG_DIR=~/.claude-<name>`
+    // reads its settings there (lead, CLAIMS L62289, S2). That rule is in the
+    // FOLDED reading only: as spelled the word keeps the class main gave it, so
+    // both are reported and no policy can find the new answer lighter (the
+    // seat's ruling on the differential of d76ebd0d), and such a path is no
+    // gate organ (a grant must hold in both readings).
     // The bare organ directory itself lands here too, as bare `.approval`,
     // `.codex` and `.hermes` do (review-b A686-FOLD3 M1, lead ruling L61587):
     // `rm -rf .claude`, `mv .claude x` and `chmod -R 000 .claude` remove or
     // disable the hook's registration in one command. A tail with `..` in it
-    // may resolve to the directory, as `.codex`'s does.
-    if (segment === ".claude") {
+    // may resolve to the directory, as `.codex`'s does. That rule is
+    // `.claude`'s only: a bare `.claude-<suffix>` is not an organ directory.
+    if (segment === ".claude" || (segment !== undefined && segment.startsWith(".claude-") && segment.length > ".claude-".length)) {
       const next = segments[index + 1];
-      if (next !== undefined && next.startsWith("settings")) return "policy.core";
-      if (bareOrganDirectory(segments, index)) return "policy.core";
+      if (next !== undefined && next.startsWith("settings") && (segment === ".claude" || inFoldedReadingOnly())) return "policy.core";
+      if (segment === ".claude" && bareOrganDirectory(segments, index)) return "policy.core";
     }
     // Cursor's equivalent surface: the hook install file, hook scripts, and
     // custom-agent prompts. An agent that could write those could write itself
@@ -2161,12 +2170,33 @@ interface LexWord {
    * same `text` as an assignment and is a command word, the program bash runs.
    */
   assignment: boolean;
+  /**
+   * Does the word open with an unquoted, unescaped `=` followed by anything
+   * but another `=` (`=mytool`, `=g++`, `="tool"`, `=$X`)? zsh's equals
+   * expansion turns it into the path of a program on PATH unless `NO_EQUALS`
+   * is set (S2, N1; the seat ruled the form fails closed whatever follows).
+   * Read by the hook's write pass alone; no rule here reads it.
+   */
+  equalsHead?: boolean;
+  /**
+   * An assignment whose value zsh equals-expands when it assigns: an
+   * unquoted `=` opening the value or following a `:` in it (`X==tool`,
+   * `P=a:=tool`). zsh stores the program's path, not the text. Read by the
+   * hook's write pass alone.
+   */
+  assignmentEquals?: boolean;
 }
 
 interface LexRedirect {
   /** `>` and `>>` write; `<` reads. */
   op: ">" | ">>" | "<";
   target: LexWord;
+  /**
+   * A zsh clobber form (`>!`, `>>!`, `>&!`) read at zsh's target. bash
+   * writes a file named `!` in the segment's directory instead (the target
+   * is an argument there). Read by the hook's write pass alone.
+   */
+  clobber?: true;
 }
 
 interface LexSegment {
@@ -2207,6 +2237,14 @@ interface LexSegment {
    * counts as inside.
    */
   subshell: boolean;
+  /**
+   * Did an operator that makes this segment's run conditional or separate
+   * from the line's own shell come before it (`&&`, `||`, `|`, `&`, `(`)?
+   * (Design v4, writes outside the workspace.) Read only by the hook's write
+   * pass, which will not trust a variable assigned in such a segment: bash may
+   * skip it, or run it in a process whose variables the line never sees.
+   */
+  conditional: boolean;
 }
 
 type LexResult =
@@ -2277,6 +2315,7 @@ function lex(command: string): LexResult {
   let depth = 0;
   let segmentStart = 0;
   let index = 0;
+  let conditional = false;
   // Where the last descriptor dup's word ended (`2>&1`): zsh refuses a
   // redirect operator joined to it (`2>&1>!x` writes nothing).
   let dupEnd = -1;
@@ -2293,7 +2332,9 @@ function lex(command: string): LexResult {
         heredoc,
         stdinFed,
         subshell: depth !== 0,
+        conditional,
       });
+      conditional = false;
       // Kept across an EMPTY flush, so the `&` of `|&` (or a newline after a
       // trailing `|`) does not drop the pipe into the next real segment.
       stdinFed = false;
@@ -2413,8 +2454,23 @@ function lex(command: string): LexResult {
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
     const assignment = ASSIGNMENT.test(command.slice(start, index));
-    const paramNames = specialParametersOnly(command.slice(start, index));
-    return { text, quoted, substitutions, splits, expands, zshGlob, paramNames, exact, assignment };
+    const raw = command.slice(start, index);
+    const paramNames = specialParametersOnly(raw);
+    const equalsHead = raw.length > 1 && raw[0] === "=" && raw[1] !== "=";
+    const assignmentEquals = assignment && /^[^=]*=(?:=[^=]|.*:=[^=])/su.test(raw);
+    return {
+      text,
+      quoted,
+      substitutions,
+      splits,
+      expands,
+      zshGlob,
+      paramNames,
+      exact,
+      assignment,
+      ...(equalsHead ? { equalsHead } : {}),
+      ...(assignmentEquals ? { assignmentEquals } : {}),
+    };
   };
 
   while (index < command.length) {
@@ -2608,7 +2664,7 @@ function lex(command: string): LexResult {
         return { ok: false, detail: `redirection ${op} has no target` };
       }
       if (clobber && command.slice(targetStart, index).includes("$'")) return zshClobberRefusal(redirect[0] as string);
-      redirects.push({ op: op.startsWith(">>") ? ">>" : op === "<" ? "<" : ">", target });
+      redirects.push({ op: op.startsWith(">>") ? ">>" : op === "<" ? "<" : ">", target, ...(clobber ? { clobber: true as const } : {}) });
       continue;
     }
 
@@ -2630,6 +2686,9 @@ function lex(command: string): LexResult {
       const pipe = ch === "|" && command[index + 1] !== "|";
       index += ch === "&" && command[index + 1] === "&" ? 2 : ch === "|" && command[index + 1] === "|" ? 2 : 1;
       flush(boundary);
+      // Design v4: every operator but `;` makes what follows conditional, or
+      // separate from the line's own shell (read by the hook's write pass).
+      if (ch !== ";") conditional = true;
       // APRV-510 (refuter rS2): the subshell depth, read by the next flush.
       if (ch === "(") depth += 1;
       if (ch === ")") depth -= 1;
@@ -6402,7 +6461,8 @@ const FIND_EXEC_PRIMARIES: readonly string[] = ["-exec", "-execdir", "-ok", "-ok
  * `find` primaries that write. `-delete` removes every match; `-fprint`,
  * `-fprintf` and `-fls` each create or truncate the file named after them.
  */
-const FIND_WRITE_PRIMARIES: readonly string[] = ["-fprint", "-fprintf", "-fls"];
+/** `find`'s primaries that write the file named by the next word (`-fprint0` too: GNU find's, and a write). */
+export const FIND_WRITE_PRIMARIES: readonly string[] = ["-fprint", "-fprint0", "-fprintf", "-fls"];
 
 /**
  * `find` walks and prints, until a primary makes it act (APRV-283).
@@ -14364,6 +14424,20 @@ export function classifyCommandInThisReading(
 }
 
 /**
+ * {@link classifyCommandInThisReading} with every GLOB-WRITE rule off: the
+ * row main's own classifier gives a segment, before #686 raises a write
+ * pattern to the class it may reach. Read by the hook's write pass to pick
+ * how a segment's words are read; never a decision on its own.
+ */
+export function classifyCommandInThisReadingWithMainRules(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[] = [],
+  context: ClassifierContext = {},
+): CommandClassification {
+  return withMainRules(() => classifyCommandAsRead(command, protectedPaths, context));
+}
+
+/**
  * Join a classification's name readings (`[folded]`, `[folded, asSpelled]`,
  * or the folded answer once per equal claim and then the as-spelled one) as
  * {@link classifyCommand} states: the folded answer, then each later
@@ -14754,6 +14828,12 @@ export interface CommandSegmentShape {
   /** Is this segment's stdin the previous segment's output? (APRV-522.) */
   stdinFed: boolean;
   /**
+   * Is this segment's run conditional, or separate from the line's own shell
+   * (after `&&`, `||`, `|`, `&` or `(`, or inside a subshell)? Design v4: the
+   * write pass trusts no variable assigned in such a segment.
+   */
+  conditional: boolean;
+  /**
    * The inner text of every `$(…)` this segment expands: in its words, its
    * redirection targets and an unquoted heredoc's body (APRV-522), so the
    * hook's disk pass judges the reads a substitution makes.
@@ -14775,6 +14855,22 @@ export interface CommandSegmentShape {
    * its script reads cannot be judged, so the hook's disk pass fails closed.
    */
   opaqueShell: boolean;
+  /**
+   * The redirect targets and words after the binary that open with an
+   * unquoted `=` and a name character (zsh's equals expansion, S2 N1), as
+   * their text: the hook's write pass cannot read where they land.
+   */
+  equalsWords?: string[];
+  /** The `NAME=value` words before the binary whose value zsh equals-expands as it assigns (S2, N1). */
+  equalsAssignments?: string[];
+  /**
+   * What bash writes for each zsh clobber redirect of the segment (`>!`,
+   * `>>!`, `>&!`, read at zsh's target in {@link writes}): a file named `!`
+   * in the segment's directory. Claude Code runs bash where zsh is not the
+   * shell, and #686's classifier joins bash's reading too. Read by the hook's
+   * write pass alone.
+   */
+  clobberBashWrites?: string[];
 }
 
 export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
@@ -14802,6 +14898,7 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
         .filter((redirect) => redirect.op === "<")
         .map((redirect) => redirect.target.text),
       stdinFed: segment.stdinFed,
+      conditional: segment.conditional || segment.subshell,
       substitutions: [
         ...segment.words.flatMap((word) => word.substitutions),
         ...segment.redirects.flatMap((redirect) => redirect.target.substitutions),
@@ -14810,6 +14907,12 @@ export function commandSegmentShapes(command: string): CommandSegmentShape[] | n
       assignments: words.slice(0, cursor),
       script,
       opaqueShell: script === null && inlineShellFlagged(words[cursor] ?? null, words.slice(cursor + 1)),
+      equalsWords: [
+        ...segment.redirects.filter((redirect) => redirect.target.equalsHead === true).map((redirect) => redirect.target.text),
+        ...segment.words.slice(cursor + 1).filter((word) => word.equalsHead === true).map((word) => word.text),
+      ],
+      equalsAssignments: segment.words.slice(0, cursor).filter((word) => word.assignmentEquals === true).map((word) => word.text),
+      clobberBashWrites: segment.redirects.filter((redirect) => redirect.clobber === true).map(() => "!"),
     };
   });
 }

@@ -23,6 +23,9 @@
  *   Explanation.overridden} records what it did say.
  * - `"load-failure"` — the policy could not be loaded, so every class is
  *   `manual`. {@link Explanation.loadFailure} carries the code and message.
+ * - `"class-minimum"` — the class has a built-in minimum
+ *   (`files.write.guarded`, design v4) and the policy resolved it lighter;
+ *   the minimum is what decided.
  *
  * The distinction is operational, not cosmetic: the first is working as
  * intended, the second means the caller under-declared or over-reached, and the
@@ -48,6 +51,7 @@ import type {
 } from "./policy-load.js";
 import {
   agentRequestability,
+  CLASS_MINIMUMS,
   resolve,
   STRICTNESS,
   type AgentRequestability,
@@ -61,6 +65,7 @@ import {
 } from "./read-scope.js";
 import { UNMAPPED_TOOL_CLASS } from "./tool-map.js";
 import { describeDelegation } from "./delegation.js";
+import { WRITE_OUT_OF_SCOPE_CLASS, WRITE_OUT_OF_SCOPE_SHIPPED_AUTONOMY, writeScopeOptedIn } from "./write-scope.js";
 
 /**
  * Action-class grammar for a *concrete* class (not a pattern).
@@ -80,7 +85,7 @@ export function isActionClass(value: string): boolean {
 }
 
 /** Why a `manual` outcome is `manual`. `null` when the outcome is not manual. */
-export type ManualBecause = "matched-rule" | "irreversibility-floor" | "load-failure";
+export type ManualBecause = "matched-rule" | "irreversibility-floor" | "load-failure" | "class-minimum";
 
 /** How a candidate won, or that it merely tied. */
 export type TieBreak =
@@ -299,6 +304,22 @@ export function explain(
     );
   }
 
+  // Design v4, point 8: a write class's explanation says whether the policy
+  // opted in to the out-of-scope class, and names the row when it has not.
+  if (actionClass.startsWith("files.write.")) {
+    decisionPath.push(
+      writeScopeOptedIn(load.policy)
+        ? `write scope: the policy opts in (it names \`${WRITE_OUT_OF_SCOPE_CLASS}\` or declares \`write_scope\`), so a write landing outside the gate root, the scratch and temp roots${load.policy.write_scope?.roots === undefined ? "" : ` and ${renderReadRoots(load.policy.write_scope.roots)}`} is \`${WRITE_OUT_OF_SCOPE_CLASS}\``
+        : `write scope: the row is missing — the policy names no \`${WRITE_OUT_OF_SCOPE_CLASS}\` and declares no \`write_scope\`, so a write outside the workspace keeps the answer it had before that class existed. Add \`${WRITE_OUT_OF_SCOPE_CLASS}: { autonomy: ${WRITE_OUT_OF_SCOPE_SHIPPED_AUTONOMY} }\` to opt in (the guarded list applies either way)`,
+    );
+  }
+  const minimum = CLASS_MINIMUMS[actionClass];
+  if (minimum !== undefined) {
+    decisionPath.push(
+      `built-in minimum: ${quote(actionClass)} never resolves lighter than ${minimum}, whatever a wildcard row, defaults.autonomy, allow_irreversible or a supervision mode says; a row naming it lighter is refused at load`,
+    );
+  }
+
   const candidates = annotate(final.candidates, final.matched?.pattern ?? null);
   describeCandidates(decisionPath, actionClass, candidates);
   describeWinner(decisionPath, load, base.provenance, base.autonomy, candidates, actionClass);
@@ -354,7 +375,11 @@ export function explain(
       allowIrreversible: final.allowIrreversible,
     },
     provenance: final.provenance,
-    manualBecause: manualBecauseOf(final.autonomy, final.floorApplied),
+    manualBecause: manualBecauseOf(
+      final.autonomy,
+      final.floorApplied,
+      reversible !== false && CLASS_MINIMUMS[actionClass] !== undefined,
+    ),
     loadFailure: null,
     matched: final.matched,
     overridden,
@@ -382,8 +407,9 @@ function irreversibilityDecision(
  * The floor is checked before the rule, because when both are true it is the
  * floor that decided — the rule said something more permissive.
  */
-function manualBecauseOf(autonomy: Autonomy, floorApplied: boolean): ManualBecause | null {
+function manualBecauseOf(autonomy: Autonomy, floorApplied: boolean, classMinimum = false): ManualBecause | null {
   if (autonomy !== "manual") return null;
+  if (floorApplied && classMinimum) return "class-minimum";
   return floorApplied ? "irreversibility-floor" : "matched-rule";
 }
 

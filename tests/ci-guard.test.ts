@@ -380,7 +380,8 @@ test("the runner hands every test file the environment scrub, ahead of --test", 
     "run-tests.mjs no longer passes scripts/test-env-scrub.mjs as --import before --test. Order matters: the module must be evaluated before the test file, and the flag must be part of the runner's own execArgv for node --test to copy it onto the file processes.",
   );
   const scrub = readFileSync(join(REPO_ROOT, "scripts", "test-env-scrub.mjs"), "utf8");
-  for (const name of ["FORCE_COLOR", "NO_COLOR"]) {
+  // S2: CLAUDE_CONFIG_DIR and CLAUDE_PROJECT_DIR name the operator's real folders, which the hook reads.
+  for (const name of ["FORCE_COLOR", "NO_COLOR", "CLAUDE_CONFIG_DIR", "CLAUDE_PROJECT_DIR"]) {
     assert.match(
       scrub,
       new RegExp(`delete process\\.env\\.${name}`, "u"),

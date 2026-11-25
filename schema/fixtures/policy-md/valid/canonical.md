@@ -19,6 +19,7 @@ approvers:
 classes:
   read.*:                       { autonomy: autonomous }
   files.write.workspace:        { autonomy: autonomous }
+  files.write.out_of_scope:     { autonomy: supervised-retro }
   calendar.write.own:           { autonomy: supervised-retro }
   communicate.email.draft:      { autonomy: autonomous }
   communicate.email.external:
