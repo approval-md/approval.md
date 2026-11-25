@@ -242,6 +242,21 @@
       },
       "examples": [{ "roots": ["/opt/reference-corpus"] }]
     },
+    "write_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Proposed SPEC.md §5.2 (design v4, writes outside the workspace): the directories an agent's writes may land in. A write whose landing path is outside every root classifies `files.write.out_of_scope`. ADDITIVE ONLY, exactly as `read_scope` is: the built-in roots (the gate root, the session scratchpad and the system temp roots) stand whatever this block says. Its presence, or a `files.write.out_of_scope` row in `classes`, opts the policy in to that class; a policy with neither keeps the answers it had before the class existed. The guarded list (`files.write.guarded`, built-in minimum `manual`) applies to every policy and is not widened by any root.",
+      "properties": {
+        "roots": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "Extra directories a write may land in and stay `files.write.workspace`. Absolute, or resolved against the gate root. Compared by path segment after the runtime resolves the landing on disk, in both readings (the text's and the kernel's). No globs, no negation, nothing to expand.",
+          "items": { "$ref": "#/$defs/readRoot" },
+          "examples": [["/Users/carter/private/orc-work"], ["../worktrees"]]
+        }
+      },
+      "examples": [{ "roots": ["/opt/build-output"] }]
+    },
     "approvers": {
       "type": "object",
       "additionalProperties": false,

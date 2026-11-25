@@ -29,6 +29,12 @@ import { after, test } from "node:test";
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand } from "../src/core/command-class.js";
 
+// Design v4 (writes outside the workspace): a write onto the guarded list (a
+// git hooks folder) or to a target the hook cannot read carries
+// files.write.guarded BESIDE its own class; the class asserted here stands.
+const LISTED = "files.write.guarded write-guarded";
+const UNREADABLE = "files.write.guarded write-unreadable";
+
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-git-dir-writes-2-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
@@ -132,10 +138,10 @@ test("S1 hook: a pattern is expanded on disk and each match walked; one it canno
   writeFileSync(join(repo, "a.log"), "");
   mkdirSync(join(repo, "src"));
   writeFileSync(join(repo, "src", "a.ts"), "");
-  assert.deepEqual(hook("echo x >> l*k/config", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("echo x >> {li,x}nk/config", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("cd l?nk && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
-  assert.deepEqual(hook("cp /tmp/x lin[k]/hooks/pre-push", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("echo x >> l*k/config", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("echo x >> {li,x}nk/config", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("cd l?nk && echo x >> config", repo), [READ_SHELL, DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("cp /tmp/x lin[k]/hooks/pre-push", repo), [DIR_WRITE, LISTED]);
   // Ordinary lines in the same checkout do not move.
   assert.deepEqual(hook("rm *.log", repo), ["files.delete.out_of_scope rm-unreadable-path"]);
   assert.deepEqual(hook("cp src/*.ts out/", repo), ["files.write.workspace workspace-write"]);
@@ -148,9 +154,10 @@ test("S1 hook: a pattern is expanded on disk and each match walked; one it canno
     // A SURE target that cannot be expanded is judged the strict way; a
     // possible one (a header value) by its text, which names no .git.
     // Main's write segment rides beside the raise (lead ruling L61926), and
-    // the disk pass's entry is shown in its place too: two entries.
-    assert.deepEqual(hook("echo x > locked/*/config", repo), [DIR_WRITE, DIR_WRITE]);
-    assert.deepEqual(hook("echo x > locked/*/.g?t/config", repo), [DIR_WRITE]);
+    // the disk pass's entry is shown in its place too: two entries. The write
+    // pass adds its unreadable entry beside them (design v4).
+    assert.deepEqual(hook("echo x > locked/*/config", repo), [DIR_WRITE, DIR_WRITE, UNREADABLE]);
+    assert.deepEqual(hook("echo x > locked/*/.g?t/config", repo), [DIR_WRITE, UNREADABLE]);
     assert.ok(!hook("wget --header=locked/*/x https://example.invalid/x", repo).includes(DIR_WRITE));
   } finally {
     chmodSync(locked, 0o755);
@@ -169,16 +176,16 @@ test("S1 review: a directory listing is read whole; thousands of matches do not 
   assert.deepEqual(hook("cp seed.txt logs/*.log", repo), ["files.write.workspace workspace-write"]);
   // Among them, one link into .git is still found.
   symlinkSync("../.git/config", join(logs, "zz.log"));
-  assert.deepEqual(hook("cp seed.txt logs/*.log", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cp seed.txt logs/*.log", repo), [DIR_WRITE, LISTED]);
 });
 
 test("S1 review: an entry whose own name holds a glob character is a real match", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "a*b"));
-  assert.deepEqual(hook("cd a*b && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(hook("cd a*b && echo x >> config", repo), [READ_SHELL, DIR_WRITE, LISTED]);
   // Matched by another pattern, so only the real listing names it.
-  assert.deepEqual(hook("cd a?b && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
-  assert.deepEqual(hook("echo x >> a*b/config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cd a?b && echo x >> config", repo), [READ_SHELL, DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("echo x >> a*b/config", repo), [DIR_WRITE, LISTED]);
   // A pattern that matches nothing, under a listing that is not empty, is
   // never "no target and nothing unknown": the hook says it cannot place it.
   const { notes } = classifyForHook("cd q*z && echo x > f", [], repo);
@@ -314,8 +321,8 @@ test("S2: ordinary git lines do not move", () => {
 test("S2 hook: a git output option is walked on disk like any other write", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "g"));
-  assert.deepEqual(hook("git diff --output=g/hooks/pre-push", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("git log -1 --output g/config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("git diff --output=g/hooks/pre-push", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("git log -1 --output g/config", repo), [DIR_WRITE, LISTED]);
   assert.deepEqual(hook("git diff --output=out.diff", repo), ["read.shell git-read"]);
 });
 
@@ -360,7 +367,7 @@ test("N1: a link to another checkout's .GIT is a git directory (APFS folds case)
   const other = checkout(at, "other");
   if (!existsSync(join(other, ".GIT"))) return; // a case-sensitive file system: nothing to fold
   symlinkSync("../other/.GIT", join(repo, "o"));
-  assert.deepEqual(hook("echo x >> o/config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("echo x >> o/config", repo), [DIR_WRITE, LISTED]);
 });
 
 test("N1: a git directory named in another case is the git directory", { skip }, () => {
@@ -410,18 +417,21 @@ test("#682's continuation cost line: a word repeated in a segment is placed once
   const many = (word: string, n: number): string => `${word} `.repeat(n);
   const noteOf = (command: string): string => classifyForHook(command, [], repo).notes.find((note) => note.startsWith("git-dir-write:")) ?? "";
   // A target after many repeated sources still lands in .git, and the note
-  // names it, as with one copy of the repeat.
+  // names it, as with one copy of the repeat. The write pass (#695) lists the
+  // git directory beside it, as on main.
   for (const n of [1, 2000]) {
     const command = `cp seed.txt ${many("d*/x", n)}l*k/config`;
-    assert.deepEqual(hook(command, repo), [DIR_WRITE], `n=${String(n)}`);
+    assert.deepEqual(hook(command, repo), [DIR_WRITE, LISTED], `n=${String(n)}`);
     assert.match(noteOf(command), /writes l\*k\/config, which lands at .*\/\.git\/config, inside a git directory/u, `n=${String(n)}`);
   }
   // A repeated tree source that carries .git is found, before or after other repeats.
   for (const command of [`cp -R ${many("../tree/.", 2000)}.`, `cp -R ${many("d*/", 2000)}${many("../t*e/.", 3)}.`]) {
     assert.ok(hook(command, repo).includes(DIR_WRITE), command.slice(0, 40));
   }
-  // Repeated ordinary words do not move.
-  assert.deepEqual(hook(`cp seed.txt ${many("d*/x", 2000)}out/`, repo), ["files.write.workspace workspace-write"]);
+  // Repeated ordinary words do not move. The write pass (#695) reads no more
+  // patterns than its bound in one segment, so 2,000 of them are unreadable
+  // to it, as on main.
+  assert.deepEqual(hook(`cp seed.txt ${many("d*/x", 2000)}out/`, repo), ["files.write.workspace workspace-write", UNREADABLE]);
   // A redirection repeated: each is a sure target; the first that lands in .git answers.
   assert.deepEqual(hook(`echo x ${many("> d*/y", 500)}> l?nk/config`, repo).filter((entry) => entry === DIR_WRITE).length > 0, true);
 });

@@ -570,7 +570,9 @@ test("review-b's N1 and codex's M1 at bcb1be08: each class a word's readings nam
   }
   // A copy READS its sources: `.approval/*` as a source is the approval
   // home's class, as on main, beside the credential read.
-  assert.deepEqual([...classes("cp .approval/* /tmp/x < .approval/env")].sort(), ["account.credential", "policy.core"]);
+  // #695's write pass also lands the pattern where it is, the log under it
+  // included, as on main.
+  assert.deepEqual([...classes("cp .approval/* /tmp/x < .approval/env")].sort(), ["account.credential", "log.mutate", "policy.core"]);
   // Every candidate under the log is the log: no cap demotes or widens it.
   assert.deepEqual(classes("echo x > .approval/log/*/*"), ["log.mutate"]);
   assert.match(claude("echo x > .approval/log/*/*", logLab), /^deny: .*log\.mutate/u);
@@ -1089,7 +1091,12 @@ test("build-1's S1 at 64c43399: a brace group the shell expands anyway, beside a
     "mkdir -p ~/proj/{src,test}$X",
   ]) {
     assert.equal(zshOptionCommandReading(command, null), null, command);
-    assert.match(claude(command), /^allow: autonomous: files\.write\.workspace$/u, command);
+    // #695 (design v4, decision B): a parameter or a substitution the line
+    // never sets makes the target unreadable to the write pass, which adds
+    // files.write.guarded beside main's class, as on main. No guarded name's
+    // class is reached (main's answer, read in process: the guarded class
+    // asks a human, and the hook would wait its whole window for each).
+    assert.deepEqual([...new Set(classes(command))].sort(), ["files.write.guarded", "files.write.workspace"], command);
   }
   // The guarded twins keep the any-name reading: `{A}` is a braceccl group
   // (`A`), a `^` is a negation, `{1..$N}` is no sequence until the parameter is

@@ -27,6 +27,11 @@ import { after, test } from "node:test";
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand } from "../src/core/command-class.js";
 
+// Design v4 (writes outside the workspace): a write to a target the hook
+// cannot read (a command substitution) carries files.write.guarded BESIDE its
+// own class; the class asserted here stands.
+const UNREADABLE = "files.write.guarded write-unreadable";
+
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-git-dir-writes-subst-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
@@ -218,11 +223,11 @@ test("hook: both spellings are git-dir-write in a checkout, and ordinary lines d
   ]) {
     assert.ok(hook(command, repo).includes(DIR_WRITE), command);
   }
-  assert.deepEqual(hook("echo x > out/$(date +%F).txt", repo), [REDIRECT]);
-  assert.deepEqual(hook('cd "$(git rev-parse --show-toplevel)" && echo x > notes.txt', repo), [READ_SHELL, REDIRECT]);
-  assert.deepEqual(hook('echo x > "$(git rev-parse --short HEAD)".txt', repo), [REDIRECT]);
-  assert.deepEqual(hook("B=$(git rev-parse --abbrev-ref HEAD); echo x > out/$B.txt", repo), [ASSIGNMENT, REDIRECT]);
-  assert.deepEqual(hook("echo x > src/$(date +%s).log", repo), [REDIRECT]);
+  assert.deepEqual(hook("echo x > out/$(date +%F).txt", repo), [REDIRECT, UNREADABLE]);
+  assert.deepEqual(hook('cd "$(git rev-parse --show-toplevel)" && echo x > notes.txt', repo), [READ_SHELL, REDIRECT, UNREADABLE]);
+  assert.deepEqual(hook('echo x > "$(git rev-parse --short HEAD)".txt', repo), [REDIRECT, UNREADABLE]);
+  assert.deepEqual(hook("B=$(git rev-parse --abbrev-ref HEAD); echo x > out/$B.txt", repo), [ASSIGNMENT, REDIRECT, UNREADABLE]);
+  assert.deepEqual(hook("echo x > src/$(date +%s).log", repo), [REDIRECT, UNREADABLE]);
 });
 
 // ---------------------------------------------------------------------------
@@ -306,7 +311,7 @@ test("hook: printf's precision on %b decoded bytes, with its control (codex on 0
   assert.ok(hook(`echo x > "$(printf '%.5b' '.g\\0itX')/config"`, repo).includes(DIR_WRITE));
   assert.ok(hook(`echo x > $(printf '%.4s' '.gi*xyz')/config`, repo).includes(DIR_WRITE));
   assert.ok(hook(`echo x > "$(printf '%.7s' 'é/.gitfoo')/config"`, repo).includes(DIR_WRITE));
-  assert.deepEqual(hook(`echo x > "$(printf '%.6b' '.g\\0itX')/config"`, repo), [REDIRECT]);
+  assert.deepEqual(hook(`echo x > "$(printf '%.6b' '.g\\0itX')/config"`, repo), [REDIRECT, UNREADABLE]);
 });
 
 test("hook: the S1 and S2 spellings are git-dir-write in a checkout", { skip }, () => {
@@ -321,7 +326,7 @@ test("hook: the S1 and S2 spellings are git-dir-write in a checkout", { skip }, 
     assert.ok(hook(command, repo).includes(DIR_WRITE), command);
   }
   assert.deepEqual(hook("printf $'a\\tb\\n' > out.tsv", repo), [REDIRECT]);
-  assert.deepEqual(hook('echo x > "${OUT:-build}/log.txt"', repo), [REDIRECT]);
+  assert.deepEqual(hook('echo x > "${OUT:-build}/log.txt"', repo), [REDIRECT, UNREADABLE]);
 });
 
 // ---------------------------------------------------------------------------
@@ -636,7 +641,7 @@ test("hook: the gate's spellings in a checkout", { skip }, () => {
   ]) {
     assert.ok(hook(command, repo).includes(DIR_WRITE), command);
   }
-  assert.deepEqual(hook(`echo x > "$(printf '%s-%s' a b).txt"`, repo), [REDIRECT]);
+  assert.deepEqual(hook(`echo x > "$(printf '%s-%s' a b).txt"`, repo), [REDIRECT, UNREADABLE]);
 });
 
 test("gate N2 (m11): an ANSI-C string ends at a NUL past the near reader's reach", () => {

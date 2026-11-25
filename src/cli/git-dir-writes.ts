@@ -284,7 +284,27 @@ const DIRECTORY_OR_LINK = (entry: Dirent): boolean => entry.isDirectory() || ent
  * read; the caller then judges a sure target the strict way and a possible
  * one by its text (review of the second fold).
  */
-function expandOnDisk(base: string, word: string): Expansion {
+export function expandOnDisk(
+  base: string,
+  word: string,
+  /**
+   * Design v4, point 6 (the write-scope pass): `keepFiles` keeps a plain file
+   * that matches a pattern segment as a match of its own, so a match is judged
+   * by its own name; `deadline` (a `Date.now()` value) gives up once passed.
+   * Absent, this step behaves exactly as the git-directory pass has it.
+   */
+  options: {
+    keepFiles?: boolean;
+    deadline?: number;
+    /**
+     * The listing of one directory, or the error code reading it gave: the
+     * write pass's per-call memo ({@link listDirectory} by default). A memo
+     * keeps only what the disk said; the entries are matched here, in the
+     * current name reading, every time.
+     */
+    list?: (path: string) => Dirent[] | string;
+  } = {},
+): Expansion {
   const words = word.includes("{") ? expandBraces(word) : [word];
   if (words === null) return { giveUp: "more brace alternatives than this hook expands" };
   const join2 = (place: string, name: string): string => (place === "/" ? `/${name}` : `${place}/${name}`);
@@ -303,20 +323,23 @@ function expandOnDisk(base: string, word: string): Expansion {
       const next: Placed[] = [];
       for (const place of places) {
         if (place.from !== "match") continue;
-        let entries: Dirent[];
-        try {
-          entries = readdirSync(place.path, { withFileTypes: true });
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException).code ?? "an error";
-          if (code === "ENOENT" || code === "ENOTDIR") continue;
-          return { giveUp: `${place.path} cannot be listed (${code})` };
+        const listed = (options.list ?? listDirectory)(place.path);
+        if (typeof listed === "string") {
+          if (listed === "ENOENT" || listed === "ENOTDIR") continue;
+          return { giveUp: `${place.path} cannot be listed (${listed})` };
         }
+        const entries = listed;
         visited += entries.length;
         if (visited > ENTRY_LIMIT) return { giveUp: `more than ${String(ENTRY_LIMIT)} entries to read` };
+        if (options.deadline !== undefined && Date.now() > options.deadline) {
+          return { giveUp: "the time this hook gives one expansion ran out" };
+        }
         next.push({ path: join2(place.path, segment), from: "parent" });
         for (const entry of entries) {
           if (!globSegmentMatches(segment, entry.name)) continue;
-          if (DIRECTORY_OR_LINK(entry) || foldNameLower(entry.name) === ".git") next.push({ path: join2(place.path, entry.name), from: "match" });
+          if (DIRECTORY_OR_LINK(entry) || foldNameLower(entry.name) === ".git" || options.keepFiles === true) {
+            next.push({ path: join2(place.path, entry.name), from: "match" });
+          }
         }
       }
       places = next;
@@ -337,6 +360,15 @@ function distinctBy<T>(items: readonly T[], key: (item: T) => string): T[] {
     out.push(item);
   }
   return out;
+}
+
+/** A directory's entries, or the error code reading it gave ("an error" when it has none). */
+export function listDirectory(path: string): Dirent[] | string {
+  try {
+    return readdirSync(path, { withFileTypes: true });
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code ?? "an error";
+  }
 }
 
 /** Does anything exist at `path` itself (a link counts, followed or not)? */

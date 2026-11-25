@@ -269,6 +269,22 @@ export function equalClaims<T>(claims: readonly T[]): readonly T[] {
 }
 
 /**
+ * Does a rule that holds in the FOLDED reading only apply here? `true` folded,
+ * `false` as spelled. Calling it records that this compare's two readings
+ * differ, so {@link eachNameReading} runs the as-spelled reading too and the
+ * caller reports both answers: the as-spelled one is exactly the answer the
+ * guards gave before the rule existed. Call it only where the rule would
+ * otherwise apply, so a line it never reaches pays for one reading. Used for
+ * the `.claude-<suffix>` settings rule (S2: a spelling keeps the class main
+ * gave it, as 7bff5543 did for folded names).
+ */
+export function inFoldedReadingOnly(): boolean {
+  if (spelledReading) return false;
+  readingsDiverged = true;
+  return true;
+}
+
+/**
  * Answers that only the folded reading reports, beside the one the guards
  * gave before names folded (every OTHER guarded class a segment's targets
  * take): `make()` folded, nothing as spelled, so the as-spelled reading stays
