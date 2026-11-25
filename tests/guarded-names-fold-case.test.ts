@@ -2092,6 +2092,9 @@ const CRED_WRITE_UNION: readonly (readonly [string, readonly string[], readonly 
   ["cp ~/.hermes/.env -t .approval -t .approval s/env", ["policy.core protected-path", "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
   // A landing under a directory where any name is credential material.
   ["cp .approval/env s/k1 .approval/keys/", [CRED], ["policy.core protected-path", CRED]],
+  // Main's answer is another protected class: the write's class is added after it.
+  ["cp .approval/log/x .approval/env", ["log.mutate protected-path", CRED], ["log.mutate protected-path", CRED, "policy.core protected-path"]],
+  ["cp .approval/log/x ~/.hermes/auth.json", ["log.mutate protected-path", CRED], ["log.mutate protected-path", CRED, "policy.core protected-path"]],
 ];
 
 test("a copy into a credential path keeps every class main gave it and adds the write's (build-1's M1 on #706)", () => {
