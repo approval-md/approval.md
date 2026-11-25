@@ -566,9 +566,11 @@ test("listings: the four workflow lines by what the directory holds", () => {
     assert.deepEqual(withListing(command, { [dir]: ["apprOVAL.MD"] }), raised, `${command} apprOVAL.MD`);
     // Unlisted, `*` may be `.approval` itself: a command on it takes the
     // class of its log too (lead ruling L62013, S1).
-    const unlisted = [...raised, "log.mutate"];
-    assert.deepEqual(withListing(command, { [dir]: "unreadable" }), unlisted, `${command} unreadable`);
-    assert.deepEqual(withListing(command, {}), unlisted, `${command} not listed`);
+    // Every class a candidate names is judged, not the strictest alone (#682's
+    // reader; review-b N1 at bcb1be08): `AGENTS.md`, and `.hermes` with its cron folder.
+    const unlisted = ["policy.core", "policy.edit", main, "log.mutate", "cron.manage"].sort();
+    assert.deepEqual([...withListing(command, { [dir]: "unreadable" })].sort(), unlisted, `${command} unreadable`);
+    assert.deepEqual([...withListing(command, {})].sort(), unlisted, `${command} not listed`);
   }
   // A dot-name counts on a line that may turn dot matching on.
   const classes = withListing("GLOBIGNORE=x; echo x > dist/*/env", { "/w/dist": [".approval"] });
@@ -584,7 +586,8 @@ test("listings: home organs, absolute and relative prefixes, the first globbed l
   assert.deepEqual(withListing("echo x > /abs/out/*", { "/abs/out": ["APPROVAL.md"] }), andMain(["policy.core"], "echo x > /abs/out/*", { "/abs/out": ["APPROVAL.md"] }));
   // A deeper globbed level keeps the over-approximated reading.
   // (`src/lib/*` may be `src/lib/.approval` itself: its log's class too, L62013 S1.)
-  assert.deepEqual(withListing("echo x > src/*/*", { "/w/src": ["lib"] }), ["policy.core", "files.write.workspace", "log.mutate"]);
+  // Every class a candidate names (#682's reader; review-b N1 at bcb1be08).
+  assert.deepEqual(withListing("echo x > src/*/*", { "/w/src": ["lib"] }), ["policy.core", "policy.edit", "files.write.workspace", "log.mutate", "cron.manage"]);
   assert.deepEqual(withListing("echo x > src/*/*.ts", { "/w/src": ["lib"] }), andMain(["files.write.workspace"], "echo x > src/*/*.ts", { "/w/src": ["lib"] }));
 });
 
@@ -1269,7 +1272,8 @@ test("lead ruling (CLAIMS L61492, L61497): a write's * or ? that would match a g
   // class rides beside the one a destination pattern raised; the plain pass
   // reads destinations as before the ruling, so `.cl*/` carries nothing new.
   // `.git/*` may be `.git/.approval`, a folder a move replaces: its log's class too (L62013, S1).
-  assert.deepEqual(classesOf("mv a .git/*"), ["policy.core", "vcs.history.rewrite", "log.mutate"]);
+  // Every class a candidate names (#682's reader; review-b N1 at bcb1be08).
+  assert.deepEqual(classesOf("mv a .git/*"), ["policy.core", "vcs.history.rewrite", "policy.edit", "log.mutate", "cron.manage"]);
   assert.deepEqual(classesOf("rsync -a evil/ .cl*/"), andMain(["policy.core"], "rsync -a evil/ .cl*/"));
 });
 
@@ -1500,7 +1504,10 @@ test("security review of the parents rule (L61587), 5: a tail after an unreadabl
   }
   // Lead ruling L62435 (S7): an ordinary variable below the working
   // directory, or after another, keeps main's class (it was policy.core).
-  // (`$X/*` keeps #686's pattern answer, main's since 9122cb3e.)
+  // (`$X/*` keeps #686's pattern answer, main's since 9122cb3e, widened by #682's
+  // M2 fold: an unreadable part may name any guarded path, so the answer carries
+  // every class one can hold, policy.edit (.github) and cron.manage included;
+  // lead ruling L62588.)
   // The spliced reading (L62568, build-6) leads with the log: `$X/*` may be
   // `.approval/log/*`; every other guarded folder it may be rides beside.
   assert.deepEqual(classesOf("rm -rf $X/*"), ["log.mutate", "policy.core", "policy.edit", "cron.manage", "files.delete.out_of_scope"]);
@@ -1943,11 +1950,13 @@ test("cost (L62090): a word already judged on a line is not walked again, and st
   // budget the line answers `log.mutate`, exactly where the repeated walks did.
   const rsync = (k: number): string => `rsync -aR ${"s/*/./a* ".repeat(k)}d*/`;
   const cp = (k: number): string => `cp ${"s/*.json ".repeat(k)}d*/`;
-  assert.deepEqual(classesOf(rsync(1)).sort(), ["network.call", "policy.core"]);
-  assert.deepEqual(classesOf(rsync(1000)).sort(), ["network.call", "policy.core"]);
-  // Past the budget the landing answers `log.mutate`; since main's #690 the
-  // operands' own `policy.core` (`a*` may be `APPROVAL.md`) rides beside it.
-  assert.deepEqual(classesOf(rsync(2000)).sort(), ["log.mutate", "network.call", "policy.core"]);
+  // `a*` may be `APPROVAL.md` and `AGENTS.md`: each class is judged (#682's
+  // reader; review-b N1 at bcb1be08).
+  assert.deepEqual(classesOf(rsync(1)).sort(), ["network.call", "policy.core", "policy.edit"]);
+  assert.deepEqual(classesOf(rsync(1000)).sort(), ["network.call", "policy.core", "policy.edit"]);
+  // Past the budget the landing answers `log.mutate` and `policy.core`
+  // (GLOB_GUARD_UNKNOWN); the operands' own classes ride beside it.
+  assert.deepEqual(classesOf(rsync(2000)).sort(), ["log.mutate", "network.call", "policy.core", "policy.edit"]);
   assert.deepEqual(classesOf(cp(1000)).sort(), ["files.write.workspace"]);
   assert.deepEqual(classesOf(cp(2000)).sort(), ["files.write.workspace", "log.mutate"]);
 });

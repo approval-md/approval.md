@@ -66,6 +66,7 @@ import {
   readTargetsOf,
 } from "./read-scope.js";
 import {
+  apartFromCallerReading,
   eachNameReading,
   equalClaims,
   foldedOnly,
@@ -77,6 +78,10 @@ import {
   inFoldedReadingOnly,
   markReadingsDiverged,
   nameListIncludes,
+  localReadingEnd,
+  localReadingSame,
+  localReadingStart,
+  localReadingsSettling,
   namesReadAsSpelled,
   readingsDivergedNow,
   SUBSTITUTION_SENTINEL,
@@ -954,10 +959,21 @@ export function protectedPathClass(
   // claims the classes of the guarded paths inside it, taken after the
   // word's own claims ({@link folderClaimsOfWord}).
   const inside: string[] = [];
-  for (const expansion of expansions) {
-    const own = protectedClaimsOfWord(expansion, extra);
-    for (const cls of own) if (!claims.includes(cls)) claims.push(cls);
-    for (const cls of folderClaimsOfWord(expansion, own, extra)) if (!inside.includes(cls)) inside.push(cls);
+  // Outside the hook's settled plain-name line nothing can be settled
+  // ({@link localReadingsSettling}), and {@link addExpansionClaims} would
+  // answer as this inline loop does: so every other caller keeps the loop as
+  // it was before 49199b6b. Cost: the write-target pattern reader's walk asks
+  // here once per candidate, and through the wrapper the call that first made
+  // this hot paid for a larger optimizing compile, counted in its CPU time
+  // (node 22: `echo x > ~/.hermes/*/` and 2,000 `*`, 23 to 33 CPU ms a call).
+  if (localReadingsSettling()) {
+    for (const expansion of expansions) addExpansionClaims(expansion, extra, claims, inside);
+  } else {
+    for (const expansion of expansions) {
+      const own = protectedClaimsOfWord(expansion, extra);
+      for (const cls of own) if (!claims.includes(cls)) claims.push(cls);
+      for (const cls of folderClaimsOfWord(expansion, own, extra)) if (!inside.includes(cls)) inside.push(cls);
+    }
   }
   if (claims.length === 0) return null;
   const ranked = claims
@@ -965,6 +981,54 @@ export function protectedPathClass(
     .sort((a, b) => protectedRank(a.cls) - protectedRank(b.cls) || a.index - b.index)
     .map((claim) => claim.cls);
   return takeAmongEqual([...ranked, ...inside.filter((cls) => !ranked.includes(cls))]);
+}
+
+/**
+ * One expansion's claims for {@link protectedPathClass}, added to `claims`
+ * (its own, {@link protectedClaimsOfWord}) and `inside` (the folder's,
+ * {@link folderClaimsOfWord}): judged as if inline, but where its compares
+ * diverge, judged as spelled too, and where both readings answer the same
+ * the caller's reading is not marked ({@link localReadingSame}): a path such
+ * as `/Users/x/.hermes/a` folds `Users` and claims the same either way, so
+ * the caller's line is not read again as spelled for it (cost: the hook's
+ * synthetic line of every entry of a directory, each under the same home).
+ * Whether a GLOB-WRITE rule fired ({@link markGlobWriteFired}) is part of the
+ * answer compared, and the flag the caller sees is the folded run's, as
+ * inline: the as-spelled run's never reaches it.
+ */
+function addExpansionClaims(expansion: string, extra: readonly ProtectedPathEntry[], claims: string[], inside: string[]): void {
+  const before = globWriteFired;
+  globWriteFired = false;
+  let own: readonly string[] = [];
+  let folder: readonly string[] = [];
+  let fired = false;
+  let settle = false;
+  const saved = localReadingStart();
+  try {
+    own = protectedClaimsOfWord(expansion, extra);
+    folder = folderClaimsOfWord(expansion, own, extra);
+    fired = globWriteFired;
+  } finally {
+    settle = localReadingEnd(saved);
+    globWriteFired = before || globWriteFired;
+  }
+  if (settle) {
+    globWriteFired = false;
+    try {
+      const spelledOwn = withNamesAsSpelled(() => protectedClaimsOfWord(expansion, extra));
+      const spelledFolder = withNamesAsSpelled(() => folderClaimsOfWord(expansion, spelledOwn, extra));
+      if (globWriteFired === fired && sameStrings(own, spelledOwn) && sameStrings(folder, spelledFolder)) localReadingSame(saved);
+    } finally {
+      globWriteFired = before || fired;
+    }
+  }
+  for (const cls of own) if (!claims.includes(cls)) claims.push(cls);
+  for (const cls of folder) if (!inside.includes(cls)) inside.push(cls);
+}
+
+/** Are `a` and `b` the same strings in the same order? */
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((each, index) => each === b[index]);
 }
 
 // ===========================================================================
@@ -2272,7 +2336,16 @@ function credentialTouch(
   args: readonly string[],
   literals: readonly (WordFacts | undefined)[] = [],
 ): CredentialOutcome | null {
-  const named = credentialReadEntries(basename, args, literals).find((entry) => isCredentialPathAsRead(entry.word, entry.facts));
+  // A word repeated is judged once: the same answer (review-b's M3 at
+  // 3774fdd4, a word the zsh option reading repeats thousands of times). The
+  // key is the word and its literal `$` positions, all the answer reads.
+  const judged = new Set<string>();
+  const named = credentialReadEntries(basename, args, literals).find((entry) => {
+    const key = `${entry.word}\u0000${entry.facts?.literalAt?.join(",") ?? ""}`;
+    if (judged.has(key)) return false;
+    judged.add(key);
+    return isCredentialPathAsRead(entry.word, entry.facts);
+  });
   if (named !== undefined) {
     return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named.word };
   }
@@ -2566,7 +2639,7 @@ interface PendingHeredoc {
  * covered in both quote styles by `tests/command-class-quoting.test.ts`, so an
  * edit that loses the property fails there rather than in someone's notes.
  */
-function lex(command: string): LexResult {
+function lex(command: string, bodiesCut = false): LexResult {
   const segments: LexSegment[] = [];
   let words: LexWord[] = [];
   let redirects: LexRedirect[] = [];
@@ -3062,7 +3135,7 @@ function lex(command: string): LexResult {
     words.push(word);
   }
 
-  if (pending.length > 0) {
+  if (pending.length > 0 && !bodiesCut) {
     const heredoc = pending[0] as PendingHeredoc;
     return { ok: false, detail: `heredoc <<${heredoc.terminator} is never terminated` };
   }
@@ -5251,7 +5324,7 @@ const GLOB_ELEMENT_LIMIT = 1024;
 type GlobElement = { star: true } | { star: false; source: string; test?: RegExp };
 
 /** The last pattern read into elements, so a disk walk reads it once. */
-let globElementsCache: { pattern: string; elements: GlobElement[] | null } | null = null;
+let globElementsCache: { pattern: string; asMain: boolean; elements: GlobElement[] | null } | null = null;
 
 /**
  * A glob pattern segment as elements (review of the substitution fold, M1),
@@ -5264,13 +5337,15 @@ let globElementsCache: { pattern: string; elements: GlobElement[] | null } | nul
  * bracket expression cannot be turned into an expression: the caller judges
  * both the strict way.
  */
-function globElements(pattern: string): GlobElement[] | null {
-  if (globElementsCache !== null && globElementsCache.pattern === pattern) return globElementsCache.elements;
+function globElements(pattern: string, asMain = false): GlobElement[] | null {
+  if (globElementsCache !== null && globElementsCache.pattern === pattern && globElementsCache.asMain === asMain) {
+    return globElementsCache.elements;
+  }
   let globs = 0;
   for (let at = 0; at < pattern.length; at += 1) {
     const char = pattern[at];
     if ((char === "*" || char === "?" || char === "[") && (globs += 1) > GLOB_ELEMENT_LIMIT) {
-      globElementsCache = { pattern, elements: null };
+      globElementsCache = { pattern, asMain, elements: null };
       return null;
     }
   }
@@ -5305,9 +5380,10 @@ function globElements(pattern: string): GlobElement[] | null {
         one("\\[");
         continue;
       }
-      // A bracket expression: a leading `!` or `^` negates it and a leading
-      // `]` is a member; a POSIX class, equivalence class or collating
-      // element (`[:alpha:]`, `[=g=]`, `[.g.]`) is skipped to its own close
+      // A bracket expression: a leading `!` or `^` makes it any one
+      // character (below) and a leading `]` is a member; a POSIX class,
+      // equivalence class or collating element (`[:alpha:]`, `[=g=]`,
+      // `[.g.]`) is skipped to its own close
       // and makes the expression match ANY one character, the strict side
       // (review of the second fold). Unclosed, the `[` is a literal.
       let close = at + 1;
@@ -5345,10 +5421,40 @@ function globElements(pattern: string): GlobElement[] | null {
         at = close;
         continue;
       }
-      let body = pattern.slice(at + 1, close);
-      const negated = body.startsWith("!") || body.startsWith("^");
-      if (negated) body = body.slice(1);
-      one(`[${negated ? "^" : ""}${body.replace(/[\\\]^]/gu, "\\$&")}]`);
+      const body = pattern.slice(at + 1, close);
+      if (asMain && (body.startsWith("^") || body.startsWith("!"))) {
+        // As main read it: a class of every character but the members
+        // (main's pass, {@link withMainRules}; review-b's M1 at 3774fdd4).
+        one(`[^${body.slice(1).replace(/[\\\]^]/gu, "\\$&")}]`);
+        at = close;
+        continue;
+      }
+      if (body.startsWith("^") || body.startsWith("!")) {
+        // `[!...]` and `[^...]` are any one character, as in the hook's own
+        // reader (src/core/glob-match.ts): bash and zsh negate both, dash
+        // reads `^` as a member (`.gi[^t]` names `.git` under dash), and a
+        // `!` the command escaped or quoted (`[\!t]`, `["!"t]`) is a member
+        // to every shell, which the lexer's text no longer shows, so
+        // `.gi[\!t]/config` is `.git/config` (review-b's M-A on 83f30bdc).
+        // After `[!]` or `[^]` the readings close the class in different
+        // places, and a class the old expression could not build (a
+        // reversed range, `[^z-a]`) stays the strict unknown, as it was
+        // before the widening (codex on 83f30bdc).
+        let builds = true;
+        try {
+          new RegExp(`[^${body.slice(1).replace(/[\\\]^]/gu, "\\$&")}]`, "iu");
+        } catch {
+          builds = false;
+        }
+        if (body[1] === "]" || !builds) {
+          globElementsCache = { pattern, asMain, elements: null };
+          return null;
+        }
+        one("[\\s\\S]");
+        at = close;
+        continue;
+      }
+      one(`[${body.replace(/[\\\]^]/gu, "\\$&")}]`);
       at = close;
     } else {
       one(char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"));
@@ -5365,7 +5471,7 @@ function globElements(pattern: string): GlobElement[] | null {
       break;
     }
   }
-  globElementsCache = { pattern, elements: result };
+  globElementsCache = { pattern, asMain, elements: result };
   return result;
 }
 
@@ -5387,8 +5493,35 @@ function globElements(pattern: string): GlobElement[] | null {
  */
 export function globSegmentMatches(pattern: string, name: string): boolean {
   if (!isPatternSegment(pattern)) return foldNameLower(pattern) === foldNameLower(name);
+  return globElementsMatch(pattern, name);
+}
+
+/** The position walk of {@link globSegmentMatches}. */
+function globElementsMatch(pattern: string, name: string): boolean {
   if (name.startsWith(".") && (pattern.startsWith("*") || pattern.startsWith("?"))) return false;
-  const elements = globElements(pattern);
+  const matched = walkGlobElements(globElements(pattern, mainRulesOnly), name);
+  // `[!g]` and `[^g]` are any one character since #682, where main read a
+  // class of every character but `g`: a name that matches only so is a
+  // GLOB-WRITE reading, and main's pass reads the line again as main did
+  // ({@link markGlobWriteFired}; review-b's M1 at 3774fdd4: `echo x >
+  // .[\!g]it/config` keeps main's workspace write beside the `.git` write).
+  if (matched && !mainRulesOnly && negatesAClass(pattern) && !walkGlobElements(globElements(pattern, true), name)) {
+    markGlobWriteFired();
+  }
+  return matched;
+}
+
+/** The last pattern {@link negatesAClass} read: a disk walk tests one pattern against every name. */
+let negatesCache: { pattern: string; negates: boolean } | null = null;
+
+/** Does `pattern` hold a `[!` or `[^`? Read once per pattern, not once per name tested. */
+function negatesAClass(pattern: string): boolean {
+  if (negatesCache === null || negatesCache.pattern !== pattern) negatesCache = { pattern, negates: /\[[!^]/u.test(pattern) };
+  return negatesCache.negates;
+}
+
+/** The position walk over `elements`; `null` elements match any name, the strict side. */
+function walkGlobElements(elements: GlobElement[] | null, name: string): boolean {
   if (elements === null) return true;
   const chars = Array.from(name);
   // live[p]: the first p characters of the name are matched so far.
@@ -5405,9 +5538,9 @@ export function globSegmentMatches(pattern: string, name: string): boolean {
         }
       }
     } else {
-      element.test ??= new RegExp(`^${element.source}$`, "iu");
+      const test = (element.test ??= new RegExp(`^${element.source}$`, "iu"));
       for (let p = 0; p < chars.length; p += 1) {
-        if (live[p] === 1 && element.test.test(chars[p] as string)) {
+        if (live[p] === 1 && test.test(chars[p] as string)) {
           next[p + 1] = 1;
           any = true;
         }
@@ -10314,7 +10447,15 @@ function strictestProtectedWrite(
   // The text answer (`text`) is kept, for the record of whether a reading raised it.
   let best = text;
   if (glob.off || mainRulesOnly) return best;
+  // Every class a reading named, with the word that named it (#682's reader,
+  // review-b N1 and codex's M1 at bcb1be08): a reading that names a class
+  // below the answer's rank still has it judged, beside the answer (folded).
+  const named: { surface: string; path: string }[] = [];
+  const offerEach = (surfaces: readonly string[], word: string): void => {
+    for (const surface of surfaces) offer(surface, word);
+  };
   const offer = (surface: string | null, word: string): void => {
+    if (surface !== null && !named.some((hit) => hit.surface === surface)) named.push({ surface, path: word });
     if (surface !== null && (best === null || protectedRank(surface) < protectedRank(best.surface))) {
       // Every class the words took so far rides beside the raise (#690: every
       // protected class a command writes is judged): main's text answer and
@@ -10352,8 +10493,12 @@ function strictestProtectedWrite(
   // `log.mutate`, as that walk did.
   const spent = new Map<string, number>();
   for (const [index, word] of words.entries()) {
-    // Review-b M1: nothing is stricter than log.mutate, so stop there.
-    if (best !== null && (best as { surface: string }).surface === "log.mutate") break;
+    // Review-b M1: once the line's matcher budget is spent, every later word
+    // answers the unknown classes ({@link globGuardUnknown}), which an earlier
+    // word offered already, so stop there. (Before, the walk stopped at the
+    // first `log.mutate`, and the classes of the words after it were not
+    // judged.)
+    if (glob.budget.left < 0 && named.some((hit) => hit.surface === "log.mutate")) break;
     // The word's own literal `$` (a lexed word's, where the caller has it); a
     // reading made from it carries none.
     const facts = literals[index];
@@ -10370,19 +10515,19 @@ function strictestProtectedWrite(
     const steps = spent.get(spentKey);
     if (steps !== undefined) {
       glob.budget.left -= steps;
-      if (steps > 0 && glob.budget.left < 0) offer("log.mutate", word);
+      if (steps > 0 && glob.budget.left < 0) offerEach(globGuardUnknown(protectedPaths), word);
       continue;
     }
     const budgetBefore = glob.budget.left;
     // A special parameter's name is not a glob, where the word's every `$` is real.
     const subject = glob.names?.(word) === true ? maskSpecialParameters(word) : word;
     const { readings, overflow } = writeWordReadings(subject);
-    if (overflow) offer("log.mutate", word);
+    if (overflow) offerEach(globGuardUnknown(protectedPaths), word);
     for (const reading of readings) {
       if (reading !== subject) offer(protectedPathClass(reading, protectedPaths), word);
       // ONE matcher budget for the whole command line (review-b M1), shared
       // through the classifier context by every segment, word and reading.
-      if (globLive(glob, word) && hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, glob.budget, glob.options, glob.disk), word);
+      if (globLive(glob, word) && hasGlobConstruct(reading)) offerEach(globGuardClasses(reading, protectedPaths, glob.budget, glob.options, glob.disk), word);
       // An unread part spliced into literal text (lead ruling CLAIMS L62568):
       // `APPROVAL$E.md` is the policy file when E is empty, inside double
       // quotes too (the value is spliced in, only not globbed).
@@ -10390,8 +10535,19 @@ function strictestProtectedWrite(
     }
     spent.set(spentKey, budgetBefore - glob.budget.left);
   }
-  if (best !== text) markGlobWriteFired();
-  if (best !== text && glob.tracker !== undefined) glob.tracker.raised = true;
+  // Each class a reading named that the answer and its others lack rides
+  // beside it, as #690 reports every class a command writes (folded only).
+  let widened = false;
+  if (best !== null) {
+    const answer: ProtectedHit = best;
+    const beside = foldedOnly(() => distinctOthers(answer.surface, [...answer.others, ...named]));
+    if (beside.length > answer.others.length) {
+      best = { ...answer, others: beside };
+      widened = true;
+    }
+  }
+  if (best !== text || widened) markGlobWriteFired();
+  if ((best !== text || widened) && glob.tracker !== undefined) glob.tracker.raised = true;
   return best;
 }
 
@@ -13248,8 +13404,273 @@ function splicedClassOf(
 }
 
 /**
+ * What a write-target pattern this reader cannot finish (past a cap, the step
+ * budget, a placeholder) may name: the log and the gate's own organs, each
+ * judged (#682's cap rule; review-b N1 and codex's M1 at bcb1be08). A policy
+ * may hold `log.mutate` looser than `policy.core` (it is unlisted in
+ * `approval init`'s policy), so the log alone is not the strict answer.
+ */
+const GLOB_GUARD_UNKNOWN: readonly string[] = ["log.mutate", "policy.core"];
+
+/**
+ * What a write-target pattern this reader cannot finish may name, under one
+ * policy's routes (build-1's M2 at 64c43399, lead ruling L62483): the log and
+ * the gate's organs ({@link GLOB_GUARD_UNKNOWN}), and the class of every other
+ * guarded name such a pattern could match: the instructions and release files
+ * (`policy.edit`), each organ folder's contents ({@link FOLDER_CONTENTS}: the
+ * workflows, which a policy may route to `policy.edit.ci`; Hermes' scripts,
+ * `cron.manage`) and each of the policy's own entries (`SPEC.md` routed to
+ * `policy.edit.spec`, `.claude/agents/` to its class). Past a cap no candidate
+ * was judged, so every class one could have named is judged. Kept per entry
+ * list.
+ */
+function globGuardUnknown(protectedPaths: readonly ProtectedPathEntry[]): readonly string[] {
+  // The answer depends on the reading it is asked in, not on the entries
+  // alone (automated security review of 16426b38): as spelled, entries tied on
+  // one path answer with the first declared only, and the folded reading
+  // takes each; main's pass and the organ-verb rule change what a folder
+  // claims. One memo per reading, so no reading reuses another's answer.
+  const mode = `${namesReadAsSpelled() ? "spelled" : "folded"}|${mainRulesOnly ? "main" : "all"}|${organVerbs ? "verbs" : "released"}`;
+  let memo = GLOB_GUARD_UNKNOWN_MEMO.get(mode);
+  if (memo === undefined) {
+    memo = new WeakMap();
+    GLOB_GUARD_UNKNOWN_MEMO.set(mode, memo);
+  }
+  const known = memo.get(protectedPaths);
+  if (known !== undefined) return known;
+  const paths = [...CORE_FILENAMES, ...PROTECTED_FILENAMES];
+  for (const [folder, tails] of Object.entries(FOLDER_CONTENTS)) for (const tail of tails) paths.push(`${folder}/${tail}`);
+  for (const raw of protectedPaths) {
+    const entry = parseProtectedEntry(raw);
+    if (entry !== null) paths.push(`${entry.segments.join("/")}${entry.directory ? "/x" : ""}`);
+  }
+  const out = [...GLOB_GUARD_UNKNOWN];
+  // protectedPathClasses joins each path's readings itself (its folded answer
+  // holds its as-spelled one), so a name of the list that folds is no reason
+  // to read the caller's whole line again as spelled: the list leaves the
+  // caller's reading as it found it, as a memo hit always did (build-1's
+  // VERDICT on A682 queue red 3). A line whose own names diverge still does.
+  apartFromCallerReading(() => {
+    for (const path of paths) for (const cls of protectedPathClasses(path, protectedPaths)) if (!out.includes(cls)) out.push(cls);
+  });
+  memo.set(protectedPaths, out);
+  return out;
+}
+
+/** {@link globGuardUnknown}'s answers, one memo per reading (a handful of keys). */
+const GLOB_GUARD_UNKNOWN_MEMO = new Map<string, WeakMap<readonly ProtectedPathEntry[], readonly string[]>>();
+
+/**
+ * Most candidate paths one word's expansions are walked over together. Each
+ * expansion is judged on its own (build-1's M2 at 64c43399: one expansion past
+ * a cap no longer ends the word), so this bounds the walk of a word of many
+ * expansions; an expansion past it is judged unknown, as one past its own cap.
+ */
+const GLOB_GUARD_WALK_CAP = 16 * GLOB_GUARD_CANDIDATE_CAP;
+
+/**
+ * Every protected class a write-target pattern could reach, empty when no
+ * guarded path is within its reach (`out/*.log`). FAIL CLOSED.
+ *
+ * The reading is brace-expanded first ({@link braceCandidates}; a group too
+ * large to expand is `policy.core`, as {@link protectedPathClass} answers it).
+ * A `~` after the first character may be zsh's exclusion, which drops the rest
+ * of the pattern, so the reading cut there is judged as well. Each expansion is
+ * split into segments, and each segment stands for a set of names:
+ *
+ * - a segment with no construct: itself, and any guarded name equal to it with
+ *   case folded (a case-folding volume, `nocaseglob`);
+ * - a segment holding a variable and no construct: itself, as
+ *   {@link protectedPathClass} reads every variable;
+ * - a pattern segment: itself, and every guarded name or prefix
+ *   ({@link GLOB_GUARD_NAMES}, {@link GLOB_GUARD_PREFIXES}, and the segments of
+ *   the policy's own entries) its tokens could match;
+ * - a segment that may stand for SEVERAL directories (a whole `**` or `***`
+ *   component; a variable beside a construct, whose value may hold a `/`; a
+ *   `braceccl` range over `/`): nothing, any one name, or any two names.
+ *
+ * Every combination is a candidate path, judged by {@link protectedPathClass};
+ * every class a candidate names is returned, each judged by the policy (#682's
+ * reader; review-b N1 at bcb1be08: the classifier's rank is not a policy's
+ * order). More combinations than {@link GLOB_GUARD_CANDIDATE_CAP}, more
+ * segments than {@link GLOB_GUARD_SEGMENTS_CAP}, more matcher steps than
+ * {@link GLOB_GUARD_STEP_CAP} (one budget over every reading of a word), a
+ * reading that already holds {@link PARAMETER_MARK}, or a placeholder that
+ * cannot be restored, adds {@link globGuardUnknown}: a pattern that wide
+ * could name the log, the gate's organs or any other guarded name. A cap
+ * applies to one brace expansion at a time, and the word's other expansions
+ * are still walked (build-1's M2 at 64c43399), {@link GLOB_GUARD_WALK_CAP}
+ * candidates over all of them.
+ */
+function globGuardClasses(
+  word: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  budget: { left: number } = { left: GLOB_GUARD_STEP_CAP },
+  options = false,
+  disk?: GlobDisk,
+): readonly string[] {
+  // zsh's extendedglob forms (`#`, `^`, the `~` exclusion) and braceccl need an
+  // option; with none possibly set on the line they are literal text (lead
+  // ruling L60846; review-b S2: `rm -f *~` is the files ending in `~`).
+  if (word.includes(PARAMETER_MARK)) return globGuardUnknown(protectedPaths);
+  const extraNames = protectedPaths.flatMap((entry) => parseProtectedEntry(entry)?.segments ?? []);
+  const names = [...new Set([...GLOB_GUARD_NAMES, ...extraNames])];
+  const words = [word];
+  if (options) for (let at = 1; at < word.length; at += 1) if (word[at] === "~") words.push(word.slice(0, at));
+  // Every class a candidate names (#682's reader; review-b N1 and codex's M1
+  // at bcb1be08): the classifier's rank is not a policy's order, so a
+  // candidate naming a class below another's is judged too. The walk goes on
+  // past `log.mutate`; the caps and the step budget bound it.
+  const found: string[] = [];
+  const consider = (surface: string | null): boolean => {
+    if (surface !== null && !found.includes(surface)) found.push(surface);
+    return false;
+  };
+  // An expansion this reader cannot finish (past a cap, the step budget, a
+  // placeholder it cannot restore) adds every class a guarded name it could
+  // match carries, and the walk goes on to the word's other expansions
+  // (build-1's M2 at 64c43399: `tee {*/*/*/x,CLAUDE.m?}` writes CLAUDE.md
+  // whatever the first expansion names).
+  const unknown = (): void => {
+    for (const cls of globGuardUnknown(protectedPaths)) consider(cls);
+  };
+  // Candidates walked over every expansion, against GLOB_GUARD_WALK_CAP.
+  let walked = 0;
+  for (const each of words) {
+    const expansions = braceCandidates(each);
+    if (expansions === null) {
+      consider("policy.core");
+      continue;
+    }
+    for (const expansion of expansions) {
+      const masked = maskParameters(expansion);
+      let lost = false;
+      const unmask = (path: string): string =>
+        path.replace(new RegExp(`\\$${PARAMETER_MARK}(\\d+)${PARAMETER_MARK}`, "gu"), (_, index: string) => {
+          const held = masked.held[Number(index)];
+          if (held === undefined) lost = true;
+          return held ?? "";
+        });
+      const segments = masked.text.split("/");
+      // Past the segment cap, or with the line's step budget already spent
+      // (each name tried would fail at once), the expansion is unknown.
+      if (segments.length > GLOB_GUARD_SEGMENTS_CAP || budget.left < 0) {
+        unknown();
+        continue;
+      }
+      // The caller's listing of the directory a prefix names, or `undefined`.
+      const listingFor = (prefix: readonly string[]): readonly string[] | undefined => {
+        if (disk === undefined || disk.listingsOk === false) return undefined;
+        const dir = globListingDir(prefix, disk);
+        if (dir === null) return undefined;
+        disk.collect?.add(dir);
+        return diskListing(disk, dir, true);
+      };
+      // Dot matching (lead ruling, CLAIMS L61492 and L61497): bash's dotglob
+      // and zsh's globdots may be set in the user's own profile, where no
+      // setter on the line shows, so a pattern is read with dot-names matched
+      // as well as hidden, and the stricter reading answers. Matched, a `*`,
+      // `?` or class at a segment's start reaches every dot-name but `.` and
+      // `..`, which no option lets them match; an explicit leading `.` (or a
+      // leading group or `.` class) reaches those too, as does any segment on
+      // a line that may set options (as before). The dot-matched reading
+      // holds every candidate the hidden one does, so it alone is judged.
+      const notDots = names.filter((name) => name !== "." && name !== "..");
+      const spanning = (segment: string, dotted: boolean): string[][] => {
+        const pool = dotted ? names : notDots;
+        const out: string[][] = [[], [segment]];
+        for (const first of pool) {
+          out.push([first]);
+          for (const second of pool) out.push([first, second]);
+        }
+        return out;
+      };
+      let exhausted = false;
+      // GLOB-WRITE (L61167): the first component holding a construct is matched
+      // against what is THERE when the caller listed its directory.
+      let firstGlobSeen = false;
+      const choices: string[][][] = segments.map((segment, index) => {
+        const listing = firstGlobSeen || !hasGlobConstruct(segment) ? undefined : listingFor(segments.slice(0, index));
+        if (hasGlobConstruct(segment)) firstGlobSeen = true;
+        if (segment.length === 0) return [[segment]];
+        // globstar and zsh's `**/` descend into dot-directories only with dot
+        // matching on; a variable's value and a braceccl range are literal text,
+        // which may hold a dot-name.
+        if (segment === "**" || segment === "***") return spanning(segment, options);
+        const glob = hasGlobConstruct(segment.split(PARAMETER_MARK).join(""));
+        if (segment.includes("$")) return glob ? spanning(segment, true) : [[segment]];
+        const pattern = globSegmentTokens(segment, options);
+        if (pattern.spans) return spanning(segment, true);
+        // An explicit leading `.`, a leading group (zsh `(.a|b)`, bash
+        // extglob `!(x)`, which matches a dot-name), or a leading braceccl
+        // class holding `.` may reach a dot-name with no option set.
+        const first = pattern.tokens[0];
+        const dotted =
+          options ||
+          /^[.(]|^[!@?*+]\(/u.test(segment) ||
+          (first?.kind === "set" && first.chars.includes("."));
+        const test = (name: string, prefix: boolean): boolean => {
+          const hit = globTokensMatch(pattern, name, prefix, budget);
+          if (hit === null) exhausted = true;
+          return hit !== false;
+        };
+        if (listing !== undefined) {
+          // The names the directory holds that the pattern could match, each
+          // also under any guarded spelling equal to it with case folded
+          // (`apprOVAL.MD` is the policy file on a case-insensitive volume).
+          // No match: the pattern names no file there, so no candidate.
+          const listed: string[][] = [];
+          // A listing never holds `.` or `..`; every name in it is read, dot-names too.
+          const present = dotted ? [...listing, ".", ".."] : listing;
+          for (const name of present) {
+            if (!test(name, false)) continue;
+            listed.push([name]);
+            for (const guard of names) if (guard !== name && sameGuardedName(guard, name)) listed.push([guard]);
+          }
+          return listed;
+        }
+        const out: string[][] = [[segment]];
+        for (const name of dotted ? names : notDots) if (name !== segment && test(name, false)) out.push([name]);
+        for (const name of GLOB_GUARD_PREFIXES) if (test(name, true)) out.push([name]);
+        return out;
+      });
+      let total = 1;
+      for (const choice of choices) total *= choice.length;
+      if (exhausted || total > GLOB_GUARD_CANDIDATE_CAP || walked + total > GLOB_GUARD_WALK_CAP) {
+        unknown();
+        continue;
+      }
+      walked += total;
+      const walk = (index: number, parts: string[]): boolean => {
+        if (index === choices.length) {
+          const path = unmask(parts.join("/"));
+          if (lost) {
+            unknown();
+            return false;
+          }
+          return consider(protectedPathClass(path, protectedPaths));
+        }
+        for (const choice of choices[index] as string[][]) {
+          if (walk(index + 1, [...parts, ...choice])) return true;
+        }
+        return false;
+      };
+      walk(0, []);
+    }
+  }
+  return found;
+}
+
+/**
  * The strictest protected class a write-target pattern could reach, or `null`
  * when no guarded path is within its reach (`out/*.log`). FAIL CLOSED.
+ *
+ * Merged beside #682's {@link globGuardClasses} (build-5's merge of main
+ * 2ac58ec5): the write-target pattern reading itself is that reader's, which
+ * returns every class and adds {@link globGuardUnknown} past its caps. This
+ * one is kept as #709 made it for the SPLICED reading alone
+ * ({@link splicedClass}, `spliced` set, `also` gathering every class), so an
+ * unread part's answers are #709's to the byte.
  *
  * The reading is brace-expanded first ({@link braceCandidates}; a group too
  * large to expand is `policy.core`, as {@link protectedPathClass} answers it).
@@ -15119,13 +15540,24 @@ function classifySegmentWithVerb(
     // §7's "a copy is classified `account.credential` in either direction"
     // holds as written.
     if (deferredCredential !== null && outranking !== null) {
+      // GLOB-WRITE here too (#682; codex's HOLD at d24f98ab): a word the
+      // command writes that the shell may still glob is judged by every
+      // guarded path it could name, as the operand scan below judges it.
+      // `rm -rf .approval/* < .approval/env` deletes `.approval/log`, so
+      // `log.mutate` answers, `policy.core` and the credential read beside
+      // it. Only a raise changes the answer: with none it is `outranking`.
+      const patterned = judged.filter(writtenInexact);
+      const plain = patterned.length === 0 ? null : strictestProtected(patterned, protectedPaths, true);
+      const read = patterned.length === 0 ? null : strictestProtectedWrite(patterned, protectedPaths, writtenInexact, true, glob);
+      const raised = read !== null && (plain === null || protectedRank(read.surface) < protectedRank(plain.surface));
+      const answer = raised ? (strongerProtected(outranking, read) ?? outranking) : outranking;
       return {
         ok: true,
-        class: outranking.surface,
+        class: answer.surface,
         rule: "protected-path",
-        path: outranking.path,
+        path: answer.path,
         also: deferredCredential,
-        ...besideProtected(outranking.surface, [outranking]),
+        ...besideProtected(answer.surface, [answer]),
       };
     }
     // GLOB-WRITE: a word the command WRITES that the shell may still glob, or
@@ -16050,7 +16482,24 @@ export interface CommandSegmentShape {
 }
 
 export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
-  const lexed = lex(command);
+  return shapesOf(lex(command));
+}
+
+/**
+ * {@link commandSegmentShapes} of ONE classified segment's text, which ends
+ * where its line ends and so leaves out the body of a heredoc it opens:
+ * `cat > .git/c* <<'EOF'` is read as the segment it is, where lexing it as a
+ * whole command refuses it as a heredoc never terminated (review-b's M2 at
+ * 3774fdd4: the git-directory pass skipped every heredoc segment, so
+ * `cat > .git/c* <<'EOF' … EOF` lost the `vcs.history.rewrite` that
+ * `echo x > .git/c*` kept). The body is data, or a substitution the
+ * classifier read from the whole line; nothing here reads it.
+ */
+export function classifiedSegmentShapes(text: string): CommandSegmentShape[] | null {
+  return shapesOf(lex(text, true));
+}
+
+function shapesOf(lexed: LexResult): CommandSegmentShape[] | null {
   if (!lexed.ok) return null;
   const expands = (word: LexWord): boolean => word.substitutions.length > 0 || /[$`]/u.test(word.text);
   return lexed.segments.map((segment) => {

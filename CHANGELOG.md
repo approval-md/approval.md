@@ -73,7 +73,9 @@ redirect target that matches one file and every shell writes through one in a
 `cp`, `mv`, `tee`, `ln` or `install` operand. A write target the shell may
 still glob is now judged by every guarded path its pattern could match, over-
 approximated (each construct matches anything it could in any shell under any
-option, case folded), and takes the strictest class among them.
+option, case folded), and takes every class among them, each judged by the
+policy: the classifier's rank is not a policy's order (#682; review-b N1 at
+bcb1be08), so `echo x > A*.md` is `policy.core` and `policy.edit`.
 
 - **Which words (fail closed):** redirect targets (`>`, `>>`, `>|`, `&>`,
   `n>`), download outputs and `-t` directories, every operand of a command
@@ -87,8 +89,8 @@ option, case folded), and takes the strictest class among them.
 - **`${X:-WORD}` defaults:** the WORD of `:-`, `-`, `:=`, `=`, `:+`, `+`,
   `:?`, `?` is a reading of its own, since the shell substitutes it and then
   globs it (`echo x > ${X:-.approval/env}` was a workspace write). More than
-  eight such spans in one word, or a default nested three deep, is
-  `log.mutate`. zsh's `braceccl` class (`{a-z}`) is read as a class of its
+  eight such spans in one word, or a default nested three deep, is judged
+  unknown, as a pattern past a cap is (below). zsh's `braceccl` class (`{a-z}`) is read as a class of its
   characters, and a variable beside a glob construct may name anything.
 - **Dot-names, setter or not (lead rulings L60846, L61492, L61497):** bash's
   `dotglob` and zsh's `globdots` may be set in the user's own start-up file,
@@ -130,9 +132,16 @@ option, case folded), and takes the strictest class among them.
   `rm -rf dist/*`, `chmod +x scripts/*`, `git add *`, `git add src/*`,
   `npx prettier --write src/*`, `echo x > dist/*.md`, `sed -i … *.md`. A
   pattern that cannot reach a guarded name (`out/*.log`, `src/*.ts`,
-  `rm -rf assets/*.png`) keeps its class. More than 4,096
-  candidate paths, 32 segments or two million matcher steps is `log.mutate`;
-  the worst words measured cost about 0.05 CPU s.
+  `rm -rf assets/*.png`) keeps its class. A brace expansion of more than
+  4,096 candidate paths or 32 segments, a word past two million matcher
+  steps, or one whose reading the reader cannot restore is judged unknown:
+  `log.mutate`, `policy.core`, and the class of every other guarded name such
+  a pattern could match (`policy.edit`, `cron.manage` for Hermes' scripts, and
+  each of the policy's routes: `policy.edit.ci` where `.github/workflows/` is
+  routed there, `policy.edit.spec` for a routed `SPEC.md`). The word's other
+  expansions are still judged, 65,536 candidates over all of them (#682;
+  build-1's M2 at 64c43399): `tee {*/*/*/x,CLAUDE.m?}` writes `CLAUDE.md`.
+  The worst words measured cost about 0.05 CPU s.
 - **One budget (review-b M1):** the two million matcher steps are one budget
   for the whole command line, shared by every segment, word and reading.
   A word judged once in a list is not walked again: `rsync -aR s0/*/./a*
@@ -263,6 +272,48 @@ path under it. Not covered, a follow-up: a parent of an organ directory
 `chown`, `chgrp`, `unlink`, `rename` and `git clean` stay refused (no rule);
 `find . -name .claude -exec rm …` stays refused (opaque); case variants
 (`rm -rf .Claude`) as for every guarded path.
+
+**The hook's glob matching is linear, and reads globs the way the shells do
+(#682).** The credential pass matched glob paths with a backtracking regex: a
+`cat` of a path with 240 `*` and 12 `z` took 65.7 CPU s, past the harness's
+60 s hook timeout, after which the call proceeds (0.4.8: 15.2 s at 160 `*`).
+
+- **Linear matching:** `src/core/glob-match.ts` walks the set of reachable
+  pattern positions with no backtracking, at most L×(2L+1) checks per name,
+  and replaces the regex at every hook caller; `globSegmentMatches`, the
+  `.git` reader of a write, is linear too (36.7 CPU s at 8 `*` before).
+- **`[!x]` and `[^x]`:** the hook read them as the literal members `!`, `^`
+  and `x`, so `cat ~/.hermes/[!x]uth.json` was a workspace read while bash and
+  zsh open `auth.json` (`account.credential`). `[!...]` is now negated as
+  every shell negates it, and `[^...]` is any one character (dash takes `^`
+  as a member). The classifier reads both as any one character, with main's
+  reading run beside wherever that reading matched a guarded name.
+- **Line continuations:** the shell removes each `\`+newline before it reads
+  the line, so the hook classifies the joined text, once (`a\<newline>(u)th.json`
+  is `a(u)th.json`). Where a `\`+newline sits in quotes, a comment, a heredoc
+  or a substitution, which the shell may keep, the text as written is read as
+  well and the stricter answer stands.
+- **zsh's `extendedglob` and `braceccl` (lead rulings L61492, L61497):** the
+  user's zshrc may set either, so every command is also read as zsh reads it
+  with both on, unquoted text only, and the stricter answer stands: `^x`,
+  `x#` and `(#a1)` are any name, `{a-z}` is a class of its characters, `a~b`
+  is `a`, and `^#` (a bad pattern) is read as written. A segment holding such
+  a form and a `$` or a substitution is any name, unless its only forms are
+  brace groups the shell expands anyway (`{a,b}`, `{1..3}`), which braceccl
+  leaves alone, beside a value zsh never globs: `touch file{1..3}$EXT` and
+  `mkdir -p out/{a,b}_$(date +%s)` keep their class (build-1's S1 at
+  64c43399). A word with no `/` in a plain read-only command is matched
+  against the directory's real entries.
+- **One reader of write-target globs, #686's (lead ruling L62400):** #682's
+  own reader is dropped, and five of its cases are now #686's: the candidate
+  walk no longer stops at the first candidate naming the log (`echo x >>
+  [$'!'A]PPROVAL.md`, `rm -f {.approval/log/x,APPROVAL.m?}` and `cp README.md
+  ~/.hermes/**/auth.json` were allowed under a policy leaving `log.mutate`
+  autonomous), a segment's words no longer stop at the first `log.mutate`
+  answer (`tee .approval/log/x A*.md`), every class a candidate names rides
+  beside the answer, the credential deferral reads the patterns of the words
+  it writes (`rm -rf .approval/* < .approval/env` keeps `log.mutate`), and a
+  pattern past a cap is the unknown answer above, not `log.mutate` alone.
 
 **Deleting, moving or locking a PARENT of an organ directory is that
 directory's class (lead ruling L61587).** `rm -rf "$PWD"`, `rm -rf ~`, `chmod

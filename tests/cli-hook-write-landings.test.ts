@@ -38,6 +38,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { readPathEntry } from "../src/cli/git-dir-writes.js";
 import { listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
 import { chmodPlainArgv, chmodRelaxedShape, classifyForHook, hookSettingsReads, HOOK_SETTINGS_MAX_BYTES, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, memoDiskReads, writeLandingJudgements, writeLandingMemo, type WriteScopeContext } from "../src/cli/hook.js";
 import { classifyCommandInThisReading } from "../src/core/command-class.js";
@@ -2070,8 +2071,17 @@ test("the call's disk memo answers as the disk does: realpath through links and 
         want = undefined;
       }
       assert.equal(link, want, `lstat ${path}`);
+      // The git-directory pass's reads of the same path, kept with their
+      // error code (build-5, the unclosed-`[` cost line): one lstat answers
+      // both readers.
+      assert.deepEqual(memo.entry(path), readPathEntry(path), `entry ${path} (round ${String(round)})`);
     }
   }
+  assert.deepEqual(memo.entry(join(root, "real", "missing")), { error: "ENOENT" });
+  assert.deepEqual(memo.entry(join(root, "real", "file", "under-a-file")), { error: "ENOTDIR" });
+  assert.deepEqual(memo.entry(join(root, "real", "file")), { link: null });
+  assert.deepEqual(memo.entry(join(root, "relative-link")), { link: "real/deep" });
+  assert.deepEqual(memo.entry(join(root, "dangling")), { link: join(root, "nowhere") });
   const listed = memo.list(root);
   assert.ok(Array.isArray(listed));
   assert.deepEqual((listed as Array<{ name: string }>).map((entry) => entry.name).sort(), readdirSync(root).sort());

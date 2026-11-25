@@ -74,7 +74,17 @@ export function foldFileName(text: string): string {
   return text.split(SUBSTITUTION_SENTINEL).map(foldText).join(SUBSTITUTION_SENTINEL);
 }
 
+/** Is `text` made of ASCII alone ({@link foldText}'s fast path)? */
+function asciiOnly(text: string): boolean {
+  for (let at = 0; at < text.length; at += 1) if (text.charCodeAt(at) > 0x7f) return false;
+  return true;
+}
+
 function foldText(text: string): string {
+  // ASCII alone holds no ignored code point, NFD leaves it as it is, and its
+  // lower, upper, lower round trip is its lower case: the same fold, read in
+  // one pass (cost: a guard folds every segment of every path it tests).
+  if (asciiOnly(text)) return text.toLowerCase();
   return text.replace(HFS_IGNORED, "").normalize("NFD").toLowerCase().toUpperCase().toLowerCase();
 }
 
@@ -224,6 +234,155 @@ export function withNamesAsSpelled<T>(run: () => T): T {
   } finally {
     spelledReading = before;
   }
+}
+
+/**
+ * Run `run`, whose answer already holds every name reading (it joins its own
+ * {@link eachNameReading} answers, so its folded answer contains its
+ * as-spelled one), without telling the caller's reading that names diverged
+ * inside it: a divergence `run` records is undone, and one the caller recorded
+ * before stays. So the caller is not read again as spelled for a value that
+ * has no other reading to add. The caller's own compares still mark its
+ * reading as before. #682's unknown-pattern classes: on a fresh entry list
+ * every line that reached them was classified a second time, as spelled
+ * (build-1's VERDICT on A682 queue red 3).
+ */
+export function apartFromCallerReading<T>(run: () => T): T {
+  const before = readingsDiverged;
+  try {
+    return refusePromise(run());
+  } finally {
+    readingsDiverged = before;
+  }
+}
+
+/**
+ * `run`'s answer in the current reading, and whether it is the answer in
+ * EVERY reading: `true` only in the folded reading, when no name compare
+ * inside `run` met a name whose two readings differ and none offered more
+ * than one equal claim. That is the test {@link eachNameReading} skips its
+ * other runs on, applied to `run` alone: with no divergence the as-spelled
+ * run takes the same branches over the same values, and with no claim set
+ * wider than one every turn takes the same claim. As spelled the helpers
+ * mark nothing, so the answer there is never called invariant.
+ *
+ * What `run` marks still reaches the caller's reading, as if it ran inline.
+ */
+export function inEveryReading<T>(run: () => T): { value: T; invariant: boolean } {
+  const outer = { diverged: readingsDiverged, widest: widestEqual };
+  readingsDiverged = false;
+  widestEqual = 1;
+  let value: T;
+  let invariant = false;
+  try {
+    value = refusePromise(run());
+    invariant = !spelledReading && !readingsDiverged && widestEqual === 1;
+  } finally {
+    readingsDiverged = outer.diverged || readingsDiverged;
+    widestEqual = Math.max(outer.widest, widestEqual);
+  }
+  return { value, invariant };
+}
+
+/**
+ * `run`'s answer once per equal claim its own compares offer (turn `k` takes
+ * claim `k mod n` of a set of `n`, as {@link eachNameReading}'s turns do), in
+ * the current reading, the first turn first. The caller has every turn's
+ * answer, so the widened claims are not passed on: the caller is not run
+ * again in another turn for this value alone (the claims of the caller's own
+ * compares still widen its reading). As spelled every claim is the first:
+ * `[run()]`. A divergence `run` marks reaches the caller as before.
+ */
+export function inEachEqualTurn<T>(run: () => T): [T, ...T[]] {
+  if (spelledReading) return [refusePromise(run())];
+  const outer = { turn: equalTurn, widest: widestEqual };
+  widestEqual = 1;
+  try {
+    equalTurn = 0;
+    const answers: [T, ...T[]] = [refusePromise(run())];
+    for (equalTurn = 1; equalTurn < widestEqual; equalTurn += 1) answers.push(refusePromise(run()));
+    return answers;
+  } finally {
+    equalTurn = outer.turn;
+    widestEqual = outer.widest;
+  }
+}
+
+/** Is {@link localReadingStart} on? Only inside {@link withLocalReadingsSettled}. */
+let settleLocalReadings = false;
+
+/**
+ * `run`, with {@link localReadingStart}'s runs on: a run of compares whose
+ * divergence leaves its answer the same does not mark the reading. For one
+ * caller: the hook's synthetic line of plain names, whose answer is shared by
+ * every reading where it holds in every reading (`redirectMatchClasses`).
+ * Everywhere else every divergence marks, as before, so no other line's
+ * readings change. The switch is restored afterwards, thrown or not.
+ */
+export function withLocalReadingsSettled<T>(run: () => T): T {
+  const before = settleLocalReadings;
+  settleLocalReadings = true;
+  try {
+    return refusePromise(run());
+  } finally {
+    settleLocalReadings = before;
+  }
+}
+
+/**
+ * Would {@link localReadingStart} start a run here (folded, inside
+ * {@link withLocalReadingsSettled})? Where it would not, the run marks as
+ * inline and nothing is settled, so a caller may judge inline.
+ */
+export function localReadingsSettling(): boolean {
+  return settleLocalReadings && !spelledReading;
+}
+
+/**
+ * The start of a run of compares whose divergence may be undone, where it
+ * turns out not to change what they answer ({@link localReadingEnd},
+ * {@link localReadingSame}). The caller's marks are set aside and handed
+ * back, to give to both; `-1` as spelled, or outside
+ * {@link withLocalReadingsSettled}, where the run marks as inline. Two calls
+ * and a number, not a closure: the protected-path tier asks once per word.
+ */
+export function localReadingStart(): number {
+  if (spelledReading || !settleLocalReadings) return -1;
+  const saved = widestEqual * 2 + (readingsDiverged ? 1 : 0);
+  readingsDiverged = false;
+  widestEqual = 1;
+  return saved;
+}
+
+/**
+ * The end of a run begun by {@link localReadingStart}, called in a `finally`:
+ * the run's marks join the caller's, as if it ran inline. `true` when the run
+ * marked a divergence and offered no claim set wider than one: the caller may
+ * then run the same compares as spelled ({@link withNamesAsSpelled}) and, where
+ * they answer the same, call {@link localReadingSame}.
+ */
+export function localReadingEnd(saved: number): boolean {
+  if (saved < 0) return false;
+  const settle = readingsDiverged && widestEqual === 1;
+  readingsDiverged = (saved & 1) === 1 || readingsDiverged;
+  widestEqual = Math.max(Math.floor(saved / 2), widestEqual);
+  return settle;
+}
+
+/**
+ * The run {@link localReadingEnd} let the caller compare answers the same as
+ * spelled: the caller's reading is left as it was before the run. So a caller
+ * whose names diverge only inside it, with no effect on what it answers, is
+ * not read again as spelled for that alone (the hook's synthetic lines: every
+ * segment of `/Users/x/…` diverges, and the protected-path tier answers the
+ * same in both readings). Sound by {@link eachNameReading}'s own test applied
+ * to the caller: its as-spelled run gets the same value at that point, and
+ * every other compare it makes still marks. The run must answer by its value
+ * alone (a module flag it sets is part of that value: the caller compares it
+ * too, and keeps the folded run's).
+ */
+export function localReadingSame(saved: number): void {
+  if (saved >= 0) readingsDiverged = (saved & 1) === 1;
 }
 
 function refusePromise<T>(value: T): T {
