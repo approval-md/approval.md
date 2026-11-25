@@ -2306,6 +2306,10 @@ test("a source lands as a credential path only where a credential name could, an
     ["cp ~/.hermes/.env -t .approval s/KEYS", ["policy.core protected-path", CRED, "log.mutate protected-path"]],
     // A backslash is a segment separator to the rows: `..\env` climbs out of `x`.
     ["cp ~/.hermes/.env -t .approval/x 's/..\\env'", ["policy.core protected-path", CRED]],
+    // Only an `auth.json` lands as a credential path in a profile (the
+    // credential source `.approval/env` lands as `p/env`, which is not one).
+    ["cp .approval/env s/auth.json -t ~/.hermes/profiles/p", ["policy.core protected-path", CRED]],
+    ["cp .approval/env s/notes.txt -t ~/.hermes/profiles/p", ["policy.core protected-path"]],
     // No credential name lands here: main's answer.
     ["cp ~/.hermes/.env -t .approval/x s/env", ["policy.core protected-path"]],
     // The credential source lands too: `p/.env` is a credential path.
