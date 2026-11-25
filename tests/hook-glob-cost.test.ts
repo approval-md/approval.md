@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, test } from "node:test";
+import { after, test, type TestContext } from "node:test";
 
 import { classifyForHook, credentialReadLandings } from "../src/cli/hook.js";
 
@@ -33,6 +33,14 @@ function cpuMs(run: () => void): number {
   run();
   const used = process.cpuUsage(start);
   return (used.user + used.system) / 1000;
+}
+
+/**
+ * Print one case's CPU time against its bound, pass or fail, so a green run's
+ * log shows the margin (as #707's ratio cases print theirs).
+ */
+function report(t: TestContext, name: string, ms: number, bound: number): void {
+  t.diagnostic(`cost: ${name}: ${ms.toFixed(1)} CPU ms of ${bound.toFixed(1)}`);
 }
 
 /** A directory an agent might sit in: names as long as `auth.json`, and a synthetic gate home. */
@@ -69,7 +77,7 @@ const STAR_COUNTS = [12, 160, 240, 2000];
  */
 const BOUND_MS = 50;
 
-test("cost: the credential pass over a long `*` run is bounded in CPU time", () => {
+test("cost: the credential pass over a long `*` run is bounded in CPU time", (t) => {
   const { dir, home } = workspace();
   const env = { HOME: home };
   for (const stars of STAR_COUNTS) {
@@ -79,6 +87,7 @@ test("cost: the credential pass over a long `*` run is bounded in CPU time", () 
       found = credentialReadLandings(`cat ${word}`, dir, env);
     });
     assert.deepEqual(found, [], `${String(stars)} stars`);
+    report(t, `cat with ${String(stars)} '*' and 12 'z' (credential pass)`, ms, BOUND_MS);
     assert.ok(ms < BOUND_MS, `cat with ${String(stars)} '*' and 12 'z': ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS)}`);
 
     // The same run that does name a credential is still found at that scale.
@@ -90,11 +99,12 @@ test("cost: the credential pass over a long `*` run is bounded in CPU time", () 
       named.some((entry) => entry.path === join(dir, ".approval", "env")),
       `${String(stars)} stars before env: ${JSON.stringify(named)}`,
     );
+    report(t, `cat .approval/ with ${String(stars)} '*' before env (credential pass)`, namedMs, BOUND_MS);
     assert.ok(namedMs < BOUND_MS, `${String(stars)} stars before env: ${namedMs.toFixed(1)} CPU ms, bound ${String(BOUND_MS)}`);
   }
 });
 
-test("cost: the whole hook classification of a long `*` run is bounded in CPU time", () => {
+test("cost: the whole hook classification of a long `*` run is bounded in CPU time", (t) => {
   const { dir, home } = workspace();
   // classifyForHook reads HOME from the process: point it at the scratch home
   // for the call, so `~/.hermes/` lists synthetic names only.
@@ -116,6 +126,7 @@ test("cost: the whole hook classification of a long `*` run is bounded in CPU ti
         const ms = cpuMs(() => {
           classifyForHook(command, [], dir, [], false, [dir]);
         });
+        report(t, `${command.slice(0, 30)} (${String(stars)} stars)`, ms, BOUND_MS * 2);
         assert.ok(ms < BOUND_MS * 2, `${command.slice(0, 30)} (${String(stars)} stars): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
       }
     }
@@ -125,7 +136,7 @@ test("cost: the whole hook classification of a long `*` run is bounded in CPU ti
   }
 });
 
-test("cost: a run of unclosed `[` and a class of many members, through the whole classification (codex on #682)", () => {
+test("cost: a run of unclosed `[` and a class of many members, through the whole classification (codex on #682)", (t) => {
   const { dir, home } = workspace();
   // Two hundred names of 250 characters, beside the workspace's own, in the
   // directory and in the home: what a class is tested against, character by
@@ -154,6 +165,7 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
         const ms = cpuMs(() => {
           classifyForHook(command, [], dir, [], false, [dir]);
         });
+        report(t, `${command.slice(0, 30)} (${String(word.length)} characters)`, ms, BOUND_MS * 2);
         assert.ok(ms < BOUND_MS * 2, `${command.slice(0, 30)} (${String(word.length)} characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
       }
     }
@@ -217,6 +229,76 @@ test("a guarded name after or among unclosed `[` still takes its class: the entr
   }
 });
 
+test("a guarded name among many plain ones under an unclosed `[` run keeps its true class: the plain names are judged as a line of their own (build-5, the unclosed-`[` cost line)", () => {
+  // Twenty plain names (each ends in a plain lower-case name) beside every
+  // guarded entry, in each directory: enough for the pattern pass to judge
+  // the plain matches first, apart from the rest, and the rest alone when the
+  // plain ones earn nothing. `notes-plain` is plain and routed by the policy
+  // below, so with that policy the plain line earns a class and the whole
+  // line is judged as before. Each answer is the one 90cfcc10 (every match
+  // in one line, in every reading) gives on this fixture, segment for segment.
+  const dir = join(scratch, "plain-split");
+  const home = join(scratch, "plain-split-home");
+  const plain = Array.from({ length: 20 }, (_, index) => `p${String(index).padStart(3, "0")}${"q".repeat(60)}`);
+  for (const each of [".approval", ".git/hooks", ".claude/agents", ".github/workflows", "sub"]) mkdirSync(join(dir, each), { recursive: true });
+  for (const each of ["APPROVAL.md", "SPEC.md", "README.md", ".approval/env", ".git/config", ".git/HEAD", ".claude/settings.json", ".claude/agents/a.md", ".github/workflows/ci.yml", "notes-plain"]) {
+    writeFileSync(join(dir, each), "x\n", "utf8");
+  }
+  for (const at of ["", ".approval", ".git", ".claude", ".claude/agents", ".github/workflows", "sub"]) for (const name of plain) writeFileSync(join(dir, at, name), "x\n", "utf8");
+  symlinkSync(join(dir, ".git"), join(dir, "gd"));
+  mkdirSync(join(home, ".hermes"), { recursive: true });
+  for (const name of ["auth.json", "config.yaml", ...plain]) writeFileSync(join(home, ".hermes", name), "x\n", "utf8");
+  const routed = [
+    { path: ".github/workflows/", class: "policy.edit.ci" },
+    { path: ".claude/agents/", class: "policy.edit.agents" },
+    { path: "SPEC.md", class: "policy.edit.spec" },
+    { path: "notes-plain", class: "policy.edit.spec" },
+  ];
+  const savedHome = process.env["HOME"];
+  process.env["HOME"] = home;
+  try {
+    const run = "[".repeat(2_000);
+    const answer = (command: string, paths: typeof routed): string => {
+      const { result } = classifyForHook(command, paths, dir, [], false, [dir]);
+      assert.ok(result.ok, command.slice(0, 40));
+      return result.segments.map((segment) => `${segment.class}/${segment.rule}`).join(" ; ");
+    };
+    // The fixture sits under the system's temporary directory, a scratch root,
+    // so only a git directory's entries are on the write pass's guarded list.
+    const guarded = "vcs.history.rewrite/git-dir-write";
+    const resolved = (...classes: string[]): string => classes.map((cls) => ` ; ${cls}/write-resolved-landing`).join("");
+    const cases: Array<[string, typeof routed, string]> = [
+      // APPROVAL.md, SPEC.md (policy.edit) and `.approval` (log.mutate) among the plain names.
+      [`echo x > ${run}`, [], `${guarded}${resolved("policy.core", "policy.edit", "log.mutate")}`],
+      [`echo x >> ${"[".repeat(1_100)}APPROVAL.md`, [], `${guarded}${resolved("policy.core", "policy.edit", "log.mutate")}`],
+      // tee's own pass judges each match it writes: the list's class beside the line's.
+      [`tee ${run} < README.md`, [], `${guarded} ; files.write.guarded/write-guarded${resolved("policy.core", "policy.edit", "log.mutate")}`],
+      // `notes-plain` is routed: the plain names earn a class, and every match is judged together.
+      [`echo x > ${run}`, routed, `${guarded}${resolved("policy.core", "policy.edit", "policy.edit.spec", "log.mutate", "policy.edit.agents", "policy.edit.ci")}`],
+      // .approval/env, .git/config (also through a link), .claude/settings.json, .github/workflows/ci.yml.
+      [`echo x > .approval/${run}`, [], `policy.core/redirect-protected ; ${guarded}`],
+      // A git directory's entries are on the guarded list wherever it is.
+      [`echo x > .git/${run}`, [], `${guarded} ; files.write.guarded/write-guarded`],
+      [`echo x > gd/${run}`, [], `${guarded} ; files.write.guarded/write-guarded`],
+      [`echo x > .claude/${run}`, [], `${guarded}${resolved("policy.core")}`],
+      [`echo x > .claude/${run}`, routed, `${guarded}${resolved("policy.core", "policy.edit.agents")}`],
+      [`echo x > .claude/agents/${run}`, routed, `policy.edit.agents/redirect-protected ; ${guarded}`],
+      [`echo x > .github/workflows/${run}`, [], `policy.edit/redirect-protected ; ${guarded}`],
+      [`echo x > .github/workflows/${run}`, routed, `policy.edit.ci/redirect-protected ; ${guarded}`],
+      [`echo x > ~/.hermes/${run}`, [], `${guarded}${resolved("policy.core")}`],
+      // Plain names alone: nothing beside the run's own classes.
+      [`echo x > sub/${run}`, [], guarded],
+      [`echo x > p0*`, [], "files.write.workspace/redirect-write"],
+    ];
+    for (const [command, paths, expected] of cases) {
+      assert.equal(answer(command, paths), expected, `${command.slice(0, 40)} (${paths.length === 0 ? "no routes" : "routed"})`);
+    }
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});
+
 /** `count` characters drawn from letters and digits with a fixed seed: a class of few distinct members, written long. */
 function classMembers(count: number): string {
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -229,7 +311,7 @@ function classMembers(count: number): string {
   return text;
 }
 
-test("cost: a big class after a directory pattern over 250 directories is compiled once (review-b's M1 on 8c91e702)", () => {
+test("cost: a big class after a directory pattern over 250 directories is compiled once (review-b's M1 on 8c91e702)", (t) => {
   const { dir, home } = workspace();
   // 250 directories under dd/ (one mkdir an agent may run on its own), so the
   // first component lists 250 bases and the class is tested in each.
@@ -258,6 +340,7 @@ test("cost: a big class after a directory pattern over 250 directories is compil
         classifyForHook(command, [], dir, [], false, [dir]);
       });
       const bound = 3 * control + BOUND_MS;
+      report(t, `${String(members)} members over 250 directories (control ${control.toFixed(1)})`, ms, bound);
       assert.ok(
         ms < bound,
         `${String(members)} members over 250 directories: ${ms.toFixed(1)} CPU ms, bound ${bound.toFixed(1)} (control ${control.toFixed(1)})`,

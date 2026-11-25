@@ -179,7 +179,7 @@ import {
 } from "../core/log.js";
 import { settleTerminationGuards } from "../core/log-lock.js";
 import { ANY_NAME, type GlobPattern, globPattern as compiledGlobPattern, zshOptionReading } from "../core/glob-match.js";
-import { eachNameReading, foldFileName, foldNameExact, foldNameLower } from "../core/name-fold.js";
+import { eachNameReading, foldFileName, foldNameExact, foldNameLower, inEachEqualTurn, inEveryReading } from "../core/name-fold.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import {
@@ -4816,7 +4816,10 @@ function listWords(shape: CommandSegmentShape): string[] {
  *
  * The classifier's answers this pass asks for (`ownAnswer`, the synthetic
  * lines) and `expandOnDisk` (whose entry test lowers or folds by the reading)
- * are NOT kept: they are asked again in each reading. Made by
+ * are NOT kept: they are asked again in each reading. One exception: whether
+ * a synthetic line of plain names earns nothing in every reading
+ * (`inertLines`, {@link inEveryReading}); where it is not known to, each
+ * reading judges the whole line, as before. Made by
  * {@link classifyForHook} for one call and dropped with it, so nothing here
  * reaches another command, directory, home or policy.
  */
@@ -4827,6 +4830,12 @@ export interface WriteLandingMemo {
   readonly disk: DiskReads;
   /** {@link resolvedWriteTarget} per directory and destination: the disk alone answers it. */
   readonly writeTarget: (target: string, cwd: string) => string | null;
+  /**
+   * Per directory state and synthetic line of plain names: does it earn no
+   * class in any reading? Judged once for the call, in the first reading that
+   * asks ({@link inEveryReading}; the pattern pass's `redirectMatchClasses`).
+   */
+  readonly inertLines: Map<string, boolean>;
 }
 
 /** A fresh {@link WriteLandingMemo}, for one `classifyForHook` call. */
@@ -4839,7 +4848,7 @@ export function writeLandingMemo(): WriteLandingMemo {
     targets.set(key, resolved);
     return resolved;
   };
-  return { landings: new Map(), paths: new Map(), disk: memoDiskReads(), writeTarget };
+  return { landings: new Map(), paths: new Map(), disk: memoDiskReads(), writeTarget, inertLines: new Map() };
 }
 
 /** How many landings the write pass has judged in this process (not answered from a memo): for tests. */
@@ -5102,14 +5111,21 @@ export function refineWriteLandings(
    * bd1bddc6, point 1).
    */
   const synthetic = new Map<string, ResolvedClass[]>();
+  /** The directory state a synthetic line is judged from, as a memo key's head. */
+  const fromKey = (): string => (cwdUnknown ? "?" : here.join("\0"));
   const classesOfSynthetic = (text: string, path: string): ResolvedClass[] => {
     // The same synthetic line from the same directories answers the same way:
     // judged once per line (a cost bound). The key carries the directory state.
-    const key = `${cwdUnknown ? "?" : here.join("\0")}\0${text}`;
+    const key = `${fromKey()}\0${text}`;
     const known = synthetic.get(key);
     if (known !== undefined) return known;
-    const out: ResolvedClass[] = [];
+    const out = judgeSynthetic(text, path);
     synthetic.set(key, out);
+    return out;
+  };
+  /** {@link classesOfSynthetic}'s answer, judged now (no memo). */
+  const judgeSynthetic = (text: string, path: string): ResolvedClass[] => {
+    const out: ResolvedClass[] = [];
     const take = (segments: readonly ClassifiedSegment[]): void => {
       for (const segment of segments) {
         if (segment.class.startsWith("read.") || segment.class === "files.write.workspace" || segment.class === GATE_SELF_CLASS) continue;
@@ -5143,6 +5159,63 @@ export function refineWriteLandings(
 
   /** A word as the shell would hand it over, single-quoted for a synthetic line. */
   const quote = (word: string): string => `'${word.replaceAll("'", "'\\''")}'`;
+
+  /** `true >> 'M1' >> 'M2' …`: a redirection to each name. */
+  const redirectLine = (names: readonly string[]): string => `true ${names.map((name) => `>> ${quote(name)}`).join(" ")}`;
+
+  /**
+   * The classes `true >> M1 >> M2 …` earns, for the names a redirect target's
+   * pattern matches on the disk ({@link patternWordClasses}).
+   *
+   * Cost (the unclosed-`[` line: past 1,024 glob characters a segment matches
+   * every entry, so `echo x >` and 2,000 `[` writes out the whole directory):
+   * the line was judged in full in each name reading, and the names of a
+   * directory are mostly plain ones that earn nothing. So where at least
+   * {@link PLAIN_BATCH_NAMES} names end in a plain lower-case name, those
+   * names are judged first, as a line of their own, once for the call
+   * ({@link inEveryReading}). When that line earns no class and is the same
+   * in every reading (no name compare in it diverged, no compare offered two
+   * equal claims), the other names' line answers alone, in each reading, and
+   * once per equal claim of its own ({@link inEachEqualTurn}); otherwise the
+   * whole line is judged as before. The plain test only chooses the names;
+   * the classifier and the git-directory pass decide.
+   *
+   * Why the split answers as the whole line does: every word of a synthetic
+   * line is single-quoted text after `true`, so no word is a pattern, a
+   * variable or a substitution, and the line's own options (`dotglob` and the
+   * like, which make only unquoted words patterns) reach none of them. Each
+   * redirection's class is its word's: the strictest protected target and the
+   * classes beside it, the git-directory walk of each word in turn. A name
+   * that earns nothing on its own adds nothing beside the others, and leaves
+   * the first git-directory hit where it was.
+   */
+  const redirectMatchClasses = (names: readonly string[], path: string): ResolvedClass[] => {
+    const plain = names.filter(plainTail);
+    if (plain.length < PLAIN_BATCH_NAMES) return classesOfSynthetic(redirectLine(names), path);
+    const plainText = redirectLine(plain);
+    const plainKey = `${fromKey()}\0${plainText}`;
+    let inert = memo.inertLines.get(plainKey);
+    if (inert === undefined) {
+      const judged = inEveryReading(() => judgeSynthetic(plainText, path));
+      inert = judged.invariant && judged.value.length === 0;
+      memo.inertLines.set(plainKey, inert);
+      // Every name is plain: that line was the whole line, judged in this reading.
+      if (plain.length === names.length) synthetic.set(plainKey, judged.value);
+    }
+    if (!inert) return classesOfSynthetic(redirectLine(names), path);
+    const rest = names.filter((name) => !plainTail(name));
+    if (rest.length === 0) return [];
+    const restText = redirectLine(rest);
+    const restKey = `\u0001${fromKey()}\0${restText}`;
+    const known = synthetic.get(restKey);
+    if (known !== undefined) return known;
+    const out: ResolvedClass[] = [];
+    for (const turn of inEachEqualTurn(() => judgeSynthetic(restText, path))) {
+      for (const each of turn) if (!out.some((known) => known.cls === each.cls)) out.push(each);
+    }
+    synthetic.set(restKey, out);
+    return out;
+  };
 
   /**
    * Classes the RESOLVED spellings of a segment's words earn as plain ones
@@ -5331,7 +5404,7 @@ export function refineWriteLandings(
           wide = true;
           break;
         }
-        add(classesOfSynthetic(`true ${names.map((name) => `>> ${quote(name)}`).join(" ")}`, word), word, names.length);
+        add(redirectMatchClasses(names, word), word, names.length);
       }
       if (wide || !argv || shape.bin === null) continue;
       const bin = /^[A-Za-z0-9_./+-]+$/u.test(shape.bin) ? shape.bin : quote(shape.bin);
@@ -5948,6 +6021,22 @@ const PATTERN_MATCH_NAMES = 8192;
 
 /** The longest those names may be together, in bytes (the same bound, for long names). */
 const PATTERN_LINE_BYTES = 1_048_576;
+
+/**
+ * How many of a redirect target's matches must end in a plain name before
+ * they are judged as a line of their own (the pattern pass's
+ * `redirectMatchClasses`): below it the whole line is judged as before.
+ */
+const PLAIN_BATCH_NAMES = 16;
+
+/**
+ * Does `name`'s last component read as a plain lower-case file name (no dot
+ * first, no upper case, no character a guard or the shell reads)? Only
+ * chooses which matches are judged together; it decides no class.
+ */
+function plainTail(name: string): boolean {
+  return /^[a-z0-9_-][a-z0-9._-]*$/u.test(name.slice(name.lastIndexOf("/") + 1));
+}
 
 // ===========================================================================
 // Skill scripts, the disk half (APRV-502)
@@ -12151,6 +12240,19 @@ export function memoDiskReads(): DiskReads {
     if (known !== undefined) return known;
     const found = listDirectory(path);
     lists.set(path, found);
+    // The listing already says which entries are links: an entry it names as
+    // anything else is read as the lstat would read it (`link: null`), so a
+    // directory's entries are not each asked again (the unclosed-`[` line
+    // lands every entry). A link, or an entry of a type the listing does not
+    // give, is still read by lstat.
+    if (typeof found !== "string") {
+      for (const each of found) {
+        if (each.isSymbolicLink()) continue;
+        if (!(each.isFile() || each.isDirectory() || each.isFIFO() || each.isSocket() || each.isBlockDevice() || each.isCharacterDevice())) continue;
+        const at = path === "/" ? `/${each.name}` : `${path}/${each.name}`;
+        if (!entries.has(at)) entries.set(at, { link: null });
+      }
+    }
     return found;
   };
   return { realpath, link, list, entry, gitDirLandings: new Map(), kernelLandings: new Map() };

@@ -58,6 +58,8 @@ import {
   foldedOnly,
   foldFileName,
   foldNameExact,
+  inEachEqualTurn,
+  inEveryReading,
   namesReadAsSpelled,
   takeAmongEqual,
   withNamesAsSpelled,
@@ -505,6 +507,41 @@ test("routes of the same depth that all match one path are all reported, however
     "policy.edit.closed redirect-protected",
     "policy.edit.cd redirect-protected",
   ]);
+});
+
+test("inEveryReading: invariant only folded with no divergence and no claim set wider than one; its marks reach the caller", () => {
+  assert.deepEqual(eachNameReading(() => inEveryReading(() => foldNameExact("readme.md"))), [{ value: "readme.md", invariant: true }]);
+  // A diverging name: not invariant, and the caller still reads it as spelled.
+  assert.deepEqual(eachNameReading(() => inEveryReading(() => foldNameExact("README.md"))), [
+    { value: "readme.md", invariant: false },
+    { value: "README.md", invariant: false },
+  ]);
+  // Equal claims: not invariant, and the caller still takes each in turn.
+  assert.deepEqual(
+    eachNameReading(() => inEveryReading(() => takeAmongEqual(["a", "b"]))),
+    [
+      { value: "a", invariant: false },
+      { value: "b", invariant: false },
+    ],
+  );
+  // As spelled nothing is marked, so nothing is called invariant.
+  assert.deepEqual(withNamesAsSpelled(() => inEveryReading(() => foldNameExact("readme.md"))), { value: "readme.md", invariant: false });
+  // A divergence the caller marked before stays.
+  assert.equal(eachNameReading(() => `${foldNameExact("K")}${String(inEveryReading(() => 1).invariant)}`).length, 2);
+});
+
+test("inEachEqualTurn: every claim its run offers, without another turn of the caller; a divergence still reaches it", () => {
+  const claims = ["a", "b", "c"];
+  assert.deepEqual(eachNameReading(() => inEachEqualTurn(() => takeAmongEqual(claims)).join("")), ["abc"]);
+  assert.deepEqual(inEachEqualTurn(() => takeAmongEqual(claims)), ["a", "b", "c"]);
+  assert.deepEqual(withNamesAsSpelled(() => inEachEqualTurn(() => takeAmongEqual(claims))), ["a"]);
+  // The caller's own claims still widen its reading, and its turn is restored.
+  assert.deepEqual(
+    eachNameReading(() => `${takeAmongEqual(["x", "y"])}${inEachEqualTurn(() => takeAmongEqual(claims)).join("")}`),
+    ["xabc", "yabc"],
+  );
+  // A divergence inside reaches the caller: it is read as spelled too.
+  assert.deepEqual(eachNameReading(() => inEachEqualTurn(() => foldNameExact("K")).join("")), ["k", "K"]);
 });
 
 test("equal claims: the folded reading takes each in turn, the as-spelled one the first, and a throw restores the turn", () => {

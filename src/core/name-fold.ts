@@ -242,6 +242,58 @@ export function apartFromCallerReading<T>(run: () => T): T {
   }
 }
 
+/**
+ * `run`'s answer in the current reading, and whether it is the answer in
+ * EVERY reading: `true` only in the folded reading, when no name compare
+ * inside `run` met a name whose two readings differ and none offered more
+ * than one equal claim. That is the test {@link eachNameReading} skips its
+ * other runs on, applied to `run` alone: with no divergence the as-spelled
+ * run takes the same branches over the same values, and with no claim set
+ * wider than one every turn takes the same claim. As spelled the helpers
+ * mark nothing, so the answer there is never called invariant.
+ *
+ * What `run` marks still reaches the caller's reading, as if it ran inline.
+ */
+export function inEveryReading<T>(run: () => T): { value: T; invariant: boolean } {
+  const outer = { diverged: readingsDiverged, widest: widestEqual };
+  readingsDiverged = false;
+  widestEqual = 1;
+  let value: T;
+  let invariant = false;
+  try {
+    value = refusePromise(run());
+    invariant = !spelledReading && !readingsDiverged && widestEqual === 1;
+  } finally {
+    readingsDiverged = outer.diverged || readingsDiverged;
+    widestEqual = Math.max(outer.widest, widestEqual);
+  }
+  return { value, invariant };
+}
+
+/**
+ * `run`'s answer once per equal claim its own compares offer (turn `k` takes
+ * claim `k mod n` of a set of `n`, as {@link eachNameReading}'s turns do), in
+ * the current reading, the first turn first. The caller has every turn's
+ * answer, so the widened claims are not passed on: the caller is not run
+ * again in another turn for this value alone (the claims of the caller's own
+ * compares still widen its reading). As spelled every claim is the first:
+ * `[run()]`. A divergence `run` marks reaches the caller as before.
+ */
+export function inEachEqualTurn<T>(run: () => T): [T, ...T[]] {
+  if (spelledReading) return [refusePromise(run())];
+  const outer = { turn: equalTurn, widest: widestEqual };
+  widestEqual = 1;
+  try {
+    equalTurn = 0;
+    const answers: [T, ...T[]] = [refusePromise(run())];
+    for (equalTurn = 1; equalTurn < widestEqual; equalTurn += 1) answers.push(refusePromise(run()));
+    return answers;
+  } finally {
+    equalTurn = outer.turn;
+    widestEqual = outer.widest;
+  }
+}
+
 function refusePromise<T>(value: T): T {
   if (typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function") {
     throw new TypeError("a name reading runs synchronously; a promise would finish in the other reading");
