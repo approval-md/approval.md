@@ -12379,6 +12379,13 @@ function splicedGuardClass(
   // `.approval/log/settings.json` or `.claude/settings.json`).
   const also = new Set<string>();
   const surface = splicedClass(word, budget, options, live, (path) => protectedPathClass(path, protectedPaths), protectedPaths, "log.mutate", false, also);
+  // A word whose literal text and unread parts may join into `.git` (`.$X/hooks/x`)
+  // is a git-dir write as well, as {@link splicedNamesGit} reads it alone.
+  if (surface !== null) {
+    const read = unreadParts(word);
+    const text = read === null ? null : live ? read.asOutputs : read.asOutputs.replace(/[*?[\]{}()#^<>|]|(?<=.)~/gu, SPLICED_INERT);
+    if (read !== null && text !== null && (read.parts > SPLICED_PARTS_CAP || wordJoinsGitAcrossSubstitution(text))) also.add("vcs.history.rewrite");
+  }
   return { surface, also: [...also].filter((cls) => cls !== surface) };
 }
 
@@ -12725,6 +12732,9 @@ function globGuardClass(
           if (spliced !== false && found !== null) {
             if (!lighterWithout(found, neutral.join("/"))) return false;
             if (unreadDirectory && lastBearing && !lighterWithout(found, [...parts.slice(0, -1), SPLICED_NEUTRAL].join("/"))) return false;
+            // A candidate inside a `.git` is a write to git's own files, as
+            // the plain spelling's git-dir rule reads it: that class rides beside.
+            if (gather !== undefined && path.split("/").includes(".git")) gather.add("vcs.history.rewrite");
           }
           return consider(found);
         }

@@ -1059,6 +1059,11 @@
             "class": "policy.edit",
             "rule": "redirect-protected",
             "path": ".g${__APPROVAL_SUBST__}/config"
+          },
+          {
+            "class": "vcs.history.rewrite",
+            "rule": "redirect-protected",
+            "path": ".g${__APPROVAL_SUBST__}/config"
           }
         ],
         "classes": [
@@ -3434,6 +3439,11 @@
             "path": ".$X"
           },
           {
+            "class": "vcs.history.rewrite",
+            "rule": "redirect-protected",
+            "path": ".$X"
+          },
+          {
             "class": "files.write.workspace",
             "rule": "redirect-write"
           },
@@ -3441,20 +3451,15 @@
             "class": "cron.manage",
             "rule": "redirect-protected",
             "path": ".$X"
-          },
-          {
-            "class": "vcs.history.rewrite",
-            "rule": "git-dir-write",
-            "path": ".$X"
           }
         ],
         "classes": [
           "log.mutate",
           "policy.core",
           "policy.edit",
+          "vcs.history.rewrite",
           "files.write.workspace",
-          "cron.manage",
-          "vcs.history.rewrite"
+          "cron.manage"
         ]
       }
     },

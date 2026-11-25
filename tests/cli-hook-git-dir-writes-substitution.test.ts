@@ -147,24 +147,24 @@ test("rule 2: literal text and a substitution's output that join into .git name 
   // `.approval/vault`, a credential read as `cd .approval/vault` is. Those
   // classes ride beside the `.git` reader's, which is unmoved.
   assert.deepEqual(pure("cd $(printf .gi)t && echo x >> config"), ["account.credential credential-path", DIR_WRITE, READ_SHELL]);
-  assert.deepEqual(pure("echo x >> $(printf .gi)t/config"), ["policy.core redirect-protected", DIR_WRITE]);
-  assert.deepEqual(pure("echo x >> .g$(printf it)/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected"]);
+  assert.deepEqual(pure("echo x >> $(printf .gi)t/config"), ["policy.core redirect-protected", DIR_WRITE, "vcs.history.rewrite redirect-protected"]);
+  assert.deepEqual(pure("echo x >> .g$(printf it)/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   assert.deepEqual(pure("echo x >> $(printf .)git/config"), [DIR_WRITE]);
-  assert.deepEqual(pure("echo x >> .$(echo g)it/config"), ["log.mutate redirect-protected", DIR_WRITE, "policy.core redirect-protected", "cron.manage redirect-protected", "policy.edit redirect-protected"]);
+  assert.deepEqual(pure("echo x >> .$(echo g)it/config"), ["log.mutate redirect-protected", DIR_WRITE, "policy.core redirect-protected", "cron.manage redirect-protected", "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   assert.deepEqual(pure('cd "$(printf .gi)t" && echo x >> config'), ["account.credential credential-path", DIR_WRITE, READ_SHELL]);
   assert.deepEqual(pure("cd .g$(printf it) && echo x >> config"), [READ_SHELL, DIR_WRITE]);
   assert.deepEqual(pure("D=$(printf .gi)t; echo x >> $D/config"), [ASSIGNMENT, DIR_WRITE]);
   assert.deepEqual(pure("D=a:.g$(printf it); cd $D && echo x >> config"), [ASSIGNMENT, READ_SHELL, DIR_WRITE]);
   // An output may hold a `/`: `.git` may begin inside one (`x/.gi` + `t`) or
   // end inside one (`.g` + `it/x`), past literal text around it.
-  assert.deepEqual(pure("echo x >> x$(printf /.gi)t/config"), ["policy.core redirect-protected", DIR_WRITE]);
-  assert.deepEqual(pure("echo x >> .g$(printf it/)config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected"]);
+  assert.deepEqual(pure("echo x >> x$(printf /.gi)t/config"), ["policy.core redirect-protected", DIR_WRITE, "vcs.history.rewrite redirect-protected"]);
+  assert.deepEqual(pure("echo x >> .g$(printf it/)config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   // A glob or brace beside the substitution is read the broad way.
   // GLOB-WRITE (22 Nov 2026): an output beside a glob construct may hold a
   // `/` and so name any directory, the approval log's among them: the stricter
   // `log.mutate` answers before the `.git` reader.
-  assert.deepEqual(pure("echo x >> .g$(printf i)?/config"), ["log.mutate redirect-protected", "vcs.history.rewrite git-dir-write"]);
-  assert.deepEqual(pure("echo x >> .g{x,$(printf it)}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected"]);
+  assert.deepEqual(pure("echo x >> .g$(printf i)?/config"), ["log.mutate redirect-protected", DIR_WRITE, "vcs.history.rewrite redirect-protected"]);
+  assert.deepEqual(pure("echo x >> .g{x,$(printf it)}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   // git's own write option, and a script a shell wrapper runs.
   assert.deepEqual(pure("git log --output=.g$(printf it)/config"), [DIR_WRITE]);
   assert.deepEqual(pure("bash -lc 'cd $(printf .gi)t && echo x >> config'"), ["account.credential credential-path", DIR_WRITE, READ_SHELL]);
@@ -282,7 +282,7 @@ test("S2: a parameter expansion that may expand to .git names it", () => {
   assert.deepEqual(pure("echo x >> ${VAR:-.gi?}/config"), [DIR_WRITE]);
   assert.deepEqual(pure("echo x >> ${A:-${B:-.git}}/config"), [DIR_WRITE]);
   assert.deepEqual(pure("echo x >> $(echo ${VAR:-.git})/config"), [DIR_WRITE]);
-  assert.deepEqual(pure("echo x >> ${VAR:-.g$(printf it)}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected"]);
+  assert.deepEqual(pure("echo x >> ${VAR:-.g$(printf it)}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
 });
 
 test("S2: a parameter expansion whose word is not .git does not move", () => {
@@ -339,7 +339,7 @@ test("security review a: every ANSI-C piece of a word is decoded and joined, quo
   assert.deepEqual(pure("echo x >> $'\\x2e'gi\"t\"/config"), [DIR_WRITE]);
   // A glob where the word is unquoted, and an output beside the string.
   assert.deepEqual(pure("cd $'\\x2eg'i? && echo x >> config"), [READ_SHELL, DIR_WRITE]);
-  assert.deepEqual(pure("echo x >> $'\\x2e'$(printf git)/config"), ["log.mutate redirect-protected", DIR_WRITE, "policy.core redirect-protected", "cron.manage redirect-protected", "policy.edit redirect-protected"]);
+  assert.deepEqual(pure("echo x >> $'\\x2e'$(printf git)/config"), ["log.mutate redirect-protected", DIR_WRITE, "policy.core redirect-protected", "cron.manage redirect-protected", "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   // A decoded `.` that is no segment's start is no `.git`.
   assert.deepEqual(pure("echo x > a$'\\x2e'gitx"), [REDIRECT]);
 });
@@ -385,9 +385,9 @@ test("security review d: the other parameter expansion operators", () => {
 });
 
 test("security review e: a nested expansion in an operator's word is an output that joins", () => {
-  assert.deepEqual(pure("echo x >> ${A:-.g${B}t}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected"]);
-  assert.deepEqual(pure("echo x >> .g${A:-i}t/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected"]);
-  assert.deepEqual(pure("echo x >> ${A:-.g$(printf i)t}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected"]);
+  assert.deepEqual(pure("echo x >> ${A:-.g${B}t}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
+  assert.deepEqual(pure("echo x >> .g${A:-i}t/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
+  assert.deepEqual(pure("echo x >> ${A:-.g$(printf i)t}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   assert.deepEqual(pure('echo x > "${OUT:-${HOME}/out}/f"'), [REDIRECT]);
   assert.deepEqual(pure('echo x > "${OUT:-out}.${EXT:-txt}"'), ["log.mutate redirect-protected", "policy.core redirect-protected", "policy.edit redirect-protected", REDIRECT, "cron.manage redirect-protected"]);
 });
@@ -611,7 +611,7 @@ test("gate M3: zsh subscripts and modifiers count", () => {
     // (Build-6 round two, L62568: the unread value beside the pattern may
     // hold a `/`, and every guarded class it may reach rides beside.)
     const globbed = /\$\w+\[/u.test(line) && !line.includes('"');
-    const SPLICED_BESIDE = ["policy.core redirect-protected", "cron.manage redirect-protected", "policy.edit redirect-protected"];
+    const SPLICED_BESIDE = ["policy.core redirect-protected", "cron.manage redirect-protected", "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"];
     assert.deepEqual(pure(line), globbed ? [ASSIGNMENT, "log.mutate redirect-protected", DIR_WRITE, ...SPLICED_BESIDE] : [ASSIGNMENT, DIR_WRITE], line);
   }
   // The coarse rule: after an unbraced parameter, any `[` or `:` and a
@@ -657,7 +657,7 @@ test("gate N2 (m11): an ANSI-C string ends at a NUL past the near reader's reach
   // Lead ruling L62568: after a decoded NUL the rest of the word is unread
   // (bash keeps it, zsh ends the path), and `.g` then any text may be a
   // guarded `.github` path: the spliced reading's class rides beside.
-  assert.deepEqual(pure(`echo x > $'.g\\0junk'""""""""it/config`), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected"]);
+  assert.deepEqual(pure(`echo x > $'.g\\0junk'""""""""it/config`), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
 });
 
 test("gate N2 (m17): %c prints the first character of each word", () => {
