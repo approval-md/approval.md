@@ -36,6 +36,46 @@ function cpuMs(run: () => void): number {
 }
 
 /**
+ * A line and its control run back to back, the order turning each round (as
+ * #707's walked-once cases in guarded-names-fold-case and #709's spliced
+ * words time theirs): the medians of the line's calls, of the control's and of
+ * the pairs' ratios, in CPU ms. Once each first, untimed: the first call pays
+ * for the compiler. A control of about 1 CPU ms is read as the mean of
+ * `controlCalls` calls made back to back, so the pair's ratio is not one short
+ * call's jitter.
+ */
+function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number, controlCalls = 1): { spent: number; control: number; ratio: number } {
+  controlRun();
+  spentRun();
+  const controlOnce = (): void => {
+    for (let call = 0; call < controlCalls; call += 1) controlRun();
+  };
+  const spents: number[] = [];
+  const controls: number[] = [];
+  const ratios: number[] = [];
+  for (let round = 0; round < rounds; round += 1) {
+    let control: number;
+    let spent: number;
+    if (round % 2 === 0) {
+      control = cpuMs(controlOnce) / controlCalls;
+      spent = cpuMs(spentRun);
+    } else {
+      spent = cpuMs(spentRun);
+      control = cpuMs(controlOnce) / controlCalls;
+    }
+    spents.push(spent);
+    controls.push(control);
+    ratios.push(spent / Math.max(control, 0.001));
+  }
+  const median = (values: number[]): number => {
+    values.sort((left, right) => left - right);
+    const middle = values.length >> 1;
+    return values.length % 2 === 1 ? values[middle]! : (values[middle - 1]! + values[middle]!) / 2;
+  };
+  return { spent: median(spents), control: median(controls), ratio: median(ratios) };
+}
+
+/**
  * Print one case's CPU time against its bound, pass or fail, so a green run's
  * log shows the margin (as #707's ratio cases print theirs).
  */
@@ -76,6 +116,15 @@ const STAR_COUNTS = [12, 160, 240, 2000];
  * 60 s timeout.
  */
 const BOUND_MS = 50;
+
+/**
+ * The most the 2,000-character `[` lines may cost over their control, the
+ * median of the pairs' ratios (test 3, {@link pairedCost}). Measured on a
+ * laptop at 168a73c1, 5 runs on node 26 and 5 on node 20: 11.0 to 16.2 (both
+ * lines); with the write pass run twice (the hand-back's mutant, 3 runs each)
+ * 20.3 to 23.5.
+ */
+const RUN_RATIO_BOUND = 18;
 
 test("cost: the credential pass over a long `*` run is bounded in CPU time", (t) => {
   const { dir, home } = workspace();
@@ -155,7 +204,45 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
     // tested against every member, in this change's hook reader). At most about 14 CPU ms a call here, so the bound is 7x.
     // (50,000 members took 985 CPU ms through `cat` on bfa73710 and 31 here;
     // tests/hook-glob-match bounds that size directly.)
-    const words = ["[".repeat(2_000), "[".repeat(20_000), `*[${"z".repeat(5_000)}]X`];
+    // The 2,000-character run past the 1,024 bound matches every entry, so the
+    // line writes all 207 out as one synthetic line and lands each: the cost
+    // that read 131.4 CPU ms of 100 once on the merge queue (node 22, #682) and
+    // 74.8 for the `~/.hermes/` line (draft #712). One call is not a reading:
+    // on node 20 whichever call first makes a function hot pays for its
+    // compile on a second thread (write-scope's guardedEntryOf, about 10 CPU ms
+    // here, in the `~/.hermes/` call), and process.cpuUsage counts it. So each
+    // is timed as #707's walked-once cases and #709's spliced words are: back
+    // to back with a control, the order turning, 21 pairs ({@link pairedCost}).
+    // The median call keeps the 100 ms bound, and the median ratio to the
+    // control is bounded. The control is the same line with the run replaced
+    // by a plain name of the same length: the same lexing and the same
+    // per-character passes over a 2,000-character word, one landing, and no
+    // match, so the ratio is what matching every entry costs (the listing, the
+    // synthetic line, the landings) over what the word alone costs. Both lines
+    // take the workspace's control: under `~/.hermes/` the control's own `~`
+    // is resolved and judged as a synthetic line of its own in the write pass,
+    // so a write pass that cost twice as much would cost the control twice as
+    // much too, and the ratio would hide most of it (with the write pass run
+    // twice, the ratio to its own control went from 9.2-11.2 to 13.2-16.0, and
+    // to the workspace's from 11.5-13.6 to 16.7-23.8, one control call a
+    // pair). The prefix costs the control about 0.3 CPU ms. The control is
+    // read as the mean of 5 calls a pair. Measured: see {@link RUN_RATIO_BOUND}.
+    for (const prefix of ["", "~/.hermes/"]) {
+      const most = RUN_RATIO_BOUND;
+      const command = `echo x > ${prefix}${"[".repeat(2_000)}`;
+      const control = `echo x > ${"a".repeat(2_000)}`;
+      const { spent, control: controlMs, ratio } = pairedCost(
+        () => classifyForHook(control, [], dir, [], false, [dir]),
+        () => classifyForHook(command, [], dir, [], false, [dir]),
+        21,
+        5,
+      );
+      const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${most.toFixed(1)}`;
+      t.diagnostic(`cost: ${label}`);
+      assert.ok(spent < BOUND_MS * 2, label);
+      assert.ok(ratio <= most, label);
+    }
+    const words = ["[".repeat(20_000), `*[${"z".repeat(5_000)}]X`];
     for (const word of words) {
       // A `cat` of a long `[` run is left out: its cost is the kernel refusing
       // a path that long (lstat through realpath, about 7 CPU ms a call,
