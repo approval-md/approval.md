@@ -57,7 +57,7 @@ quote's) is text here, where the word is read as lexed: `--append-notes
 'A$B'` keeps its answer; a reading made from a word (an option's value, a
 default's text, a folded name) counts every `$` in it as a parameter. Past
 eight unread parts in one word the word could be any path (`log.mutate`), and
-so is a word with 32 separators (`/` or `\`) or whose readings pass the
+so is a word with 32 `/` or 1,024 `\` in it or whose readings pass the
 candidate bound. On
 one day's 19,368 Bash calls holding a `$`, 11 answers moved, each stricter: 8
 writes below a `$W/scripts` directory take `cron.manage` beside (W may be the

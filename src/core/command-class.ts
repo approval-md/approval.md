@@ -12564,6 +12564,8 @@ const splicedCredentialMemo = new Map<string, boolean>();
 const SPLICED_CREDENTIAL_MEMO_CAP = 4096;
 /** The longest word {@link splicedCredentialMemo} remembers (its literal positions are shorter). */
 const SPLICED_CREDENTIAL_MEMO_TEXT = 4096;
+/** Most backslashes a spliced word holds before it could be any path (cost: the judge splits on each). */
+const SPLICED_BACKSLASH_CAP = 1024;
 /** Matcher steps one credential reading may take; past them the word may be one. */
 const SPLICED_CREDENTIAL_STEP_CAP = 200_000;
 
@@ -12596,13 +12598,17 @@ function splicedClass(
   const read = unreadParts(word, literalAt);
   if (read === null) return null;
   if (read.parts > SPLICED_PARTS_CAP) return wide;
-  // The judge reads a `\` as a separator as it reads a `/`: past the segments
-  // bound of the pattern reader the word could be any path, and each of its
-  // candidates would cost the judge a walk of every segment
-  // (`tee $a'a\qa\q…'`, 33,000 of them).
-  let separators = 0;
-  for (const char of read.marked) if (char === "/" || char === "\\") separators += 1;
-  if (separators >= GLOB_GUARD_SEGMENTS_CAP) return wide;
+  // Past the pattern reader's segments bound the word could be any path. The
+  // judge also reads a `\` as a separator, and each candidate costs it a walk
+  // of every segment (`tee $a'a\qa\q…'`, 33,000 of them): past
+  // {@link SPLICED_BACKSLASH_CAP} of them, too.
+  let slashes = 0;
+  let backslashes = 0;
+  for (const char of read.marked) {
+    if (char === "/") slashes += 1;
+    else if (char === "\\") backslashes += 1;
+  }
+  if (slashes >= GLOB_GUARD_SEGMENTS_CAP || backslashes >= SPLICED_BACKSLASH_CAP) return wide;
   // A word the shell does not glob (every glob character in it quoted, as in
   // `"$f[1,4]/out"`) has those characters as text: no guarded name holds one,
   // so each stands as a character that matches nothing guarded. A word it may
