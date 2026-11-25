@@ -706,11 +706,12 @@ other segments, and the hook judges each.
   guarded destinations, a read's own output. `cp .approval/env
   .gith*/workflows/ci.yml` is the credential class, then `policy.edit.ci`
   and `policy.edit`; `sort -o .github/workflows/ci.yml .approval/env` names
-  the workflow. The credential read is not a place a copy lands: `cp
-  notes.txt .approval/env` is the credential class alone. Through a wrapper
-  or a program with no rule (next) the words are read as written, so a
-  pattern there is not judged (`command cp .approval/env
-  .gith*/workflows/ci.yml` is the credential class alone).
+  the workflow. A copy onto a credential path is a write (#706, below): `cp
+  notes.txt .approval/env` is `policy.core` with the credential class.
+  Through a wrapper or a program with no rule (next) the words are read as
+  written, so a pattern there is not judged for its own class (`command cp
+  .approval/env .gith*/workflows/ci.yml` is the credential class and, since
+  #706, `policy.core` for the target the shell builds, not `policy.edit.ci`).
 - **A wrapper or a program with no rule** (`command cp .approval/env
   .github/workflows/ci.yml`, `nice cp …`, `ditto …`, `python3 x.py …`):
   the credential class answers, as before, and nobody can say what such a
