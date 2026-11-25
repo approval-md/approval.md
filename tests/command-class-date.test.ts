@@ -256,9 +256,23 @@ test("APRV-508: a credential path in a date argv is still a credential touch", (
 });
 
 test("APRV-508: a secret-named variable is a credential touch before the shape is asked", () => {
-  const segment = classified("date -d $APPROVAL_TG_TOKEN");
-  assert.equal(segment.class, "account.credential");
-  assert.equal(segment.rule, "credential-env");
+  // The credential answers first. The walk after it refuses `date -d $X` (no
+  // admitted shape for a word the shell still builds), so the credential
+  // tier cannot know this program writes nothing, and it fails closed: the
+  // variable is reported as an unknown target beside the credential, as
+  // `cp .approval/env $X` reports it (build-1's S2 on #701, the seat's
+  // ruling: a secret-named variable is a word the shell builds like any other).
+  const result = classifyCommand("date -d $APPROVAL_TG_TOKEN", []);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(
+    result.segments.map((segment) => [segment.class, segment.rule, segment.path]),
+    [
+      ["account.credential", "credential-env", undefined],
+      ["policy.core", "copy-target-unknown", "$APPROVAL_TG_TOKEN"],
+    ],
+  );
+  assert.equal(classifyCommand("date -d $X", []).ok, false);
 });
 
 test("APRV-508: date is not a scoped reader, and stays read.shell under any roots", () => {

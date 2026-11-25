@@ -5209,6 +5209,33 @@ function attachedOptionValues(word: string): string[] {
 }
 
 /**
+ * The longest single-dash option word, in UTF-8 bytes, whose tails the
+ * credential tier's refusal branch reads one by one ({@link
+ * attachedOptionValues}; build-1's S2 on #701, the seat's ruling on its
+ * cost). Every tail is scanned, so the work is quadratic in the word: past
+ * this bound the word is not scanned tail by tail, and the line is refused,
+ * as a short attached value that outranks the credential class refuses it
+ * (`-oAPPROVAL.md`, `-o.approval/log/x`): a word too long to read must not
+ * get a lighter answer than that. Linear. main's own readers of attached
+ * values are not bounded here.
+ */
+const ATTACHED_TAIL_SCAN_BYTES = 256;
+
+/** Is this an option word whose attached tails {@link ATTACHED_TAIL_SCAN_BYTES} leaves unscanned? */
+function isLongAttachedOption(word: string): boolean {
+  if (!word.startsWith("-") || word.startsWith("--") || word.length < 3) return false;
+  // A UTF-16 unit is at most three UTF-8 bytes, so a short word needs no count.
+  if (word.length * 3 <= ATTACHED_TAIL_SCAN_BYTES) return false;
+  let bytes = 0;
+  for (const char of word) {
+    const point = char.codePointAt(0) as number;
+    bytes += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+    if (bytes > ATTACHED_TAIL_SCAN_BYTES) return true;
+  }
+  return false;
+}
+
+/**
  * The files a READ-class command writes through its own words (follow-up,
  * item B), read from this Mac's manual pages: `sort -o <file>` /
  * `--output=<file>` (any prefix of one letter or more), `uniq`'s second
@@ -8583,6 +8610,162 @@ function credentialSideScan(
  * chose them, and what it found (`named` from the positionals, `fed` from
  * the `<` targets, `found` the stronger of the two).
  */
+/**
+ * The credential paths a copy WRITES (build-1's N3 on #701 and M1 on #682,
+ * the lead's ruling CLAIMS L62502): a credential path in a destination slot
+ * of a copy, move, link, install or sync that has an option table ({@link
+ * copyPlan}: `cp README.md .approval/env`, `cp ~/.hermes/.env .approval/env`,
+ * `rsync README.md ~/.hermes/auth.json`, `cp -t .approval/env notes.txt`),
+ * and the paths a source lands at that are credential paths (`cp x/env
+ * .approval` writes `.approval/env`). The class a write of such a path takes
+ * (`policy.core` for the gate's environment map) is ADDED to the answer main
+ * gives the line, which is walked exactly as main walks it (build-1's M1 on
+ * #706, the lead's ruling CLAIMS L62686: a union, never a swap): every class
+ * main reports stays (`rsync -a --log-file=.approval/log/events.jsonl
+ * README.md .approval/env` keeps `log.mutate`), the write's class answers
+ * first where main answered with the credential class itself, and the
+ * credential touch is carried where main's walk ended on a branch that drops
+ * it. Where the table cannot read the argv (an unknown option, a word the
+ * shell may still turn into one) every credential path among the words may
+ * be written ({@link CredentialWrites.possible}); for a tool with no table
+ * nothing is read here: the line answers as on main.
+ */
+interface CredentialWrites {
+  words: ReadonlySet<string>;
+  landings: readonly string[];
+  /**
+   * Where the argv cannot be read (an option the table does not know, a word
+   * the shell may still turn into an option): every credential path among
+   * the operands and option values may be a destination; and a credential
+   * glob as the last operand with no `-t`, whose last match is written. These are not taken
+   * out of the read and defer nothing; their protected class is ADDED beside
+   * the answer main gives (fail closed, never lighter).
+   */
+  possible: readonly string[];
+}
+
+const NO_CREDENTIAL_WRITES: CredentialWrites = { words: new Set(), landings: [], possible: [] };
+
+function credentialWrites(
+  basename: string,
+  args: readonly string[],
+  flags: readonly ArgExpansion[],
+  argsPlan: () => CopyPlan | null,
+  argvUnknown: () => string | null,
+): CredentialWrites {
+  if (COPY_OPTION_TABLES[basename] === undefined) return NO_CREDENTIAL_WRITES;
+  const plan = argsPlan();
+  // A word the shell may still turn into an option (`cp $X .approval/env`:
+  // the copy family's own test, {@link copyArgvUnknown}), or an option the
+  // table does not know (`cp --frob README.md .approval/env`), makes every
+  // operand a destination and a source alike: which word is written is
+  // unknown. Every credential path among the words may be written, so its
+  // class is ADDED to main's whole answer (`possible`), never deferring it.
+  if (plan === null || plan.unknown !== null || argvUnknown() !== null) {
+    const possible = args.flatMap((arg) => {
+      const equals = arg.indexOf("=");
+      return [arg, ...(equals === -1 ? [] : [arg.slice(equals + 1)])].filter((word) => isCredentialPathAsRead(word));
+    });
+    return possible.length === 0 ? NO_CREDENTIAL_WRITES : { words: new Set(), landings: [], possible };
+  }
+  // A glob as the last operand, with no `-t`, may expand to several words,
+  // and the last of them is written (`cp ~/.hermes/profiles/*/auth.json`
+  // runs `cp a/auth.json b/auth.json`; `ln` links the last one): a credential
+  // path it spells may be a destination, so its class is ADDED as for an
+  // unreadable argv (the security review of the S3 fold on #706). A glob
+  // anywhere else expands among the sources.
+  const lastOperand = plan.operands[plan.operands.length - 1];
+  const targeted = plan.dests.length > 0 && plan.sources.length === plan.operands.length && plan.implicitDest !== true;
+  const lastFlags = lastOperand === undefined ? undefined : flags[args.lastIndexOf(lastOperand)];
+  const possible =
+    lastOperand !== undefined &&
+    !targeted &&
+    lastFlags?.expands === true &&
+    !((basename === "rsync" || basename === "scp") && remoteOperand(lastOperand)) &&
+    isCredentialPathAsRead(lastOperand)
+      ? [lastOperand]
+      : [];
+  const last = plan.dests[plan.dests.length - 1];
+  if (last === undefined) return possible.length === 0 ? NO_CREDENTIAL_WRITES : { words: new Set(), landings: [], possible };
+  // Linear in the words (build-1's M2 and S5 on #706, the lead's ruling CLAIMS
+  // L62686: no sources times destinations). Each destination word is judged
+  // once, a repeated `-t` included.
+  const words = new Set([...new Set(plan.dests)].filter((dest) => isCredentialPathAsRead(dest)));
+  // A landing is read only between words the text settles: `cp ~/.hermes/.env
+  // $X` lands nowhere this text can name (the copy-unknown class says so).
+  const settled = (word: string): boolean => !/[$`*?[\]{}~]/u.test(word.replace(/^~(?=\/)/u, ""));
+  const landings: string[] = [];
+  // The sources land in ONE directory: the last destination named (cp, mv,
+  // install and ln take one target directory; GNU's refuse a second `-t`).
+  // Every other `-t` value is still a destination word above.
+  if (settled(last)) {
+    const into = last.replace(/\/+$/u, "");
+    // Below a directory where any name is credential material
+    // (`.approval/keys/`) every source name is judged; elsewhere only a name
+    // that can END a credential path ({@link mayEndCredentialPath}) can make
+    // one, so no other name is judged at all.
+    const anyName = isCredentialPathAsRead(`${into}/x`);
+    // Nor can any name land as one where no name of each credential row's
+    // kind would ({@link CREDENTIAL_LANDING_NAMES}) and no source name holds
+    // a backslash (a segment separator to the rows, so `..\env` may climb):
+    // then the loop is skipped, and a long copy pays no test per word
+    // (build-1's S5 on #706).
+    const mayLand =
+      anyName ||
+      CREDENTIAL_LANDING_NAMES.some((name) => isCredentialPathAsRead(`${into}/${name}`)) ||
+      plan.sources.some((source) => source.includes("\\"));
+    const judged = new Set<string>();
+    for (const source of mayLand ? plan.sources : []) {
+      if (!settled(source)) continue;
+      const base = landingName(source);
+      if (base === null || judged.has(base)) continue;
+      judged.add(base);
+      if (!anyName && !mayEndCredentialPath(base)) continue;
+      const landing = `${into}/${base}`;
+      if (isCredentialPathAsRead(landing)) landings.push(landing);
+    }
+  }
+  return words.size === 0 && landings.length === 0 && possible.length === 0 ? NO_CREDENTIAL_WRITES : { words, landings, possible };
+}
+
+/**
+ * The name a copy source lands under (`cp x/env .approval` writes
+ * `.approval/env`): its last segment, a remote `host:` cut off, or `null`
+ * for none, `.` or `..`.
+ */
+function landingName(source: string): string | null {
+  let end = source.length;
+  while (end > 0 && source.charCodeAt(end - 1) === 0x2f) end -= 1;
+  const start = source.lastIndexOf("/", end - 1) + 1;
+  const base = start === 0 ? source.slice(0, end).replace(/^[^/]*:/u, "") : source.slice(start, end);
+  return base.length === 0 || base === "." || base === ".." ? null : base;
+}
+
+/**
+ * Can a source landing under this name make a credential path of a
+ * directory that is not one (`.approval` + `env`, a Hermes home or profile +
+ * `.env`)? A cheap test ahead of {@link isCredentialPathAsRead}, never in
+ * place of it. The credential rows ({@link credentialSegments}) end a path at
+ * a fixed name after `.approval` (`vault*`, `keys`, `env`, `env.*`) or below
+ * a Hermes home (`.env`, `.env.*`, `auth.json`, `.op.env`, `.op.env.*`, and
+ * those below `hermes-agent/`); a name that is none of these leaves the
+ * directory's own answer, which the caller asks once. A name that is not
+ * ASCII (folded spellings such as `ENſ`) or holds a backslash (a segment
+ * separator to the rows) is always judged.
+ */
+/**
+ * One name of each kind {@link mayEndCredentialPath} lets through, for the
+ * test of the destination directory: where none of these lands as a
+ * credential path, no name of their kinds can either (the rows read a fixed
+ * name or a fixed prefix, folded).
+ */
+const CREDENTIAL_LANDING_NAMES: readonly string[] = ["vault", "keys", "env", "env.x", ".env", ".env.x", "auth.json", ".op.env", ".op.env.x"];
+
+function mayEndCredentialPath(name: string): boolean {
+  if (!/^[\x20-\x5b\x5d-\x7e]*$/u.test(name)) return true;
+  return /^(?:vault|keys$|env$|env\.|\.env$|\.env\.|auth\.json$|\.op\.env$|\.op\.env\.)/u.test(name.toLowerCase());
+}
+
 interface CredentialSideScan {
   positionals: readonly string[];
   reads: readonly string[];
@@ -8616,6 +8799,74 @@ function isCredentialReadWord(word: string, protectedPaths: readonly ProtectedPa
     isCredentialPathAsRead(word) &&
     protectedRank(protectedPathClass(word, protectedPaths) ?? "policy.core") >= protectedRank("policy.core")
   );
+}
+
+/**
+ * Is this argument word a LITERAL credential read (build-1's S2 on #701, the
+ * seat's ruling on the review)? Only then is it left out of the rule that a
+ * word the shell still builds is an unknown write target: a credential file
+ * path ({@link isCredentialReadWord}) in which nothing can vary but a
+ * leading `~/`, alone or after a literal `key=` or `--opt=` prefix
+ * (`.approval/env`, `~/.hermes/.env`, `--in=.approval/env`). Nothing with a
+ * `$`, a backtick, a glob or a brace in it is ever left out, a secret-named
+ * variable included: the name is the agent's to choose and to assign
+ * (`X_TOKEN=.github/workflows/ci.yml; command cp .approval/env $X_TOKEN`),
+ * and plain `cp` counts every variable word as an unknown target.
+ *
+ * One glob form is the read too (build-1's S3 on #706): a pattern that can
+ * match only credential paths, handed to a program that only reads its
+ * operands ({@link GLOB_READ_BINS}), so that the spelling alone does not move
+ * the class (`less ~/.hermes/profiles/*\/auth.json` reads what `less
+ * ~/.hermes/auth.json` reads). See {@link isCredentialGlobRead}. Anywhere
+ * else a glob may put a credential path in a slot the program WRITES (`command
+ * cp ~/.hermes/profiles/*\/auth.json` expands to `cp a/auth.json
+ * b/auth.json`; `xxd in out` writes `out`): it stays a built target.
+ */
+function isCredentialArgWord(word: LexWord, protectedPaths: readonly ProtectedPathEntry[], readsEveryOperand: boolean): boolean {
+  if (word.substitutions.length > 0 || word.splits) return false;
+  const prefix = /^(?:--?[A-Za-z0-9][A-Za-z0-9_-]*|[A-Za-z_][A-Za-z0-9_]*)=/u.exec(word.text);
+  const value = prefix === null ? word.text : word.text.slice(prefix[0].length);
+  if (word.expands) return readsEveryOperand && isCredentialGlobRead(value, protectedPaths);
+  return !/[$`~*?[\]{}]/u.test(value.replace(/^~(?=\/)/u, "")) && isCredentialReadWord(value, protectedPaths);
+}
+
+/**
+ * Programs with no rule that only READ every operand they are handed (the
+ * pagers and dumpers the credential tier names rather than refuses), for
+ * {@link isCredentialArgWord}'s glob form. Not `xxd` (`xxd in out` writes
+ * `out`), `base64` (GNU's takes one file, others an output operand), or any
+ * copy, move, link or editor.
+ */
+const GLOB_READ_BINS: ReadonlySet<string> = new Set(["less", "more", "most", "hexdump", "od", "strings", "file"]);
+
+/**
+ * Can every match of this glob only be a credential read? (build-1's S3 on
+ * #706.) Narrow by design, so a pattern that might match anything else stays
+ * a target the shell builds: the only characters that may vary are `*` and
+ * `?`, each in a segment of its own made of them alone (no `**`, which may
+ * match no segment or several), and nothing else may (no `$`, backtick,
+ * bracket, brace, `~` but a leading `~/`, backslash, or zsh and ksh pattern
+ * syntax). Such a segment matches one name, never `.` or `..`, and a name
+ * starting with a dot only under `dotglob`; so the word is the read when it
+ * is a credential read with each such segment filled by an ordinary name and
+ * by a dot name (`~/.hermes/profiles/x/auth.json` and
+ * `~/.hermes/profiles/.x/auth.json`). `~/.hermes/*\/.env` (a match may be
+ * any directory) and `.approval/env*` (a match may be `.approval/envoy`) are
+ * not.
+ */
+function isCredentialGlobRead(value: string, protectedPaths: readonly ProtectedPathEntry[]): boolean {
+  const rest = value.replace(/^~(?=\/)/u, "");
+  if (/[$`~[\]{}()\\#^|<>!@+]/u.test(rest)) return false;
+  const segments = value.split("/");
+  let globbed = false;
+  for (const segment of segments) {
+    if (!/[*?]/u.test(segment)) continue;
+    if (!/^[*?]+$/u.test(segment) || segment.includes("**")) return false;
+    globbed = true;
+  }
+  if (!globbed) return false;
+  const fill = (name: string): string => segments.map((segment) => (/[*?]/u.test(segment) ? name : segment)).join("/");
+  return isCredentialReadWord(fill("x"), protectedPaths) && isCredentialReadWord(fill(".x"), protectedPaths);
 }
 
 /**
@@ -13204,6 +13455,19 @@ function classifySegmentWithVerb(
         ? uploadCredential
         : argCredential;
   const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets);
+  // The copy table's reading of the argv and the copy family's unknown-word
+  // test, made once for the credential tier and the walk (build-1's S5 on
+  // #706: the credential copy read the argv a second time).
+  let planMemo: { value: CopyPlan | null } | undefined;
+  const argsPlan = (): CopyPlan | null => (planMemo ??= { value: copyPlan(basename, args) }).value;
+  let unknownMemo: { value: string | null } | undefined;
+  const argvUnknown = (): string | null => (unknownMemo ??= { value: copyArgvUnknown(args, argFlags) }).value;
+  // The credential paths a copy WRITES ({@link credentialWrites}): folded
+  // reading only, as the rest of this tier's additions (as spelled, main's).
+  const copyWrites =
+    credential === null && redirectCredential === null
+      ? NO_CREDENTIAL_WRITES
+      : (foldedOnly(() => [credentialWrites(basename, args, argFlags, argsPlan, argvUnknown)])[0] ?? NO_CREDENTIAL_WRITES);
   const sideScan =
     credential === null && redirectCredential === null
       ? null
@@ -13245,23 +13509,149 @@ function classifySegmentWithVerb(
   // an option or of a `key=value` word (`--out=.github/workflows/ci.yml`,
   // `of=.github/workflows/ci.yml`) is a word of such a program too, so it is
   // read with them; a credential file there is the read.
+  //
+  // Two more (build-1's S2 on #701, the lead's ruling CLAIMS L62362), after
+  // those, one entry per class. The values attached to a short option
+  // (`-o.github/workflows/ci.yml`, `-xo.github/workflows/ci.yml`) are read
+  // as words the same way, every tail ({@link attachedOptionValues}: a tail
+  // that names nothing protected adds nothing, so `-rf` adds nothing), the
+  // credential reads among them left out. An `=` value or an attached value
+  // that OUTRANKS the credential class (`-oAPPROVAL.md`, `--out=APPROVAL.md`,
+  // `-t.approval/log`) leaves the line refused, as the same path as its own
+  // word does (`frobnicate .approval/env APPROVAL.md` defers the credential
+  // and the walk refuses): never less strict than that line. And a target
+  // the shell still builds fails closed as `cp .approval/env $X` does,
+  // `policy.core` `copy-target-unknown`: the first argument word whose value
+  // the text cannot settle, by the flags the copy family's test reads
+  // (`splits`, `expands`), the lexer's `exact` (a `$` inside double quotes,
+  // an unquoted `~`) and its substitutions (`"$(…)"`). An option word over
+  // {@link ATTACHED_TAIL_SCAN_BYTES} is not scanned tail by tail (the scan is
+  // quadratic in the word): the line is refused. Every word counts,
+  // `--` or not: nobody knows this program's operands, and a secret-named
+  // variable is a word the shell builds like any other. Only a literal
+  // credential path is left out as the read ({@link isCredentialArgWord});
+  // `'$X'` is a literal.
   const answered = outranking === null && !fetchOutranksCredential ? (credential ?? redirectCredential) : null;
   if (answered !== null) {
+    const refused: { outcome?: SegmentOutcome } = {};
     const more = foldedOnly((): ProtectedBeside[] => {
       const rest = restOfWalk();
       if (rest.ok) return protectedBeside(rest);
+      // A copy that WRITES a credential path, and whose walk refuses: the
+      // refusal stands (the review of the M1 fold on #706). Its answer at
+      // dbebd65d was that walk, deferred; a refusal is the strictest answer,
+      // so the union of main's answer and the write's class is the refusal.
+      if (copyWrites.words.size > 0 || copyWrites.landings.length > 0) {
+        refused.outcome = rest;
+        return [];
+      }
       const optionValues = args.flatMap((arg) => {
         const equals = arg.indexOf("=");
         if (equals === -1) return [];
         const value = arg.slice(equals + 1);
         return value.length === 0 || isCredentialReadWord(value, protectedPaths) ? [] : [value];
       });
-      const named = [sideScan?.found ?? null, strictestProtected(optionValues, protectedPaths)];
-      return besideProtected(answered.class, named).more ?? [];
+      // An option word too long to scan tail by tail may carry any path, one
+      // that outranks the credential among them: the line is refused, as a
+      // short one that outranks it is (below).
+      if (args.some(isLongAttachedOption)) {
+        refused.outcome = rest;
+        return [];
+      }
+      const attached = args.flatMap(attachedOptionValues).filter((value) => !isCredentialReadWord(value, protectedPaths));
+      const optionHit = strictestProtected(optionValues, protectedPaths);
+      const attachedHit = strictestProtected(attached, protectedPaths);
+      if ([optionHit, attachedHit].some((hit) => hit !== null && outranksCredential(hit.surface))) {
+        refused.outcome = rest;
+        return [];
+      }
+      const built = segment.words
+        .slice(cursor + 1)
+        .find(
+          (word) =>
+            (word.splits || word.expands || !word.exact || word.substitutions.length > 0) &&
+            !isCredentialArgWord(word, protectedPaths, GLOB_READ_BINS.has(basename)),
+        );
+      const named = [sideScan?.found ?? null, optionHit, attachedHit];
+      const unknown: ProtectedBeside[] =
+        built === undefined ? [] : [{ class: "policy.core", rule: "copy-target-unknown", path: built.text }];
+      return besideProtected(answered.class, named, "protected-path", unknown).more ?? [];
     });
-    return { ok: true, ...answered, ...(more.length === 0 ? {} : { more: [...more] }) };
+    if (refused.outcome !== undefined) return refused.outcome;
+    return addWritten(addPossible({ ok: true, ...answered, ...(more.length === 0 ? {} : { more: [...more] }) }));
   }
-  return restOfWalk();
+  return addWritten(addPossible(restOfWalk()));
+
+  /**
+   * The answer main gives a copy that writes a credential path ({@link
+   * credentialWrites}: a credential destination word, or a source landing as
+   * one), with the class each written path takes ADDED (build-1's M1 on #706,
+   * the lead's ruling CLAIMS L62686: a union, never a swap). The line is
+   * walked as main walks it, so every class main reports stays, in main's
+   * order (`rsync -a --log-file=.approval/log/events.jsonl README.md
+   * .approval/env` keeps `log.mutate`). Where main answered with the
+   * credential class itself (`cp README.md .approval/env`), the write's class
+   * answers first and the credential touch rides beside it, as for any path
+   * that outranks the credential (`cp .approval/env APPROVAL.md`); elsewhere
+   * the write's classes main lacks are added after main's. Where main's walk
+   * ended on a branch that does not carry the credential touch (`cp -t
+   * .approval/env APPROVAL.md`), it is carried. A refusal stays.
+   */
+  function addWritten(outcome: SegmentOutcome): SegmentOutcome {
+    const touch = credential ?? redirectCredential;
+    if (!outcome.ok || touch === null || (copyWrites.words.size === 0 && copyWrites.landings.length === 0)) return outcome;
+    const hit = strictestProtected([...copyWrites.words, ...copyWrites.landings], protectedPaths);
+    const written: ProtectedBeside[] = hit === null ? [] : [hit, ...hit.others].map((each) => ({ class: each.surface, rule: "protected-path", path: each.path }));
+    if (hit !== null && outcome.class === touch.class && outcome.also === undefined && outranksCredential(hit.surface)) {
+      const more: ProtectedBeside[] = [];
+      for (const entry of [...(outcome.more ?? []), ...written.slice(1)]) {
+        if (entry.class === hit.surface || entry.class === touch.class || more.some((have) => have.class === entry.class)) continue;
+        more.push(entry);
+      }
+      return {
+        ok: true,
+        class: hit.surface,
+        rule: "protected-path",
+        path: hit.path,
+        also: { class: outcome.class, rule: outcome.rule, ...(outcome.path === undefined ? {} : { path: outcome.path }) },
+        ...(more.length === 0 ? {} : { more }),
+      };
+    }
+    const have = new Set([outcome.class, ...(outcome.also === undefined ? [] : [outcome.also.class]), ...(outcome.more ?? []).map((entry) => entry.class)]);
+    const also = outcome.also ?? (have.has(touch.class) ? undefined : touch);
+    if (also !== undefined) have.add(also.class);
+    const added: ProtectedBeside[] = [];
+    for (const entry of [...written, { class: touch.class, rule: touch.rule, ...(touch.path === undefined ? {} : { path: touch.path }) }]) {
+      if (have.has(entry.class)) continue;
+      have.add(entry.class);
+      added.push(entry);
+    }
+    if (also === outcome.also && added.length === 0) return outcome;
+    return {
+      ...outcome,
+      ...(also === undefined ? {} : { also }),
+      ...(added.length === 0 && outcome.more === undefined ? {} : { more: [...(outcome.more ?? []), ...added] }),
+    };
+  }
+
+  /**
+   * The answer with the protected class of each credential path an
+   * unreadable copy may write ({@link CredentialWrites.possible}) added after
+   * every class it already reports, one entry per class. A refusal stays.
+   */
+  function addPossible(outcome: SegmentOutcome): SegmentOutcome {
+    if (copyWrites.possible.length === 0 || !outcome.ok) return outcome;
+    const hit = strictestProtected(copyWrites.possible, protectedPaths);
+    if (hit === null) return outcome;
+    const have = new Set([outcome.class, ...(outcome.also === undefined ? [] : [outcome.also.class]), ...(outcome.more ?? []).map((entry) => entry.class)]);
+    const added: ProtectedBeside[] = [];
+    for (const each of [hit, ...hit.others]) {
+      if (have.has(each.surface)) continue;
+      have.add(each.surface);
+      added.push({ class: each.surface, rule: "protected-path", path: each.path });
+    }
+    return added.length === 0 ? outcome : { ...outcome, more: [...(outcome.more ?? []), ...added] };
+  }
 
   /**
    * The walk from the credential tier on. Its body keeps the indentation it
@@ -13381,7 +13771,7 @@ function classifySegmentWithVerb(
   // still read them ({@link globWriteOperands}).
   // Review of 039b840a (finding 2): a copy tool's argv read by its option
   // table, so an option's value is never taken for the destination.
-  const plan = copyPlan(basename, args);
+  const plan = argsPlan();
   // Lead ruling L61587: a recursive delete, move or chmod of a PARENT of an
   // organ directory (`rm -rf .`, `mv "$PWD" ../x`, `chmod -R 000 ~`), decided
   // by the hook's listing of it ({@link organParentClass}).
@@ -13449,7 +13839,7 @@ function classifySegmentWithVerb(
     false,
     glob,
   );
-  const copyUnknown = copyFamily ? copyArgvUnknown(args, argFlags) : null;
+  const copyUnknown = copyFamily ? argvUnknown() : null;
   // The effectful scan by text, as `laterProtected` reads it: the positionals
   // (and an upload's sources) with the prose skip, and the `<` targets.
   // Beside a credential answer taken above it is the scan {@link

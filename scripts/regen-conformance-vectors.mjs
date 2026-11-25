@@ -2447,6 +2447,12 @@ const commandClassVectors = [
       "a wrapper in front of the copy does not take the protected target off the answer: account.credential, then policy.edit for the instruction file. Without the credential word the line is refused, no rule covering `command`",
     input: { command: "command cp .approval/env CLAUDE.md" },
   },
+  {
+    id: "every-protected-target-credential-through-a-wrapper-built-target",
+    description:
+      "behind a wrapper, a target the shell builds fails closed as `cp .approval/env $X` does: account.credential, then policy.core (copy-target-unknown) for the variable. A quoted '$X' is a literal and the line is the credential class alone",
+    input: { command: "command cp .approval/env $X" },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",

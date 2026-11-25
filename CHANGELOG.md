@@ -695,6 +695,63 @@ other segments, and the hook judges each.
   (`--out=.github/workflows/ci.yml`). Before,
   one word in front of `cp` left the workflow write unnamed. Without the
   credential word these lines are refused, as they were.
+- **Behind a wrapper, a target the shell builds fails closed** as `cp
+  .approval/env $X` does: a variable, a command substitution, a glob, a
+  brace expansion or a `~` in a word of the line (`command cp .approval/env
+  $X`, `"$(…)"`, `.gith*/workflows/ci.yml`, `{a,b}.yml`, `~bob/x`) reports
+  `policy.core` (`copy-target-unknown`) beside the credential class, after
+  the classes above, and every tail of a short option's attached value is
+  read as a word (`-o.github/workflows/ci.yml`, `-xo.github/workflows/ci.yml`);
+  an attached-option word over 256 bytes is not read tail by tail, and
+  behind a wrapper it refuses the line, as an outranking value does, so the
+  scan stays linear.
+  An attached or `=` value that outranks the credential class
+  (`-oAPPROVAL.md`, `--out=APPROVAL.md`, `-t.approval/log`) leaves the line
+  refused, as the same path as its own word does. A quoted `'$X'` is a
+  literal, and only a literal credential path (`.approval/env`,
+  `~/.hermes/.env`, `--in=.approval/env`) is left out as the read. A
+  secret-named variable is a word the shell builds like any other, as plain
+  `cp` counts it, since the name is the agent's to choose and to assign:
+  `command cp $APPROVAL_TG_TOKEN notes.txt` and `frobnicate --token
+  $APPROVAL_TG_TOKEN` are `account.credential` (`credential-env`), then
+  `policy.core`. So under a policy that runs `account.credential` more
+  lightly than `policy.core`, a program with no rule that is handed a
+  secret variable now also waits on `policy.core`; under the policy
+  `approval init` writes both classes are manual and no decision moves.
+  Before, these lines were the credential class alone.
+- **A copy INTO a credential path writes it.** A credential path in a
+  copy's destination slot (by the copy tool's own option table: `cp`, `mv`,
+  `ln`, `install`, `rsync`, `scp`) was read as the credential read, so `cp
+  README.md .approval/env`, `cp ~/.hermes/.env .approval/env` and `cp
+  .approval/env ~/.hermes/auth.json`, with their brace and quoted
+  spellings, answered `account.credential` alone. The destination is now a
+  write: the class a write of that path takes (`policy.core`) outranks the
+  credential class and answers first, with the credential touch beside it,
+  as for any outranking path (`cp .approval/env APPROVAL.md`). A source
+  that lands at a credential path counts the same way. Where the table
+  cannot read the argv (an option it does not know, `cp --frob README.md
+  .approval/env`, or a word the shell may still turn into one), every
+  credential path among the words may be written: the line keeps its whole
+  answer and that path's class is added after it (a credential source there,
+  `cp --frob .approval/env notes.txt`, gains it too). So under a policy
+  that runs `account.credential` more lightly than `policy.core`, such a
+  copy now also waits on `policy.core`. A credential source is still the
+  read (`cp .approval/env notes.txt` is the credential class alone), and
+  the redirect, `tee` and `mv` forms answered `policy.core` already.
+  The write's class is ADDED to the answer the line had: every class it
+  reported stays, so `rsync -a --log-file=.approval/log/events.jsonl
+  README.md .approval/env` keeps `log.mutate` (likewise rsync's
+  `--temp-dir`, and a glob source's readings), and a refusal of the rest of
+  the walk stands. The sources land in the last target directory named.
+  A credential glob as a copy's last operand with no `-t` may expand into
+  its destination (`cp ~/.hermes/profiles/*/auth.json`, `cp
+  .approval/env{,.bak}`): that path's class is added too.
+- **A credential read spelled as a glob is still the read** where the
+  program only reads its operands (`less`, `more`, `most`, `hexdump`, `od`,
+  `strings`, `file`) and every match of the glob is a credential path (`less
+  ~/.hermes/profiles/*/auth.json`, as `less ~/.hermes/auth.json`). Anywhere
+  a match may be written (`xxd in out`, a wrapper, a program with no rule)
+  the glob is a target the shell builds, as above.
 - **Not changed:** a protected path that outranks the credential class
   still answers first with the credential beside it, except in a copy's
   joined target-directory flag (`cp --target-directory=.approval/log
@@ -705,7 +762,7 @@ other segments, and the hook judges each.
 - The segment is still walked once: the walk goes on from the credential
   answer, and its protected scan is the one the credential tier already
   made.
-- Conformance: four new `command-class` vectors; the 400 before them are
+- Conformance: five new `command-class` vectors; the 400 before them are
   byte-identical.
 
 **Every protected path a command writes is judged.** A segment that named
