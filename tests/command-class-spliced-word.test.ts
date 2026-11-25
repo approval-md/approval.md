@@ -420,7 +420,7 @@ function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number
   return { ratio: median(ratios), spent: median(spents) };
 }
 
-test("cost: a word of 3,000 unread parts is bounded, and past the bound could be any path", () => {
+test("cost: a word of 3,000 unread parts is bounded, and past the bound could be any path", (t) => {
   const bound = scaledBound(1);
   for (const [label, command, strict] of [
     ["3,000 parts around a guarded name", `echo x > A${"$E".repeat(3000)}PPROVAL.md`, true],
@@ -451,6 +451,7 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
   ] as const) {
     const { ratio, spent } = pairedCost(() => classifyCommand(control, []), () => classifyCommand(command, []), 21);
     const label = `${command.slice(0, 20)}: median ${spent.toFixed(3)} CPU s, ${ratio.toFixed(2)} of its control (${runner().line})`;
+    t.diagnostic(`${label}; bounds ${scaledBound(0.4).toFixed(2)} CPU s and ${String(most)}`);
     assert.ok(spent < scaledBound(0.4), label);
     assert.ok(ratio <= most, label);
   }
