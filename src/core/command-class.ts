@@ -6189,15 +6189,23 @@ function readDollarQuoted(
       while (length < 4 && at + length < close && /[0-7]/u.test(command[at + length] as string)) length += 1;
     } else length = 0;
     if (length === 0) {
-      // Unread. Where one shell reads the characters after it with it (`\cX`
-      // in bash, `\C-X` and `\M-X` in zsh), the rest of this quote is
-      // unknown. Any other letter or sign is the backslash and itself to bash,
-      // itself alone to zsh (`\x`, `\u`, `\U` with no digit a NUL to zsh).
+      // Unread. Where one shell reads the character after it with it (`\cX`
+      // in bash; zsh reads `\c` as `c`; `\C-X` and `\M-X` in zsh, written as
+      // they are by bash), that one placeholder covers the escape and the
+      // character it takes, and the quote goes on being read: both shells keep
+      // the rest of the quote (review of fe0a101a, M1: a `break` here left
+      // `$'\conformance/../\x2eapproval/env'` a wholly unread word). Any other
+      // letter or sign is the backslash and itself to bash, itself alone to
+      // zsh (`\x`, `\u`, `\U` with no digit a NUL to zsh).
       // zsh may read a NUL here (`\C-@`; `\x`, `\u` or `\U` with no digit).
       if (/[CMxuU]/u.test(next) && zshNulAt === null) zshNulAt = text.length;
       unknown();
-      if (next === "c" || next === "C" || next === "M") break;
-      at += 1;
+      // The last character this escape takes (a backslash pair counts as one).
+      let last = at + 1;
+      if (next === "c") last = at + 2;
+      else if ((next === "C" || next === "M") && command[at + 2] === "-") last = at + 3;
+      if (last > at + 1 && command[last] === "\\") last += 1;
+      at = Math.min(last, close - 1);
       continue;
     }
     const escape = command.slice(at, at + length);

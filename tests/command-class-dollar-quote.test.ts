@@ -146,7 +146,7 @@ test("the lexer's text: each shared escape decoded, each other one unknown", () 
     ["$'a\\qb'", `a${U}b`],
     // Review of b58db9ec (M1): an unknown part is the rest of its QUOTE at
     // most, and the word goes on after it.
-    ["$'a\\cAb'c", `a${U}c`],
+    ["$'a\\cAb'c", `a${U}bc`], // \cA is one part; the quote goes on (review of fe0a101a, M1)
     ["$'a\\U00000041b'", "aAb"],
     ["$'a\\U41'b", "aAb"],
     ["$'a\\U41b'", `a${U}`], // U+041B: outside ASCII
@@ -156,8 +156,10 @@ test("the lexer's text: each shared escape decoded, each other one unknown", () 
     ["$'\\u2e'approval", ".approval"],
     ["$'a\\u0'c", "ac"], // a NUL: bash ends the quote there
     ["$'a\\xgb'c", `a${U}gbc`],
-    ["$'a\\C-ab'c", `a${U}c`],
-    ["$'a\\M-ab'c", `a${U}c`],
+    ["$'a\\C-ab'c", `a${U}bc`],
+    ["$'a\\M-ab'c", `a${U}bc`],
+    ["$'a\\c\\\\b'c", `a${U}bc`], // \c takes a backslash pair
+    ["$'\\conformance/../\\x2eapproval/env'", `${U}nformance/../.approval/env`],
     ["$'a\\xc3\\xa9b'", `a${U}b`],
     ["$'a\\u00e9b'", `a${U}b`],
     ["$'a\\0b'c", "ac"],
@@ -303,6 +305,19 @@ test("review of b58db9ec (M1): a quote's unknown part ends at its quote, and the
       ["git reset $'\\u2d'-hard", "vcs.history.rewrite"],
       ["git commit $'\\u2d'-amend -m x", "vcs.history.rewrite"],
       ["gh pr $'\\u6d'erge 1", "vcs.push.main"],
+      // Review of fe0a101a (M1): after \c, \C- or \M- the rest of the quote is read.
+      ["cat $'\\conformance/../\\x2eapproval/env'", "account.credential"],
+      ["cat < $'\\conformance/../\\x2eapproval/env'", "account.credential"],
+      ["grep K $'\\conformance/../\\x2eapproval/env'", "account.credential"],
+      ["cat $'\\c/../\\x2eapproval/env'", "account.credential"],
+      ["cat src/$'\\c/../../\\x2eapproval/env'", "account.credential"],
+      ["rm -f $'\\conformance/../\\x41PPROVAL.md'", "policy.core"],
+      ["echo x > $'\\conformance/../\\x41PPROVAL.md'", "policy.core"],
+      ["echo x >> $'\\conformance/../\\x2eapproval/log/events.jsonl'", "log.mutate"],
+      ["tee $'\\conformance/../\\x2eclaude/settings.json'", "policy.core"],
+      ["cat $'\\cX/../\\x2eapproval/env'", "account.credential"],
+      ["cat $'\\C-a/../\\x2eapproval/env'", "account.credential"],
+      ["cat $'\\M-a/../\\x2eapproval/env'", "account.credential"],
       // zsh ends the path at the NUL: APPROVAL.md; bash writes APPROVAL.md.bak.
       ["echo x > $'APPROVAL.md\\0'.bak", "policy.core"],
     ] as const) {
