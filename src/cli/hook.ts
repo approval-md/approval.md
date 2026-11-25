@@ -114,6 +114,7 @@ import {
   CODE_EXECUTING_RULES,
   CONTRIBUTOR_SUFFIX,
   credentialReadWords,
+  eachDollarQuoteReading,
   GATE_SELF_CLASS,
   gitVerbIndex,
   isCredentialPath,
@@ -178,7 +179,8 @@ import {
   type EventRecord,
 } from "../core/log.js";
 import { settleTerminationGuards } from "../core/log-lock.js";
-import { eachNameReading, foldFileName, foldNameExact, foldNameLower } from "../core/name-fold.js";
+import { ANY_NAME, type GlobPattern, globPattern as compiledGlobPattern, zshOptionReading } from "../core/glob-match.js";
+import { eachNameReading, foldFileName, foldNameExact, foldNameLower, inEachEqualTurn, inEveryReading, withLocalReadingsSettled } from "../core/name-fold.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import {
@@ -242,7 +244,7 @@ import {
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
-import { expandOnDisk, listDirectory, refineGitDirWrites } from "./git-dir-writes.js";
+import { expandOnDisk, listDirectory, readPathEntry, refineGitDirWrites, type GitDirLanding, type PathEntry } from "./git-dir-writes.js";
 import { refinePushRepo } from "./push-repo.js";
 import { jsonStringLeaves, readJsonDocument } from "./settings-json.js";
 import { HOOK_GROK_HELP, HOOK_HELP, HOOK_HERMES_HELP, HOOK_MUSE_HELP } from "./help.js";
@@ -2800,7 +2802,7 @@ function steeredReadCouldNameCredential(
     if (hasGlobChars(segment)) {
       globs += 1;
       if (globs > STEERED_GLOB_CAP || segment.includes("**")) return true;
-      const pattern = globRegex(segment);
+      const pattern = globPattern(segment);
       const matched = representatives.filter((name) => pattern.test(name));
       if (matched.length > 0) alternatives = matched;
     }
@@ -2833,6 +2835,10 @@ function steeredReadCouldNameCredential(
  * takes; both readings are judged.
  */
 export function physicalLanding(from: string, text: string): string {
+  return remembered(diskMemo?.physical, `${from}\u0000${text}`, () => physicalLandingOnDisk(from, text));
+}
+
+function physicalLandingOnDisk(from: string, text: string): string {
   let current = isAbsolute(text) ? sep : from;
   try {
     current = realpathSync(current);
@@ -3080,7 +3086,11 @@ function curlValuesNotRead(
  * pattern could name a credential at all. Over-matches rather than under:
  * `*` matches a leading dot here, which the shell's glob does not.
  */
-function expandGlobPath(path: string): string[] | null {
+function expandGlobPath(path: string): readonly string[] | null {
+  return remembered(diskMemo?.globs, `${shellOptionsSet ? 1 : 0}\u0000${path}`, () => expandGlobPathOnDisk(path));
+}
+
+function expandGlobPathOnDisk(path: string): string[] | null {
   // Fix round 2 (path-parser differential): the shell's glob splits on `/`
   // alone and reads a backslash as an escape, so a pattern holding one is not
   // listed here (the caller judges whether it could name a credential).
@@ -3089,12 +3099,15 @@ function expandGlobPath(path: string): string[] | null {
   let current: string[] = [sep];
   for (const component of components) {
     const next: string[] = [];
+    // Compiled once for every base it is listed in (review-b's M1 on
+    // 8c91e702: a big class compiled once per base, up to 256 of them).
+    const pattern = hasGlobChars(component) ? globPattern(component) : null;
     for (const base of current) {
       if (component === "..") {
         next.push(dirname(base));
         continue;
       }
-      if (!hasGlobChars(component)) {
+      if (pattern === null) {
         next.push(join(base, component));
         continue;
       }
@@ -3105,7 +3118,6 @@ function expandGlobPath(path: string): string[] | null {
         if (!existsSync(base)) continue;
         return null;
       }
-      const pattern = globRegex(component);
       for (const name of names) if (pattern.test(name)) next.push(join(base, name));
     }
     if (next.length > 256) return null;
@@ -3199,8 +3211,14 @@ export function credentialReadLandings(
   env: NodeJS.ProcessEnv = process.env,
 ): Array<{ segment: string; path: string }> {
   const found: Array<{ segment: string; path: string }> = [];
+  // Whether a path is a credential read, by path and recursion, for this
+  // call: one name reading, one set of shell options (review-b's M3 at 3774fdd4).
+  const landed = new Map<string, boolean>();
+  const recorded = new Set<string>();
   const record = (segment: string, path: string): void => {
-    if (!found.some((entry) => entry.segment === segment && entry.path === path)) {
+    const key = `${segment}\u0000${path}`;
+    if (!recorded.has(key)) {
+      recorded.add(key);
       found.push({ segment, path });
     }
   };
@@ -3316,14 +3334,19 @@ export function credentialReadLandings(
         continue;
       }
       const hit = (path: string): void => record(shape.text, path);
-      const lands = (path: string, recursive: boolean): boolean => {
-        const canonical = canonicalPath(path);
-        return (
-          isCredentialPath(path) ||
-          isCredentialPath(canonical) ||
-          (recursive && (holdsCredentials(canonical) || holdsCredentials(path)))
-        );
-      };
+      const lands = (path: string, recursive: boolean): boolean =>
+        remembered(landed, `${recursive ? 1 : 0}${path}`, () => {
+          const canonical = canonicalPath(path);
+          return (
+            isCredentialPath(path) ||
+            isCredentialPath(canonical) ||
+            (recursive && (holdsCredentials(canonical) || holdsCredentials(path)))
+          );
+        });
+      // Review-b's M3 at 3774fdd4: a word this segment already judged, with
+      // the same flags, from the same directories, records what it recorded
+      // then, so it is judged once (`grep -r ^import ^import …`).
+      const judgedHere = new Set<string>();
       // Fix round 2 (the narrowed M-B rule): is a relative word read under a
       // directory a `CDPATH` lookup may have chosen a credential read? Every
       // recursive reader is (a recursive read of an unknown directory could
@@ -3457,6 +3480,9 @@ export function credentialReadLandings(
         }
       };
       const judge = (word: string, recursive: boolean, steeredToo = true, homeSpelled = true): void => {
+        const key = `${recursive ? 1 : 0}${steeredToo ? 1 : 0}${homeSpelled ? 1 : 0}${word}`;
+        if (judgedHere.has(key)) return;
+        judgedHere.add(key);
         // APRV-524 (review-b M1): a word holding the substitution sentinel is
         // judged a second time with every sentinel removed. That is how the
         // release before APRV-511 read it, its lexer adding nothing for a
@@ -3790,6 +3816,12 @@ export function refineWriteScope(
   result: CommandClassification,
   roots: readonly string[],
   cwd: string,
+  /**
+   * Where a destination really is ({@link resolvedWriteTarget}), from the
+   * disk alone: the hook's call passes one that keeps each answer for the
+   * call ({@link WriteLandingMemo}), so every name reading asks the disk once.
+   */
+  resolveTarget: (target: string, cwd: string) => string | null = resolvedWriteTarget,
 ): RefinedClassification {
   if (!result.ok) return { result, notes: [] };
   if (roots.length === 0) return { result, notes: [] };
@@ -3827,7 +3859,7 @@ export function refineWriteScope(
     };
 
     for (const candidate of writeCandidates(parsed.args)) {
-      const resolved = resolvedWriteTarget(candidate, cwd);
+      const resolved = resolveTarget(candidate, cwd);
       if (resolved === null) {
         return reject(
           candidate,
@@ -4199,7 +4231,11 @@ export function judgeWriteLanding(
     const parent = kernelLanding(dirname(spelled), null, disk);
     if (parent !== null) forms.push(join(parent, tail));
   }
-  for (const form of forms) {
+  // Each form once, in order: the readings of a plain path are often the same
+  // path, and every test below answers by the form alone (cost: a pattern
+  // matching every entry of a directory lands each entry).
+  const distinct = [...new Set(forms)];
+  for (const form of distinct) {
     const entry = guardedEntryOf(form, homes, configDirs);
     if (entry !== null) {
       return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `${form} is on the guarded list (${entry})` };
@@ -4209,7 +4245,7 @@ export function judgeWriteLanding(
   // nothing above has guarded the landing.
   const scripts = guard.hookScripts();
   if (scripts.size > 0) {
-    for (const form of forms) {
+    for (const form of distinct) {
       if (scripts.has(foldedPathKey(form))) {
         return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `${form} is on the guarded list (${HOOK_SCRIPT_ENTRY})` };
       }
@@ -4219,7 +4255,7 @@ export function judgeWriteLanding(
   // archive, a clone) holds names this hook never reads: an entry under it is
   // within reach.
   if (tree !== false) {
-    for (const form of forms) {
+    for (const form of distinct) {
       const entry = guardedEntryBelow(form, homes, configDirs);
       if (entry !== null) {
         return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can hold ${entry}, which is on the guarded list` };
@@ -4230,7 +4266,7 @@ export function judgeWriteLanding(
     // (`tree === true`), not rule A's list words: `git add .` at a project
     // root whose settings name a script under it stays as it was.
     if (tree === true) {
-      for (const form of forms) {
+      for (const form of distinct) {
         if (hookScriptAtOrUnder(form, scripts)) {
           return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can replace ${HOOK_SCRIPT_ENTRY}, which is on the guarded list` };
         }
@@ -4241,7 +4277,7 @@ export function judgeWriteLanding(
     // not exist yet holds none today (what the tree itself carries is not
     // read: see the hand-back).
     if (TREE_AT_A_CHECKOUT_IS_GUARDED && tree === true) {
-      for (const form of new Set([...landing.paths, ...forms])) {
+      for (const form of new Set([...landing.paths, ...distinct])) {
         try {
           lstatSync(join(form, ".git"));
         } catch {
@@ -4781,7 +4817,11 @@ function listWords(shape: CommandSegmentShape): string[] {
  *
  * The classifier's answers this pass asks for (`ownAnswer`, the synthetic
  * lines) and `expandOnDisk` (whose entry test lowers or folds by the reading)
- * are NOT kept: they are asked again in each reading. Made by
+ * are NOT kept: they are asked again in each reading. One exception: a
+ * synthetic line of plain names, judged once for the call, and its answer and
+ * whether that answer holds in every reading (`plainLines`,
+ * {@link inEveryReading}); where it is not known to, each reading judges the
+ * whole line, as before. Made by
  * {@link classifyForHook} for one call and dropped with it, so nothing here
  * reaches another command, directory, home or policy.
  */
@@ -4790,11 +4830,31 @@ export interface WriteLandingMemo {
   /** `landingPaths` per spelling: the lexical and the kernel landing, from the disk alone. */
   readonly paths: Map<string, { paths: string[]; unknown: boolean }>;
   readonly disk: DiskReads;
+  /** {@link resolvedWriteTarget} per directory and destination: the disk alone answers it. */
+  readonly writeTarget: (target: string, cwd: string) => string | null;
+  /**
+   * Per directory state and synthetic line of plain names: the classes it
+   * earns, and whether they are its classes in every reading. Judged once for
+   * the call, in the first reading that asks ({@link inEveryReading}; the
+   * pattern pass's `redirectMatchClasses`).
+   */
+  readonly plainLines: Map<string, { readonly value: readonly PlainLineClass[]; readonly invariant: boolean }>;
 }
+
+/** A class a synthetic line earns, as the write pass attaches it ({@link WriteLandingMemo.plainLines}). */
+export type PlainLineClass = { cls: string; rule: string; path: string; why?: string };
 
 /** A fresh {@link WriteLandingMemo}, for one `classifyForHook` call. */
 export function writeLandingMemo(): WriteLandingMemo {
-  return { landings: new Map(), paths: new Map(), disk: memoDiskReads() };
+  const targets = new Map<string, string | null>();
+  const writeTarget = (target: string, cwd: string): string | null => {
+    const key = `${cwd}\u0000${target}`;
+    if (targets.has(key)) return targets.get(key) as string | null;
+    const resolved = resolvedWriteTarget(target, cwd);
+    targets.set(key, resolved);
+    return resolved;
+  };
+  return { landings: new Map(), paths: new Map(), disk: memoDiskReads(), writeTarget, plainLines: new Map() };
 }
 
 /** How many landings the write pass has judged in this process (not answered from a memo): for tests. */
@@ -4932,7 +4992,7 @@ export function refineWriteLandings(
     const context = { scratchRoots: resolveScratchRoots(hookCwd) };
     const asMain = classifyCommandInThisReadingWithMainRules(shape.text, protectedPaths, context);
     const pure = asMain.ok ? asMain : classifyCommandInThisReading(shape.text, protectedPaths, context);
-    const raised = refineWriteScope(pure, resolveWriteRoots(hookCwd), hookCwd).result;
+    const raised = refineWriteScope(pure, resolveWriteRoots(hookCwd), hookCwd, memo.writeTarget).result;
     const answer = raised.ok ? (raised.segments[0] ?? null) : null;
     ownAnswers.set(shape.text, answer);
     return answer;
@@ -5057,14 +5117,21 @@ export function refineWriteLandings(
    * bd1bddc6, point 1).
    */
   const synthetic = new Map<string, ResolvedClass[]>();
+  /** The directory state a synthetic line is judged from, as a memo key's head. */
+  const fromKey = (): string => (cwdUnknown ? "?" : here.join("\0"));
   const classesOfSynthetic = (text: string, path: string): ResolvedClass[] => {
     // The same synthetic line from the same directories answers the same way:
     // judged once per line (a cost bound). The key carries the directory state.
-    const key = `${cwdUnknown ? "?" : here.join("\0")}\0${text}`;
+    const key = `${fromKey()}\0${text}`;
     const known = synthetic.get(key);
     if (known !== undefined) return known;
-    const out: ResolvedClass[] = [];
+    const out = judgeSynthetic(text, path);
     synthetic.set(key, out);
+    return out;
+  };
+  /** {@link classesOfSynthetic}'s answer, judged now (no memo). */
+  const judgeSynthetic = (text: string, path: string): ResolvedClass[] => {
+    const out: ResolvedClass[] = [];
     const take = (segments: readonly ClassifiedSegment[]): void => {
       for (const segment of segments) {
         if (segment.class.startsWith("read.") || segment.class === "files.write.workspace" || segment.class === GATE_SELF_CLASS) continue;
@@ -5086,7 +5153,7 @@ export function refineWriteLandings(
       return out;
     }
     for (const from of here) {
-      const raised = refineGitDirWrites(plain, from).result;
+      const raised = refineGitDirWrites(plain, from, memo.disk.entry, memo.disk.gitDirLandings).result;
       if (!raised.ok) {
         unreadable();
         continue;
@@ -5098,6 +5165,68 @@ export function refineWriteLandings(
 
   /** A word as the shell would hand it over, single-quoted for a synthetic line. */
   const quote = (word: string): string => `'${word.replaceAll("'", "'\\''")}'`;
+
+  /** `true >> 'M1' >> 'M2' …`: a redirection to each name. */
+  const redirectLine = (names: readonly string[]): string => `true ${names.map((name) => `>> ${quote(name)}`).join(" ")}`;
+
+  /**
+   * The classes `true >> M1 >> M2 …` earns, for the names a redirect target's
+   * pattern matches on the disk ({@link patternWordClasses}).
+   *
+   * Cost (the unclosed-`[` line: past 1,024 glob characters a segment matches
+   * every entry, so `echo x >` and 2,000 `[` writes out the whole directory):
+   * the line was judged in full in each name reading, and the names of a
+   * directory are mostly plain ones that earn nothing. So where at least
+   * {@link PLAIN_BATCH_NAMES} names end in a plain lower-case name, those
+   * names are judged first, as a line of their own, once for the call
+   * ({@link inEveryReading}). When that line is the same in every reading (no
+   * name compare in it diverged, or each one that did left its tier's answer
+   * the same, judged {@link withLocalReadingsSettled}; no compare offered two
+   * equal claims): where it is every name, its answer is the answer in each
+   * reading; where it earns no class, the other names' line answers alone, in
+   * each reading, and once per equal claim of its own ({@link inEachEqualTurn}).
+   * Otherwise the whole line is judged as before. The plain test only chooses
+   * the names; the classifier and the git-directory pass decide.
+   *
+   * Why the split answers as the whole line does: every word of a synthetic
+   * line is single-quoted text after `true`, so no word is a pattern, a
+   * variable or a substitution, and the line's own options (`dotglob` and the
+   * like, which make only unquoted words patterns) reach none of them. Each
+   * redirection's class is its word's: the strictest protected target and the
+   * classes beside it, the git-directory walk of each word in turn. A name
+   * that earns nothing on its own adds nothing beside the others, and leaves
+   * the first git-directory hit where it was.
+   */
+  const redirectMatchClasses = (names: readonly string[], path: string): ResolvedClass[] => {
+    const plain = names.filter(plainTail);
+    if (plain.length < PLAIN_BATCH_NAMES) return classesOfSynthetic(redirectLine(names), path);
+    const plainText = redirectLine(plain);
+    const plainKey = `${fromKey()}\0${plainText}`;
+    let judged = memo.plainLines.get(plainKey);
+    if (judged === undefined) {
+      judged = inEveryReading(() => withLocalReadingsSettled(() => judgeSynthetic(plainText, path)));
+      memo.plainLines.set(plainKey, judged);
+      // Every name is plain: that line was the whole line, judged in this reading.
+      if (plain.length === names.length) synthetic.set(plainKey, judged.value as ResolvedClass[]);
+    }
+    // Every name is plain and the line answers the same in every reading:
+    // that answer, in each reading (the classes of `~/.hermes/` and a `[` run,
+    // every entry under a home whose path folds).
+    if (judged.invariant && plain.length === names.length) return judged.value as ResolvedClass[];
+    if (!judged.invariant || judged.value.length > 0) return classesOfSynthetic(redirectLine(names), path);
+    const rest = names.filter((name) => !plainTail(name));
+    if (rest.length === 0) return [];
+    const restText = redirectLine(rest);
+    const restKey = `\u0001${fromKey()}\0${restText}`;
+    const known = synthetic.get(restKey);
+    if (known !== undefined) return known;
+    const out: ResolvedClass[] = [];
+    for (const turn of inEachEqualTurn(() => judgeSynthetic(restText, path))) {
+      for (const each of turn) if (!out.some((known) => known.cls === each.cls)) out.push(each);
+    }
+    synthetic.set(restKey, out);
+    return out;
+  };
 
   /**
    * Classes the RESOLVED spellings of a segment's words earn as plain ones
@@ -5258,11 +5387,7 @@ export function refineWriteLandings(
               if (each.from !== "match") continue;
               // A literal segment after a pattern one is joined unseen: only a
               // name that is there is a word the shell makes.
-              try {
-                lstatSync(each.path);
-              } catch {
-                continue;
-              }
+              if ("error" in memo.disk.entry(each.path)) continue;
               const name = absolute ? each.path : each.path.split("/").filter((part) => part.length > 0).slice(kept).join("/");
               if (name.length === 0 || seen.has(name)) continue;
               seen.add(name);
@@ -5290,7 +5415,7 @@ export function refineWriteLandings(
           wide = true;
           break;
         }
-        add(classesOfSynthetic(`true ${names.map((name) => `>> ${quote(name)}`).join(" ")}`, word), word, names.length);
+        add(redirectMatchClasses(names, word), word, names.length);
       }
       if (wide || !argv || shape.bin === null) continue;
       const bin = /^[A-Za-z0-9_./+-]+$/u.test(shape.bin) ? shape.bin : quote(shape.bin);
@@ -5943,6 +6068,22 @@ const PATTERN_MATCH_NAMES = 8192;
 /** The longest those names may be together, in bytes (the same bound, for long names). */
 const PATTERN_LINE_BYTES = 1_048_576;
 
+/**
+ * How many of a redirect target's matches must end in a plain name before
+ * they are judged as a line of their own (the pattern pass's
+ * `redirectMatchClasses`): below it the whole line is judged as before.
+ */
+const PLAIN_BATCH_NAMES = 16;
+
+/**
+ * Does `name`'s last component read as a plain lower-case file name (no dot
+ * first, no upper case, no character a guard or the shell reads)? Only
+ * chooses which matches are judged together; it decides no class.
+ */
+function plainTail(name: string): boolean {
+  return /^[a-z0-9_-][a-z0-9._-]*$/u.test(name.slice(name.lastIndexOf("/") + 1));
+}
+
 // ===========================================================================
 // Skill scripts, the disk half (APRV-502)
 // ===========================================================================
@@ -6240,6 +6381,209 @@ export function classifyForHook(
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
   readRoots: readonly string[] = [],
+  execCode = false,
+  credentialCwds: readonly string[] = [],
+  noRuleSegments = false,
+  /** The write scope the loaded policy asks for ({@link classifyForHookOnce}). */
+  writeScope: WriteScopeContext = WRITE_SCOPE_OFF,
+  /**
+   * GLOB-WRITE (lead ruling L61167): the directories a write-target pattern
+   * globs in, listed BEFORE classification ({@link listGlobWriteDirsFor}).
+   * `null` (every synchronous caller) keeps the strict, over-approximated
+   * answer; with it a pattern is matched against what is there. Every reading
+   * below is classified with the same listings.
+   */
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
+): RefinedClassification {
+  // The shell removes each `\`+newline before it reads anything else, so every
+  // reader below reads the text with them removed too (the lead's ruling on
+  // review-b's M-C at bcb1be08: `a\<newline>(u)th.json` is `a(u)th.json`),
+  // with that reading's refusal standing; and the text with every
+  // `\`+newline removed, quoted or in a comment, where
+  // {@link joinContinuations} keeps one (a refusal of that reading adds
+  // nothing). The joined text is the answer's base, so its segments are the
+  // ones bound and recorded, as the shell runs them; the other reading adds
+  // only the classes it has that the answer lacks.
+  //
+  // Review-b's S1 at 41e6fd1b (lead's ruling): the command is classified ONCE,
+  // on the text after the shell's continuations are removed, never also as
+  // written (a word with a continuation was classified twice, doubling a
+  // fan-out's cost). Only where a `\`+newline sits in quotes or a comment,
+  // which the shell keeps, is the text with every one removed read as well.
+  const joined = joinContinuations(command);
+  // Security review of ec416318: joinContinuations knows quotes and comments,
+  // not a heredoc's body (where a quoted delimiter keeps every `\`+newline, so
+  // `x\<newline>EOF` still ends it) nor a nested `$(…)` or backquote. Where
+  // the text holds one of those, the text as written is read too, with its
+  // refusal standing, as before the S1 fold; elsewhere it is not (the cost).
+  const shellMayKeep = joined !== command && /<<|\$\(|`/u.test(command);
+  const bases = [...new Set([joined, command.replaceAll("\\\n", ""), ...(shellMayKeep ? [command] : [])])];
+  const outer = shellOptionsSet;
+  shellOptionsSet = outer || bases.some(setsShellOption);
+  // Review-b's M3 at 3774fdd4: every reading below lands its words on the
+  // disk again, so each landing is kept for the length of this call.
+  const outerMemo = diskMemo;
+  diskMemo ??= newDiskMemo();
+  // The write pass's landings and disk lookups (#695, the COST686 lines),
+  // made once for this call: every reading below lands the same spellings,
+  // and a landing's answer depends on neither the text's reading nor the
+  // name reading ({@link WriteLandingMemo}).
+  const landings = writeLandingMemo();
+  try {
+    const once = (text: string): RefinedClassification =>
+      classifyForHookOnce(text, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments, writeScope, globListings, landings);
+    let judged = once(joined);
+    for (const base of bases) {
+      if (base !== joined) judged = togetherIfNew(judged, once(base), base === command);
+      // Other readings of the same text, the stricter together: zsh's numeric
+      // glob where bash reads a redirect (a refusal of that reading stands),
+      // and a group a word carries, which zsh globs with no option set
+      // (`a(u)th.json` opens auth.json; security review of d0288514) and
+      // bash's extglob or zsh's extended glob read under an option (a refusal
+      // of that reading alone adds nothing, so `f() { …; }` keeps its
+      // verdict). The two compose (`p<->/a(u)th.json`; codex on 83f30bdc): the
+      // group reading is taken of the numeric reading too.
+      // The text as zsh reads it under `extendedglob` and `braceccl`, which
+      // the user's zshrc may set (the lead's ruling L61492); a reading that
+      // adds no class leaves the answer as it was.
+      const option = zshOptionCommandReading(base, isAbsolute(cwd) ? [cwd, ...credentialCwds.filter((each) => isAbsolute(each))] : null);
+      if (option !== null) {
+        judged = togetherIfNew(judged, once(option), false);
+        const grouped = optionGroupReading(option);
+        if (grouped !== null) judged = togetherIfNew(judged, once(grouped), false);
+      }
+      const zsh = zshNumericGlobReading(base);
+      if (zsh !== null) judged = together(judged, once(zsh), true);
+      for (const reading of new Set([optionGroupReading(base), zsh === null ? null : optionGroupReading(zsh)])) {
+        if (reading === null) continue;
+        judged = together(judged, once(reading), false);
+      }
+    }
+    return judged;
+  } finally {
+    shellOptionsSet = outer;
+    diskMemo = outerMemo;
+  }
+}
+
+/**
+ * What the disk answered during one {@link classifyForHook} call, by the
+ * path asked (review-b's M3 at 3774fdd4): the same word in the base text,
+ * the zsh option reading, the group readings and both name readings, or
+ * repeated n times in one command, costs one landing, not one per reading per
+ * word. Only answers the disk alone gives are kept, never one a name reading
+ * or a shell option changes; nothing writes to the disk while a command is
+ * judged, before it runs. `null` outside a call: every caller then asks the
+ * disk each time, as before.
+ */
+interface DiskMemo {
+  canonical: Map<string, string>;
+  physical: Map<string, string>;
+  directory: Map<string, boolean>;
+  /** {@link expandGlobPath}'s answers, keyed by whether a shell option is set as well. */
+  globs: Map<string, readonly string[] | null>;
+}
+
+let diskMemo: DiskMemo | null = null;
+
+function newDiskMemo(): DiskMemo {
+  return { canonical: new Map(), physical: new Map(), directory: new Map(), globs: new Map() };
+}
+
+/** `compute(key)`, kept in `map` while a {@link DiskMemo} is live. */
+function remembered<K, V>(map: Map<K, V> | undefined, key: K, compute: () => V): V {
+  if (map === undefined) return compute();
+  if (map.has(key)) return map.get(key) as V;
+  const value = compute();
+  map.set(key, value);
+  return value;
+}
+
+/**
+ * The command with each line continuation (`\` and a newline) removed, as the
+ * shell removes it before it reads the line: outside quotes and inside double
+ * quotes, never inside single quotes, ANSI-C quotes (`$'…'`) or a comment. An
+ * escaped backslash (`\\`) is not a continuation. One pass over the text.
+ */
+export function joinContinuations(text: string): string {
+  if (!text.includes("\\\n")) return text;
+  let out = "";
+  let quote: "'" | '"' | "$'" | null = null;
+  let comment = false;
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at] as string;
+    if (comment) {
+      out += char;
+      if (char === "\n") comment = false;
+      continue;
+    }
+    if (quote === "'") {
+      out += char;
+      if (char === "'") quote = null;
+      continue;
+    }
+    if (char === "\\") {
+      if (quote !== "$'" && text[at + 1] === "\n") {
+        at += 1;
+        continue;
+      }
+      out += text.slice(at, at + 2);
+      at += 1;
+      continue;
+    }
+    out += char;
+    if (quote === "$'") {
+      if (char === "'") quote = null;
+    } else if (quote === '"') {
+      if (char === '"') quote = null;
+    } else if (char === "'") {
+      quote = out.length >= 2 && out[out.length - 2] === "$" ? "$'" : "'";
+    } else if (char === '"') {
+      quote = '"';
+    } else if (char === "#" && (out.length === 1 || /[\s;&|()<>]/u.test(out[out.length - 2] as string))) {
+      comment = true;
+    }
+  }
+  return out;
+}
+
+/**
+ * Two readings of one command as one answer: every segment and class of
+ * both. A refusal of the first stands; a refusal of the second stands when
+ * `refusalStands`, else that reading adds nothing.
+ */
+function together(first: RefinedClassification, second: RefinedClassification, refusalStands: boolean): RefinedClassification {
+  if (!first.result.ok) return first;
+  if (!second.result.ok) return refusalStands ? second : first;
+  return {
+    result: {
+      ...first.result,
+      segments: [...first.result.segments, ...second.result.segments],
+      classes: [...new Set([...first.result.classes, ...second.result.classes])],
+    },
+    notes: [...first.notes, ...second.notes],
+  };
+}
+
+/**
+ * {@link together}, except that a reading which adds no class leaves the
+ * answer as it was, so a command whose continuations change nothing keeps its
+ * one set of segments.
+ */
+function togetherIfNew(first: RefinedClassification, second: RefinedClassification, refusalStands: boolean): RefinedClassification {
+  if (first.result.ok && second.result.ok) {
+    const known = new Set(first.result.classes);
+    if (second.result.classes.every((cls) => known.has(cls))) return first;
+  }
+  return together(first, second, refusalStands);
+}
+
+/** {@link classifyForHook} for one reading of the command. */
+function classifyForHookOnce(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  cwd: string,
+  readRoots: readonly string[] = [],
   /**
    * May an opaque program classify `exec.code`? (APRV-510.) `true` only when
    * the loaded policy opens the class ({@link execCodeGate}); the default is
@@ -6270,15 +6614,32 @@ export function classifyForHook(
    * itself, with its own bounds, whether this is given or not.
    */
   globListings: ReadonlyMap<string, GlobListing> | null = null,
+  /**
+   * The write pass's landings and disk lookups, shared by this call's name
+   * readings and by nothing else (cost: the COST686 lines): made by
+   * {@link classifyForHook} once for all its readings of the text.
+   */
+  landings: WriteLandingMemo = writeLandingMemo(),
 ): RefinedClassification {
-  // The write pass's landings and disk lookups, shared by this call's name
-  // readings and by nothing else (cost: the COST686 lines).
-  const landings = writeLandingMemo();
-  const [folded, ...others] = eachNameReading(() =>
-    classifyForHookAsRead(command, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments, writeScope, globListings, landings),
-  );
-  if (others.length === 0) return folded;
-  const notes = [...folded.notes];
+  // Every pass below reads words from the classifier's lexer, which reads a
+  // dollar-quoted word as the shell does (`$'\x41PPROVAL.md'` is the policy
+  // file). Where it read one, the whole chain runs again with dollar quotes
+  // kept as main kept them, and the two join as the name readings do, so no
+  // pass that narrows a class answers lighter than main did.
+  // The write pass's landings and disk lookups are shared by one dollar-quote
+  // reading's name readings (cost: the COST686 lines): the first reading
+  // takes the call's own (`landings`, shared with the call's other readings
+  // of the text), and a kept-quote or zsh reading a memo of its own.
+  let dollarReading = 0;
+  const [first, ...others] = eachDollarQuoteReading(() => {
+    const memo = dollarReading === 0 ? landings : writeLandingMemo();
+    dollarReading += 1;
+    return eachNameReading(() =>
+      classifyForHookAsRead(command, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments, writeScope, globListings, memo),
+    );
+  }).flat() as [RefinedClassification, ...RefinedClassification[]];
+  if (others.length === 0) return first;
+  const notes = [...first.notes];
   const seen = new Set(notes);
   for (const other of others) {
     for (const note of other.notes) {
@@ -6287,7 +6648,7 @@ export function classifyForHook(
       notes.push(note);
     }
   }
-  return { result: unionNameReadings([folded.result, ...others.map((other) => other.result)]), notes };
+  return { result: unionNameReadings([first.result, ...others.map((other) => other.result)]), notes };
 }
 
 /** {@link classifyForHook} in the current name reading. */
@@ -6335,7 +6696,7 @@ function classifyForHookAsRead(
   // directory not named `.git`. First, so the push pass below sees a segment
   // it raises as the write it is, and the history-rewrite and write-scope
   // passes do not lower or narrow it again.
-  const gitWrites = refineGitDirWrites(classified, cwd);
+  const gitWrites = refineGitDirWrites(classified, cwd, landings.disk.entry, landings.disk.gitDirLandings);
   const pushed = refinePushRepo(gitWrites.result, cwd, command);
   const rewritten = refineRewrite(pushed.result, cwd);
   const scratched = refineScratchDelete(rewritten.result, roots);
@@ -6345,7 +6706,7 @@ function classifyForHookAsRead(
   // of the working directory and the scratch roots. Last in the chain because
   // it is the narrowest, and because nothing after it would re-read a segment
   // it has already tightened.
-  const written = refineWriteScope(scoped.result, resolveWriteRoots(cwd), cwd);
+  const written = refineWriteScope(scoped.result, resolveWriteRoots(cwd), cwd, landings.writeTarget);
   // APRV-502. Touches only the two skill-script rules, which no pass above
   // reads, so its place in the chain changes nothing for any other segment.
   const scripted = refineSkillScripts(written.result, cwd, protectedPaths);
@@ -10223,7 +10584,11 @@ function resolvedPathClasses(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
   const found: string[] = [];
-  for (const reading of eachNameReading(() => resolvedPathClassesAsRead(raw, segments, cwd, protectedPaths, readRoots, env))) {
+  // Dollar quotes as the shell reads them and as main kept them (`eachDollarQuoteReading`): both add.
+  const readings = eachDollarQuoteReading(() =>
+    eachNameReading(() => resolvedPathClassesAsRead(raw, segments, cwd, protectedPaths, readRoots, env)),
+  ).flat();
+  for (const reading of readings) {
     for (const cls of reading) if (!found.includes(cls)) found.push(cls);
   }
   return found;
@@ -10758,26 +11123,397 @@ function variableDecidesDirectory(text: string): boolean {
   return /[$`]/u.test(dirname(text)) || /^[$`]/u.test(basename(text));
 }
 
-/** `*`, `?` or `[` in a path word. */
+/**
+ * `*`, `?` or `[` in a path word. While {@link classifyForHook} judges a
+ * command that sets a shell option, also every character an option makes a
+ * glob (bash's extglob, zsh's extended glob, ksh glob and brace classes).
+ */
 function hasGlobChars(text: string): boolean {
-  return /[*?[]/u.test(text);
+  return (shellOptionsSet ? /[*?[\]^#~(){}<>|]/u : /[*?[]/u).test(text);
 }
 
-/** A shell glob component as an anchored regular expression. */
-function globRegex(component: string): RegExp {
-  let source = "";
-  for (const char of component) {
-    if (char === "*") source += ".*";
-    else if (char === "?") source += ".";
-    else if (char === "[" || char === "]") source += char;
-    else source += char.replace(/[.+^${}()|\\]/gu, "\\$&");
+/**
+ * Does the command set a shell option (lead's ruling L60846 on #682)? `shopt`,
+ * `setopt`, `unsetopt`, `emulate`, `set -o` / `set +o`, or a shell started with
+ * `-O` / `-o` or a long option, anywhere in the text: an option set before a glob on the same
+ * line (nocaseglob, dotglob, globstar, extglob, zsh's extendedglob, kshglob,
+ * globdots, braceccl, ...) changes what the glob opens, and this hook does not
+ * model the options, so every glob in such a command matches any name. An
+ * option set by an EARLIER call, in a shell that persists between calls, is
+ * not in this text and is not seen here.
+ */
+export function setsShellOption(written: string): boolean {
+  // Quotes and backslashes removed first, as the shell removes them before
+  // it runs the word (`set "-o" x`, `s'et' -o x`, `set -'o' x`; codex on
+  // 83f30bdc). Removing them everywhere can only find more.
+  const command = written.replace(/['"\\]/gu, "");
+  if (/(?:^|[^A-Za-z0-9_.-])(?:shopt|setopt|unsetopt|emulate)(?![A-Za-z0-9_.-])/u.test(command)) return true;
+  // One pass over the words (no regular expression that backtracks over a
+  // long line): after `set` or a shell's name in a segment, an option word
+  // holding `o` or `O`, its value attached or not (`-o`, `+o`, `-eo`,
+  // `-oextendedglob`, bash's `-O` and `-Oextglob`), or any long option
+  // (`--extendedglob`, `--emulate`; security review of d0288514).
+  let afterSetter = false;
+  for (const word of command.split(/(?=[;&|\n])|\s+/u)) {
+    if (/^[;&|\n]/u.test(word)) afterSetter = false;
+    const name = word.replace(/^[;&|\n(]+/u, "").split("/").pop() ?? "";
+    if (SHELL_OPTION_SETTERS.has(name)) afterSetter = true;
+    else if (afterSetter && (/^[-+][A-Za-z]*[oO]/u.test(word) || /^--[A-Za-z]/u.test(word))) return true;
   }
-  try {
-    return new RegExp(`^${source}$`, "u");
-  } catch {
-    return /^.*$/u;
-  }
+  return false;
 }
+
+/** `set` and the shells whose command line may set an option with `-o` / `-O`. */
+const SHELL_OPTION_SETTERS: ReadonlySet<string> = new Set(["set", "bash", "zsh", "sh", "ksh", "dash"]);
+
+/** Set by {@link classifyForHook} for the length of one call: see {@link setsShellOption}. */
+let shellOptionsSet = false;
+
+/** The hook's glob reader, or any name while the command sets a shell option. */
+function globPattern(component: string): GlobPattern {
+  return shellOptionsSet ? ANY_NAME : compiledGlobPattern(component);
+}
+
+/**
+ * The command as zsh reads a numeric glob in it (`p<->`, `p<1-9>`), which
+ * bash reads as a redirect (lead's ruling L60846): each `<N-M>` written as `*`,
+ * which matches at least every digit run. `null` when there is none.
+ */
+function zshNumericGlobReading(command: string): string | null {
+  if (!/<[0-9]*-[0-9]*>/u.test(command)) return null;
+  return command.replace(/<[0-9]*-[0-9]*>/gu, "*");
+}
+
+/**
+ * The command with each group a word carries (`~/(#i).HERMES`, `@(a|b)`,
+ * `x(#a1)`, nested `a((u))th.json`) and each zsh glob flag group (`(#i)`, at
+ * a word's start too) written as `*`: zsh globs a group with no option set,
+ * and bash's extglob and zsh's extended glob read more under one, while the
+ * lexer reads a `(` inside a word as the start of a subshell or a syntax
+ * error, and `#` after it as a comment. `null` when there is none.
+ *
+ * A group is word-attached when the character before its `(` is not a
+ * separator, `$`, `<`, `>`, `=` or `(` (so a substitution, a process
+ * substitution, an array and a subshell are left alone), or when `#` follows
+ * it. Only a group holding no whitespace is rewritten, and the outermost such
+ * group is written whole, so a group nested in an attached one needs no
+ * attachment of its own: its parent is written over it, or (holding
+ * whitespace) keeps a `(` the lexer refuses, and a refused reading adds
+ * nothing. (review-b's planted fault f3 at bcb1be08 found that clause
+ * changed no decision; it is gone.) One pass with a stack, so a long line
+ * costs its length.
+ */
+function optionGroupReading(command: string): string | null {
+  const open: Array<{ at: number; attached: boolean; clean: boolean }> = [];
+  const spans: Array<[number, number]> = [];
+  for (let at = 0; at < command.length; at += 1) {
+    const char = command[at] as string;
+    if (char === "(") {
+      const before = command[at - 1];
+      const attached = command[at + 1] === "#" || (before !== undefined && !/[\s;&|<>$=(]/u.test(before));
+      open.push({ at, attached, clean: true });
+    } else if (char === ")") {
+      const group = open.pop();
+      if (group === undefined) continue;
+      if (group.attached && group.clean) spans.push([group.at, at + 1]);
+      const parent = open[open.length - 1];
+      if (!group.clean && parent !== undefined) parent.clean = false;
+    } else if (/\s/u.test(char)) {
+      const top = open[open.length - 1];
+      if (top !== undefined) top.clean = false;
+    }
+  }
+  if (spans.length === 0) return null;
+  spans.sort((left, right) => left[0] - right[0]);
+  let text = "";
+  let from = 0;
+  for (const [start, end] of spans) {
+    if (start < from) continue; // inside a group already written
+    // The extglob prefix goes with its group: ksh reads `.@(e)nv` as `.env`
+    // with no option set, and `.@*nv` would need the `@` (build-2's sweep v3
+    // on 83f30bdc, under the abstain policy).
+    const prefixed = start > from && /[@!+?*]/u.test(command[start - 1] as string) ? start - 1 : start;
+    // A flag group zsh reads under `extendedglob` that is not a letter-case
+    // or anchor flag (`(#a1)` approximation, `(#c2)` repetition, `(#q)`)
+    // may let the rest of its segment be any name, a dot name too: the rest
+    // of the segment is written as `{.*,*}` (the lead's ruling L61492:
+    // `(#a1).Zermes` names `.hermes`).
+    if (command.startsWith("(#", start) && !/^\(#[ilIbBmMseUu]*\)$/u.test(command.slice(start, end))) {
+      const rest = /[/\s;&|<>'"`)]/u.exec(command.slice(end));
+      text += `${command.slice(from, prefixed)}{.*,*}`;
+      from = rest === null ? command.length : end + rest.index;
+      continue;
+    }
+    text += `${command.slice(from, prefixed)}*`;
+    from = end;
+  }
+  return text + command.slice(from);
+}
+
+/**
+ * The command with each unquoted path segment zsh reads as a glob under
+ * `extendedglob` or `braceccl` written as the plain glob it is at most
+ * ({@link zshOptionReading}): `.h^Z` as `.h*`, `.Z#hermes` as `.*hermes`,
+ * `.{hZ}ermes` as `.[hZ]ermes`, `^zz` as `*`. The user's own zshrc may set
+ * either option, so every command is read this way too and the stricter
+ * answer stands (the lead's ruling L61492).
+ *
+ * Quoting is zsh's: a quoted or escaped character is itself (written `?` when
+ * it is a glob character, which matches it), so `'a'^x.json` is `a*`; a
+ * segment whose form also holds an unquoted `$` or backquote cannot be read
+ * and is any name (`*`). A comment is left as written (security review of
+ * aec23242: no segment is skipped for its spelling).
+ *
+ * A word with no `/` names entries of the directory the command runs in,
+ * hidden ones too (`globdots` may be set as well; the lead's ruling L61497).
+ * The word is written as EVERY entry it matches there, or left as written
+ * when it matches none, only where the directory is known (`cwds`) and the
+ * command has the one shape in which nothing can change directory or make a
+ * file before the word expands ({@link listingCommand}; the coordinator's
+ * ruling after the security reviews of c53565eb and 901a37c6). Every other
+ * command reads the word as the plain glob, as it is past
+ * {@link OPTION_WORD_ENTRIES} matches for one word or
+ * {@link OPTION_COMMAND_ENTRIES} for the command. The listing is read when the
+ * hook runs, as the credential pass reads it for a plain glob. `null` when
+ * nothing changes. One pass over the text.
+ */
+export function zshOptionCommandReading(command: string, cwds: readonly string[] | null): string | null {
+  if (!/[\^#{~]/u.test(command)) return null;
+  // The directories the words expand in, where the command's shape proves
+  // what they hold when the words expand.
+  const proven = cwds !== null && listingCommand(command) ? cwds : null;
+  const listings = new Map<string, string[]>();
+  // Entries written for the whole command, every word's every match.
+  let written = 0;
+  const separator = /[\s;&|<>()]/u;
+  // The output as parts joined once at the end, and the last character
+  // written: indexing a string built by `+=` flattens it on every word.
+  const parts: string[] = [];
+  let last = "";
+  const write = (text: string): void => {
+    if (text.length === 0) return;
+    parts.push(text);
+    last = text[text.length - 1] as string;
+  };
+  let changed = false;
+  let at = 0;
+  while (at < command.length) {
+    const char = command[at] as string;
+    if (separator.test(char)) {
+      write(char);
+      at += 1;
+      continue;
+    }
+    if (char === "#" && (last === "" || /[\s;&|]/u.test(last))) {
+      const newline = command.indexOf("\n", at);
+      const stop = newline === -1 ? command.length : newline;
+      write(command.slice(at, stop));
+      at = stop;
+      continue;
+    }
+    // One word: its raw text, and each character it stands for with whether
+    // it was quoted; `$` and backquote outside single quotes mark the segment
+    // unknown.
+    const raw = at;
+    const units: Array<{ char: string; quoted: boolean; unknown: boolean; end: number; param?: true }> = [];
+    let quote: "'" | '"' | "$'" | null = null;
+    // Inside an unquoted `${…}` every character is the parameter's syntax
+    // (`${a:-x}`, `${#a}`, `${a^^}`), never a zsh glob form.
+    let paramDepth = 0;
+    while (at < command.length) {
+      const next = command[at] as string;
+      if (quote === "'" || quote === "$'") {
+        if (next === "\\" && quote === "$'") {
+          units.push({ char: command[at + 1] ?? "", quoted: true, unknown: false, end: at + 2 });
+          at += 2;
+          continue;
+        }
+        at += 1;
+        if (next === "'") quote = null;
+        else units.push({ char: next, quoted: true, unknown: false, end: at });
+        continue;
+      }
+      if (next === "\\") {
+        units.push({ char: command[at + 1] ?? "", quoted: true, unknown: false, end: at + 2 });
+        at += 2;
+        continue;
+      }
+      if (quote === '"') {
+        at += 1;
+        if (next === '"') quote = null;
+        else units.push({ char: next, quoted: true, unknown: next === "$" || next === "`", end: at });
+        continue;
+      }
+      if (next === "'" || next === '"') {
+        quote = next === "'" && command[at - 1] === "$" && units[units.length - 1]?.char === "$" ? "$'" : next;
+        if (quote === "$'") units.pop();
+        at += 1;
+        continue;
+      }
+      if (separator.test(next)) break;
+      at += 1;
+      if (next === "{" && units[units.length - 1]?.char === "$" && units[units.length - 1]?.quoted === false) paramDepth += 1;
+      const param = paramDepth > 0;
+      if (next === "}" && paramDepth > 0) paramDepth -= 1;
+      units.push({ char: next, quoted: false, unknown: next === "$" || next === "`", end: at, ...(param ? { param: true as const } : {}) });
+    }
+    const word = command.slice(raw, at);
+    // The segments, split at each unquoted `/`, each with its raw text.
+    const segments: Array<{ units: typeof units; from: number; to: number }> = [{ units: [], from: raw, to: at }];
+    for (const unit of units) {
+      const current = segments[segments.length - 1] as (typeof segments)[number];
+      if (!unit.quoted && unit.char === "/") {
+        current.to = unit.end - 1;
+        segments.push({ units: [], from: unit.end, to: at });
+      } else {
+        current.units.push(unit);
+      }
+    }
+    const hasForm = (segment: typeof units): boolean => segment.some((_, index) => optionFormAt(segment, index));
+    if (!segments.some((segment) => hasForm(segment.units))) {
+      write(word);
+      continue;
+    }
+    const read = segments.map(({ units: segment, from, to }) => {
+      if (!hasForm(segment)) return command.slice(from, to);
+      // A `$` or backquote beside a form: the segment is any name, unless its
+      // only forms are brace groups the shell expands anyway (`{a,b}`,
+      // `{1..3}`), which braceccl leaves as they are, and zsh never globs a
+      // parameter's or a substitution's value (build-1's S1 at 64c43399:
+      // `touch file{1..3}$EXT` is file1$EXT … file3$EXT, as with no option).
+      if (segment.some((unit) => unit.unknown)) return onlyExpandedBraces(segment) ? command.slice(from, to) : "*";
+      const plain = segment
+        .map((unit) => (unit.quoted && /[*?[\]^#~{}!\\'"`$\s;&|<>()]/u.test(unit.char) ? "?" : unit.char))
+        .join("");
+      return zshOptionReading(plain) ?? "*";
+    });
+    let rewritten = read.join("/");
+    if (segments.length === 1 && proven !== null) {
+      const pattern = read[0] as string;
+      const glob = globPattern(pattern);
+      const matches = new Set<string>();
+      let tooMany = false;
+      for (const directory of proven) {
+        let names = listings.get(directory);
+        if (names === undefined) {
+          try {
+            names = readdirSync(directory);
+          } catch {
+            names = [];
+          }
+          listings.set(directory, names);
+        }
+        for (const name of names) if (glob.test(name)) matches.add(name);
+        if (matches.size > OPTION_WORD_ENTRIES) tooMany = true;
+      }
+      if (written + matches.size > OPTION_COMMAND_ENTRIES) tooMany = true;
+      if (!tooMany && matches.size === 0) rewritten = word;
+      else if (!tooMany) {
+        written += matches.size;
+        rewritten = [...matches].map((name) => `'${name.replaceAll("'", "'\\''")}'`).join(" ");
+      }
+    }
+    if (rewritten !== word) changed = true;
+    write(rewritten);
+  }
+  return changed ? parts.join("") : null;
+}
+
+/** One character of a word as {@link zshOptionCommandReading} reads it. */
+interface OptionUnit {
+  char: string;
+  quoted: boolean;
+  unknown: boolean;
+  param?: true;
+}
+
+/** Is `segment[index]` a form zsh reads under `extendedglob` or `braceccl` (`^`, `#`, `{`, a `~` past the start)? */
+function optionFormAt(segment: readonly OptionUnit[], index: number): boolean {
+  const unit = segment[index] as OptionUnit;
+  return (
+    !unit.quoted &&
+    unit.param !== true &&
+    !(unit.char === "#" && segment[index - 1]?.char === "$") &&
+    (/[\^#{]/u.test(unit.char) || (unit.char === "~" && index > 0))
+  );
+}
+
+/**
+ * Is every form in `segment` ({@link optionFormAt}) the opening brace of a
+ * group the shell expands with no option set: one holding an unquoted comma
+ * outside any inner group (`{a,b}`, `{,s}`), or a sequence of plain text
+ * (`{1..3}`, `{a..c}`, `{1..9..2}`)? zsh's braceccl reads only a group that
+ * would not otherwise expand (`{AP}` is `A` and `P`), so such a segment holds
+ * nothing the option changes (build-1's S1 at 64c43399). A sequence holding a
+ * `$` (`{1..$N}`, which zsh expands after the parameter and bash not at all),
+ * an unclosed group, or a group cut by a `/` is not one. One pass over the
+ * segment, and one over each group's body.
+ */
+function onlyExpandedBraces(segment: readonly OptionUnit[]): boolean {
+  const live = (unit: OptionUnit): boolean => !unit.quoted && unit.param !== true;
+  const expanded = new Set<number>();
+  const open: number[] = [];
+  for (let index = 0; index < segment.length; index += 1) {
+    const unit = segment[index] as OptionUnit;
+    if (!live(unit)) continue;
+    if (unit.char === "{") open.push(index);
+    else if (unit.char === "}") {
+      const start = open.pop();
+      if (start !== undefined && expandsWithNoOption(segment.slice(start + 1, index))) expanded.add(start);
+    }
+  }
+  return segment.every((_, index) => !optionFormAt(segment, index) || expanded.has(index));
+}
+
+/** Does a brace group with this body expand with no option set (see {@link onlyExpandedBraces})? */
+function expandsWithNoOption(body: readonly OptionUnit[]): boolean {
+  let depth = 0;
+  for (const unit of body) {
+    if (unit.quoted || unit.param === true) continue;
+    if (unit.char === "{") depth += 1;
+    else if (unit.char === "}") depth -= 1;
+    else if (unit.char === "," && depth === 0) return true;
+  }
+  if (body.some((unit) => unit.quoted || unit.unknown || unit.param === true)) return false;
+  const text = body.map((unit) => unit.char).join("");
+  return /^(?:-?\d+\.\.-?\d+|[A-Za-z]\.\.[A-Za-z])(?:\.\.-?\d+)?$/u.test(text);
+}
+
+/** The commands whose words {@link listingCommand} lets a listing answer: none changes directory or makes a file. */
+const LISTING_COMMANDS: ReadonlySet<string> = new Set(["grep", "rg", "egrep", "fgrep", "ls", "cat", "head", "tail", "wc", "file", "stat", "sed", "awk"]);
+
+/**
+ * Is the whole command ONE simple command in which nothing can change
+ * directory or make a file before its words expand, so that a listing of the
+ * directory it starts in is what its globs match? Its command word is a plain
+ * name from {@link LISTING_COMMANDS} or `git` with `log`, `diff` or `show`
+ * next; `sed` and `awk` only with no in-place flag (`-i`, `--in-place`), no
+ * script file (`-f`) and no `w` in any word. Nowhere in the text, quoted or
+ * not, is there a `;`, `&`, `|`, newline, `(`, `)`, `>` (a writing
+ * redirection), backquote or `$(`, and no word is `{` or `}` (a brace group,
+ * and with it `always`, `while { … }` and the other reserved-word forms that
+ * need one). Strict by construction: a command it refuses reads its words as
+ * the plain glob.
+ */
+function listingCommand(command: string): boolean {
+  if (/[;&|\n\r()>`]|\$\(/u.test(command)) return false;
+  const words = command.trim().split(/[ \t]+/u);
+  if (words.some((word) => word === "{" || word === "}")) return false;
+  const [name, next] = words;
+  if (name === "git") return next === "log" || next === "diff" || next === "show";
+  if (name === undefined || !LISTING_COMMANDS.has(name)) return false;
+  if (name === "sed" || name === "awk") {
+    return !words
+      .slice(1)
+      .some((word) => /^-[^-]*[if]/u.test(word) || /^--(?:in-?place|file)/u.test(word) || word.includes("w"));
+  }
+  return true;
+}
+
+/** Past this many matching entries, a word with no `/` is read as its plain glob. */
+const OPTION_WORD_ENTRIES = 256;
+/** Past this many entries written for one command's words, a further word is read as its plain glob. */
+const OPTION_COMMAND_ENTRIES = 1024;
 
 /** Names a credential file goes by, for a pattern to be tested against. */
 const CREDENTIAL_NAMES: readonly string[] = [".env", ".env.local", ".op.env", "auth.json", "env", "vault.enc", "keys"];
@@ -10800,7 +11536,11 @@ const ORGAN_NAMES: readonly string[] = [
 function globCouldNameGateHome(path: string): boolean {
   return path
     .split(/[/\\]+/u)
-    .some((component) => hasGlobChars(component) && [".hermes", ".approval"].some((name) => globRegex(component).test(name)));
+    .some((component) => {
+      if (!hasGlobChars(component)) return false;
+      const pattern = globPattern(component);
+      return [".hermes", ".approval"].some((name) => pattern.test(name));
+    });
 }
 
 /** SF3a: a written pattern that could land on an organ. */
@@ -10820,11 +11560,13 @@ function globCouldNameOrgan(path: string): boolean {
       folded(index - 1) === ".hermes" ||
       hasGlobChars(parent) ||
       (folded(index - 3) === ".hermes" && folded(index - 2) === "profiles");
-    if (underHome && ORGAN_NAMES.some((name) => globRegex(component).test(name))) return true;
+    if (!underHome) continue;
+    const pattern = globPattern(component);
+    if (ORGAN_NAMES.some((name) => pattern.test(name))) return true;
   }
   const last = basename(path);
   if (!hasGlobChars(last)) return false;
-  const pattern = globRegex(last);
+  const pattern = globPattern(last);
   const parent = dirname(path);
   const parentIsHome =
     parent.split(/[/\\]+/u).some((segment) => foldNameExact(segment) === ".hermes" || foldNameExact(segment) === ".approval") ||
@@ -10866,15 +11608,13 @@ function globCouldNameCredential(path: string): boolean {
   for (let index = 0; index < components.length - 1; index += 1) {
     const component = components[index] as string;
     if (!hasGlobChars(component)) continue;
-    const names = GLOB_DIRECTORY_NAMES.filter(
-      (name) =>
-        globRegex(component).test(name) ||
-        // The lowered pattern stays beside the folded one: folding a pattern
-        // decomposes a bracket range's end (`[P-\u00C9]`), so the fold alone
-        // could match less than the lowered pattern did.
-        globRegex(component.toLowerCase()).test(name) ||
-        globRegex(foldNameLower(component)).test(name),
-    );
+    const pattern = globPattern(component);
+    // The lowered pattern stays beside the folded one: folding a pattern
+    // decomposes a bracket range's end (`[P-\u00C9]`), so the fold alone
+    // could match less than the lowered pattern did.
+    const lowered = globPattern(component.toLowerCase());
+    const folded = globPattern(foldNameLower(component));
+    const names = GLOB_DIRECTORY_NAMES.filter((name) => pattern.test(name) || lowered.test(name) || folded.test(name));
     if (names.length > 0) choices.push({ index, names });
   }
   if (choices.length === 0) return false;
@@ -10917,7 +11657,10 @@ const GLOB_DIRECTORY_NAMING_CAP = 4;
 /** A last-component pattern that could name a credential file, or any pattern that could name a home. */
 function globNamesCredentialOrHome(path: string): boolean {
   const last = basename(path);
-  if (hasGlobChars(last) && CREDENTIAL_NAMES.some((name) => globRegex(last).test(name))) return true;
+  if (hasGlobChars(last)) {
+    const pattern = globPattern(last);
+    if (CREDENTIAL_NAMES.some((name) => pattern.test(name))) return true;
+  }
   return globCouldNameGateHome(path);
 }
 
@@ -11286,7 +12029,7 @@ function expandGlob(path: string): string[] | null {
   const parent = dirname(path);
   if (hasGlobChars(parent)) return null;
   try {
-    const pattern = globRegex(basename(path));
+    const pattern = globPattern(basename(path));
     return readdirSync(canonicalPath(parent))
       .filter((name) => pattern.test(name))
       .map((name) => join(parent, name));
@@ -11296,11 +12039,13 @@ function expandGlob(path: string): string[] | null {
 }
 
 function isDirectoryPath(path: string): boolean {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
+  return remembered(diskMemo?.directory, path, () => {
+    try {
+      return statSync(path).isDirectory();
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -11436,6 +12181,10 @@ const RECURSIVE_READERS: ReadonlySet<string> = new Set([
  * yet is judged by where it would be created (APRV-445 recheck SF2(e)).
  */
 export function canonicalPath(path: string, disk: DiskReads = DIRECT_DISK): string {
+  return remembered(diskMemo?.canonical, path, () => canonicalPathOnDisk(path, disk));
+}
+
+function canonicalPathOnDisk(path: string, disk: DiskReads): string {
   let current = path;
   const tail: string[] = [];
   for (let climbed = 0; ; climbed += 1) {
@@ -11468,6 +12217,12 @@ export function canonicalPath(path: string, disk: DiskReads = DIRECT_DISK): stri
 export interface DiskReads {
   realpath(path: string): string | null;
   link(path: string): string | null | undefined;
+  /** The lstat and link the git-directory pass walks by ({@link readPathEntry}). */
+  entry(path: string): PathEntry;
+  /** The git-directory pass's walks, by path (kept by a memo; fresh per pass when absent). */
+  readonly gitDirLandings?: Map<string, GitDirLanding>;
+  /** {@link kernelLanding}'s answers with no volatile test, by spelling (kept by a memo). */
+  readonly kernelLandings?: Map<string, string | null>;
   /** A directory's entries, or the error code reading it gave ({@link listDirectory}). */
   list(path: string): Dirent[] | string;
 }
@@ -11490,6 +12245,7 @@ const DIRECT_DISK: DiskReads = {
     }
   },
   list: listDirectory,
+  entry: readPathEntry,
 };
 
 /**
@@ -11501,12 +12257,21 @@ const DIRECT_DISK: DiskReads = {
  */
 export function memoDiskReads(): DiskReads {
   const reals = new Map<string, string | null>();
-  const links = new Map<string, string | null | undefined>();
-  const link = (path: string): string | null | undefined => {
-    if (links.has(path)) return links.get(path);
-    const found = DIRECT_DISK.link(path);
-    links.set(path, found);
+  // One lstat per path for both readers of it: `link` (the write pass) and
+  // `entry` (the git-directory pass, which keeps the error code).
+  const entries = new Map<string, PathEntry>();
+  const entry = (path: string): PathEntry => {
+    let found = entries.get(path);
+    if (found === undefined) {
+      found = readPathEntry(path);
+      entries.set(path, found);
+    }
     return found;
+  };
+  // As DIRECT_DISK.link: `undefined` when the lstat fails or a link's target cannot be read.
+  const link = (path: string): string | null | undefined => {
+    const found = entry(path);
+    return "link" in found ? found.link : undefined;
   };
   const realpath = (path: string): string | null => {
     if (reals.has(path)) return reals.get(path) as string | null;
@@ -11539,9 +12304,22 @@ export function memoDiskReads(): DiskReads {
     if (known !== undefined) return known;
     const found = listDirectory(path);
     lists.set(path, found);
+    // The listing already says which entries are links: an entry it names as
+    // anything else is read as the lstat would read it (`link: null`), so a
+    // directory's entries are not each asked again (the unclosed-`[` line
+    // lands every entry). A link, or an entry of a type the listing does not
+    // give, is still read by lstat.
+    if (typeof found !== "string") {
+      for (const each of found) {
+        if (each.isSymbolicLink()) continue;
+        if (!(each.isFile() || each.isDirectory() || each.isFIFO() || each.isSocket() || each.isBlockDevice() || each.isCharacterDevice())) continue;
+        const at = path === "/" ? `/${each.name}` : `${path}/${each.name}`;
+        if (!entries.has(at)) entries.set(at, { link: null });
+      }
+    }
     return found;
   };
-  return { realpath, link, list };
+  return { realpath, link, list, entry, gitDirLandings: new Map(), kernelLandings: new Map() };
 }
 
 /** How many components {@link canonicalPath} climbs one at a time before it halves. */
@@ -11620,6 +12398,19 @@ function spelledAbsolute(from: string, text: string): string {
  * cannot see, and `..` out of it lands wherever the link will point.
  */
 function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | null = null, disk: DiskReads = DIRECT_DISK): string | null {
+  // With no volatile test the answer is the disk's alone: kept for the call
+  // where the disk reads are (every entry of a listed directory lands its
+  // parent again).
+  const kept = volatile === null ? disk.kernelLandings : undefined;
+  if (kept === undefined) return kernelLandingWalk(spelled, volatile, disk);
+  const known = kept.get(spelled);
+  if (known !== undefined) return known;
+  const walked = kernelLandingWalk(spelled, null, disk);
+  kept.set(spelled, walked);
+  return walked;
+}
+
+function kernelLandingWalk(spelled: string, volatile: ((path: string) => boolean) | null, disk: DiskReads): string | null {
   const queue = spelled.split("/").filter((part) => part.length > 0 && part !== ".");
   if (
     queue[0] === "proc" &&

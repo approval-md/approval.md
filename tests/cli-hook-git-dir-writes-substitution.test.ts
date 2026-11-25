@@ -144,34 +144,50 @@ test("rule 1: forms that were already strict stay so", () => {
 // ---------------------------------------------------------------------------
 
 test("rule 2: literal text and a substitution's output that join into .git name it", () => {
-  assert.deepEqual(pure("cd $(printf .gi)t && echo x >> config"), [READ_SHELL, DIR_WRITE]);
-  assert.deepEqual(pure("echo x >> $(printf .gi)t/config"), [DIR_WRITE]);
-  assert.deepEqual(pure("echo x >> .g$(printf it)/config"), [DIR_WRITE]);
+  // Build-6 round two (lead rulings L62542 and L62568): an output is an unread
+  // part, any text with a `/` in it, and the word asks the class of every
+  // guarded path it could be. `$(printf .gi)t/config` may be
+  // `.claude/hooks/…t/config`; `.$(echo g)it/config` may be
+  // `.approval/log/…it/config`; `cd $(printf .gi)t` may enter
+  // `.approval/vault`, a credential read as `cd .approval/vault` is. Those
+  // classes ride beside the `.git` reader's, which is unmoved.
+  assert.deepEqual(pure("cd $(printf .gi)t && echo x >> config"), ["account.credential credential-path", DIR_WRITE, READ_SHELL]);
+  assert.deepEqual(pure("echo x >> $(printf .gi)t/config"), ["policy.core redirect-protected", DIR_WRITE, "vcs.history.rewrite redirect-protected"]);
+  assert.deepEqual(pure("echo x >> .g$(printf it)/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   assert.deepEqual(pure("echo x >> $(printf .)git/config"), [DIR_WRITE]);
-  assert.deepEqual(pure("echo x >> .$(echo g)it/config"), [DIR_WRITE]);
-  assert.deepEqual(pure('cd "$(printf .gi)t" && echo x >> config'), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> .$(echo g)it/config"), ["log.mutate redirect-protected", DIR_WRITE, "policy.core redirect-protected", "cron.manage redirect-protected", "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
+  assert.deepEqual(pure('cd "$(printf .gi)t" && echo x >> config'), ["account.credential credential-path", DIR_WRITE, READ_SHELL]);
   assert.deepEqual(pure("cd .g$(printf it) && echo x >> config"), [READ_SHELL, DIR_WRITE]);
   assert.deepEqual(pure("D=$(printf .gi)t; echo x >> $D/config"), [ASSIGNMENT, DIR_WRITE]);
   assert.deepEqual(pure("D=a:.g$(printf it); cd $D && echo x >> config"), [ASSIGNMENT, READ_SHELL, DIR_WRITE]);
   // An output may hold a `/`: `.git` may begin inside one (`x/.gi` + `t`) or
   // end inside one (`.g` + `it/x`), past literal text around it.
-  assert.deepEqual(pure("echo x >> x$(printf /.gi)t/config"), [DIR_WRITE]);
-  assert.deepEqual(pure("echo x >> .g$(printf it/)config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> x$(printf /.gi)t/config"), ["policy.core redirect-protected", DIR_WRITE, "vcs.history.rewrite redirect-protected"]);
+  assert.deepEqual(pure("echo x >> .g$(printf it/)config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   // A glob or brace beside the substitution is read the broad way.
   // GLOB-WRITE (22 Nov 2026): an output beside a glob construct may hold a
   // `/` and so name any directory, the approval log's among them: the stricter
   // `log.mutate` answers before the `.git` reader.
-  assert.deepEqual(pure("echo x >> .g$(printf i)?/config"), ["log.mutate redirect-protected", "vcs.history.rewrite git-dir-write"]);
-  assert.deepEqual(pure("echo x >> .g{x,$(printf it)}/config"), [DIR_WRITE]);
+  // Every class such a pattern may name is judged too (#682's reader; review-b
+  // N1 at bcb1be08), beside the spliced reading's (merge of #682 and #709).
+  assert.deepEqual(pure("echo x >> .g$(printf i)?/config"), [
+    "log.mutate redirect-protected",
+    DIR_WRITE,
+    "policy.core redirect-protected",
+    "vcs.history.rewrite redirect-protected",
+    "cron.manage redirect-protected",
+    "policy.edit redirect-protected",
+  ]);
+  assert.deepEqual(pure("echo x >> .g{x,$(printf it)}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   // git's own write option, and a script a shell wrapper runs.
   assert.deepEqual(pure("git log --output=.g$(printf it)/config"), [DIR_WRITE]);
-  assert.deepEqual(pure("bash -lc 'cd $(printf .gi)t && echo x >> config'"), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(pure("bash -lc 'cd $(printf .gi)t && echo x >> config'"), ["account.credential credential-path", DIR_WRITE, READ_SHELL]);
   // The backtick form was refused before and is still.
   assert.deepEqual(pure("echo x >> `printf .gi`t/config"), ["refused opaque"]);
 });
 
 test("both rules inside a substitution body: the body is read as a line of its own", () => {
-  assert.deepEqual(pure('echo x >> "$(echo $(printf .gi)t)/config"'), [DIR_WRITE]);
+  assert.deepEqual(pure('echo x >> "$(echo $(printf .gi)t)/config"'), ["refused opaque"]);
   assert.deepEqual(pure("D=$(echo .g$(printf it)); cd $D && echo x >> config"), [ASSIGNMENT, READ_SHELL, DIR_WRITE]);
   assert.deepEqual(pure('D=$(cd "$(git rev-parse --git-dir)" && pwd); echo x >> $D/config'), [ASSIGNMENT, DIR_WRITE]);
   // zsh's echo decodes escapes in a word the text cannot read, so an echo of
@@ -280,7 +296,7 @@ test("S2: a parameter expansion that may expand to .git names it", () => {
   assert.deepEqual(pure("echo x >> ${VAR:-.gi?}/config"), [DIR_WRITE]);
   assert.deepEqual(pure("echo x >> ${A:-${B:-.git}}/config"), [DIR_WRITE]);
   assert.deepEqual(pure("echo x >> $(echo ${VAR:-.git})/config"), [DIR_WRITE]);
-  assert.deepEqual(pure("echo x >> ${VAR:-.g$(printf it)}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${VAR:-.g$(printf it)}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
 });
 
 test("S2: a parameter expansion whose word is not .git does not move", () => {
@@ -337,7 +353,7 @@ test("security review a: every ANSI-C piece of a word is decoded and joined, quo
   assert.deepEqual(pure("echo x >> $'\\x2e'gi\"t\"/config"), [DIR_WRITE]);
   // A glob where the word is unquoted, and an output beside the string.
   assert.deepEqual(pure("cd $'\\x2eg'i? && echo x >> config"), [READ_SHELL, DIR_WRITE]);
-  assert.deepEqual(pure("echo x >> $'\\x2e'$(printf git)/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> $'\\x2e'$(printf git)/config"), ["log.mutate redirect-protected", DIR_WRITE, "policy.core redirect-protected", "cron.manage redirect-protected", "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   // A decoded `.` that is no segment's start is no `.git`.
   assert.deepEqual(pure("echo x > a$'\\x2e'gitx"), [REDIRECT]);
 });
@@ -345,8 +361,11 @@ test("security review a: every ANSI-C piece of a word is decoded and joined, quo
 test("security review b: quotes are tracked, and a quote that does not close is the strict side", () => {
   // `$'` inside single quotes is text the shell leaves as written.
   assert.deepEqual(pure("echo '$'\"'\"'\\x2egit' > \"$D\""), [REDIRECT]);
-  // The lexer and the shell disagree on `\'` inside `$'…'`: unreadable, strict.
-  assert.deepEqual(pure("echo $'x\\'' ' > \"$D\""), [DIR_WRITE]);
+  // `\'` inside `$'…'` is a quote character (lead ruling L62542: the lexer
+  // reads it as the shell does), so the `'` after the string opens a quote that
+  // never closes: bash 3.2 and zsh 5.9 refuse the line (lab), and so does the
+  // classifier. It was a `.git` write while the lexer ended the string there.
+  assert.deepEqual(pure("echo $'x\\'' ' > \"$D\""), ["refused unparseable"]);
 });
 
 test("security review c: what printf or echo prints is read with quotes removed", () => {
@@ -376,15 +395,15 @@ test("security review d: the other parameter expansion operators", () => {
   // A length and plain expansions do not move. (A transforming operator on a
   // variable the line does not set is strict now: point i below.)
   assert.deepEqual(pure('echo x > "${#X}.txt"'), [REDIRECT]);
-  assert.deepEqual(pure('echo x > "${name}.${ext}"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${name}.${ext}"'), ["log.mutate redirect-protected", "policy.core redirect-protected", "policy.edit redirect-protected", "cron.manage redirect-protected", REDIRECT]);
 });
 
 test("security review e: a nested expansion in an operator's word is an output that joins", () => {
-  assert.deepEqual(pure("echo x >> ${A:-.g${B}t}/config"), [DIR_WRITE]);
-  assert.deepEqual(pure("echo x >> .g${A:-i}t/config"), [DIR_WRITE]);
-  assert.deepEqual(pure("echo x >> ${A:-.g$(printf i)t}/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> ${A:-.g${B}t}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
+  assert.deepEqual(pure("echo x >> .g${A:-i}t/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
+  assert.deepEqual(pure("echo x >> ${A:-.g$(printf i)t}/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   assert.deepEqual(pure('echo x > "${OUT:-${HOME}/out}/f"'), [REDIRECT]);
-  assert.deepEqual(pure('echo x > "${OUT:-out}.${EXT:-txt}"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${OUT:-out}.${EXT:-txt}"'), ["log.mutate redirect-protected", "policy.core redirect-protected", "policy.edit redirect-protected", "cron.manage redirect-protected", REDIRECT]);
 });
 
 test("security review f: an operator after a special parameter is read as the operator", () => {
@@ -446,7 +465,7 @@ test("security review g to q: every operator that transforms a value counts", ()
   assert.deepEqual(pure('echo x > "${#X}.txt"'), [REDIRECT]);
   assert.deepEqual(pure('echo x > "out/${!REF}.txt"'), [REDIRECT]);
   assert.deepEqual(pure('echo x > "${f}.bak"'), [REDIRECT]);
-  assert.deepEqual(pure('echo x > "${name}.${ext}"'), [REDIRECT]);
+  assert.deepEqual(pure('echo x > "${name}.${ext}"'), ["log.mutate redirect-protected", "policy.core redirect-protected", "policy.edit redirect-protected", "cron.manage redirect-protected", REDIRECT]);
   assert.deepEqual(pure("echo x >> ${VAR:?.git}/config"), [REDIRECT]);
   // A read of a transformed name, or a write to a literal path, does not move.
   assert.deepEqual(pure('cat "${f%.txt}.log"'), [READ_SHELL]);
@@ -528,13 +547,16 @@ test("gate M2: printf is read only with a literal format of %s, %b, %c and %d", 
     'F=x; echo x > "$(printf "$F")/report.txt"',
     'echo x > "$(printf $F)/config"',
     'echo x > "$(printf ${F})/config"',
-    'echo x > "$(printf "%.${N}s" .gitfoo)/config"',
     // A substitution as the format, or as a word to fill it.
     'echo x > "$(printf "$(echo %.4s)" .gitfoo)/config"',
     'echo x > "$(printf %s "$(cat v)")/config"',
   ]) {
     assert.ok(pure(line).includes(DIR_WRITE), line);
   }
+  // Build-6 round two (L62542): `%.${N}s` may be `%.x/.approval/keys`, a
+  // credential printf reads as main reads `printf %s .approval/env`, and a
+  // substitution that reads one is refused.
+  assert.deepEqual(pure('echo x > "$(printf "%.${N}s" .gitfoo)/config"'), ["refused opaque"]);
   // Literal formats of %s, %b, %c and %d with literal words keep their reading.
   assert.deepEqual(pure(`echo x > "$(printf '%s-%s' a b).txt"`), [REDIRECT]);
   assert.deepEqual(pure(`echo x > "out-$(printf '%05d' 7).log"`), [REDIRECT]);
@@ -600,8 +622,13 @@ test("gate M3: zsh subscripts and modifiers count", () => {
     // GLOB-WRITE: bash reads an UNQUOTED `[...]` after a parameter as a glob
     // beside an unknown value, which may name a guarded path, so that pattern
     // rides beside the git-dir write; in double quotes it is text.
+    // (Build-6 round two, L62568: the unread value beside the pattern may
+    // hold a `/`, and every guarded class it may reach rides beside.)
     const globbed = /\$\w+\[/u.test(line) && !line.includes('"');
-    assert.deepEqual(pure(line), globbed ? [ASSIGNMENT, "log.mutate redirect-protected", DIR_WRITE] : [ASSIGNMENT, DIR_WRITE], line);
+    // Every class that pattern may name is judged (#682's reader; review-b N1
+    // at bcb1be08), and the spliced reading's beside it (#709).
+    const SPLICED_BESIDE = ["policy.core redirect-protected", "cron.manage redirect-protected", "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"];
+    assert.deepEqual(pure(line), globbed ? [ASSIGNMENT, "log.mutate redirect-protected", DIR_WRITE, ...SPLICED_BESIDE] : [ASSIGNMENT, DIR_WRITE], line);
   }
   // The coarse rule: after an unbraced parameter, any `[` or `:` and a
   // letter or `&` counts, on any parameter, special ones too.
@@ -643,7 +670,9 @@ test("hook: the gate's spellings in a checkout", { skip }, () => {
 
 test("gate N2 (m11): an ANSI-C string ends at a NUL past the near reader's reach", () => {
   // Past the near reader's five characters, only the NUL end reads it.
-  assert.deepEqual(pure(`echo x > $'.g\\0junk'""""""""it/config`), [DIR_WRITE]);
+  // (Build-6, reviews of the M1 fix: zsh ends the path at the NUL and writes
+  // `.g`, a workspace file, read beside bash's `.git/config`.)
+  assert.deepEqual(pure(`echo x > $'.g\\0junk'""""""""it/config`), [DIR_WRITE, REDIRECT]);
 });
 
 test("gate N2 (m17): %c prints the first character of each word", () => {

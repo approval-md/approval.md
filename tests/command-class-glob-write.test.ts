@@ -293,7 +293,10 @@ test("review 2: a ${X:-WORD} default (and := :+ - = +) is a reading of its own, 
 test("review 2b: more ${…} operator spans than the cap, or a default nested too deep, is log.mutate", () => {
   const spans = (n: number): string => Array.from({ length: n }, (_, k) => `\${X${String(k)}:-a}`).join("");
   // At the cap (8) the readings are judged; one past it fails closed.
-  assert.deepEqual(classesOf(`echo x > out/${spans(8)}.log`), ["files.write.workspace"]);
+  // (The spliced reading, L62568, build-6: `out/${X0}a${X1}…` may be
+  // `out/.approval/log/…`, a part holding `/` beside the literal `a`; every
+  // class it may reach rides beside.)
+  assert.deepEqual(classesOf(`echo x > out/${spans(8)}.log`), ["log.mutate", "policy.core", "files.write.workspace"]);
   assert.equal(strictest(`echo x > out/${spans(9)}.log`), "log.mutate");
   // The guarded default past the cap is not lost.
   assert.equal(strictest(`echo x > ${spans(8)}\${Y:-.approval/env}`), "log.mutate");
@@ -327,7 +330,9 @@ test("review 5: the parameter placeholder cannot be forged, and $ beside a glob 
   // A word holding the private-use mark fails closed.
   assert.equal(strictest("echo x > ab*"), "log.mutate");
   // `$1`, `$9` are variables (their value is unseen, as on main); no collision.
-  assert.deepEqual(classesOf("echo x > ~/.hermes/$1uth.json.bak"), andMain(["files.write.workspace"], "echo x > ~/.hermes/$1uth.json.bak"));
+  // (The spliced reading, L62568, build-6: `$1` may hold a `/`, so the word
+  // may be `~/.hermes/plugins/auth.json.bak` or under its `scripts`.)
+  assert.deepEqual(classesOf("echo x > ~/.hermes/$1uth.json.bak"), andMain(["policy.core", "cron.manage", "files.write.workspace"], "echo x > ~/.hermes/$1uth.json.bak"));
   assert.deepEqual(classesOf('echo x > "$9"'), andMain(["files.write.workspace"], 'echo x > "$9"'));
   // A variable beside a glob construct may hold a `/`: it may name anything.
   assert.equal(strictest("echo x > ${X}*"), "log.mutate");
@@ -561,9 +566,11 @@ test("listings: the four workflow lines by what the directory holds", () => {
     assert.deepEqual(withListing(command, { [dir]: ["apprOVAL.MD"] }), raised, `${command} apprOVAL.MD`);
     // Unlisted, `*` may be `.approval` itself: a command on it takes the
     // class of its log too (lead ruling L62013, S1).
-    const unlisted = [...raised, "log.mutate"];
-    assert.deepEqual(withListing(command, { [dir]: "unreadable" }), unlisted, `${command} unreadable`);
-    assert.deepEqual(withListing(command, {}), unlisted, `${command} not listed`);
+    // Every class a candidate names is judged, not the strictest alone (#682's
+    // reader; review-b N1 at bcb1be08): `AGENTS.md`, and `.hermes` with its cron folder.
+    const unlisted = ["policy.core", "policy.edit", main, "log.mutate", "cron.manage"].sort();
+    assert.deepEqual([...withListing(command, { [dir]: "unreadable" })].sort(), unlisted, `${command} unreadable`);
+    assert.deepEqual([...withListing(command, {})].sort(), unlisted, `${command} not listed`);
   }
   // A dot-name counts on a line that may turn dot matching on.
   const classes = withListing("GLOBIGNORE=x; echo x > dist/*/env", { "/w/dist": [".approval"] });
@@ -579,7 +586,8 @@ test("listings: home organs, absolute and relative prefixes, the first globbed l
   assert.deepEqual(withListing("echo x > /abs/out/*", { "/abs/out": ["APPROVAL.md"] }), andMain(["policy.core"], "echo x > /abs/out/*", { "/abs/out": ["APPROVAL.md"] }));
   // A deeper globbed level keeps the over-approximated reading.
   // (`src/lib/*` may be `src/lib/.approval` itself: its log's class too, L62013 S1.)
-  assert.deepEqual(withListing("echo x > src/*/*", { "/w/src": ["lib"] }), ["policy.core", "files.write.workspace", "log.mutate"]);
+  // Every class a candidate names (#682's reader; review-b N1 at bcb1be08).
+  assert.deepEqual(withListing("echo x > src/*/*", { "/w/src": ["lib"] }), ["policy.core", "policy.edit", "files.write.workspace", "log.mutate", "cron.manage"]);
   assert.deepEqual(withListing("echo x > src/*/*.ts", { "/w/src": ["lib"] }), andMain(["files.write.workspace"], "echo x > src/*/*.ts", { "/w/src": ["lib"] }));
 });
 
@@ -1035,7 +1043,10 @@ test("e6b7bf97 (3): only a real `$` names a special parameter; a quoted or escap
     assert.ok(!ORDINARY(classesOf(command)), command);
   }
   // Every `$` real: `$*` and `$?` are names, so no pattern.
-  assert.ok(ORDINARY(classesOf("echo x > a$*$?")));
+  assert.ok(ORDINARY(classesOf("echo x > z$*$?")));
+  // Lead ruling L62568: they are unread parts, and `a` then any text may be a
+  // guarded name (`aPPROVAL.md` folds to the policy file): the spliced reading asks.
+  assert.ok(!ORDINARY(classesOf("echo x > a$*$?")));
 });
 
 test("e6b7bf97 (4): a directory that was not there is empty only to a glob on a one-segment line", () => {
@@ -1261,7 +1272,8 @@ test("lead ruling (CLAIMS L61492, L61497): a write's * or ? that would match a g
   // class rides beside the one a destination pattern raised; the plain pass
   // reads destinations as before the ruling, so `.cl*/` carries nothing new.
   // `.git/*` may be `.git/.approval`, a folder a move replaces: its log's class too (L62013, S1).
-  assert.deepEqual(classesOf("mv a .git/*"), ["policy.core", "vcs.history.rewrite", "log.mutate"]);
+  // Every class a candidate names (#682's reader; review-b N1 at bcb1be08).
+  assert.deepEqual(classesOf("mv a .git/*"), ["policy.core", "vcs.history.rewrite", "policy.edit", "log.mutate", "cron.manage"]);
   assert.deepEqual(classesOf("rsync -a evil/ .cl*/"), andMain(["policy.core"], "rsync -a evil/ .cl*/"));
 });
 
@@ -1492,8 +1504,13 @@ test("security review of the parents rule (L61587), 5: a tail after an unreadabl
   }
   // Lead ruling L62435 (S7): an ordinary variable below the working
   // directory, or after another, keeps main's class (it was policy.core).
-  // (`$X/*` keeps #686's pattern answer, main's since 9122cb3e.)
-  assert.deepEqual(classesOf("rm -rf $X/*"), ["policy.core", "files.delete.out_of_scope", "log.mutate"]);
+  // (`$X/*` keeps #686's pattern answer, main's since 9122cb3e, widened by #682's
+  // M2 fold: an unreadable part may name any guarded path, so the answer carries
+  // every class one can hold, policy.edit (.github) and cron.manage included;
+  // lead ruling L62588.)
+  // The spliced reading (L62568, build-6) leads with the log: `$X/*` may be
+  // `.approval/log/*`; every other guarded folder it may be rides beside.
+  assert.deepEqual(classesOf("rm -rf $X/*"), ["log.mutate", "policy.core", "policy.edit", "cron.manage", "files.delete.out_of_scope"]);
   // Lead ruling L62511 (S-D): a recursive chmod of one is policy.core again.
   for (const command of ["chmod -R 000 ./$X", "chmod -R 000 sub/$X", "chmod -R 000 $X/$Y"]) assert.ok(classesOf(command).includes("policy.core"), command);
   for (const command of ['rm -rf "$X/$Y"']) {
@@ -1933,11 +1950,13 @@ test("cost (L62090): a word already judged on a line is not walked again, and st
   // budget the line answers `log.mutate`, exactly where the repeated walks did.
   const rsync = (k: number): string => `rsync -aR ${"s/*/./a* ".repeat(k)}d*/`;
   const cp = (k: number): string => `cp ${"s/*.json ".repeat(k)}d*/`;
-  assert.deepEqual(classesOf(rsync(1)).sort(), ["network.call", "policy.core"]);
-  assert.deepEqual(classesOf(rsync(1000)).sort(), ["network.call", "policy.core"]);
-  // Past the budget the landing answers `log.mutate`; since main's #690 the
-  // operands' own `policy.core` (`a*` may be `APPROVAL.md`) rides beside it.
-  assert.deepEqual(classesOf(rsync(2000)).sort(), ["log.mutate", "network.call", "policy.core"]);
+  // `a*` may be `APPROVAL.md` and `AGENTS.md`: each class is judged (#682's
+  // reader; review-b N1 at bcb1be08).
+  assert.deepEqual(classesOf(rsync(1)).sort(), ["network.call", "policy.core", "policy.edit"]);
+  assert.deepEqual(classesOf(rsync(1000)).sort(), ["network.call", "policy.core", "policy.edit"]);
+  // Past the budget the landing answers `log.mutate` and `policy.core`
+  // (GLOB_GUARD_UNKNOWN); the operands' own classes ride beside it.
+  assert.deepEqual(classesOf(rsync(2000)).sort(), ["log.mutate", "network.call", "policy.core", "policy.edit"]);
   assert.deepEqual(classesOf(cp(1000)).sort(), ["files.write.workspace"]);
   assert.deepEqual(classesOf(cp(2000)).sort(), ["files.write.workspace", "log.mutate"]);
 });
@@ -2205,9 +2224,16 @@ test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary varia
   // An ordinary variable alone, below the working directory, or below a
   // directory that holds neither the working directory nor the home.
   const tmp = { "/w": [".claude"], "/tmp": ["x"], "/private/tmp": ["x"], ...realpaths("/w", "/h", "/private/tmp"), [realpathKey("/tmp")]: ["/private/tmp"] };
-  for (const command of ["rm -rf $TARGET", "rm -rf $BUILD_DIR", 'rm -rf "$OUT"', 'rm -rf "$TMPDIR"', "rm -rf ./$X", "rm -rf /tmp/$name", "rm -rf /private/tmp/$SESSION", "rm -rf build-$ID", "rm -rf dist/$X.tmp", "rm -rf v$A.$B"]) {
+  for (const command of ["rm -rf $TARGET", "rm -rf $BUILD_DIR", 'rm -rf "$OUT"', 'rm -rf "$TMPDIR"', "rm -rf ./$X", "rm -rf /tmp/$name", "rm -rf /private/tmp/$SESSION", "rm -rf build-$ID", "rm -rf dist/$X.tmp"]) {
     assert.deepEqual(classesOf(command), mainClasses(command), `${command} (pure)`);
     assert.deepEqual(withListing(command, tmp), ["files.delete.out_of_scope"], `${command} (listing)`);
+  }
+  // Lead ruling L62568 (build-6, spliced words): `v$A.$B` may be `v…/.git`
+  // (B=`git`, A ending in `/`): an unread part counts as any text, `/`
+  // included, and the literal `.` takes part. Main's class rides beside.
+  {
+    const spliced = classesOf("rm -rf v$A.$B");
+    for (const cls of ["vcs.history.rewrite", ...mainClasses("rm -rf v$A.$B")]) assert.ok(spliced.includes(cls), `rm -rf v$A.$B: ${spliced.join(",")}`);
   }
   // Below a proven parent: may be the workspace itself, strict.
   for (const command of ["rm -rf ../$X", "rm -rf ~/$X", "rm -rf /$X", "rm -rf $PWD/../$X", "rm -rf ../../$X", "rm -rf ~/../$X", 'rm -rf "../$X/$Y"']) {

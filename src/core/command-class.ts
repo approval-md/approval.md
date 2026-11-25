@@ -66,14 +66,24 @@ import {
   readTargetsOf,
 } from "./read-scope.js";
 import {
+  apartFromCallerReading,
   eachNameReading,
   equalClaims,
   foldedOnly,
+  eachEqualClaim,
+  foldedOnlyQuietly,
   foldFileName,
   foldNameExact,
   foldNameLower,
   inFoldedReadingOnly,
+  markReadingsDiverged,
   nameListIncludes,
+  localReadingEnd,
+  localReadingSame,
+  localReadingStart,
+  localReadingsSettling,
+  namesReadAsSpelled,
+  readingsDivergedNow,
   SUBSTITUTION_SENTINEL,
   takeAmongEqual,
   withNamesAsSpelled,
@@ -449,6 +459,99 @@ export function braceExpansions(word: string): string[] | null {
  * group is a sequence or list of plain numbers ({@link numericRepresentative}).
  */
 export function braceCandidates(word: string): string[] | null {
+  // Remembered for one classification call ({@link withClassifyCall}): the
+  // same word is expanded by every pass over a line (the spliced reading, the
+  // line's main pass at the seam, each name reading), and a 1 MB word of
+  // groups costs seconds each time. Pure, so a hit is exactly what the
+  // expansion would give; a copy, so no caller shares it. A new call starts
+  // afresh, so a repeated measurement pays the work again. Every word goes
+  // through it (a stray `}` alone changes the word: `.op.env}` is `.op.env`).
+  if (classifyCallDepth === 0) return braceCandidatesOnce(word);
+  // Keyed by a hash of the whole text: V8 hashes a long string by its length
+  // alone on some versions (node 20), and 1 MB keys of one length then collide.
+  const key = braceMemoKey(word);
+  const bucket = braceCandidatesMemo.get(key);
+  const hit = bucket?.find((entry) => entry.word === word);
+  if (hit !== undefined) return hit.made === null ? null : [...hit.made];
+  const made = braceCandidatesOnce(word);
+  // What an entry holds: the word and every word it expands to. One over its
+  // own bound is not kept, and once the memo is full nothing more is kept
+  // (what it holds stays until the call ends).
+  let size = word.length;
+  for (const each of made ?? []) size += each.length;
+  if (
+    size <= BRACE_CANDIDATES_ENTRY_CHARS &&
+    braceCandidatesMemoChars + size <= BRACE_CANDIDATES_MEMO_CHARS &&
+    braceMemoEntries < BRACE_CANDIDATES_MEMO_ENTRIES
+  ) {
+    const entry = { word, made: made === null ? null : [...made] };
+    if (bucket === undefined) braceCandidatesMemo.set(key, [entry]);
+    else bucket.push(entry);
+    braceMemoEntries += 1;
+    braceCandidatesMemoChars += size;
+    braceMemoHeld += word.length + (made ?? []).reduce((sum, each) => sum + each.length, 0);
+    if (braceMemoHeld > braceMemoPeak) braceMemoPeak = braceMemoHeld;
+    if (braceMemoEntries > braceMemoEntriesPeak) braceMemoEntriesPeak = braceMemoEntries;
+  }
+  return made;
+}
+
+/** {@link braceCandidates}' answers by word (bucketed by {@link braceMemoKey}), for the current classification call. */
+const braceCandidatesMemo = new Map<string, { word: string; made: readonly string[] | null }[]>();
+/** How many words {@link braceCandidatesMemo} holds. */
+let braceMemoEntries = 0;
+
+/** A key for a word from every character of it (FNV-1a over UTF-16 units) and its length. */
+function braceMemoKey(word: string): string {
+  let hash = 0x811c9dc5;
+  for (let at = 0; at < word.length; at += 1) hash = Math.imul(hash ^ word.charCodeAt(at), 0x01000193);
+  return `${String(word.length)}:${String(hash >>> 0)}`;
+}
+/** How deep the exported classification calls are: the outermost starts the memo afresh. */
+let classifyCallDepth = 0;
+/** The characters {@link braceCandidatesMemo} holds, words and expansions, for its bound. */
+let braceCandidatesMemoChars = 0;
+/** The same, counted apart for {@link braceCandidatesMemoPeak} (what a test reads). */
+let braceMemoHeld = 0;
+let braceMemoPeak = 0;
+let braceMemoEntriesPeak = 0;
+/** Most characters {@link braceCandidatesMemo} holds in one call (words and their expansions). */
+export const BRACE_CANDIDATES_MEMO_CHARS = 8_000_000;
+/** Most characters one entry may hold and still be kept. */
+const BRACE_CANDIDATES_ENTRY_CHARS = 4_000_000;
+/** Most entries {@link braceCandidatesMemo} holds in one call. */
+export const BRACE_CANDIDATES_MEMO_ENTRIES = 4096;
+
+/** The most characters and entries the brace memo held during the last outermost classification call, and the entries it holds now. */
+export function braceCandidatesMemoPeak(): { peak: number; entriesPeak: number; heldNow: number } {
+  return { peak: braceMemoPeak, entriesPeak: braceMemoEntriesPeak, heldNow: braceMemoEntries };
+}
+
+/** Run one exported classification call; the outermost starts {@link braceCandidatesMemo} afresh, and ends it. */
+function withClassifyCall<T>(run: () => T): T {
+  if (classifyCallDepth === 0) {
+    braceCandidatesMemo.clear();
+    braceCandidatesMemoChars = 0;
+    braceMemoEntries = 0;
+    braceMemoHeld = 0;
+    braceMemoPeak = 0;
+    braceMemoEntriesPeak = 0;
+  }
+  classifyCallDepth += 1;
+  try {
+    return run();
+  } finally {
+    classifyCallDepth -= 1;
+    if (classifyCallDepth === 0) {
+      braceCandidatesMemo.clear();
+      braceCandidatesMemoChars = 0;
+      braceMemoEntries = 0;
+      braceMemoHeld = 0;
+    }
+  }
+}
+
+function braceCandidatesOnce(word: string): string[] | null {
   const expanded = braceExpansions(word) ?? numericRepresentative(word);
   if (expanded === null) return null;
   const out = [...expanded];
@@ -856,10 +959,21 @@ export function protectedPathClass(
   // claims the classes of the guarded paths inside it, taken after the
   // word's own claims ({@link folderClaimsOfWord}).
   const inside: string[] = [];
-  for (const expansion of expansions) {
-    const own = protectedClaimsOfWord(expansion, extra);
-    for (const cls of own) if (!claims.includes(cls)) claims.push(cls);
-    for (const cls of folderClaimsOfWord(expansion, own, extra)) if (!inside.includes(cls)) inside.push(cls);
+  // Outside the hook's settled plain-name line nothing can be settled
+  // ({@link localReadingsSettling}), and {@link addExpansionClaims} would
+  // answer as this inline loop does: so every other caller keeps the loop as
+  // it was before 49199b6b. Cost: the write-target pattern reader's walk asks
+  // here once per candidate, and through the wrapper the call that first made
+  // this hot paid for a larger optimizing compile, counted in its CPU time
+  // (node 22: `echo x > ~/.hermes/*/` and 2,000 `*`, 23 to 33 CPU ms a call).
+  if (localReadingsSettling()) {
+    for (const expansion of expansions) addExpansionClaims(expansion, extra, claims, inside);
+  } else {
+    for (const expansion of expansions) {
+      const own = protectedClaimsOfWord(expansion, extra);
+      for (const cls of own) if (!claims.includes(cls)) claims.push(cls);
+      for (const cls of folderClaimsOfWord(expansion, own, extra)) if (!inside.includes(cls)) inside.push(cls);
+    }
   }
   if (claims.length === 0) return null;
   const ranked = claims
@@ -867,6 +981,54 @@ export function protectedPathClass(
     .sort((a, b) => protectedRank(a.cls) - protectedRank(b.cls) || a.index - b.index)
     .map((claim) => claim.cls);
   return takeAmongEqual([...ranked, ...inside.filter((cls) => !ranked.includes(cls))]);
+}
+
+/**
+ * One expansion's claims for {@link protectedPathClass}, added to `claims`
+ * (its own, {@link protectedClaimsOfWord}) and `inside` (the folder's,
+ * {@link folderClaimsOfWord}): judged as if inline, but where its compares
+ * diverge, judged as spelled too, and where both readings answer the same
+ * the caller's reading is not marked ({@link localReadingSame}): a path such
+ * as `/Users/x/.hermes/a` folds `Users` and claims the same either way, so
+ * the caller's line is not read again as spelled for it (cost: the hook's
+ * synthetic line of every entry of a directory, each under the same home).
+ * Whether a GLOB-WRITE rule fired ({@link markGlobWriteFired}) is part of the
+ * answer compared, and the flag the caller sees is the folded run's, as
+ * inline: the as-spelled run's never reaches it.
+ */
+function addExpansionClaims(expansion: string, extra: readonly ProtectedPathEntry[], claims: string[], inside: string[]): void {
+  const before = globWriteFired;
+  globWriteFired = false;
+  let own: readonly string[] = [];
+  let folder: readonly string[] = [];
+  let fired = false;
+  let settle = false;
+  const saved = localReadingStart();
+  try {
+    own = protectedClaimsOfWord(expansion, extra);
+    folder = folderClaimsOfWord(expansion, own, extra);
+    fired = globWriteFired;
+  } finally {
+    settle = localReadingEnd(saved);
+    globWriteFired = before || globWriteFired;
+  }
+  if (settle) {
+    globWriteFired = false;
+    try {
+      const spelledOwn = withNamesAsSpelled(() => protectedClaimsOfWord(expansion, extra));
+      const spelledFolder = withNamesAsSpelled(() => folderClaimsOfWord(expansion, spelledOwn, extra));
+      if (globWriteFired === fired && sameStrings(own, spelledOwn) && sameStrings(folder, spelledFolder)) localReadingSame(saved);
+    } finally {
+      globWriteFired = before || fired;
+    }
+  }
+  for (const cls of own) if (!claims.includes(cls)) claims.push(cls);
+  for (const cls of folder) if (!inside.includes(cls)) inside.push(cls);
+}
+
+/** Are `a` and `b` the same strings in the same order? */
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((each, index) => each === b[index]);
 }
 
 // ===========================================================================
@@ -916,6 +1078,101 @@ function zshClobberRefusal(spelled: string): { ok: false; detail: string } {
     detail: `redirection ${spelled} is not read by this classifier: zsh writes the word after it and bash a file named "!"; write >| to overwrite a file, or quote the name`,
   };
 }
+
+// ===========================================================================
+// Dollar-quoted words: read as the shell reads them, main's reading beside
+// ===========================================================================
+//
+// `$'…'` (ANSI-C quoting) and `$"…"` (locale quoting) are quotes to the shell:
+// `echo x > $'\x41PPROVAL.md'` writes the policy file. Main's lexer kept the
+// `$` and read the quote after it, so the word was the unknown variable
+// `$\x41PPROVAL.md` and the line a workspace write. The lexer now reads each
+// as the shell does ({@link readDollarQuoted}): `$"…"` as a double-quoted
+// string, `$'…'` decoded where bash and zsh decode it alike, and a part it
+// cannot read for both shells left as an unknown, the way `$X` is.
+//
+// A decoded word can be LIGHTER than main's unknown one (`cp a $'b'` is a
+// workspace write; main answered `policy.core` for a copy to a target it could
+// not read). So wherever the lexer decoded a dollar quote, the line is
+// classified again with dollar quotes kept as main kept them, and that answer
+// joins the first as a name reading does ({@link unionNameReadings}): main's
+// classes ride beside, and a line main refuses stays refused. The switch is
+// module state, set only by {@link withDollarQuotesKept}.
+
+let dollarQuotesKept = false;
+let dollarQuoteRead = false;
+/** Run `run` with dollar quotes kept as main's lexer kept them, and restore the mode afterwards. */
+function withDollarQuotesKept<T>(run: () => T): T {
+  const saved = dollarQuotesKept;
+  dollarQuotesKept = true;
+  try {
+    return run();
+  } finally {
+    dollarQuotesKept = saved;
+  }
+}
+
+/** {@link classifyCommand} with dollar quotes kept as main's lexer kept them: the answer that rides beside. */
+export function classifyCommandWithDollarQuotesKept(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[] = [],
+  context: ClassifierContext = {},
+): CommandClassification {
+  return withDollarQuotesKept(() => classifyCommand(command, protectedPaths, context));
+}
+
+/**
+ * `run`'s answer with dollar quotes read as the shell reads them, and, where
+ * the lexer read one during that run, its answer with them kept as main kept
+ * them: `[decoded]` or `[decoded, asMain]`. Callers join the answers as they
+ * join the name readings. Inside the kept mode this is `[run()]`.
+ */
+export function eachDollarQuoteReading<T>(run: () => T): [T, ...T[]] {
+  // Inside an outer reading (the hook's whole chain), the outer one runs the
+  // kept pass over everything this run does, and joins it: the decoded
+  // answer alone here, the lexer's record of a decoded quote left for it.
+  if (dollarQuotesKept || zshNulReading || dollarQuoteReadingOpen) return [run()];
+  const outer = dollarQuoteRead;
+  const outerNul = zshNulSeen;
+  dollarQuoteRead = false;
+  zshNulSeen = false;
+  dollarQuoteReadingOpen = true;
+  let read = false;
+  let nul = false;
+  try {
+    const decoded = run();
+    read = dollarQuoteRead;
+    nul = zshNulSeen;
+    const answers: [T, ...T[]] = [decoded];
+    if (read) answers.push(withDollarQuotesKept(run));
+    // A dollar quote held a NUL: zsh's reading, each such word ending there.
+    if (nul) answers.push(withZshNulReading(run));
+    return answers;
+  } finally {
+    dollarQuoteReadingOpen = false;
+    dollarQuoteRead = outer || read;
+    zshNulSeen = outerNul || nul;
+  }
+}
+
+/** The lexer met a dollar quote zsh may read a NUL in ({@link eachDollarQuoteReading}). */
+let zshNulSeen = false;
+/** The zsh reading is on: a word ends at a dollar quote's NUL. */
+let zshNulReading = false;
+
+/** Run `run` with each word ending where zsh may read a NUL in a dollar quote. */
+function withZshNulReading<T>(run: () => T): T {
+  const saved = zshNulReading;
+  zshNulReading = true;
+  try {
+    return run();
+  } finally {
+    zshNulReading = saved;
+  }
+}
+
+/** An {@link eachDollarQuoteReading} is running: an inner one reads the decoded pass alone. */
+let dollarQuoteReadingOpen = false;
 
 /** A GLOB-WRITE rule changed this line's answer: the main pass must run. */
 function markGlobWriteFired(): void {
@@ -1576,11 +1833,24 @@ const CREDENTIAL_CLASS = "account.credential";
  * current one only.
  */
 export function isCredentialPath(candidate: string): boolean {
-  return eachNameReading(() => isCredentialPathAsRead(candidate)).some((credential) => credential);
+  // The credential rows alone: the hook judges paths it resolved itself
+  // (a cwd joined, a home expanded), and those are not a word the line
+  // spelled; the spliced reading ({@link splicedCredential}) is the
+  // classifier's own, over the words it lexed.
+  return eachNameReading(() => isCredentialPathPlain(candidate)).some((credential) => credential);
 }
 
-/** {@link isCredentialPath} in the current name reading. */
-function isCredentialPathAsRead(candidate: string): boolean {
+/**
+ * {@link isCredentialPath} in the current name reading: the credential rows
+ * ({@link isCredentialPathPlain}), and a word with an unread part spliced
+ * into literal text that could be a credential file ({@link splicedCredential}).
+ */
+function isCredentialPathAsRead(candidate: string, facts?: WordFacts): boolean {
+  return isCredentialPathPlain(candidate) || splicedCredential(candidate, facts?.literalAt);
+}
+
+/** The credential rows over `candidate`'s brace expansions, as written. */
+function isCredentialPathPlain(candidate: string): boolean {
   if (candidate.length === 0) return false;
   // APRV-511 refuter M2: any brace expansion that names a credential is one.
   const expansions = braceCandidates(candidate);
@@ -1999,50 +2269,85 @@ function credentialProtectedScanKeeps(basename: string): boolean {
  * credential path; under-reading one costs the property.
  */
 export function credentialReadWords(basename: string, args: readonly string[]): string[] {
+  return credentialReadEntries(basename, args).map((entry) => entry.word);
+}
+
+/** A word {@link credentialReadWords} reads, and, where it is an argument as lexed, that argument's literal `$` ({@link LexWord.literalDollars}). */
+interface CredentialReadEntry {
+  word: string;
+  facts?: WordFacts;
+}
+
+/**
+ * {@link credentialReadWords}, each word with the literal `$` of the argument
+ * it IS (`literals`, by argument index); a word read out of an argument (an
+ * option's value, an upload's file, a git path) carries none.
+ */
+function credentialReadEntries(
+  basename: string,
+  args: readonly string[],
+  literals: readonly (WordFacts | undefined)[] = [],
+): CredentialReadEntry[] {
   if (credentialWritesOnly(basename, args)) return [];
-  const words: string[] = [];
-  for (const arg of args) {
+  const words: CredentialReadEntry[] = [];
+  for (const [index, arg] of args.entries()) {
     if (!isFlag(arg)) {
-      words.push(arg);
+      const facts = literals[index];
+      words.push(facts === undefined ? { word: arg } : { word: arg, facts });
     } else if (arg.startsWith("--")) {
       const equals = arg.indexOf("=");
-      if (equals !== -1 && equals < arg.length - 1) words.push(arg.slice(equals + 1));
+      if (equals !== -1 && equals < arg.length - 1) words.push({ word: arg.slice(equals + 1) });
     } else if (arg.length > 2) {
-      words.push(arg.slice(2));
+      words.push({ word: arg.slice(2) });
       const equals = arg.indexOf("=");
-      if (equals !== -1 && equals < arg.length - 1) words.push(arg.slice(equals + 1));
+      if (equals !== -1 && equals < arg.length - 1) words.push({ word: arg.slice(equals + 1) });
     }
   }
   // A snapshot: the loop appends to `words`.
-  const spelled = words.slice();
+  const spelled = words.map((entry) => entry.word);
   for (const word of spelled) {
     for (let at = word.search(/[@<]/u); at !== -1; ) {
       const rest = (word.slice(at + 1).split(";")[0] ?? "").trim();
-      if (rest.length > 0) words.push(rest);
+      if (rest.length > 0) words.push({ word: rest });
       const next = word.slice(at + 1).search(/[@<]/u);
       at = next === -1 ? -1 : at + 1 + next;
     }
   }
   if (basename !== "git") return words;
-  const out: string[] = [];
-  for (const word of words) {
-    out.push(word);
+  const out: CredentialReadEntry[] = [];
+  for (const entry of words) {
+    out.push(entry);
+    const word = entry.word;
     for (let at = word.indexOf(":"); at !== -1; at = word.indexOf(":", at + 1)) {
       let rest = word.slice(at + 1);
       if (rest.startsWith("(")) {
         const close = rest.indexOf(")");
         rest = close === -1 ? rest.slice(1) : rest.slice(close + 1);
       }
-      if (rest.length > 0) out.push(rest);
+      if (rest.length > 0) out.push({ word: rest });
     }
   }
   return out;
 }
 
-function credentialTouch(basename: string, args: readonly string[]): CredentialOutcome | null {
-  const named = credentialReadWords(basename, args).find((word) => isCredentialPathAsRead(word));
+/** `literals`: each argument's literal `$` ({@link LexWord.literalDollars}), by index; absent, none. */
+function credentialTouch(
+  basename: string,
+  args: readonly string[],
+  literals: readonly (WordFacts | undefined)[] = [],
+): CredentialOutcome | null {
+  // A word repeated is judged once: the same answer (review-b's M3 at
+  // 3774fdd4, a word the zsh option reading repeats thousands of times). The
+  // key is the word and its literal `$` positions, all the answer reads.
+  const judged = new Set<string>();
+  const named = credentialReadEntries(basename, args, literals).find((entry) => {
+    const key = `${entry.word}\u0000${entry.facts?.literalAt?.join(",") ?? ""}`;
+    if (judged.has(key)) return false;
+    judged.add(key);
+    return isCredentialPathAsRead(entry.word, entry.facts);
+  });
   if (named !== undefined) {
-    return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
+    return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named.word };
   }
 
   for (const word of args) {
@@ -2095,8 +2400,9 @@ function uploadCredentialTouch(sources: readonly string[], unknown: string | nul
 function redirectCredentialTouch(
   readTargets: readonly string[],
   allTargets: readonly string[],
+  readLiterals: readonly (WordFacts | undefined)[] = [],
 ): CredentialOutcome | null {
-  const named = readTargets.find((target) => isCredentialPathAsRead(target));
+  const named = readTargets.find((target, index) => isCredentialPathAsRead(target, readLiterals[index]));
   if (named !== undefined) {
     return { class: CREDENTIAL_CLASS, rule: "credential-path", path: named };
   }
@@ -2171,6 +2477,22 @@ interface LexWord {
    */
   assignment: boolean;
   /**
+   * Where in `text` each `$` the shell reads as text sits: one in single
+   * quotes, escaped (`\$`, outside or inside double quotes), left by a decoded
+   * `$'…'`, or a kept dollar quote's own `$`. Every other `$` is an
+   * expansion. Read where an unread part is formed ({@link unreadParts}), only
+   * for this word's own text: a reading made from it (a brace expansion, a
+   * fold, an option's value, a joined path) carries none, so each of its `$`
+   * counts as a parameter (fail closed). Absent: none.
+   */
+  literalDollars?: readonly number[];
+  /**
+   * A dollar quote in the word holds an escape the shells read differently
+   * ({@link readDollarQuoted}'s unread parts). Read by the verb check: a
+   * flag or subcommand holding one refuses.
+   */
+  dollarUnread?: boolean;
+  /**
    * Does the word open with an unquoted, unescaped `=` followed by anything
    * but another `=` (`=mytool`, `=g++`, `="tool"`, `=$X`)? zsh's equals
    * expansion turns it into the path of a program on PATH unless `NO_EQUALS`
@@ -2185,6 +2507,15 @@ interface LexWord {
    * hook's write pass alone.
    */
   assignmentEquals?: boolean;
+}
+
+/** What the spliced reading takes from a lexed word, for its own text only ({@link LexWord.literalDollars}). */
+interface WordFacts {
+  literalAt?: readonly number[];
+}
+
+function wordFacts(word: LexWord): WordFacts | undefined {
+  return word.literalDollars === undefined ? undefined : { literalAt: word.literalDollars };
 }
 
 interface LexRedirect {
@@ -2277,6 +2608,10 @@ interface PendingHeredoc {
  * are kept verbatim in the word text, and every rule that reads a path or a
  * refspec treats a word containing `$` as unknown, which resolves stricter.
  *
+ * Dollar quotes are read as the shell reads them: `$"…"` as `"…"`, `$'…'`
+ * decoded where bash and zsh agree ({@link readDollarQuoted}), with main's
+ * reading of the line beside wherever one was ({@link eachDollarQuoteReading}).
+ *
  * ## Quoted text is DATA, and that is a contract (APRV-353)
  *
  * The command boundary this tokenizer honours is the shell's own. A quoted
@@ -2304,7 +2639,7 @@ interface PendingHeredoc {
  * covered in both quote styles by `tests/command-class-quoting.test.ts`, so an
  * edit that loses the property fails there rather than in someone's notes.
  */
-function lex(command: string): LexResult {
+function lex(command: string, bodiesCut = false): LexResult {
   const segments: LexSegment[] = [];
   let words: LexWord[] = [];
   let redirects: LexRedirect[] = [];
@@ -2361,6 +2696,15 @@ function lex(command: string): LexResult {
     let exact = true;
     const substitutions: string[] = [];
     const start = index;
+    // A dollar quote in the word holds a part no shell-independent reading has.
+    let dollarUnread = false;
+    // Where zsh's reading of the word ends at a NUL, after literal text: the
+    // rest of the word is unknown there ({@link readDollarQuoted}).
+    let cut: number | null = null;
+    // The placeholders the word's dollar quotes may still add ({@link DOLLAR_QUOTE_PLACEHOLDER_CAP}).
+    const placeholders = { left: DOLLAR_QUOTE_PLACEHOLDER_CAP };
+    // Where in `text` each `$` that is text sits ({@link LexWord.literalDollars}).
+    const literalDollars: number[] = [];
 
     for (; index < command.length; index += 1) {
       const ch = command[index] as string;
@@ -2378,6 +2722,7 @@ function lex(command: string): LexResult {
           continue;
         }
         // A backslash-newline is a line continuation and contributes nothing.
+        if (next === "$") literalDollars.push(text.length);
         if (next !== "\n") text += next;
         index += 1;
         continue;
@@ -2386,7 +2731,9 @@ function lex(command: string): LexResult {
       if (ch === "'") {
         const close = command.indexOf("'", index + 1);
         if (close === -1) return null;
-        text += command.slice(index + 1, close);
+        const chunk = command.slice(index + 1, close);
+        for (let at = chunk.indexOf("$"); at !== -1; at = chunk.indexOf("$", at + 1)) literalDollars.push(text.length + at);
+        text += chunk;
         quoted = true;
         index = close;
         continue;
@@ -2395,6 +2742,7 @@ function lex(command: string): LexResult {
       if (ch === '"') {
         const scan = readDoubleQuoted(command, index);
         if (scan === null) return null;
+        for (const at of scan.literalDollars) literalDollars.push(text.length + at);
         text += scan.text;
         substitutions.push(...scan.substitutions);
         if (scan.opaque !== null) opaque = scan.opaque;
@@ -2413,6 +2761,71 @@ function lex(command: string): LexResult {
         opaque = "backtick command substitution";
         index = close;
         continue;
+      }
+
+      if (ch === "$" && !dollarQuotesKept) {
+        const next = command[index + 1];
+        // `$$` is the shell's pid: its second `$` opens no quote (`$$'x'`).
+        if (next === "$") {
+          text += "$$";
+          splits = true;
+          exact = false;
+          index += 1;
+          continue;
+        }
+        if (next === '"') {
+          // `$"…"`: a double-quoted string (bash translates it through a
+          // message catalog, the identity without one). Expansions in it stay
+          // as they are in `"…"`.
+          dollarQuoteRead = true;
+          const scan = readDoubleQuoted(command, index + 1);
+          if (scan === null) return null;
+          for (const at of scan.literalDollars) literalDollars.push(text.length + at);
+          text += scan.text;
+          substitutions.push(...scan.substitutions);
+          if (scan.opaque !== null) opaque = scan.opaque;
+          quoted = true;
+          exact = false;
+          index = scan.end;
+          continue;
+        }
+        if (next === "'") {
+          dollarQuoteRead = true;
+          const scan = readDollarQuoted(command, index + 1, placeholders);
+          if (scan === null) return null;
+          const quoteAt = text.length;
+          // A dollar quote expands nothing: each `$` it leaves is text, but for
+          // the sentinel an escape it cannot read stands as (an unread part).
+          for (let at = scan.text.indexOf("$"); at !== -1; at = scan.text.indexOf("$", at + 1)) {
+            if (scan.text.startsWith(SUBSTITUTION_SENTINEL, at)) at += SUBSTITUTION_SENTINEL.length - 1;
+            else literalDollars.push(text.length + at);
+          }
+          text += scan.text;
+          if (scan.unread) {
+            splits = true;
+            dollarUnread = true;
+          }
+          // zsh ends the path at a NUL and bash goes on with the word: the
+          // text is bash's, and the line is read again as zsh reads it, each
+          // such word ending at its NUL ({@link eachDollarQuoteReading};
+          // `$'APPROVAL.md\0'.bak` is APPROVAL.md to zsh, `git reset
+          // $'--hard\0'x` is `--hard`). Reviews of the M1 fix.
+          if (scan.zshNulAt !== null) {
+            zshNulSeen = true;
+            if (zshNulReading && cut === null) cut = quoteAt + scan.zshNulAt;
+          }
+          // Past the word's placeholders the rest of the word is unknown, to
+          // every reader (an unexpanded variable to the end), and the spliced
+          // reading reads it as any path (review of the M3 fix).
+          if (scan.overflow && cut === null) {
+            text += DOLLAR_QUOTE_REST;
+            cut = text.length;
+          }
+          quoted = true;
+          exact = false;
+          index = scan.end;
+          continue;
+        }
       }
 
       if (ch === "$" && command[index + 1] === "(") {
@@ -2437,6 +2850,7 @@ function lex(command: string): LexResult {
         continue;
       }
 
+      if (ch === "$" && dollarQuotesKept && (command[index + 1] === "'" || command[index + 1] === '"')) literalDollars.push(text.length);
       if (ch === "$") splits = true;
       else if (ch === "{" || ch === "*" || ch === "?" || ch === "[") expands = true;
       else if (ch === "#" || ch === "^" || ch === "~") zshGlob = true;
@@ -2453,11 +2867,13 @@ function lex(command: string): LexResult {
     // word that consumed characters and produced no text is still a word (`''`,
     // or a backtick substitution that only set the opaque flag).
     if (index === start) return null;
+    if (cut !== null) text = text.slice(0, cut);
     const assignment = ASSIGNMENT.test(command.slice(start, index));
     const raw = command.slice(start, index);
     const paramNames = specialParametersOnly(raw);
     const equalsHead = raw.length > 1 && raw[0] === "=" && raw[1] !== "=";
     const assignmentEquals = assignment && /^[^=]*=(?:=[^=]|.*:=[^=])/su.test(raw);
+    const literal = cut === null ? literalDollars : literalDollars.filter((at) => at < text.length);
     return {
       text,
       quoted,
@@ -2470,6 +2886,8 @@ function lex(command: string): LexResult {
       assignment,
       ...(equalsHead ? { equalsHead } : {}),
       ...(assignmentEquals ? { assignmentEquals } : {}),
+      ...(literal.length === 0 ? {} : { literalDollars: literal }),
+      ...(dollarUnread ? { dollarUnread } : {}),
     };
   };
 
@@ -2556,8 +2974,8 @@ function lex(command: string): LexResult {
       // - joined to a dup's word (`2>&1>!x`), or after a line continuation
       //   (`>\` newline `>!x`): zsh refuses the line and writes nothing;
       // - a target opening `=` (zsh's command lookup) or `#` (a comment in
-      //   zsh, so no target), or carrying `$'…'`, which zsh decodes and this
-      //   lexer does not.
+      //   zsh, so no target), or carrying `$'…'`, which main's lexer did not
+      //   decode (the refusal is kept where it now does).
       const clobber = op === ">!" || op === ">>!" || op === ">&!";
       if (clobber) {
         const start = index - (redirect[0] as string).length;
@@ -2717,7 +3135,7 @@ function lex(command: string): LexResult {
     words.push(word);
   }
 
-  if (pending.length > 0) {
+  if (pending.length > 0 && !bodiesCut) {
     const heredoc = pending[0] as PendingHeredoc;
     return { ok: false, detail: `heredoc <<${heredoc.terminator} is never terminated` };
   }
@@ -2750,23 +3168,27 @@ function readDoubleQuoted(
   substitutions: string[];
   opaque: string | null;
   exact: boolean;
+  /** Where in `text` each escaped `\$` sits: text, not an expansion ({@link LexWord.literalDollars}). */
+  literalDollars: number[];
 } | null {
   let text = "";
   const substitutions: string[] = [];
   let opaque: string | null = null;
   // APRV-510, see `LexWord.exact`.
   let exact = true;
+  const literalDollars: number[] = [];
   let index = start + 1;
 
   for (; index < command.length; index += 1) {
     const ch = command[index] as string;
-    if (ch === '"') return { text, end: index, substitutions, opaque, exact };
+    if (ch === '"') return { text, end: index, substitutions, opaque, exact, literalDollars };
     if (ch === "\\") {
       const next = command[index + 1];
       if (next === undefined) break;
       // The shell keeps the backslash before any other character; this lexer
       // drops it, so the text is no longer the shell's bytes.
       if (!DOUBLE_QUOTE_ESCAPES.has(next)) exact = false;
+      if (next === "$") literalDollars.push(text.length);
       if (next !== "\n") text += next;
       index += 1;
       continue;
@@ -2824,6 +3246,19 @@ function readSubstitution(command: string, start: number): { inner: string; end:
     const ch = command[index] as string;
     if (ch === "\\") {
       index += 1;
+      continue;
+    }
+    // A `$'…'` ends at its own closing quote: `\'` inside it is a quote
+    // character, not the end (`$(echo $'\'')` closes at the `)`).
+    if (ch === "$" && command[index + 1] === "$" && !dollarQuotesKept) {
+      index += 1;
+      continue;
+    }
+    if (ch === "$" && command[index + 1] === "'" && !dollarQuotesKept) {
+      dollarQuoteRead = true;
+      const close = ansiCQuoteEnd(command, index + 1);
+      if (close === null) return null;
+      index = close;
       continue;
     }
     if (ch === "'") {
@@ -4889,7 +5324,7 @@ const GLOB_ELEMENT_LIMIT = 1024;
 type GlobElement = { star: true } | { star: false; source: string; test?: RegExp };
 
 /** The last pattern read into elements, so a disk walk reads it once. */
-let globElementsCache: { pattern: string; elements: GlobElement[] | null } | null = null;
+let globElementsCache: { pattern: string; asMain: boolean; elements: GlobElement[] | null } | null = null;
 
 /**
  * A glob pattern segment as elements (review of the substitution fold, M1),
@@ -4902,13 +5337,15 @@ let globElementsCache: { pattern: string; elements: GlobElement[] | null } | nul
  * bracket expression cannot be turned into an expression: the caller judges
  * both the strict way.
  */
-function globElements(pattern: string): GlobElement[] | null {
-  if (globElementsCache !== null && globElementsCache.pattern === pattern) return globElementsCache.elements;
+function globElements(pattern: string, asMain = false): GlobElement[] | null {
+  if (globElementsCache !== null && globElementsCache.pattern === pattern && globElementsCache.asMain === asMain) {
+    return globElementsCache.elements;
+  }
   let globs = 0;
   for (let at = 0; at < pattern.length; at += 1) {
     const char = pattern[at];
     if ((char === "*" || char === "?" || char === "[") && (globs += 1) > GLOB_ELEMENT_LIMIT) {
-      globElementsCache = { pattern, elements: null };
+      globElementsCache = { pattern, asMain, elements: null };
       return null;
     }
   }
@@ -4943,9 +5380,10 @@ function globElements(pattern: string): GlobElement[] | null {
         one("\\[");
         continue;
       }
-      // A bracket expression: a leading `!` or `^` negates it and a leading
-      // `]` is a member; a POSIX class, equivalence class or collating
-      // element (`[:alpha:]`, `[=g=]`, `[.g.]`) is skipped to its own close
+      // A bracket expression: a leading `!` or `^` makes it any one
+      // character (below) and a leading `]` is a member; a POSIX class,
+      // equivalence class or collating element (`[:alpha:]`, `[=g=]`,
+      // `[.g.]`) is skipped to its own close
       // and makes the expression match ANY one character, the strict side
       // (review of the second fold). Unclosed, the `[` is a literal.
       let close = at + 1;
@@ -4983,10 +5421,40 @@ function globElements(pattern: string): GlobElement[] | null {
         at = close;
         continue;
       }
-      let body = pattern.slice(at + 1, close);
-      const negated = body.startsWith("!") || body.startsWith("^");
-      if (negated) body = body.slice(1);
-      one(`[${negated ? "^" : ""}${body.replace(/[\\\]^]/gu, "\\$&")}]`);
+      const body = pattern.slice(at + 1, close);
+      if (asMain && (body.startsWith("^") || body.startsWith("!"))) {
+        // As main read it: a class of every character but the members
+        // (main's pass, {@link withMainRules}; review-b's M1 at 3774fdd4).
+        one(`[^${body.slice(1).replace(/[\\\]^]/gu, "\\$&")}]`);
+        at = close;
+        continue;
+      }
+      if (body.startsWith("^") || body.startsWith("!")) {
+        // `[!...]` and `[^...]` are any one character, as in the hook's own
+        // reader (src/core/glob-match.ts): bash and zsh negate both, dash
+        // reads `^` as a member (`.gi[^t]` names `.git` under dash), and a
+        // `!` the command escaped or quoted (`[\!t]`, `["!"t]`) is a member
+        // to every shell, which the lexer's text no longer shows, so
+        // `.gi[\!t]/config` is `.git/config` (review-b's M-A on 83f30bdc).
+        // After `[!]` or `[^]` the readings close the class in different
+        // places, and a class the old expression could not build (a
+        // reversed range, `[^z-a]`) stays the strict unknown, as it was
+        // before the widening (codex on 83f30bdc).
+        let builds = true;
+        try {
+          new RegExp(`[^${body.slice(1).replace(/[\\\]^]/gu, "\\$&")}]`, "iu");
+        } catch {
+          builds = false;
+        }
+        if (body[1] === "]" || !builds) {
+          globElementsCache = { pattern, asMain, elements: null };
+          return null;
+        }
+        one("[\\s\\S]");
+        at = close;
+        continue;
+      }
+      one(`[${body.replace(/[\\\]^]/gu, "\\$&")}]`);
       at = close;
     } else {
       one(char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"));
@@ -5003,7 +5471,7 @@ function globElements(pattern: string): GlobElement[] | null {
       break;
     }
   }
-  globElementsCache = { pattern, elements: result };
+  globElementsCache = { pattern, asMain, elements: result };
   return result;
 }
 
@@ -5025,8 +5493,35 @@ function globElements(pattern: string): GlobElement[] | null {
  */
 export function globSegmentMatches(pattern: string, name: string): boolean {
   if (!isPatternSegment(pattern)) return foldNameLower(pattern) === foldNameLower(name);
+  return globElementsMatch(pattern, name);
+}
+
+/** The position walk of {@link globSegmentMatches}. */
+function globElementsMatch(pattern: string, name: string): boolean {
   if (name.startsWith(".") && (pattern.startsWith("*") || pattern.startsWith("?"))) return false;
-  const elements = globElements(pattern);
+  const matched = walkGlobElements(globElements(pattern, mainRulesOnly), name);
+  // `[!g]` and `[^g]` are any one character since #682, where main read a
+  // class of every character but `g`: a name that matches only so is a
+  // GLOB-WRITE reading, and main's pass reads the line again as main did
+  // ({@link markGlobWriteFired}; review-b's M1 at 3774fdd4: `echo x >
+  // .[\!g]it/config` keeps main's workspace write beside the `.git` write).
+  if (matched && !mainRulesOnly && negatesAClass(pattern) && !walkGlobElements(globElements(pattern, true), name)) {
+    markGlobWriteFired();
+  }
+  return matched;
+}
+
+/** The last pattern {@link negatesAClass} read: a disk walk tests one pattern against every name. */
+let negatesCache: { pattern: string; negates: boolean } | null = null;
+
+/** Does `pattern` hold a `[!` or `[^`? Read once per pattern, not once per name tested. */
+function negatesAClass(pattern: string): boolean {
+  if (negatesCache === null || negatesCache.pattern !== pattern) negatesCache = { pattern, negates: /\[[!^]/u.test(pattern) };
+  return negatesCache.negates;
+}
+
+/** The position walk over `elements`; `null` elements match any name, the strict side. */
+function walkGlobElements(elements: GlobElement[] | null, name: string): boolean {
   if (elements === null) return true;
   const chars = Array.from(name);
   // live[p]: the first p characters of the name are matched so far.
@@ -5043,9 +5538,9 @@ export function globSegmentMatches(pattern: string, name: string): boolean {
         }
       }
     } else {
-      element.test ??= new RegExp(`^${element.source}$`, "iu");
+      const test = (element.test ??= new RegExp(`^${element.source}$`, "iu"));
       for (let p = 0; p < chars.length; p += 1) {
-        if (live[p] === 1 && element.test.test(chars[p] as string)) {
+        if (live[p] === 1 && test.test(chars[p] as string)) {
           next[p + 1] = 1;
           any = true;
         }
@@ -5206,6 +5701,33 @@ function attachedOptionValues(word: string): string[] {
   const tails: string[] = [];
   for (let at = 2; at < word.length; at += 1) tails.push(word.slice(at));
   return tails;
+}
+
+/**
+ * The longest single-dash option word, in UTF-8 bytes, whose tails the
+ * credential tier's refusal branch reads one by one ({@link
+ * attachedOptionValues}; build-1's S2 on #701, the seat's ruling on its
+ * cost). Every tail is scanned, so the work is quadratic in the word: past
+ * this bound the word is not scanned tail by tail, and the line is refused,
+ * as a short attached value that outranks the credential class refuses it
+ * (`-oAPPROVAL.md`, `-o.approval/log/x`): a word too long to read must not
+ * get a lighter answer than that. Linear. main's own readers of attached
+ * values are not bounded here.
+ */
+const ATTACHED_TAIL_SCAN_BYTES = 256;
+
+/** Is this an option word whose attached tails {@link ATTACHED_TAIL_SCAN_BYTES} leaves unscanned? */
+function isLongAttachedOption(word: string): boolean {
+  if (!word.startsWith("-") || word.startsWith("--") || word.length < 3) return false;
+  // A UTF-16 unit is at most three UTF-8 bytes, so a short word needs no count.
+  if (word.length * 3 <= ATTACHED_TAIL_SCAN_BYTES) return false;
+  let bytes = 0;
+  for (const char of word) {
+    const point = char.codePointAt(0) as number;
+    bytes += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+    if (bytes > ATTACHED_TAIL_SCAN_BYTES) return true;
+  }
+  return false;
 }
 
 /**
@@ -5710,6 +6232,213 @@ function decodeBackslashEscapes(text: string, zeroOctal: boolean): string {
     at += used;
   }
   return out;
+}
+
+/**
+ * The index of the quote closing the ANSI-C string whose opening quote is at
+ * `open` (the `'` of `$'`), or `null` when it does not close: a backslash
+ * takes the character after it, so `\'` does not end it.
+ */
+function ansiCQuoteEnd(command: string, open: number): number | null {
+  let close = open + 1;
+  while (close < command.length && command[close] !== "'") close += command[close] === "\\" ? 2 : 1;
+  return close < command.length ? close : null;
+}
+
+/**
+ * Most placeholders one word's dollar quotes put in its text: past them an
+ * unread part stands as nothing (the word already holds more unread parts
+ * than the spliced reading takes one by one, so it is read as any path), and
+ * the word's text stays linear in the line (review of b58db9ec, M3; a
+ * placeholder is a braced name, and a word of thousands of them made every
+ * later reader pay for each).
+ */
+const DOLLAR_QUOTE_PLACEHOLDER_CAP = 32;
+
+/**
+ * What ends a word past {@link DOLLAR_QUOTE_PLACEHOLDER_CAP}: an unexpanded
+ * variable to every rule, and to the spliced reading ({@link unreadParts})
+ * a word that could be any path.
+ */
+const DOLLAR_QUOTE_REST = "${__APPROVAL_REST__}";
+
+/** The letter escapes bash and zsh decode alike inside `$'…'` (measured on bash 3.2 and zsh 5.9). */
+const ANSI_C_SHARED_LETTERS = new Set(["a", "b", "e", "E", "f", "n", "r", "t", "v", "\\", "'", '"', "?"]);
+
+/**
+ * The `$'…'` whose opening quote is at `open` (the `'` after the `$`), read as
+ * the shells the hook stands beside read it: bash (3.2, as macOS ships it, and
+ * 5) and zsh 5.9, each measured. Its text is the decoded string where they
+ * agree: the letter escapes ({@link ANSI_C_SHARED_LETTERS}), `\xH` and
+ * `\xHH`, and octal `\N`, `\NN`, `\NNN` (a byte: `\777` is 0xFF and `\400` a
+ * NUL to both), each decoded by {@link decodeBackslashEscapes} on its own
+ * text. `\uH` to `\uHHHH` and `\UH` to `\UHHHHHHHH` are decoded where the
+ * character is ASCII, as zsh 5.9 (and bash 4.2 on) reads them; bash 3.2 keeps
+ * them as written, and main's reading of the line, which rides beside
+ * ({@link withDollarQuotesKept}), reads them as written too.
+ *
+ * What it cannot read for every shell is UNREAD (`unread`), and stands in the
+ * text as {@link SUBSTITUTION_SENTINEL}, an unknown value the way `$X` is,
+ * that may be empty:
+ *
+ * - a decoded character outside ASCII (`\x80` to `\xFF` and octal above
+ *   `\177` are bytes, `\u00E9` a character the locale encodes);
+ * - an escape bash keeps whole and zsh drops the backslash of (`\q`, `\8`,
+ *   `\-`, any other letter or sign), and `\x`, `\u`, `\U` with no digit (zsh
+ *   reads a NUL): the backslash and that character;
+ * - from a decoded NUL, or an escape one shell reads with what follows
+ *   (`\cX` in bash; `\C-X`, `\M-X` in zsh), to the end of THIS quote: bash
+ *   ends the quote's text at a NUL, zsh keeps it. The word goes on after the
+ *   quote (review of b58db9ec, M1: `$'\0'.approval/env` is `.approval/env`
+ *   to bash).
+ *
+ * `null` when the quote does not close (the line is unparseable). Linear in
+ * the body: each escape is read once.
+ */
+function readDollarQuoted(
+  command: string,
+  open: number,
+  placeholders: { left: number } = { left: DOLLAR_QUOTE_PLACEHOLDER_CAP },
+): { text: string; end: number; unread: boolean; unreadParts: number; zshNulAt: number | null; overflow: boolean } | null {
+  const close = ansiCQuoteEnd(command, open);
+  if (close === null) return null;
+  let text = "";
+  let unread = false;
+  // Where in `text` zsh may read a NUL, where a path it hands the system ends.
+  let zshNulAt: number | null = null;
+  // The word's placeholders ran out: the rest of the word is unknown.
+  let overflow = false;
+  let unreadParts = 0;
+  // Whether the text ends in the placeholder: a flag, as in {@link unreadParts}.
+  let atPlaceholder = false;
+  const unknown = (): void => {
+    if (!atPlaceholder) {
+      if (placeholders.left > 0) {
+        text += SUBSTITUTION_SENTINEL;
+        placeholders.left -= 1;
+      } else overflow = true;
+      unreadParts += 1;
+    }
+    atPlaceholder = true;
+    unread = true;
+  };
+  const hexRun = (from: number, most: number): number => {
+    let end = from;
+    while (end < close && end - from < most && /[0-9A-Fa-f]/u.test(command[end] as string)) end += 1;
+    return end - from;
+  };
+  for (let at = open + 1; at < close && !overflow; at += 1) {
+    const char = command[at] as string;
+    if (char !== "\\") {
+      text += char;
+      atPlaceholder = false;
+      continue;
+    }
+    const next = command[at + 1] as string;
+    // bash 3.2 reads `\x{H...}`: any number of hex digits, the closing `}`
+    // optional, the low byte kept (`$'\x{41}PPROVAL.md'` is `APPROVAL.md`), so
+    // it is decoded as bash reads it (review of 7c1c2b06, M1: a word of braced
+    // escapes only read as one unread part, like `$X`). zsh reads `\x` with no
+    // digit as a NUL, so the line is read as zsh reads it too. A low byte of 0,
+    // or no digit, is bash's NUL, which ends the known text (as `\c@` does); a
+    // byte past ASCII is one unread part (build-2's probe of 83439855, L63099).
+    if (next === "x" && command[at + 2] === "{") {
+      if (zshNulAt === null) zshNulAt = text.length;
+      let end = at + 3;
+      while (end < close && /[0-9A-Fa-f]/u.test(command[end] as string)) end += 1;
+      const low = end > at + 3 ? Number.parseInt(command.slice(Math.max(at + 3, end - 2), end), 16) : 0;
+      if (low === 0) {
+        unknown();
+        overflow = true;
+        break;
+      }
+      if (low > 0x7f) unknown();
+      else {
+        text += String.fromCharCode(low);
+        atPlaceholder = false;
+      }
+      at = Math.min(command[end] === "}" ? end : end - 1, close - 1);
+      continue;
+    }
+    let length: number;
+    // `\u` and `\U` with their digits: one character, by code point.
+    let codePoint: number | null = null;
+    if (ANSI_C_SHARED_LETTERS.has(next)) length = 2;
+    else if (next === "x") length = hexRun(at + 2, 2) === 0 ? 0 : 2 + hexRun(at + 2, 2);
+    else if (next === "u" || next === "U") {
+      const digits = hexRun(at + 2, next === "u" ? 4 : 8);
+      length = digits === 0 ? 0 : 2 + digits;
+      if (digits > 0) codePoint = Number.parseInt(command.slice(at + 2, at + 2 + digits), 16);
+    } else if (/[0-7]/u.test(next)) {
+      length = 2;
+      while (length < 4 && at + length < close && /[0-7]/u.test(command[at + length] as string)) length += 1;
+    } else length = 0;
+    if (length === 0) {
+      // Unread. Where one shell reads the character after it with it (`\cX`
+      // in bash; zsh reads `\c` as `c`; `\C-X` and `\M-X` in zsh, written as
+      // they are by bash), that one placeholder covers the escape and the
+      // character it takes, and the quote goes on being read: both shells keep
+      // the rest of the quote (review of fe0a101a, M1: a `break` here left
+      // `$'\conformance/../\x2eapproval/env'` a wholly unread word). Any other
+      // letter or sign is the backslash and itself to bash, itself alone to
+      // zsh (`\x`, `\u`, `\U` with no digit a NUL to zsh).
+      // zsh may read a NUL here (`\C-@`; `\x`, `\u` or `\U` with no digit).
+      if (/[CMxuU]/u.test(next) && zshNulAt === null) zshNulAt = text.length;
+      unknown();
+      // bash's `\c@`, `` \c` `` and `\c ` are a NUL, which ends bash's text of
+      // this quote, while zsh reads `c@` and goes on: the two readings part
+      // for the rest of the WORD, so it is unknown from here, to every reader
+      // (the overflow's end marker; review of the \c fix).
+      // bash applies \c to the next character's first UTF-8 byte, so any non-ASCII character
+      // may be a NUL too (U+0800-U+0FFF start 0xE0): it ends the known text the same way.
+      // A backslash after `\c` parts them too: bash takes it as `\c`'s
+      // character and reads on as text, zsh reads `c` and decodes the escape
+      // (`$'\c\x2fAPPROVAL.md'` is `c/APPROVAL.md` to zsh; review of 83b52249, M1).
+      if (
+        next === "c" &&
+        at + 2 < close &&
+        (command[at + 2] === "\\" ||
+          (command.codePointAt(at + 2) as number) > 0x7f ||
+          (((command[at + 2] as string).toUpperCase().charCodeAt(0) & 0x1f) === 0))
+      ) {
+        overflow = true;
+        break;
+      }
+      // The last character this escape takes. After `\C-` or `\M-` a backslash
+      // is never taken: bash writes `\C-` as it is and decodes the escape that
+      // follows, so the reading goes on from that backslash (zsh's reading is
+      // one control or non-ASCII byte, which no guarded name holds).
+      let last = at + 1;
+      if (next === "c") last = at + 2;
+      else if ((next === "C" || next === "M") && command[at + 2] === "-") {
+        last = command[at + 3] === "\\" ? at + 2 : at + 3;
+      }
+      at = Math.min(last, close - 1);
+      continue;
+    }
+    const escape = command.slice(at, at + length);
+    let decoded: string;
+    if (codePoint !== null) decoded = codePoint > 0x7f ? "\u0080" : String.fromCharCode(codePoint);
+    else {
+      decoded = decodeBackslashEscapes(escape, false);
+      // An octal escape is a byte: `\777` is 0xFF and `\400` a NUL to both shells.
+      if (/^\\[0-7]/u.test(escape)) decoded = String.fromCharCode(Number.parseInt(escape.slice(1), 8) & 0xff);
+    }
+    at += length - 1;
+    if (decoded === "\0") {
+      // bash ends this quote's text here and goes on with the word after it;
+      // zsh keeps the NUL, where a path ends. Both readings are known.
+      if (zshNulAt === null) zshNulAt = text.length;
+      break;
+    }
+    if ((decoded.codePointAt(0) ?? 0) > 0x7f) {
+      unknown();
+      continue;
+    }
+    text += decoded;
+    atPlaceholder = false;
+  }
+  return { text, end: close, unread, unreadParts, zshNulAt, overflow };
 }
 
 /**
@@ -6323,6 +7052,36 @@ function expansionWordNamesGit(text: string): boolean {
  * levels; a deeper one counts as naming `.git`, the strict side, so the
  * reading's cost and its depth on the call stack stay bounded.
  */
+/**
+ * {@link ansiCQuotingSpellsGit} or {@link ansiCQuotingNearSpellsGit} of a
+ * segment's raw text, remembered for the last text in each name reading: the
+ * text is the same in every pass over one line (dollar quotes decoded or
+ * kept, main's rules, the hook's landing pass), and on a 100 KB line of dollar
+ * quotes the two scans were half its cost. One entry per reading, so it holds
+ * one text. A scan that saw a name whose readings differ records that again
+ * when it is remembered ({@link readingsDivergedNow}).
+ */
+function segmentTextSpellsGit(text: string): boolean {
+  const spelled = namesReadAsSpelled();
+  const last = spelled ? lastTextSpellsGit.spelled : lastTextSpellsGit.folded;
+  if (last !== null && last.text === text) {
+    if (last.diverged) markReadingsDiverged();
+    return last.answer;
+  }
+  const before = readingsDivergedNow();
+  const answer = ansiCQuotingSpellsGit(text) || ansiCQuotingNearSpellsGit(text);
+  // Only where this scan's own record can be told apart from the run's.
+  const entry = before && !spelled ? null : { text, answer, diverged: !spelled && readingsDivergedNow() };
+  if (spelled) lastTextSpellsGit.spelled = entry;
+  else lastTextSpellsGit.folded = entry;
+  return answer;
+}
+
+const lastTextSpellsGit: {
+  folded: { text: string; answer: boolean; diverged: boolean } | null;
+  spelled: { text: string; answer: boolean; diverged: boolean } | null;
+} = { folded: null, spelled: null };
+
 function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): boolean {
   // A substitution body's words, each read as a path the shell may still
   // expand (`$(echo .gi?)`); its own segments read as a line of their own
@@ -6359,8 +7118,7 @@ function lineSpellsGitIndirectly(segments: readonly LexSegment[], depth = 0): bo
     const assignments = bashAssignmentCount(segment.words);
     const words = [...segment.words, ...segment.redirects.map((redirect) => redirect.target)];
     return (
-      ansiCQuotingSpellsGit(segment.text) ||
-      ansiCQuotingNearSpellsGit(segment.text) ||
+      segmentTextSpellsGit(segment.text) ||
       assignsByPrinter(segment) ||
       segment.bodySubstitutions.some(bodyNamesGit) ||
       words.some((word, index) => {
@@ -8583,6 +9341,162 @@ function credentialSideScan(
  * chose them, and what it found (`named` from the positionals, `fed` from
  * the `<` targets, `found` the stronger of the two).
  */
+/**
+ * The credential paths a copy WRITES (build-1's N3 on #701 and M1 on #682,
+ * the lead's ruling CLAIMS L62502): a credential path in a destination slot
+ * of a copy, move, link, install or sync that has an option table ({@link
+ * copyPlan}: `cp README.md .approval/env`, `cp ~/.hermes/.env .approval/env`,
+ * `rsync README.md ~/.hermes/auth.json`, `cp -t .approval/env notes.txt`),
+ * and the paths a source lands at that are credential paths (`cp x/env
+ * .approval` writes `.approval/env`). The class a write of such a path takes
+ * (`policy.core` for the gate's environment map) is ADDED to the answer main
+ * gives the line, which is walked exactly as main walks it (build-1's M1 on
+ * #706, the lead's ruling CLAIMS L62686: a union, never a swap): every class
+ * main reports stays (`rsync -a --log-file=.approval/log/events.jsonl
+ * README.md .approval/env` keeps `log.mutate`), the write's class answers
+ * first where main answered with the credential class itself, and the
+ * credential touch is carried where main's walk ended on a branch that drops
+ * it. Where the table cannot read the argv (an unknown option, a word the
+ * shell may still turn into one) every credential path among the words may
+ * be written ({@link CredentialWrites.possible}); for a tool with no table
+ * nothing is read here: the line answers as on main.
+ */
+interface CredentialWrites {
+  words: ReadonlySet<string>;
+  landings: readonly string[];
+  /**
+   * Where the argv cannot be read (an option the table does not know, a word
+   * the shell may still turn into an option): every credential path among
+   * the operands and option values may be a destination; and a credential
+   * glob as the last operand with no `-t`, whose last match is written. These are not taken
+   * out of the read and defer nothing; their protected class is ADDED beside
+   * the answer main gives (fail closed, never lighter).
+   */
+  possible: readonly string[];
+}
+
+const NO_CREDENTIAL_WRITES: CredentialWrites = { words: new Set(), landings: [], possible: [] };
+
+function credentialWrites(
+  basename: string,
+  args: readonly string[],
+  flags: readonly ArgExpansion[],
+  argsPlan: () => CopyPlan | null,
+  argvUnknown: () => string | null,
+): CredentialWrites {
+  if (COPY_OPTION_TABLES[basename] === undefined) return NO_CREDENTIAL_WRITES;
+  const plan = argsPlan();
+  // A word the shell may still turn into an option (`cp $X .approval/env`:
+  // the copy family's own test, {@link copyArgvUnknown}), or an option the
+  // table does not know (`cp --frob README.md .approval/env`), makes every
+  // operand a destination and a source alike: which word is written is
+  // unknown. Every credential path among the words may be written, so its
+  // class is ADDED to main's whole answer (`possible`), never deferring it.
+  if (plan === null || plan.unknown !== null || argvUnknown() !== null) {
+    const possible = args.flatMap((arg) => {
+      const equals = arg.indexOf("=");
+      return [arg, ...(equals === -1 ? [] : [arg.slice(equals + 1)])].filter((word) => isCredentialPathAsRead(word));
+    });
+    return possible.length === 0 ? NO_CREDENTIAL_WRITES : { words: new Set(), landings: [], possible };
+  }
+  // A glob as the last operand, with no `-t`, may expand to several words,
+  // and the last of them is written (`cp ~/.hermes/profiles/*/auth.json`
+  // runs `cp a/auth.json b/auth.json`; `ln` links the last one): a credential
+  // path it spells may be a destination, so its class is ADDED as for an
+  // unreadable argv (the security review of the S3 fold on #706). A glob
+  // anywhere else expands among the sources.
+  const lastOperand = plan.operands[plan.operands.length - 1];
+  const targeted = plan.dests.length > 0 && plan.sources.length === plan.operands.length && plan.implicitDest !== true;
+  const lastFlags = lastOperand === undefined ? undefined : flags[args.lastIndexOf(lastOperand)];
+  const possible =
+    lastOperand !== undefined &&
+    !targeted &&
+    lastFlags?.expands === true &&
+    !((basename === "rsync" || basename === "scp") && remoteOperand(lastOperand)) &&
+    isCredentialPathAsRead(lastOperand)
+      ? [lastOperand]
+      : [];
+  const last = plan.dests[plan.dests.length - 1];
+  if (last === undefined) return possible.length === 0 ? NO_CREDENTIAL_WRITES : { words: new Set(), landings: [], possible };
+  // Linear in the words (build-1's M2 and S5 on #706, the lead's ruling CLAIMS
+  // L62686: no sources times destinations). Each destination word is judged
+  // once, a repeated `-t` included.
+  const words = new Set([...new Set(plan.dests)].filter((dest) => isCredentialPathAsRead(dest)));
+  // A landing is read only between words the text settles: `cp ~/.hermes/.env
+  // $X` lands nowhere this text can name (the copy-unknown class says so).
+  const settled = (word: string): boolean => !/[$`*?[\]{}~]/u.test(word.replace(/^~(?=\/)/u, ""));
+  const landings: string[] = [];
+  // The sources land in ONE directory: the last destination named (cp, mv,
+  // install and ln take one target directory; GNU's refuse a second `-t`).
+  // Every other `-t` value is still a destination word above.
+  if (settled(last)) {
+    const into = last.replace(/\/+$/u, "");
+    // Below a directory where any name is credential material
+    // (`.approval/keys/`) every source name is judged; elsewhere only a name
+    // that can END a credential path ({@link mayEndCredentialPath}) can make
+    // one, so no other name is judged at all.
+    const anyName = isCredentialPathAsRead(`${into}/x`);
+    // Nor can any name land as one where no name of each credential row's
+    // kind would ({@link CREDENTIAL_LANDING_NAMES}) and no source name holds
+    // a backslash (a segment separator to the rows, so `..\env` may climb):
+    // then the loop is skipped, and a long copy pays no test per word
+    // (build-1's S5 on #706).
+    const mayLand =
+      anyName ||
+      CREDENTIAL_LANDING_NAMES.some((name) => isCredentialPathAsRead(`${into}/${name}`)) ||
+      plan.sources.some((source) => source.includes("\\"));
+    const judged = new Set<string>();
+    for (const source of mayLand ? plan.sources : []) {
+      if (!settled(source)) continue;
+      const base = landingName(source);
+      if (base === null || judged.has(base)) continue;
+      judged.add(base);
+      if (!anyName && !mayEndCredentialPath(base)) continue;
+      const landing = `${into}/${base}`;
+      if (isCredentialPathAsRead(landing)) landings.push(landing);
+    }
+  }
+  return words.size === 0 && landings.length === 0 && possible.length === 0 ? NO_CREDENTIAL_WRITES : { words, landings, possible };
+}
+
+/**
+ * The name a copy source lands under (`cp x/env .approval` writes
+ * `.approval/env`): its last segment, a remote `host:` cut off, or `null`
+ * for none, `.` or `..`.
+ */
+function landingName(source: string): string | null {
+  let end = source.length;
+  while (end > 0 && source.charCodeAt(end - 1) === 0x2f) end -= 1;
+  const start = source.lastIndexOf("/", end - 1) + 1;
+  const base = start === 0 ? source.slice(0, end).replace(/^[^/]*:/u, "") : source.slice(start, end);
+  return base.length === 0 || base === "." || base === ".." ? null : base;
+}
+
+/**
+ * Can a source landing under this name make a credential path of a
+ * directory that is not one (`.approval` + `env`, a Hermes home or profile +
+ * `.env`)? A cheap test ahead of {@link isCredentialPathAsRead}, never in
+ * place of it. The credential rows ({@link credentialSegments}) end a path at
+ * a fixed name after `.approval` (`vault*`, `keys`, `env`, `env.*`) or below
+ * a Hermes home (`.env`, `.env.*`, `auth.json`, `.op.env`, `.op.env.*`, and
+ * those below `hermes-agent/`); a name that is none of these leaves the
+ * directory's own answer, which the caller asks once. A name that is not
+ * ASCII (folded spellings such as `ENſ`) or holds a backslash (a segment
+ * separator to the rows) is always judged.
+ */
+/**
+ * One name of each kind {@link mayEndCredentialPath} lets through, for the
+ * test of the destination directory: where none of these lands as a
+ * credential path, no name of their kinds can either (the rows read a fixed
+ * name or a fixed prefix, folded).
+ */
+const CREDENTIAL_LANDING_NAMES: readonly string[] = ["vault", "keys", "env", "env.x", ".env", ".env.x", "auth.json", ".op.env", ".op.env.x"];
+
+function mayEndCredentialPath(name: string): boolean {
+  if (!/^[\x20-\x5b\x5d-\x7e]*$/u.test(name)) return true;
+  return /^(?:vault|keys$|env$|env\.|\.env$|\.env\.|auth\.json$|\.op\.env$|\.op\.env\.)/u.test(name.toLowerCase());
+}
+
 interface CredentialSideScan {
   positionals: readonly string[];
   reads: readonly string[];
@@ -8616,6 +9530,74 @@ function isCredentialReadWord(word: string, protectedPaths: readonly ProtectedPa
     isCredentialPathAsRead(word) &&
     protectedRank(protectedPathClass(word, protectedPaths) ?? "policy.core") >= protectedRank("policy.core")
   );
+}
+
+/**
+ * Is this argument word a LITERAL credential read (build-1's S2 on #701, the
+ * seat's ruling on the review)? Only then is it left out of the rule that a
+ * word the shell still builds is an unknown write target: a credential file
+ * path ({@link isCredentialReadWord}) in which nothing can vary but a
+ * leading `~/`, alone or after a literal `key=` or `--opt=` prefix
+ * (`.approval/env`, `~/.hermes/.env`, `--in=.approval/env`). Nothing with a
+ * `$`, a backtick, a glob or a brace in it is ever left out, a secret-named
+ * variable included: the name is the agent's to choose and to assign
+ * (`X_TOKEN=.github/workflows/ci.yml; command cp .approval/env $X_TOKEN`),
+ * and plain `cp` counts every variable word as an unknown target.
+ *
+ * One glob form is the read too (build-1's S3 on #706): a pattern that can
+ * match only credential paths, handed to a program that only reads its
+ * operands ({@link GLOB_READ_BINS}), so that the spelling alone does not move
+ * the class (`less ~/.hermes/profiles/*\/auth.json` reads what `less
+ * ~/.hermes/auth.json` reads). See {@link isCredentialGlobRead}. Anywhere
+ * else a glob may put a credential path in a slot the program WRITES (`command
+ * cp ~/.hermes/profiles/*\/auth.json` expands to `cp a/auth.json
+ * b/auth.json`; `xxd in out` writes `out`): it stays a built target.
+ */
+function isCredentialArgWord(word: LexWord, protectedPaths: readonly ProtectedPathEntry[], readsEveryOperand: boolean): boolean {
+  if (word.substitutions.length > 0 || word.splits) return false;
+  const prefix = /^(?:--?[A-Za-z0-9][A-Za-z0-9_-]*|[A-Za-z_][A-Za-z0-9_]*)=/u.exec(word.text);
+  const value = prefix === null ? word.text : word.text.slice(prefix[0].length);
+  if (word.expands) return readsEveryOperand && isCredentialGlobRead(value, protectedPaths);
+  return !/[$`~*?[\]{}]/u.test(value.replace(/^~(?=\/)/u, "")) && isCredentialReadWord(value, protectedPaths);
+}
+
+/**
+ * Programs with no rule that only READ every operand they are handed (the
+ * pagers and dumpers the credential tier names rather than refuses), for
+ * {@link isCredentialArgWord}'s glob form. Not `xxd` (`xxd in out` writes
+ * `out`), `base64` (GNU's takes one file, others an output operand), or any
+ * copy, move, link or editor.
+ */
+const GLOB_READ_BINS: ReadonlySet<string> = new Set(["less", "more", "most", "hexdump", "od", "strings", "file"]);
+
+/**
+ * Can every match of this glob only be a credential read? (build-1's S3 on
+ * #706.) Narrow by design, so a pattern that might match anything else stays
+ * a target the shell builds: the only characters that may vary are `*` and
+ * `?`, each in a segment of its own made of them alone (no `**`, which may
+ * match no segment or several), and nothing else may (no `$`, backtick,
+ * bracket, brace, `~` but a leading `~/`, backslash, or zsh and ksh pattern
+ * syntax). Such a segment matches one name, never `.` or `..`, and a name
+ * starting with a dot only under `dotglob`; so the word is the read when it
+ * is a credential read with each such segment filled by an ordinary name and
+ * by a dot name (`~/.hermes/profiles/x/auth.json` and
+ * `~/.hermes/profiles/.x/auth.json`). `~/.hermes/*\/.env` (a match may be
+ * any directory) and `.approval/env*` (a match may be `.approval/envoy`) are
+ * not.
+ */
+function isCredentialGlobRead(value: string, protectedPaths: readonly ProtectedPathEntry[]): boolean {
+  const rest = value.replace(/^~(?=\/)/u, "");
+  if (/[$`~[\]{}()\\#^|<>!@+]/u.test(rest)) return false;
+  const segments = value.split("/");
+  let globbed = false;
+  for (const segment of segments) {
+    if (!/[*?]/u.test(segment)) continue;
+    if (!/^[*?]+$/u.test(segment) || segment.includes("**")) return false;
+    globbed = true;
+  }
+  if (!globbed) return false;
+  const fill = (name: string): string => segments.map((segment) => (/[*?]/u.test(segment) ? name : segment)).join("/");
+  return isCredentialReadWord(fill("x"), protectedPaths) && isCredentialReadWord(fill(".x"), protectedPaths);
 }
 
 /**
@@ -9460,11 +10442,20 @@ function strictestProtectedWrite(
   skipProse = false,
   glob: GlobReading = defaultGlobReading(),
   text: ProtectedHit | null = strictestProtected(words, protectedPaths, skipProse),
+  literals: readonly (WordFacts | undefined)[] = [],
 ): ProtectedHit | null {
   // The text answer (`text`) is kept, for the record of whether a reading raised it.
   let best = text;
   if (glob.off || mainRulesOnly) return best;
+  // Every class a reading named, with the word that named it (#682's reader,
+  // review-b N1 and codex's M1 at bcb1be08): a reading that names a class
+  // below the answer's rank still has it judged, beside the answer (folded).
+  const named: { surface: string; path: string }[] = [];
+  const offerEach = (surfaces: readonly string[], word: string): void => {
+    for (const surface of surfaces) offer(surface, word);
+  };
   const offer = (surface: string | null, word: string): void => {
+    if (surface !== null && !named.some((hit) => hit.surface === surface)) named.push({ surface, path: word });
     if (surface !== null && (best === null || protectedRank(surface) < protectedRank(best.surface))) {
       // Every class the words took so far rides beside the raise (#690: every
       // protected class a command writes is judged): main's text answer and
@@ -9480,6 +10471,19 @@ function strictestProtectedWrite(
       };
     }
   };
+  // The spliced reading's strictest class, and every other class it reached
+  // beside it (the plain spelling's among them).
+  const offerSpliced = (found: { surface: string | null; also: readonly string[] }, word: string): void => {
+    offer(found.surface, word);
+    if (best === null || found.also.length === 0) return;
+    const current: ProtectedHit = best;
+    const others = foldedOnly(() => distinctOthers(current.surface, [...current.others, ...found.also.map((surface) => ({ surface, path: word }))]));
+    if (others.length !== current.others.length) {
+      best = { ...current, others };
+      markGlobWriteFired();
+      if (glob.tracker !== undefined) glob.tracker.raised = true;
+    }
+  };
   // The matcher steps each word already judged here took. The same word again
   // (`rsync -aR s0/*/./a* … s45/*/./a* d/` lands every source as `d/a*`, and
   // 46 sources made 46 walks of one pattern) offers exactly what it offered
@@ -9488,32 +10492,62 @@ function strictestProtectedWrite(
   // where it ran out before: a walk that would have exhausted it answers
   // `log.mutate`, as that walk did.
   const spent = new Map<string, number>();
-  for (const word of words) {
-    // Review-b M1: nothing is stricter than log.mutate, so stop there.
-    if (best !== null && (best as { surface: string }).surface === "log.mutate") break;
-    if (!inexact(word)) continue;
+  for (const [index, word] of words.entries()) {
+    // Review-b M1: once the line's matcher budget is spent, every later word
+    // answers the unknown classes ({@link globGuardUnknown}), which an earlier
+    // word offered already, so stop there. (Before, the walk stopped at the
+    // first `log.mutate`, and the classes of the words after it were not
+    // judged.)
+    if (glob.budget.left < 0 && named.some((hit) => hit.surface === "log.mutate")) break;
+    // The word's own literal `$` (a lexed word's, where the caller has it); a
+    // reading made from it carries none.
+    const facts = literals[index];
+    const literalAt = facts?.literalAt;
+    if (!inexact(word)) {
+      // A substitution leaves its word `exact` to the lexer, and its output is
+      // an unread part all the same (`APPROVAL$(true).md`).
+      if (word.includes(SUBSTITUTION_SENTINEL) && !(skipProse && /\s/u.test(word))) offerSpliced(splicedGuardClass(word, protectedPaths, glob.budget, glob.options, globLive(glob, word), literalAt), word);
+      continue;
+    }
     if (skipProse && /\s/u.test(word)) continue;
-    const steps = spent.get(word);
+    // The same text with other literal `$` is another word here.
+    const spentKey = literalAt === undefined ? word : `${literalAt.join(",")}\u0000${word}`;
+    const steps = spent.get(spentKey);
     if (steps !== undefined) {
       glob.budget.left -= steps;
-      if (steps > 0 && glob.budget.left < 0) offer("log.mutate", word);
+      if (steps > 0 && glob.budget.left < 0) offerEach(globGuardUnknown(protectedPaths), word);
       continue;
     }
     const budgetBefore = glob.budget.left;
     // A special parameter's name is not a glob, where the word's every `$` is real.
     const subject = glob.names?.(word) === true ? maskSpecialParameters(word) : word;
     const { readings, overflow } = writeWordReadings(subject);
-    if (overflow) offer("log.mutate", word);
+    if (overflow) offerEach(globGuardUnknown(protectedPaths), word);
     for (const reading of readings) {
       if (reading !== subject) offer(protectedPathClass(reading, protectedPaths), word);
       // ONE matcher budget for the whole command line (review-b M1), shared
       // through the classifier context by every segment, word and reading.
-      if (globLive(glob, word) && hasGlobConstruct(reading)) offer(globGuardClass(reading, protectedPaths, glob.budget, glob.options, glob.disk), word);
+      if (globLive(glob, word) && hasGlobConstruct(reading)) offerEach(globGuardClasses(reading, protectedPaths, glob.budget, glob.options, glob.disk), word);
+      // An unread part spliced into literal text (lead ruling CLAIMS L62568):
+      // `APPROVAL$E.md` is the policy file when E is empty, inside double
+      // quotes too (the value is spliced in, only not globbed).
+      offerSpliced(splicedGuardClass(reading, protectedPaths, glob.budget, glob.options, globLive(glob, word), reading === word ? literalAt : undefined), word);
     }
-    spent.set(word, budgetBefore - glob.budget.left);
+    spent.set(spentKey, budgetBefore - glob.budget.left);
   }
-  if (best !== text) markGlobWriteFired();
-  if (best !== text && glob.tracker !== undefined) glob.tracker.raised = true;
+  // Each class a reading named that the answer and its others lack rides
+  // beside it, as #690 reports every class a command writes (folded only).
+  let widened = false;
+  if (best !== null) {
+    const answer: ProtectedHit = best;
+    const beside = foldedOnly(() => distinctOthers(answer.surface, [...answer.others, ...named]));
+    if (beside.length > answer.others.length) {
+      best = { ...answer, others: beside };
+      widened = true;
+    }
+  }
+  if (best !== text || widened) markGlobWriteFired();
+  if ((best !== text || widened) && glob.tracker !== undefined) glob.tracker.raised = true;
   return best;
 }
 
@@ -9624,6 +10658,32 @@ function dotGlobNamesGitRule(word: string, inexact: (word: string) => boolean, g
   })();
   if (hit && glob.tracker !== undefined) glob.tracker.raised = true;
   return hit;
+}
+
+/**
+ * Could an unread part of this write target join its literal text into a
+ * `.git` segment (lead ruling CLAIMS L62568)? `.gi${x}t/config` is `.git/config`
+ * when x is empty. Each unread part is read as a substitution's output, any
+ * text a `/` included, by the reader that already joins literal text and
+ * outputs into `.git` ({@link wordJoinsGitAcrossSubstitution}): a `.git`
+ * window must hold at least one literal character, so `$D/config` and
+ * `out/$F` do not count. The plain (text-only) pass reads none; a hit is a
+ * raise.
+ */
+function splicedNamesGit(word: string, inexact: (word: string) => boolean, glob: GlobReading): boolean {
+  // Off in the seam's main rules. With dollar quotes kept, a kept quote's `$`
+  // is text ({@link unreadParts}), not the parameter `$env` of `$'env'`.
+  if (mainRulesOnly || glob.off || !inexact(word)) return false;
+  const read = unreadParts(word);
+  if (read === null) return false;
+  // Quoted glob characters are text, as in {@link splicedGuardClass}.
+  const text = globLive(glob, word) ? read.asOutputs : read.asOutputs.replace(/[*?[\]{}()#^<>|]|(?<=.)~/gu, SPLICED_INERT);
+  const named = read.parts > SPLICED_PARTS_CAP || wordJoinsGitAcrossSubstitution(text);
+  if (named) {
+    markGlobWriteFired();
+    if (glob.tracker !== undefined) glob.tracker.raised = true;
+  }
+  return named;
 }
 
 /** Unknown liveness is live: fail closed. */
@@ -11581,7 +12641,7 @@ const PARAMETER_MARK = "";
  * reading. A word holding {@link PARAMETER_MARK} counts, and fails closed.
  */
 function hasGlobConstruct(word: string): boolean {
-  if (word.includes(PARAMETER_MARK)) return true;
+  if (word.includes(PARAMETER_MARK) || word.includes(UNREAD_MARK)) return true;
   const outside = maskParameters(word).text;
   return /[*?[\]{}()#^<>|]/u.test(outside) || outside.slice(1).includes("~");
 }
@@ -11844,7 +12904,7 @@ function globSegmentTokens(segment: string, options = true): { tokens: GlobToken
   const lastClose = segment.lastIndexOf("}");
   for (let at = 0; at < segment.length; at += 1) {
     const ch = segment[at] as string;
-    if (ch === "*") pushRun();
+    if (ch === "*" || ch === UNREAD_MARK) pushRun();
     else if (ch === "?") tokens.push({ kind: "one" });
     else if (ch === "^" && options) tokens.push({ kind: "rest" });
     else if (ch === "#" && options) {
@@ -11971,9 +13031,446 @@ function globTokensMatch(
   return exhausted ? null : found;
 }
 
+/** The private-use character an unread part of a word stands as in a spliced pattern ({@link splicedGuardClass}). */
+const UNREAD_MARK = "\uE001";
+/** A name no guarded-path rule reads: the stand-in for literal text in the spliced reading's check. */
+const SPLICED_NEUTRAL = "__neutral__";
+/** A character no guarded name holds: a quoted glob character's stand-in in the spliced reading. */
+const SPLICED_INERT = "\uE002";
+/** Most unread parts one word is read through; past it the word could be any path, and answers `log.mutate`. */
+const SPLICED_PARTS_CAP = 8;
+
 /**
- * The strictest protected class a write-target pattern could reach, or `null`
- * when no guarded path is within its reach (`out/*.log`). FAIL CLOSED.
+ * The unread parts of a word's text: each parameter expansion (`$X`, `${…}`,
+ * `$1`, `$?`; a substitution's output and an unread dollar-quote escape are
+ * `${…}` placeholders too). `null` when there is none, or when the word has
+ * no literal text: every component is unread parts alone, or `.` or `..`
+ * (`$OUT`, `$D/$F`, `./$X`, `../$X`), and keeps main's answer for an unknown
+ * word. A `.` inside a component is literal text like any other (`.$X` may
+ * be `.approval`, `$A.$B` may be `.git`). Otherwise the word with each run of
+ * unread parts as one {@link UNREAD_MARK} (`marked`), and as one
+ * {@link SUBSTITUTION_SENTINEL} (`asOutputs`, for the `.git` reader), and how
+ * many parts it holds. A `$` that opens no expansion is literal, and a `$`
+ * at one of `literalAt` (the lexed word's own {@link LexWord.literalDollars},
+ * handed in only for that word's own text) is text no guarded name holds
+ * ({@link SPLICED_INERT}).
+ */
+function unreadParts(text: string, literalAt?: readonly number[]): { marked: string; asOutputs: string; parts: number } | null {
+  if (!text.includes("$")) return null;
+  // The same word is read in every pass over a line (each name and
+  // dollar-quote reading, main's rules, the hook's landing pass): the last
+  // few answers are remembered (a pure function of the text and positions).
+  const literalKey = literalAt === undefined ? "" : literalAt.join(",");
+  for (const entry of unreadPartsRecent) if (entry.text === text && entry.literalKey === literalKey) return entry.read;
+  const read = unreadPartsOf(text, literalAt);
+  unreadPartsRecent.unshift({ text, literalKey, read });
+  if (unreadPartsRecent.length > UNREAD_PARTS_RECENT) unreadPartsRecent.pop();
+  return read;
+}
+
+/** {@link unreadParts}'s last answers, newest first: at most {@link UNREAD_PARTS_RECENT}. */
+const unreadPartsRecent: { text: string; literalKey: string; read: { marked: string; asOutputs: string; parts: number } | null }[] = [];
+const UNREAD_PARTS_RECENT = 4;
+
+function unreadPartsOf(text: string, literalAt?: readonly number[]): { marked: string; asOutputs: string; parts: number } | null {
+  // A word whose dollar quotes ran past their placeholders could be any path.
+  if (text.includes(DOLLAR_QUOTE_REST)) return { marked: UNREAD_MARK, asOutputs: SUBSTITUTION_SENTINEL, parts: SPLICED_PARTS_CAP + 1 };
+  let marked = "";
+  let asOutputs = "";
+  let parts = 0;
+  let afterPart = false;
+  // `literalAt` ascends: the next literal `$` at or after `at`.
+  let nextLiteral = 0;
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at] as string;
+    let end = -1;
+    if (char === "$" && literalAt !== undefined) {
+      while (nextLiteral < literalAt.length && (literalAt[nextLiteral] as number) < at) nextLiteral += 1;
+    }
+    if (char === "$" && literalAt !== undefined && literalAt[nextLiteral] === at) {
+      // A `$` the shell reads as text (single-quoted, escaped, a dollar
+      // quote's). A text no guarded name holds.
+      marked += SPLICED_INERT;
+      asOutputs += SPLICED_INERT;
+      afterPart = false;
+      continue;
+    }
+    if (char === "$") {
+      const next = text[at + 1];
+      if (next === "{") end = parameterEnd(text, at);
+      else if (next !== undefined && /[A-Za-z_]/u.test(next)) {
+        end = at + 1;
+        while (end + 1 < text.length && /[A-Za-z0-9_]/u.test(text[end + 1] as string)) end += 1;
+      } else if (next !== undefined && /[0-9?#*@!$-]/u.test(next)) end = at + 1;
+    }
+    // The home variables are read as the home, as the organ and credential
+    // rows read them (`$HERMES_HOME/workspace/x` is the home's workspace):
+    // text here, not an unread part. A default (`${HERMES_HOME:-/x}`,
+    // `${HOME-x}`) is the home where the variable is set, as
+    // {@link collapseBracedVariables} reads it for those rows; the default's
+    // own reading is judged beside ({@link homeDefaultReading}). Any other
+    // operator (`${HOME%/*}`, `${HOME:+x}`, `${HOME/x/y}`) is an unread part.
+    // A default holding an expansion of its own is an unread part. Only as
+    // the word's FIRST component (followed by `/`, or the whole word): an
+    // unset HERMES_HOME is empty, so `APPROVAL${HERMES_HOME}.md` is the
+    // policy file, and anywhere else a home variable is an unread part
+    // (review of b58db9ec, M2).
+    const homePlace = at === 0 && (end + 1 === text.length || text[end + 1] === "/");
+    const homeOperator = end === -1 || !homePlace ? null : /^\$\{(HOME|HERMES_HOME):?-[^$}]*\}$/u.exec(text.slice(at, end + 1));
+    if (homeOperator !== null || (end !== -1 && homePlace && /^\$(?:HOME|HERMES_HOME|\{HOME\}|\{HERMES_HOME\})$/u.test(text.slice(at, end + 1)))) {
+      const spelled = homeOperator === null ? text.slice(at, end + 1) : `\${${homeOperator[1] as string}}`;
+      marked += spelled;
+      asOutputs += spelled;
+      afterPart = false;
+      at = end;
+      continue;
+    }
+    if (end === -1) {
+      marked += char;
+      asOutputs += char;
+      afterPart = false;
+      continue;
+    }
+    parts += 1;
+    // A flag, not `endsWith`: a string built a character at a time is a rope,
+    // and reading its end flattens it each time (a 256 KB word took 3 s).
+    if (!afterPart) {
+      marked += UNREAD_MARK;
+      asOutputs += SUBSTITUTION_SENTINEL;
+    }
+    afterPart = true;
+    at = end;
+  }
+  if (parts === 0) return null;
+  // No literal text: every component unread parts alone, or a `.` or `..` step.
+  let literal = false;
+  for (const component of marked.split("/")) {
+    if (component === "." || component === "..") continue;
+    for (const char of component) {
+      if (char !== UNREAD_MARK) {
+        literal = true;
+        break;
+      }
+    }
+    if (literal) break;
+  }
+  if (!literal) return null;
+  return { marked, asOutputs, parts };
+}
+
+/**
+ * The strictest protected class a write target with an UNREAD PART spliced
+ * into literal text could reach, or `null` (lead ruling CLAIMS L62568, on
+ * review-b's FINDING L61530): `echo x > APPROVAL$E.md` writes the policy file
+ * when E is empty, and was a workspace write. Each unread part counts as any
+ * text, a `/` included, and the word is matched against every guarded path by
+ * the write-target pattern reader ({@link globGuardClass}, the `spliced`
+ * reading), through the name fold. {@link splicedCredential} is the same
+ * reading for a credential read.
+ *
+ * The edge: a candidate counts only where the word's literal text takes part
+ * in it (see the walk in {@link globGuardClass}). `$D/APPROVAL.md`,
+ * `.approval/$F`, `.claude$S/settings.json`, `.appro${x}val/env`,
+ * `.github/$W/ci.yml`, `.$X` and `notes-$F.md`'s `APPROVAL.md`-shaped reading
+ * do; `$D/notes.md` (as `.approval/notes.md`) and `out/$F` (as
+ * `out/APPROVAL.md`) do not, and keep the answer they have: main's for an
+ * unknown directory or name. A word with no literal text ({@link unreadParts}:
+ * `$OUT`, `$D/$F`, `./$X`) is not read here at all.
+ */
+function splicedGuardClass(
+  word: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  budget: { left: number },
+  options: boolean,
+  live: boolean,
+  literalAt?: readonly number[],
+): { surface: string | null; also: readonly string[] } {
+  // Every class a counted candidate takes, not only the strictest: the plain
+  // spelling's class rides beside a stricter one (`.$X/settings.json` may be
+  // `.approval/log/settings.json` or `.claude/settings.json`).
+  const also = new Set<string>();
+  const surface = splicedClass(word, budget, options, live, (path) => protectedPathClass(path, protectedPaths), protectedPaths, "log.mutate", false, also, literalAt);
+  // A word whose literal text and unread parts may join into `.git` (`.$X/hooks/x`)
+  // is a git-dir write as well, as {@link splicedNamesGit} reads it alone.
+  if (surface !== null) {
+    const read = unreadParts(word, literalAt);
+    const text = read === null ? null : live ? read.asOutputs : read.asOutputs.replace(/[*?[\]{}()#^<>|]|(?<=.)~/gu, SPLICED_INERT);
+    if (read !== null && text !== null && (read.parts > SPLICED_PARTS_CAP || wordJoinsGitAcrossSubstitution(text))) also.add("vcs.history.rewrite");
+  }
+  return { surface, also: [...also].filter((cls) => cls !== surface) };
+}
+
+/**
+ * Could a word with an unread part spliced into literal text be a credential
+ * file (lead ruling CLAIMS L62542, "for writes AND reads (the credential read
+ * too)", and L62568's `.appro${x}val/env`)? `cat .approval/$F` reads the
+ * environment map when F is `env`, as `cat .approval/env` does. The reading
+ * of {@link splicedGuardClass}, judged by the credential rows
+ * ({@link isCredentialPathPlain}); past the parts bound, or where the matcher
+ * runs out, it may be one. Where it is one, main's answer for the line joins
+ * (the seam), so a line main refuses stays refused. Remembered per text and
+ * reading. A glob
+ * character in it is text here, as the credential rows read a glob in a read
+ * (the hook judges a glob against the listing): only the unread parts are
+ * read as any text.
+ */
+function splicedCredential(word: string, literalAt?: readonly number[]): boolean {
+  if (mainRulesOnly || !word.includes("$")) return false;
+  return (
+    foldedOnlyQuietly(() => {
+      // Keyed by which `$` in it are text, too.
+      // A long word is not remembered: the memo holds at most
+      // SPLICED_CREDENTIAL_MEMO_CAP keys of a bounded size.
+      const key = word.length > SPLICED_CREDENTIAL_MEMO_TEXT ? null : `${dollarQuotesKept ? "k" : "d"}${literalAt?.join(",") ?? "-"}|${word}`;
+      const known = key === null ? undefined : splicedCredentialMemo.get(key);
+      if (known !== undefined) return known;
+      const found =
+        splicedClass(word, { left: SPLICED_CREDENTIAL_STEP_CAP }, true, false, (path) => (isCredentialPathPlain(path) ? CREDENTIAL_CLASS : null), [], CREDENTIAL_CLASS, true, undefined, literalAt) !== null;
+      if (key === null) return found;
+      if (splicedCredentialMemo.size >= SPLICED_CREDENTIAL_MEMO_CAP) {
+        splicedCredentialMemo.clear();
+        splicedCredentialMemoChars = 0;
+      }
+      splicedCredentialMemo.set(key, found);
+      splicedCredentialMemoChars += key.length;
+      return found;
+    }) === true &&
+    // Main's answer for the line joins this one (the seam): the credential
+    // tier answers before a command's own rules, and where main refuses the
+    // line (`awk '{print $3,…}'` has no rule), the refusal stands.
+    (markGlobWriteFired(), true)
+  );
+}
+
+/** {@link splicedCredential}'s answers by text and reading (it reads no policy and no disk). */
+const splicedCredentialMemo = new Map<string, boolean>();
+let splicedCredentialMemoChars = 0;
+
+/** For tests: the characters {@link splicedCredentialMemo}'s keys hold now. */
+export function splicedCredentialMemoHeld(): number {
+  return splicedCredentialMemoChars;
+}
+/** Most texts {@link splicedCredentialMemo} holds before it starts again. */
+const SPLICED_CREDENTIAL_MEMO_CAP = 4096;
+/** The longest word {@link splicedCredentialMemo} remembers (its literal positions are shorter). */
+const SPLICED_CREDENTIAL_MEMO_TEXT = 4096;
+/** Most backslashes a spliced word holds before it could be any path (cost: the judge splits on each). */
+const SPLICED_BACKSLASH_CAP = 1024;
+/** Matcher steps one credential reading may take; past them the word may be one. */
+const SPLICED_CREDENTIAL_STEP_CAP = 200_000;
+
+/**
+ * The spliced reading under `judge` (a path's class, or `null`): the
+ * strictest class a candidate the word's literal text takes part in has, or
+ * `null`. `wide` answers past {@link SPLICED_PARTS_CAP} parts, where the word
+ * could be any path, and where the brace groups are too many to expand.
+ *
+ * Readings, after brace expansion (each word a brace makes is read on its
+ * own, so `{x,.github}/$W/ci.yml` is `.github/$W/ci.yml` too): a run of
+ * unread parts that fills whole components is any one guarded name or
+ * nothing; one inside a component is a `*` there, and, one part at a time,
+ * also `*` then a component of its own then `*` (the part holding a `/`).
+ */
+function splicedClass(
+  word: string,
+  budget: { left: number },
+  options: boolean,
+  live: boolean,
+  judge: (path: string) => string | null,
+  protectedPaths: readonly ProtectedPathEntry[],
+  wide: string,
+  directoryKeeps = false,
+  also?: Set<string>,
+  literalAt?: readonly number[],
+): string | null {
+  const own = splicedClassOf(word, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also, literalAt);
+  // A home variable's default (`${HOME:-/x}`), read as the home in `own`, is
+  // read as its default too: the strictest of the two answers, every class
+  // either reached beside (review of the home-operator reading).
+  const defaulted = mainRulesOnly ? null : homeDefaultReading(word);
+  if (defaulted === null) return own;
+  const other =
+    unreadParts(defaulted) === null
+      ? judge(defaulted)
+      : splicedClassOf(defaulted, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also);
+  if (other !== null) also?.add(other);
+  if (own === null) return other;
+  if (other === null) return own;
+  return protectedRank(other) < protectedRank(own) ? other : own;
+}
+
+/**
+ * The word with each home variable's default (`${HOME:-w}`, `${HOME-w}`,
+ * `HERMES_HOME` the same) replaced by its default text `w`, or `null` when it
+ * has none. A default holding a `}` or a `$` is not read here (it stays the
+ * home, and its own expansions are judged as the word's other readings).
+ */
+function homeDefaultReading(word: string): string | null {
+  if (!word.includes("HOME")) return null;
+  const read = word.replace(/\$\{(?:HOME|HERMES_HOME):?-([^}$]*)\}/gu, (_, value: string) => value);
+  return read === word ? null : read;
+}
+
+function splicedClassOf(
+  word: string,
+  budget: { left: number },
+  options: boolean,
+  live: boolean,
+  judge: (path: string) => string | null,
+  protectedPaths: readonly ProtectedPathEntry[],
+  wide: string,
+  directoryKeeps = false,
+  also?: Set<string>,
+  literalAt?: readonly number[],
+): string | null {
+  // Off in main's passes, as {@link splicedNamesGit} is.
+  if (mainRulesOnly) return null;
+  const read = unreadParts(word, literalAt);
+  if (read === null) return null;
+  if (read.parts > SPLICED_PARTS_CAP) return wide;
+  // Past the pattern reader's segments bound the word could be any path. The
+  // judge also reads a `\` as a separator, and each candidate costs it a walk
+  // of every segment (`tee $a'a\qa\q…'`, 33,000 of them): past
+  // {@link SPLICED_BACKSLASH_CAP} of them, too.
+  let slashes = 0;
+  let backslashes = 0;
+  for (const char of read.marked) {
+    if (char === "/") slashes += 1;
+    else if (char === "\\") backslashes += 1;
+  }
+  if (slashes >= GLOB_GUARD_SEGMENTS_CAP || backslashes >= SPLICED_BACKSLASH_CAP) return wide;
+  // A word the shell does not glob (every glob character in it quoted, as in
+  // `"$f[1,4]/out"`) has those characters as text: no guarded name holds one,
+  // so each stands as a character that matches nothing guarded. A word it may
+  // glob keeps them as patterns, as the glob reading does, and its brace
+  // groups are expanded first (automated security review of the spliced
+  // reading, b: the `/` reading was skipped beside a brace).
+  const literal = live ? read.marked : read.marked.replace(/[*?[\]{}()#^<>|]|(?<=.)~/gu, SPLICED_INERT);
+  const expansions = braceCandidates(literal);
+  if (expansions === null) return wide;
+  let strictest: string | null = null;
+  for (const expansion of new Set(expansions)) {
+    const pieces = expansion.split(UNREAD_MARK);
+    if (pieces.length < 2) continue;
+    // Which marks sit inside a component (literal text beside them in it).
+    const inside: number[] = [];
+    for (let at = 0; at + 1 < pieces.length; at += 1) {
+      const before = pieces[at] as string;
+      const after = pieces[at + 1] as string;
+      const whole = (before.length === 0 || before.endsWith("/")) && (after.length === 0 || after.startsWith("/"));
+      if (!whole) inside.push(at);
+    }
+    // The part at `slashed` holding a `/`: the literal text before it ends a
+    // component, a component of the part's own stands between, and the text
+    // after it begins one (on a side with no literal text beside it, no piece).
+    const slashedMark = (at: number): string => {
+      const before = pieces[at] as string;
+      const after = pieces[at + 1] as string;
+      const left = before.length === 0 || before.endsWith("/") ? "" : `${UNREAD_MARK}/`;
+      const right = after.length === 0 || after.startsWith("/") ? "" : `/${UNREAD_MARK}`;
+      return `${left}${UNREAD_MARK}${right}`;
+    };
+    const reading = (slashed: number): string =>
+      pieces.reduce((out, piece, at) => (at === 0 ? piece : `${out}${at - 1 === slashed ? slashedMark(at - 1) : UNREAD_MARK}${piece}`), "");
+    // A wholly unread directory: every component before the word's last, as
+    // written, is unread parts, `.` or `..` alone (`$D/x`, `./$D/x`).
+    const components = expansion.split("/");
+    const directory = components.slice(0, -1);
+    const unreadDirectory =
+      directory.some((component) => component.includes(UNREAD_MARK)) &&
+      directory.every((component) => component === "." || component === ".." || component.replaceAll(UNREAD_MARK, "").length === 0);
+    // A credential read under a wholly unread directory (`cat $D/env`) keeps
+    // main's answer: the hook already judges that tail by its name
+    // (`credential-path-resolved`), and the pure answer is main's, as `echo x
+    // > $D/env` keeps it.
+    if (directoryKeeps && unreadDirectory) continue;
+    for (const slashed of [-1, ...inside]) {
+      // The folded reading's alone, and quietly: the guarded names it walks fold
+      // (`APPROVAL.md`), and a word whose own names do not fold keeps its one
+      // name reading; an equal claim it meets still counts. Main's answer, as
+      // spelled, has no spliced reading.
+      // Equal claims a candidate meets are each taken here, the walk once per
+      // claim, never by turning the whole line ({@link eachEqualClaim}).
+      const founds = foldedOnlyQuietly(() =>
+        eachEqualClaim(() => globGuardClass(reading(slashed), protectedPaths, budget, options, undefined, { unreadDirectory, judge, also })),
+      );
+      for (const found of founds ?? []) {
+        if (found !== null && (strictest === null || protectedRank(found) < protectedRank(strictest))) strictest = found;
+      }
+      if (strictest === "log.mutate" && also === undefined) return strictest;
+    }
+  }
+  return strictest;
+}
+
+/**
+ * What a write-target pattern this reader cannot finish (past a cap, the step
+ * budget, a placeholder) may name: the log and the gate's own organs, each
+ * judged (#682's cap rule; review-b N1 and codex's M1 at bcb1be08). A policy
+ * may hold `log.mutate` looser than `policy.core` (it is unlisted in
+ * `approval init`'s policy), so the log alone is not the strict answer.
+ */
+const GLOB_GUARD_UNKNOWN: readonly string[] = ["log.mutate", "policy.core"];
+
+/**
+ * What a write-target pattern this reader cannot finish may name, under one
+ * policy's routes (build-1's M2 at 64c43399, lead ruling L62483): the log and
+ * the gate's organs ({@link GLOB_GUARD_UNKNOWN}), and the class of every other
+ * guarded name such a pattern could match: the instructions and release files
+ * (`policy.edit`), each organ folder's contents ({@link FOLDER_CONTENTS}: the
+ * workflows, which a policy may route to `policy.edit.ci`; Hermes' scripts,
+ * `cron.manage`) and each of the policy's own entries (`SPEC.md` routed to
+ * `policy.edit.spec`, `.claude/agents/` to its class). Past a cap no candidate
+ * was judged, so every class one could have named is judged. Kept per entry
+ * list.
+ */
+function globGuardUnknown(protectedPaths: readonly ProtectedPathEntry[]): readonly string[] {
+  // The answer depends on the reading it is asked in, not on the entries
+  // alone (automated security review of 16426b38): as spelled, entries tied on
+  // one path answer with the first declared only, and the folded reading
+  // takes each; main's pass and the organ-verb rule change what a folder
+  // claims. One memo per reading, so no reading reuses another's answer.
+  const mode = `${namesReadAsSpelled() ? "spelled" : "folded"}|${mainRulesOnly ? "main" : "all"}|${organVerbs ? "verbs" : "released"}`;
+  let memo = GLOB_GUARD_UNKNOWN_MEMO.get(mode);
+  if (memo === undefined) {
+    memo = new WeakMap();
+    GLOB_GUARD_UNKNOWN_MEMO.set(mode, memo);
+  }
+  const known = memo.get(protectedPaths);
+  if (known !== undefined) return known;
+  const paths = [...CORE_FILENAMES, ...PROTECTED_FILENAMES];
+  for (const [folder, tails] of Object.entries(FOLDER_CONTENTS)) for (const tail of tails) paths.push(`${folder}/${tail}`);
+  for (const raw of protectedPaths) {
+    const entry = parseProtectedEntry(raw);
+    if (entry !== null) paths.push(`${entry.segments.join("/")}${entry.directory ? "/x" : ""}`);
+  }
+  const out = [...GLOB_GUARD_UNKNOWN];
+  // protectedPathClasses joins each path's readings itself (its folded answer
+  // holds its as-spelled one), so a name of the list that folds is no reason
+  // to read the caller's whole line again as spelled: the list leaves the
+  // caller's reading as it found it, as a memo hit always did (build-1's
+  // VERDICT on A682 queue red 3). A line whose own names diverge still does.
+  apartFromCallerReading(() => {
+    for (const path of paths) for (const cls of protectedPathClasses(path, protectedPaths)) if (!out.includes(cls)) out.push(cls);
+  });
+  memo.set(protectedPaths, out);
+  return out;
+}
+
+/** {@link globGuardUnknown}'s answers, one memo per reading (a handful of keys). */
+const GLOB_GUARD_UNKNOWN_MEMO = new Map<string, WeakMap<readonly ProtectedPathEntry[], readonly string[]>>();
+
+/**
+ * Most candidate paths one word's expansions are walked over together. Each
+ * expansion is judged on its own (build-1's M2 at 64c43399: one expansion past
+ * a cap no longer ends the word), so this bounds the walk of a word of many
+ * expansions; an expansion past it is judged unknown, as one past its own cap.
+ */
+const GLOB_GUARD_WALK_CAP = 16 * GLOB_GUARD_CANDIDATE_CAP;
+
+/**
+ * Every protected class a write-target pattern could reach, empty when no
+ * guarded path is within its reach (`out/*.log`). FAIL CLOSED.
  *
  * The reading is brace-expanded first ({@link braceCandidates}; a group too
  * large to expand is `policy.core`, as {@link protectedPathClass} answers it).
@@ -11993,38 +13490,56 @@ function globTokensMatch(
  *   `braceccl` range over `/`): nothing, any one name, or any two names.
  *
  * Every combination is a candidate path, judged by {@link protectedPathClass};
- * the strictest answers. More combinations than
- * {@link GLOB_GUARD_CANDIDATE_CAP}, more segments than
- * {@link GLOB_GUARD_SEGMENTS_CAP}, more matcher steps than
- * {@link GLOB_GUARD_STEP_CAP} (one budget over every reading of a word), a reading that already holds
- * {@link PARAMETER_MARK}, or a placeholder that cannot be restored, is the
- * strictest class there is, `log.mutate`: a pattern that wide could name the
- * log.
+ * every class a candidate names is returned, each judged by the policy (#682's
+ * reader; review-b N1 at bcb1be08: the classifier's rank is not a policy's
+ * order). More combinations than {@link GLOB_GUARD_CANDIDATE_CAP}, more
+ * segments than {@link GLOB_GUARD_SEGMENTS_CAP}, more matcher steps than
+ * {@link GLOB_GUARD_STEP_CAP} (one budget over every reading of a word), a
+ * reading that already holds {@link PARAMETER_MARK}, or a placeholder that
+ * cannot be restored, adds {@link globGuardUnknown}: a pattern that wide
+ * could name the log, the gate's organs or any other guarded name. A cap
+ * applies to one brace expansion at a time, and the word's other expansions
+ * are still walked (build-1's M2 at 64c43399), {@link GLOB_GUARD_WALK_CAP}
+ * candidates over all of them.
  */
-function globGuardClass(
+function globGuardClasses(
   word: string,
   protectedPaths: readonly ProtectedPathEntry[],
   budget: { left: number } = { left: GLOB_GUARD_STEP_CAP },
   options = false,
   disk?: GlobDisk,
-): string | null {
+): readonly string[] {
   // zsh's extendedglob forms (`#`, `^`, the `~` exclusion) and braceccl need an
   // option; with none possibly set on the line they are literal text (lead
   // ruling L60846; review-b S2: `rm -f *~` is the files ending in `~`).
-  if (word.includes(PARAMETER_MARK)) return "log.mutate";
+  if (word.includes(PARAMETER_MARK)) return globGuardUnknown(protectedPaths);
   const extraNames = protectedPaths.flatMap((entry) => parseProtectedEntry(entry)?.segments ?? []);
   const names = [...new Set([...GLOB_GUARD_NAMES, ...extraNames])];
   const words = [word];
   if (options) for (let at = 1; at < word.length; at += 1) if (word[at] === "~") words.push(word.slice(0, at));
-  let strictest: string | null = null;
+  // Every class a candidate names (#682's reader; review-b N1 and codex's M1
+  // at bcb1be08): the classifier's rank is not a policy's order, so a
+  // candidate naming a class below another's is judged too. The walk goes on
+  // past `log.mutate`; the caps and the step budget bound it.
+  const found: string[] = [];
   const consider = (surface: string | null): boolean => {
-    if (surface !== null && (strictest === null || protectedRank(surface) < protectedRank(strictest))) strictest = surface;
-    return strictest === "log.mutate";
+    if (surface !== null && !found.includes(surface)) found.push(surface);
+    return false;
   };
+  // An expansion this reader cannot finish (past a cap, the step budget, a
+  // placeholder it cannot restore) adds every class a guarded name it could
+  // match carries, and the walk goes on to the word's other expansions
+  // (build-1's M2 at 64c43399: `tee {*/*/*/x,CLAUDE.m?}` writes CLAUDE.md
+  // whatever the first expansion names).
+  const unknown = (): void => {
+    for (const cls of globGuardUnknown(protectedPaths)) consider(cls);
+  };
+  // Candidates walked over every expansion, against GLOB_GUARD_WALK_CAP.
+  let walked = 0;
   for (const each of words) {
     const expansions = braceCandidates(each);
     if (expansions === null) {
-      if (consider("policy.core")) return strictest;
+      consider("policy.core");
       continue;
     }
     for (const expansion of expansions) {
@@ -12037,7 +13552,12 @@ function globGuardClass(
           return held ?? "";
         });
       const segments = masked.text.split("/");
-      if (segments.length > GLOB_GUARD_SEGMENTS_CAP) return "log.mutate";
+      // Past the segment cap, or with the line's step budget already spent
+      // (each name tried would fail at once), the expansion is unknown.
+      if (segments.length > GLOB_GUARD_SEGMENTS_CAP || budget.left < 0) {
+        unknown();
+        continue;
+      }
       // The caller's listing of the directory a prefix names, or `undefined`.
       const listingFor = (prefix: readonly string[]): readonly string[] | undefined => {
         if (disk === undefined || disk.listingsOk === false) return undefined;
@@ -12114,14 +13634,20 @@ function globGuardClass(
         for (const name of GLOB_GUARD_PREFIXES) if (test(name, true)) out.push([name]);
         return out;
       });
-      if (exhausted) return "log.mutate";
       let total = 1;
       for (const choice of choices) total *= choice.length;
-      if (total > GLOB_GUARD_CANDIDATE_CAP) return "log.mutate";
+      if (exhausted || total > GLOB_GUARD_CANDIDATE_CAP || walked + total > GLOB_GUARD_WALK_CAP) {
+        unknown();
+        continue;
+      }
+      walked += total;
       const walk = (index: number, parts: string[]): boolean => {
         if (index === choices.length) {
           const path = unmask(parts.join("/"));
-          if (lost) return consider("log.mutate");
+          if (lost) {
+            unknown();
+            return false;
+          }
           return consider(protectedPathClass(path, protectedPaths));
         }
         for (const choice of choices[index] as string[][]) {
@@ -12129,7 +13655,248 @@ function globGuardClass(
         }
         return false;
       };
-      if (walk(0, [])) return strictest;
+      walk(0, []);
+    }
+  }
+  return found;
+}
+
+/**
+ * The strictest protected class a write-target pattern could reach, or `null`
+ * when no guarded path is within its reach (`out/*.log`). FAIL CLOSED.
+ *
+ * Merged beside #682's {@link globGuardClasses} (build-5's merge of main
+ * 2ac58ec5): the write-target pattern reading itself is that reader's, which
+ * returns every class and adds {@link globGuardUnknown} past its caps. This
+ * one is kept as #709 made it for the SPLICED reading alone
+ * ({@link splicedClass}, `spliced` set, `also` gathering every class), so an
+ * unread part's answers are #709's to the byte.
+ *
+ * The reading is brace-expanded first ({@link braceCandidates}; a group too
+ * large to expand is `policy.core`, as {@link protectedPathClass} answers it).
+ * A `~` after the first character may be zsh's exclusion, which drops the rest
+ * of the pattern, so the reading cut there is judged as well. Each expansion is
+ * split into segments, and each segment stands for a set of names:
+ *
+ * - a segment with no construct: itself, and any guarded name equal to it with
+ *   case folded (a case-folding volume, `nocaseglob`);
+ * - a segment holding a variable and no construct: itself, as
+ *   {@link protectedPathClass} reads every variable;
+ * - a pattern segment: itself, and every guarded name or prefix
+ *   ({@link GLOB_GUARD_NAMES}, {@link GLOB_GUARD_PREFIXES}, and the segments of
+ *   the policy's own entries) its tokens could match;
+ * - a segment that may stand for SEVERAL directories (a whole `**` or `***`
+ *   component; a variable beside a construct, whose value may hold a `/`; a
+ *   `braceccl` range over `/`): nothing, any one name, or any two names.
+ *
+ * Every combination is a candidate path, judged by {@link protectedPathClass};
+ * the strictest answers. More combinations than
+ * {@link GLOB_GUARD_CANDIDATE_CAP}, more segments than
+ * {@link GLOB_GUARD_SEGMENTS_CAP}, more matcher steps than
+ * {@link GLOB_GUARD_STEP_CAP} (one budget over every reading of a word), a reading that already holds
+ * {@link PARAMETER_MARK}, or a placeholder that cannot be restored, is the
+ * strictest class there is, `log.mutate`: a pattern that wide could name the
+ * log.
+ */
+function globGuardClass(
+  word: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  budget: { left: number } = { left: GLOB_GUARD_STEP_CAP },
+  options = false,
+  disk?: GlobDisk,
+  spliced: false | { unreadDirectory: boolean; judge: (path: string) => string | null; also?: Set<string> | undefined } = false,
+): string | null {
+  // zsh's extendedglob forms (`#`, `^`, the `~` exclusion) and braceccl need an
+  // option; with none possibly set on the line they are literal text (lead
+  // ruling L60846; review-b S2: `rm -f *~` is the files ending in `~`).
+  if (word.includes(PARAMETER_MARK)) return "log.mutate";
+  const extraNames = protectedPaths.flatMap((entry) => parseProtectedEntry(entry)?.segments ?? []);
+  const names = [...new Set([...GLOB_GUARD_NAMES, ...extraNames])];
+  const words = [word];
+  if (options) for (let at = 1; at < word.length; at += 1) if (word[at] === "~") words.push(word.slice(0, at));
+  let strictest: string | null = null;
+  // Spliced with `also`: every class is gathered, so the walk does not stop at the log.
+  const gather = spliced === false ? undefined : spliced.also;
+  const consider = (surface: string | null): boolean => {
+    if (surface !== null && (strictest === null || protectedRank(surface) < protectedRank(strictest))) strictest = surface;
+    if (surface !== null) gather?.add(surface);
+    return strictest === "log.mutate" && gather === undefined;
+  };
+  for (const each of words) {
+    const expansions = braceCandidates(each);
+    if (expansions === null) {
+      if (consider("policy.core")) return strictest;
+      continue;
+    }
+    for (const expansion of expansions) {
+      const masked = maskParameters(expansion);
+      let lost = false;
+      const unmask = (path: string): string =>
+        path.replace(new RegExp(`\\$${PARAMETER_MARK}(\\d+)${PARAMETER_MARK}`, "gu"), (_, index: string) => {
+          const held = masked.held[Number(index)];
+          if (held === undefined) lost = true;
+          return held ?? "";
+        });
+      const segments = masked.text.split("/");
+      if (segments.length > GLOB_GUARD_SEGMENTS_CAP) return "log.mutate";
+      // The caller's listing of the directory a prefix names, or `undefined`.
+      const listingFor = (prefix: readonly string[]): readonly string[] | undefined => {
+        if (disk === undefined || disk.listingsOk === false) return undefined;
+        const dir = globListingDir(prefix, disk);
+        if (dir === null) return undefined;
+        disk.collect?.add(dir);
+        return diskListing(disk, dir, true);
+      };
+      // Dot matching (lead ruling, CLAIMS L61492 and L61497): bash's dotglob
+      // and zsh's globdots may be set in the user's own profile, where no
+      // setter on the line shows, so a pattern is read with dot-names matched
+      // as well as hidden, and the stricter reading answers. Matched, a `*`,
+      // `?` or class at a segment's start reaches every dot-name but `.` and
+      // `..`, which no option lets them match; an explicit leading `.` (or a
+      // leading group or `.` class) reaches those too, as does any segment on
+      // a line that may set options (as before). The dot-matched reading
+      // holds every candidate the hidden one does, so it alone is judged.
+      const notDots = names.filter((name) => name !== "." && name !== "..");
+      const spanning = (segment: string, dotted: boolean): string[][] => {
+        const pool = dotted ? names : notDots;
+        const out: string[][] = [[], [segment]];
+        for (const first of pool) {
+          out.push([first]);
+          for (const second of pool) out.push([first, second]);
+        }
+        return out;
+      };
+      let exhausted = false;
+      // GLOB-WRITE (L61167): the first component holding a construct is matched
+      // against what is THERE when the caller listed its directory.
+      let firstGlobSeen = false;
+      const choices: string[][][] = segments.map((segment, index) => {
+        // A component made only of unread parts ({@link splicedGuardClass}):
+        // nothing, or any one guarded name. Its value is no pattern, and the
+        // disk does not bound it.
+        if (spliced !== false && segment.includes(UNREAD_MARK) && segment.replaceAll(UNREAD_MARK, "").length === 0) {
+          return [[], ...names.map((name) => [name])];
+        }
+        const listing = firstGlobSeen || !hasGlobConstruct(segment) ? undefined : listingFor(segments.slice(0, index));
+        if (hasGlobConstruct(segment)) firstGlobSeen = true;
+        if (segment.length === 0) return [[segment]];
+        // globstar and zsh's `**/` descend into dot-directories only with dot
+        // matching on; a variable's value and a braceccl range are literal text,
+        // which may hold a dot-name.
+        if (segment === "**" || segment === "***") return spanning(segment, options);
+        const glob = hasGlobConstruct(segment.split(PARAMETER_MARK).join(""));
+        // Spliced, every parameter is already a mark ({@link unreadParts}): a
+        // `$` left in the text is text.
+        if (spliced === false && segment.includes("$")) return glob ? spanning(segment, true) : [[segment]];
+        const pattern = globSegmentTokens(segment, options);
+        if (pattern.spans) return spanning(segment, true);
+        // An explicit leading `.`, a leading group (zsh `(.a|b)`, bash
+        // extglob `!(x)`, which matches a dot-name), or a leading braceccl
+        // class holding `.` may reach a dot-name with no option set.
+        const first = pattern.tokens[0];
+        const dotted =
+          options ||
+          /^[.(]|^[!@?*+]\(/u.test(segment) ||
+          (first?.kind === "set" && first.chars.includes(".")) ||
+          segment.includes(UNREAD_MARK);
+        const test = (name: string, prefix: boolean): boolean => {
+          const hit = globTokensMatch(pattern, name, prefix, budget);
+          if (hit === null) exhausted = true;
+          return hit !== false;
+        };
+        if (listing !== undefined) {
+          // The names the directory holds that the pattern could match, each
+          // also under any guarded spelling equal to it with case folded
+          // (`apprOVAL.MD` is the policy file on a case-insensitive volume).
+          // No match: the pattern names no file there, so no candidate.
+          const listed: string[][] = [];
+          // A listing never holds `.` or `..`; every name in it is read, dot-names too.
+          const present = dotted ? [...listing, ".", ".."] : listing;
+          for (const name of present) {
+            if (!test(name, false)) continue;
+            listed.push([name]);
+            for (const guard of names) if (guard !== name && sameGuardedName(guard, name)) listed.push([guard]);
+          }
+          return listed;
+        }
+        const out: string[][] = [[segment]];
+        for (const name of dotted ? names : notDots) if (name !== segment && test(name, false)) out.push([name]);
+        // Spliced: a component opening with an unread part reaches a name
+        // BEGINNING with a guarded prefix (`.env.`, `settings`, `vault`)
+        // through that part alone, unless its literal text opens the name
+        // with the part empty: only that reading takes part.
+        const opening = spliced !== false && segment.startsWith(UNREAD_MARK) ? globSegmentTokens(segment.replace(/^\uE001+/u, ""), options) : pattern;
+        for (const name of GLOB_GUARD_PREFIXES) {
+          const hit = globTokensMatch(opening, name, true, budget);
+          if (hit === null) exhausted = true;
+          if (hit !== false) out.push([name]);
+        }
+        return out;
+      });
+      if (exhausted) return "log.mutate";
+      let total = 1;
+      for (const choice of choices) total *= choice.length;
+      // Spliced: an unread part that is the whole LAST component may hold a
+      // `/` as well (`.claude/$F` as `.claude/hooks/x.sh`): nothing, one or
+      // two guarded names there. Only a component of unread marks alone (a
+      // `$` that opens no parameter is text, never a mark). Past the
+      // candidate bound the word fails closed below, never the one-name
+      // reading.
+      const tail = segments.length - 1;
+      if (spliced !== false && tail > 0 && (segments[tail] as string).includes(UNREAD_MARK) && (segments[tail] as string).replaceAll(UNREAD_MARK, "").length === 0) {
+        // Two names are two real names: a `..` that climbs out of the literal
+        // directory and back down is the reading of `..` the text does not
+        // follow (as {@link credentialSegmentsAsWrittenOrResolved} reads one
+        // the line spells), not a part's own.
+        const spans: string[][] = [[], ...names.map((name) => [name]), ...notDots.flatMap((first) => notDots.map((second) => [first, second]))];
+        total = (total / (choices[tail] as string[][]).length) * spans.length;
+        choices[tail] = spans;
+      }
+      if (total > GLOB_GUARD_CANDIDATE_CAP) return "log.mutate";
+      // Spliced (lead ruling CLAIMS L62568): a candidate counts only where the
+      // word's LITERAL text takes part in it. The same candidate with every
+      // component that holds literal text replaced by a name no rule guards is
+      // judged too, and when that is as strict, the class came from the
+      // unread parts alone (`$D/notes.md` as `.approval/notes.md`, `out/$F` as
+      // `out/APPROVAL.md`), which a word with no literal text would reach as
+      // well: main's answer for an unknown word stands there. A component of
+      // only `.` or `..` is a step, not literal text; any other `.` is.
+      // Where the word's directory is WHOLLY unread (`$D/tail`), the tail is
+      // its only literal text, so this same test asks the tail to end a
+      // guarded path by name, as the brief's edge has it (`$D/APPROVAL.md`,
+      // `$D/settings.json` count; `$D/env` as `.approval/env` comes from the
+      // directory the unread part names, not the tail). A directory with
+      // literal text in it (`.github/$W/ci.yml`) is read as any other part.
+      // (A second test of the tail alone was the same path, and is gone: the
+      // second lane's B3, 16,660 probes, no difference.)
+      const judge = spliced === false ? (path: string): string | null => protectedPathClass(path, protectedPaths) : spliced.judge;
+      const bearing = segments.map(
+        (segment) => spliced !== false && segment !== "." && segment !== ".." && segment.replaceAll(UNREAD_MARK, "").length > 0,
+      );
+      const lighterWithout = (found: string, path: string): boolean => {
+        const without = judge(path);
+        return without === null || protectedRank(without) > protectedRank(found);
+      };
+      const walk = (index: number, parts: string[], neutral: string[]): boolean => {
+        if (index === choices.length) {
+          const path = unmask(parts.join("/"));
+          if (lost) return consider("log.mutate");
+          const found = judge(path);
+          if (spliced !== false && found !== null) {
+            if (!lighterWithout(found, neutral.join("/"))) return false;
+            // A candidate inside a `.git` is a write to git's own files, as
+            // the plain spelling's git-dir rule reads it: that class rides beside.
+            if (gather !== undefined && path.split("/").includes(".git")) gather.add("vcs.history.rewrite");
+          }
+          return consider(found);
+        }
+        for (const choice of choices[index] as string[][]) {
+          const stand = bearing[index] === true ? choice.map(() => SPLICED_NEUTRAL) : choice;
+          if (walk(index + 1, [...parts, ...choice], [...neutral, ...stand])) return true;
+        }
+        return false;
+      };
+      if (walk(0, [], [])) return strictest;
     }
   }
   return strictest;
@@ -12829,6 +14596,21 @@ function classifySegmentWithVerb(
     cursor += found.skip;
   }
 
+  // Review of b58db9ec (M1, c): a flag or subcommand of git or gh that holds
+  // a dollar-quote escape the shells read differently may be any flag or
+  // subcommand (`git reset $'\q'-hard`): refused, not read as an unknown word.
+  const verbWord = words[cursor];
+  const verbName = verbWord === undefined ? null : (pathSegments(verbWord).slice(-1)[0] ?? verbWord);
+  if (verbName === "git" || verbName === "gh") {
+    let operands = 0;
+    for (const word of segment.words.slice(cursor + 1)) {
+      const flagLike = word.text.startsWith("-") || word.text.startsWith(SUBSTITUTION_SENTINEL);
+      if (word.dollarUnread === true && (flagLike || operands < (verbName === "gh" ? 2 : 1))) {
+        return { ok: false, code: "unclassified", detail: `a ${verbName} flag or subcommand holds a dollar-quote escape the shells read differently` };
+      }
+      if (!flagLike) operands += 1;
+    }
+  }
   const everyWriteTarget = segment.redirects
     .filter((redirect) => redirect.op !== "<")
     .map((redirect) => redirect.target.text)
@@ -12842,6 +14624,12 @@ function classifySegmentWithVerb(
   const everyReadTarget = segment.redirects
     .filter((redirect) => redirect.op === "<")
     .map((redirect) => redirect.target.text);
+  // Each word's and read target's literal `$` (the lexed word's own, by index).
+  const wordLiterals = segment.words.map(wordFacts);
+  const everyReadLiterals = segment.redirects.filter((redirect) => redirect.op === "<").map((redirect) => wordFacts(redirect.target));
+  const everyWriteLiterals = segment.redirects
+    .filter((redirect) => redirect.op !== "<" && !isDiscardTarget(redirect.target.text))
+    .map((redirect) => wordFacts(redirect.target));
   const everyRedirectTarget = segment.redirects.map((redirect) => redirect.target.text);
   // A redirection onto a protected path is a write to that path, whatever the
   // command in front of it was going to do. The CLASS says which surface was
@@ -12882,7 +14670,15 @@ function classifySegmentWithVerb(
     off: context.globPatternsOff === true,
     ...(context.globTracker === undefined ? {} : { tracker: context.globTracker }),
   };
-  const redirected = strictestProtectedWrite(everyWriteTarget, protectedPaths, inexact, false, glob);
+  const redirected = strictestProtectedWrite(
+    everyWriteTarget,
+    protectedPaths,
+    inexact,
+    false,
+    glob,
+    strictestProtected(everyWriteTarget, protectedPaths, false),
+    everyWriteLiterals,
+  );
   const bin = words[cursor];
   if (redirected !== null) {
     // APRV-503 recheck (SHOULD-FIX-R1): a segment that writes a protected path
@@ -12894,8 +14690,8 @@ function classifySegmentWithVerb(
     const touched =
       (writer === null
         ? null
-        : credentialTouch(writer, writerArgs)) ??
-      redirectCredentialTouch(everyReadTarget, everyRedirectTarget);
+        : credentialTouch(writer, writerArgs, wordLiterals.slice(cursor + 1))) ??
+      redirectCredentialTouch(everyReadTarget, everyRedirectTarget, everyReadLiterals);
     // The command in front of the redirect may write protected paths of its
     // own (`tee .github/workflows/ci.yml > design/x`): its own answer, the
     // write redirections set aside, is judged beside the redirect's. A reader
@@ -12933,6 +14729,7 @@ function classifySegmentWithVerb(
     .map((redirect) => redirect.target.text)
     .filter((target) => !isDiscardTarget(target));
   const readTargets = redirects.filter((redirect) => redirect.op === "<").map((redirect) => redirect.target.text);
+  const readLiterals = redirects.filter((redirect) => redirect.op === "<").map((redirect) => wordFacts(redirect.target));
   const redirectTargets = redirects.map((redirect) => redirect.target.text);
   // APRV-521 (review-b M1). Every spelling of bash's assignment word is read
   // past by the cursor above ({@link ASSIGNMENT}), and only the plain one is
@@ -12981,7 +14778,7 @@ function classifySegmentWithVerb(
     // Nothing here can outrank it: there are no positionals, and a protected
     // write target has already answered above, so the precedence rule the
     // binary path applies below has nothing to defer to.
-    const bareCredential = redirectCredentialTouch(readTargets, redirectTargets);
+    const bareCredential = redirectCredentialTouch(readTargets, redirectTargets, readLiterals);
     if (bareCredential !== null) return { ok: true, ...bareCredential };
     // APRV-508 refutation S1: an assignment on its own sets a shell variable,
     // and when that variable is already exported (PATH and LANG always are)
@@ -13011,7 +14808,7 @@ function classifySegmentWithVerb(
     // `.git` or a git configuration file is that write (APRV-518, S1).
     if (writeTargets.length > 0) {
       const gitWrite = gitWriteRefinement(writeTargets, [], context.shellDir, true, context.lineNamesGit === true, (word) =>
-        dotGlobNamesGit(word, inexact, glob),
+        dotGlobNamesGit(word, inexact, glob) || splicedNamesGit(word, inexact, glob),
       );
       if (gitWrite !== null) return { ok: true, ...gitWrite };
       return { ok: true, class: "files.write.workspace", rule: "redirect-write" };
@@ -13075,6 +14872,8 @@ function classifySegmentWithVerb(
   }
 
   const positionals = args.filter((arg) => !isFlag(arg));
+  // Each positional's literal `$` (its lexed word's own, by index).
+  const positionalLiterals = args.flatMap((arg, index) => (isFlag(arg) ? [] : [wordLiterals[cursor + 1 + index]]));
   // Lead ruling L62013 (S2), fail closed: the organ-directory rule holds for
   // every command but the release list (redirects above were judged with it).
   organVerbs = !releasedFromOrganRule(segment);
@@ -13196,14 +14995,27 @@ function classifySegmentWithVerb(
   // and redirect targets, git's readers) and APRV-511's upload sources. An
   // upload option word APRV-522 also reads is named by the file it sends, as
   // APRV-511 names it; a positional or an environment reference keeps its own.
-  const argCredential = credentialTouch(basename, args);
+  const argCredential = credentialTouch(basename, args, wordLiterals.slice(cursor + 1));
   const credential =
     argCredential === null
       ? uploadCredential
       : uploadCredential !== null && argCredential.path !== undefined && !positionals.includes(argCredential.path)
         ? uploadCredential
         : argCredential;
-  const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets);
+  const redirectCredential = redirectCredentialTouch(readTargets, redirectTargets, readLiterals);
+  // The copy table's reading of the argv and the copy family's unknown-word
+  // test, made once for the credential tier and the walk (build-1's S5 on
+  // #706: the credential copy read the argv a second time).
+  let planMemo: { value: CopyPlan | null } | undefined;
+  const argsPlan = (): CopyPlan | null => (planMemo ??= { value: copyPlan(basename, args) }).value;
+  let unknownMemo: { value: string | null } | undefined;
+  const argvUnknown = (): string | null => (unknownMemo ??= { value: copyArgvUnknown(args, argFlags) }).value;
+  // The credential paths a copy WRITES ({@link credentialWrites}): folded
+  // reading only, as the rest of this tier's additions (as spelled, main's).
+  const copyWrites =
+    credential === null && redirectCredential === null
+      ? NO_CREDENTIAL_WRITES
+      : (foldedOnly(() => [credentialWrites(basename, args, argFlags, argsPlan, argvUnknown)])[0] ?? NO_CREDENTIAL_WRITES);
   const sideScan =
     credential === null && redirectCredential === null
       ? null
@@ -13245,23 +15057,149 @@ function classifySegmentWithVerb(
   // an option or of a `key=value` word (`--out=.github/workflows/ci.yml`,
   // `of=.github/workflows/ci.yml`) is a word of such a program too, so it is
   // read with them; a credential file there is the read.
+  //
+  // Two more (build-1's S2 on #701, the lead's ruling CLAIMS L62362), after
+  // those, one entry per class. The values attached to a short option
+  // (`-o.github/workflows/ci.yml`, `-xo.github/workflows/ci.yml`) are read
+  // as words the same way, every tail ({@link attachedOptionValues}: a tail
+  // that names nothing protected adds nothing, so `-rf` adds nothing), the
+  // credential reads among them left out. An `=` value or an attached value
+  // that OUTRANKS the credential class (`-oAPPROVAL.md`, `--out=APPROVAL.md`,
+  // `-t.approval/log`) leaves the line refused, as the same path as its own
+  // word does (`frobnicate .approval/env APPROVAL.md` defers the credential
+  // and the walk refuses): never less strict than that line. And a target
+  // the shell still builds fails closed as `cp .approval/env $X` does,
+  // `policy.core` `copy-target-unknown`: the first argument word whose value
+  // the text cannot settle, by the flags the copy family's test reads
+  // (`splits`, `expands`), the lexer's `exact` (a `$` inside double quotes,
+  // an unquoted `~`) and its substitutions (`"$(…)"`). An option word over
+  // {@link ATTACHED_TAIL_SCAN_BYTES} is not scanned tail by tail (the scan is
+  // quadratic in the word): the line is refused. Every word counts,
+  // `--` or not: nobody knows this program's operands, and a secret-named
+  // variable is a word the shell builds like any other. Only a literal
+  // credential path is left out as the read ({@link isCredentialArgWord});
+  // `'$X'` is a literal.
   const answered = outranking === null && !fetchOutranksCredential ? (credential ?? redirectCredential) : null;
   if (answered !== null) {
+    const refused: { outcome?: SegmentOutcome } = {};
     const more = foldedOnly((): ProtectedBeside[] => {
       const rest = restOfWalk();
       if (rest.ok) return protectedBeside(rest);
+      // A copy that WRITES a credential path, and whose walk refuses: the
+      // refusal stands (the review of the M1 fold on #706). Its answer at
+      // dbebd65d was that walk, deferred; a refusal is the strictest answer,
+      // so the union of main's answer and the write's class is the refusal.
+      if (copyWrites.words.size > 0 || copyWrites.landings.length > 0) {
+        refused.outcome = rest;
+        return [];
+      }
       const optionValues = args.flatMap((arg) => {
         const equals = arg.indexOf("=");
         if (equals === -1) return [];
         const value = arg.slice(equals + 1);
         return value.length === 0 || isCredentialReadWord(value, protectedPaths) ? [] : [value];
       });
-      const named = [sideScan?.found ?? null, strictestProtected(optionValues, protectedPaths)];
-      return besideProtected(answered.class, named).more ?? [];
+      // An option word too long to scan tail by tail may carry any path, one
+      // that outranks the credential among them: the line is refused, as a
+      // short one that outranks it is (below).
+      if (args.some(isLongAttachedOption)) {
+        refused.outcome = rest;
+        return [];
+      }
+      const attached = args.flatMap(attachedOptionValues).filter((value) => !isCredentialReadWord(value, protectedPaths));
+      const optionHit = strictestProtected(optionValues, protectedPaths);
+      const attachedHit = strictestProtected(attached, protectedPaths);
+      if ([optionHit, attachedHit].some((hit) => hit !== null && outranksCredential(hit.surface))) {
+        refused.outcome = rest;
+        return [];
+      }
+      const built = segment.words
+        .slice(cursor + 1)
+        .find(
+          (word) =>
+            (word.splits || word.expands || !word.exact || word.substitutions.length > 0) &&
+            !isCredentialArgWord(word, protectedPaths, GLOB_READ_BINS.has(basename)),
+        );
+      const named = [sideScan?.found ?? null, optionHit, attachedHit];
+      const unknown: ProtectedBeside[] =
+        built === undefined ? [] : [{ class: "policy.core", rule: "copy-target-unknown", path: built.text }];
+      return besideProtected(answered.class, named, "protected-path", unknown).more ?? [];
     });
-    return { ok: true, ...answered, ...(more.length === 0 ? {} : { more: [...more] }) };
+    if (refused.outcome !== undefined) return refused.outcome;
+    return addWritten(addPossible({ ok: true, ...answered, ...(more.length === 0 ? {} : { more: [...more] }) }));
   }
-  return restOfWalk();
+  return addWritten(addPossible(restOfWalk()));
+
+  /**
+   * The answer main gives a copy that writes a credential path ({@link
+   * credentialWrites}: a credential destination word, or a source landing as
+   * one), with the class each written path takes ADDED (build-1's M1 on #706,
+   * the lead's ruling CLAIMS L62686: a union, never a swap). The line is
+   * walked as main walks it, so every class main reports stays, in main's
+   * order (`rsync -a --log-file=.approval/log/events.jsonl README.md
+   * .approval/env` keeps `log.mutate`). Where main answered with the
+   * credential class itself (`cp README.md .approval/env`), the write's class
+   * answers first and the credential touch rides beside it, as for any path
+   * that outranks the credential (`cp .approval/env APPROVAL.md`); elsewhere
+   * the write's classes main lacks are added after main's. Where main's walk
+   * ended on a branch that does not carry the credential touch (`cp -t
+   * .approval/env APPROVAL.md`), it is carried. A refusal stays.
+   */
+  function addWritten(outcome: SegmentOutcome): SegmentOutcome {
+    const touch = credential ?? redirectCredential;
+    if (!outcome.ok || touch === null || (copyWrites.words.size === 0 && copyWrites.landings.length === 0)) return outcome;
+    const hit = strictestProtected([...copyWrites.words, ...copyWrites.landings], protectedPaths);
+    const written: ProtectedBeside[] = hit === null ? [] : [hit, ...hit.others].map((each) => ({ class: each.surface, rule: "protected-path", path: each.path }));
+    if (hit !== null && outcome.class === touch.class && outcome.also === undefined && outranksCredential(hit.surface)) {
+      const more: ProtectedBeside[] = [];
+      for (const entry of [...(outcome.more ?? []), ...written.slice(1)]) {
+        if (entry.class === hit.surface || entry.class === touch.class || more.some((have) => have.class === entry.class)) continue;
+        more.push(entry);
+      }
+      return {
+        ok: true,
+        class: hit.surface,
+        rule: "protected-path",
+        path: hit.path,
+        also: { class: outcome.class, rule: outcome.rule, ...(outcome.path === undefined ? {} : { path: outcome.path }) },
+        ...(more.length === 0 ? {} : { more }),
+      };
+    }
+    const have = new Set([outcome.class, ...(outcome.also === undefined ? [] : [outcome.also.class]), ...(outcome.more ?? []).map((entry) => entry.class)]);
+    const also = outcome.also ?? (have.has(touch.class) ? undefined : touch);
+    if (also !== undefined) have.add(also.class);
+    const added: ProtectedBeside[] = [];
+    for (const entry of [...written, { class: touch.class, rule: touch.rule, ...(touch.path === undefined ? {} : { path: touch.path }) }]) {
+      if (have.has(entry.class)) continue;
+      have.add(entry.class);
+      added.push(entry);
+    }
+    if (also === outcome.also && added.length === 0) return outcome;
+    return {
+      ...outcome,
+      ...(also === undefined ? {} : { also }),
+      ...(added.length === 0 && outcome.more === undefined ? {} : { more: [...(outcome.more ?? []), ...added] }),
+    };
+  }
+
+  /**
+   * The answer with the protected class of each credential path an
+   * unreadable copy may write ({@link CredentialWrites.possible}) added after
+   * every class it already reports, one entry per class. A refusal stays.
+   */
+  function addPossible(outcome: SegmentOutcome): SegmentOutcome {
+    if (copyWrites.possible.length === 0 || !outcome.ok) return outcome;
+    const hit = strictestProtected(copyWrites.possible, protectedPaths);
+    if (hit === null) return outcome;
+    const have = new Set([outcome.class, ...(outcome.also === undefined ? [] : [outcome.also.class]), ...(outcome.more ?? []).map((entry) => entry.class)]);
+    const added: ProtectedBeside[] = [];
+    for (const each of [hit, ...hit.others]) {
+      if (have.has(each.surface)) continue;
+      have.add(each.surface);
+      added.push({ class: each.surface, rule: "protected-path", path: each.path });
+    }
+    return added.length === 0 ? outcome : { ...outcome, more: [...(outcome.more ?? []), ...added] };
+  }
 
   /**
    * The walk from the credential tier on. Its body keeps the indentation it
@@ -13315,7 +15253,8 @@ function classifySegmentWithVerb(
       fetched.unknown !== null ||
       fetchedOutputProtected !== null ||
       strictestProtected([...lexWords.map((word) => word.text), ...resolvedWords], protectedPaths) !== null ||
-      [...lexWords.map((word) => word.text), ...resolvedWords].some((word) => isCredentialPathAsRead(word)) ||
+      lexWords.some((word) => isCredentialPathAsRead(word.text, wordFacts(word))) ||
+      resolvedWords.some((word) => isCredentialPathAsRead(word)) ||
       // F-12 fold (review-b N2): APFS and the default macOS volume are case-
       // insensitive, so `>> approval.md` is the policy file. Fail closed: a bare
       // word that names a protected file or a credential in ANY case refuses.
@@ -13381,7 +15320,7 @@ function classifySegmentWithVerb(
   // still read them ({@link globWriteOperands}).
   // Review of 039b840a (finding 2): a copy tool's argv read by its option
   // table, so an option's value is never taken for the destination.
-  const plan = copyPlan(basename, args);
+  const plan = argsPlan();
   // Lead ruling L61587: a recursive delete, move or chmod of a PARENT of an
   // organ directory (`rm -rf .`, `mv "$PWD" ../x`, `chmod -R 000 ~`), decided
   // by the hook's listing of it ({@link organParentClass}).
@@ -13449,7 +15388,7 @@ function classifySegmentWithVerb(
     false,
     glob,
   );
-  const copyUnknown = copyFamily ? copyArgvUnknown(args, argFlags) : null;
+  const copyUnknown = copyFamily ? argvUnknown() : null;
   // The effectful scan by text, as `laterProtected` reads it: the positionals
   // (and an upload's sources) with the prose skip, and the `<` targets.
   // Beside a credential answer taken above it is the scan {@link
@@ -13520,7 +15459,15 @@ function classifySegmentWithVerb(
   // the destination, so the destination is unknown: `policy.core`, unless a
   // named path already earns a class at least as strict (the log).
   if (copyUnknown !== null) {
-    const named = strictestProtectedWrite(copyWords, protectedPaths, writtenInexact, false, glob);
+    const named = strictestProtectedWrite(
+      copyWords,
+      protectedPaths,
+      writtenInexact,
+      false,
+      glob,
+      strictestProtected(copyWords, protectedPaths, false),
+      besideRead === null ? [...positionalLiterals, ...readLiterals] : [],
+    );
     if (named !== null && protectedRank(named.surface) <= protectedRank("policy.core")) {
       return {
         ok: true,
@@ -13593,13 +15540,24 @@ function classifySegmentWithVerb(
     // §7's "a copy is classified `account.credential` in either direction"
     // holds as written.
     if (deferredCredential !== null && outranking !== null) {
+      // GLOB-WRITE here too (#682; codex's HOLD at d24f98ab): a word the
+      // command writes that the shell may still glob is judged by every
+      // guarded path it could name, as the operand scan below judges it.
+      // `rm -rf .approval/* < .approval/env` deletes `.approval/log`, so
+      // `log.mutate` answers, `policy.core` and the credential read beside
+      // it. Only a raise changes the answer: with none it is `outranking`.
+      const patterned = judged.filter(writtenInexact);
+      const plain = patterned.length === 0 ? null : strictestProtected(patterned, protectedPaths, true);
+      const read = patterned.length === 0 ? null : strictestProtectedWrite(patterned, protectedPaths, writtenInexact, true, glob);
+      const raised = read !== null && (plain === null || protectedRank(read.surface) < protectedRank(plain.surface));
+      const answer = raised ? (strongerProtected(outranking, read) ?? outranking) : outranking;
       return {
         ok: true,
-        class: outranking.surface,
+        class: answer.surface,
         rule: "protected-path",
-        path: outranking.path,
+        path: answer.path,
         also: deferredCredential,
-        ...besideProtected(outranking.surface, [outranking]),
+        ...besideProtected(answer.surface, [answer]),
       };
     }
     // GLOB-WRITE: a word the command WRITES that the shell may still glob, or
@@ -13610,7 +15568,7 @@ function classifySegmentWithVerb(
     // text answer of them is handed in: the protected scan is made once.
     const operandNamed =
       besideRead === null
-        ? strictestProtectedWrite(judged, protectedPaths, writtenInexact, true, glob)
+        ? strictestProtectedWrite(judged, protectedPaths, writtenInexact, true, glob, strictestProtected(judged, protectedPaths, true), positionalLiterals)
         : strictestProtectedWrite(besideRead.positionals, protectedPaths, writtenInexact, true, glob, besideRead.named);
     // Lead ruling L61195 (b): a copy, move, link or install into a DIRECTORY
     // writes `<dir>/<basename of each source>`, so that file is judged too
@@ -13751,7 +15709,7 @@ function classifySegmentWithVerb(
     const gitWrite =
       gitWriteRefinement(writeTargets, named, context.shellDir, true, context.lineNamesGit === true, (word) =>
         // Lead ruling L61587: a parent whose listing holds `.git`.
-        organParent.git.has(word) || dotGlobNamesGit(word, inexact, glob),
+        organParent.git.has(word) || dotGlobNamesGit(word, inexact, glob) || splicedNamesGit(word, inexact, glob),
       ) ??
       (sedLiteral
         ? (sedLiteralGitWrite(readOutputs, context.shellDir, context.lineNamesGit === true) ??
@@ -13974,7 +15932,7 @@ function innerPartRefused(part: LexSegment, protectedPaths: readonly ProtectedPa
         DIRECTORY_VERBS.has(word.text.split("/").pop() ?? "") ||
         protectedNameFolded(word.text, protectedPaths) ||
         strictestProtected([word.text], protectedPaths) !== null ||
-        isCredentialPathAsRead(word.text) ||
+        isCredentialPathAsRead(word.text, wordFacts(word)) ||
         isCredentialPathAsRead(foldNameLower(word.text)),
     )
   );
@@ -14046,7 +16004,7 @@ export function classifyCommand(
   protectedPaths: readonly ProtectedPathEntry[] = [],
   context: ClassifierContext = {},
 ): CommandClassification {
-  return unionNameReadings(eachNameReading(() => classifyCommandAsRead(command, protectedPaths, context)));
+  return withClassifyCall(() => unionNameReadings(eachNameReading(() => classifyCommandAsRead(command, protectedPaths, context))));
 }
 
 /**
@@ -14060,7 +16018,7 @@ export function classifyCommandInThisReading(
   protectedPaths: readonly ProtectedPathEntry[] = [],
   context: ClassifierContext = {},
 ): CommandClassification {
-  return classifyCommandAsRead(command, protectedPaths, context);
+  return withClassifyCall(() => classifyCommandAsRead(command, protectedPaths, context));
 }
 
 /**
@@ -14112,6 +16070,16 @@ export function unionNameReadings(readings: readonly CommandClassification[]): C
 }
 
 function classifyCommandAsRead(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  context: ClassifierContext,
+): CommandClassification {
+  // Dollar quotes read, and where one was, main's reading beside (see `withDollarQuotesKept`).
+  const readings = eachDollarQuoteReading(() => classifyCommandAsReadBeside(command, protectedPaths, context));
+  return readings.length === 1 ? readings[0] : unionNameReadings(readings);
+}
+
+function classifyCommandAsReadBeside(
   command: string,
   protectedPaths: readonly ProtectedPathEntry[],
   context: ClassifierContext,
@@ -14514,7 +16482,24 @@ export interface CommandSegmentShape {
 }
 
 export function commandSegmentShapes(command: string): CommandSegmentShape[] | null {
-  const lexed = lex(command);
+  return shapesOf(lex(command));
+}
+
+/**
+ * {@link commandSegmentShapes} of ONE classified segment's text, which ends
+ * where its line ends and so leaves out the body of a heredoc it opens:
+ * `cat > .git/c* <<'EOF'` is read as the segment it is, where lexing it as a
+ * whole command refuses it as a heredoc never terminated (review-b's M2 at
+ * 3774fdd4: the git-directory pass skipped every heredoc segment, so
+ * `cat > .git/c* <<'EOF' … EOF` lost the `vcs.history.rewrite` that
+ * `echo x > .git/c*` kept). The body is data, or a substitution the
+ * classifier read from the whole line; nothing here reads it.
+ */
+export function classifiedSegmentShapes(text: string): CommandSegmentShape[] | null {
+  return shapesOf(lex(text, true));
+}
+
+function shapesOf(lexed: LexResult): CommandSegmentShape[] | null {
   if (!lexed.ok) return null;
   const expands = (word: LexWord): boolean => word.substitutions.length > 0 || /[$`]/u.test(word.text);
   return lexed.segments.map((segment) => {

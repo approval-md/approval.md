@@ -28,7 +28,7 @@ import {
   type ClassifiedSegment,
   type CommandClassification,
 } from "../src/core/command-class.js";
-import { refineWriteScope, resolveScratchRoots, resolveWriteRoots } from "../src/cli/hook.js";
+import { refineWriteScope, resolveScratchRoots, resolveWriteRoots, writeLandingMemo } from "../src/cli/hook.js";
 
 /** dist/tests/cli-hook-write-scope.test.js -> dist/src/cli/main.js */
 const CLI_ENTRY = fileURLToPath(new URL("../src/cli/main.js", import.meta.url));
@@ -90,6 +90,31 @@ function decide(command: string, roots: readonly string[] = ROOTS): Verdict {
   assert.ok(segment !== undefined);
   return { cls: segment.class, rule: segment.rule, note: refined.notes.join(" ") };
 }
+
+test("the hook call's kept target answers are the disk's: the same verdicts as asking each time, twice over (build-5, the write pass's second reading)", () => {
+  const memo = writeLandingMemo();
+  const commands = [
+    "cp x build/y",
+    "cp x out/y",
+    "cp x out/secrets/deep/y",
+    "cp x ../elsewhere/y",
+    `cp x ${join(scratch, "link", "y")}`,
+    `cp x ${join(scratch, "z")}`,
+    "cp x nowhere/at/all",
+    "mv x build",
+    "cp x build/y out/y",
+  ];
+  for (const round of [1, 2]) {
+    for (const command of commands) {
+      const classified = pure(command);
+      assert.deepEqual(
+        refineWriteScope(classified, ROOTS, workspace, memo.writeTarget),
+        refineWriteScope(classified, ROOTS, workspace),
+        `${command} (round ${String(round)})`,
+      );
+    }
+  }
+});
 
 // ---------------------------------------------------------------------------
 // 1. The destination the text cannot see
