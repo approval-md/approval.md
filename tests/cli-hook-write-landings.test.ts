@@ -1163,6 +1163,61 @@ test("file tools: out of scope only when the policy opts in", () => {
   assert.equal(verdict(runCli(["hook", "claude-code", "--as", "agent:cc"], opted, event("Write", { file_path: join(opted, "in.txt"), content: "x" }))).permission, "allow");
 });
 
+/** `cp a -t d0 s0/x -t d1 s1/x …` up to about `bytes`: every landing is inside the workspace. */
+function manyTargets(bytes: number): string {
+  let line = "cp a";
+  for (let index = 0; Buffer.byteLength(line) < bytes; index += 1) line += ` -t d${String(index)} s${String(index)}/x`;
+  return line;
+}
+
+test("past the -t landings cap: files.write.out_of_scope beside files.write.guarded when a write_scope is set, guarded only when not (lead ruling L63122)", () => {
+  // About 78 `-t` at 1 KB: past INTO_EXTRA_LANDINGS_CAP, so the landings after
+  // it are not judged, though each would be inside the workspace.
+  const many = manyTargets(1024);
+  assert.ok(Buffer.byteLength(many) <= 1100, String(Buffer.byteLength(many)));
+  const scoped = see(many, optedIn());
+  assert.ok(scoped.ok, scoped.notes);
+  assert.ok(scoped.classes.includes(GUARDED) && scoped.classes.includes(OUT), scoped.classes.join(","));
+  assert.match(scoped.notes, /write-out-of-scope: .*more landings than this hook judges/u, scoped.notes);
+  const plain = see(many);
+  assert.ok(plain.classes.includes(GUARDED) && !plain.classes.includes(OUT), plain.classes.join(","));
+  // Within the cap each landing is judged: inside the workspace, neither class.
+  const few = see("cp a -t d0 -t d1 s0/x", optedIn());
+  assert.ok(!few.classes.includes(GUARDED) && !few.classes.includes(OUT), few.classes.join(","));
+});
+
+test("the -t landings cap: the first directory is never capped, and the edge is exact (1,024 judged, 1,025 guarded) (build-1's N1 and N2 on #711)", () => {
+  const files = (n: number): string => Array.from({ length: n }, (_, i) => `f${String(i)}`).join(" ");
+  // One -t: every landing is in the first directory, which the cap does not count.
+  for (const n of [1100, 3000]) {
+    const one = see(`cp -t d0 ${files(n)}`);
+    assert.ok(one.ok && !one.classes.includes(GUARDED), `one -t, ${String(n)} files: ${one.classes.join(",")}`);
+  }
+  // Two -t: the second directory takes every source, the second -t value among them, so n files land n + 1 times
+  // there. 1,023 files: 1,024 landings, all judged (inside the workspace, no guarded class). 1,024 files: 1,025, past
+  // INTO_EXTRA_LANDINGS_CAP, so the segment is guarded as unreadable.
+  const at = see(`cp -t d0 -t d1 ${files(1023)}`);
+  assert.ok(at.ok && !at.classes.includes(GUARDED), `at the cap: ${at.classes.join(",")}`);
+  const past = see(`cp -t d0 -t d1 ${files(1024)}`);
+  assert.ok(past.ok && past.classes.includes(GUARDED), `one past the cap: ${past.classes.join(",")}`);
+});
+
+test("past the -t landings cap through the real hook: out_of_scope human-only denies the line, not a guarded request (lead ruling L63122)", () => {
+  const dir = gate(["  files.write.workspace: { autonomy: autonomous }", `  ${OUT}: { autonomy: human-only }`]);
+  let n = 0;
+  const hook = (command: string): { permission: string; reason: string } => {
+    n += 1;
+    // The session's cwd is the project, so each landing is inside the write root.
+    const input = JSON.stringify({ hook_event_name: "PreToolUse", session_id: "l63122", tool_use_id: `l63122-${String(n)}`, cwd: dir, transcript_path: "/dev/null", tool_name: "Bash", tool_input: { command } });
+    return verdict(runCli(["hook", "claude-code", "--as", "agent:cc", "--timeout", "1s", "--interval", "200ms"], dir, input));
+  };
+  const few = hook("cp a -t d0 -t d1 s0/x");
+  assert.equal(few.permission, "allow", few.reason);
+  const many = hook(manyTargets(1024));
+  assert.equal(many.permission, "deny", many.reason);
+  assert.match(many.reason, /files\.write\.out_of_scope resolves to human-only/u, many.reason);
+});
+
 test("the open window treats files.write.guarded as a manual class: decision E", () => {
   const dir = gate(["  files.write.workspace: { autonomy: autonomous }"], "manual");
   const answers = ["understood"];
