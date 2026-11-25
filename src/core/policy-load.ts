@@ -83,9 +83,10 @@ import { withNamesAsSpelled } from "./name-fold.js";
 // and erased at build, so nothing circular exists at runtime — and the
 // alternative, a private strictness table here, is exactly the drift a floor
 // must never have from the resolution it floors.
-import { resolve, STRICTNESS } from "./policy-match.js";
+import { CLASS_MINIMUMS, resolve, STRICTNESS } from "./policy-match.js";
 import { promptBlockErrors } from "./prompt-layout.js";
 import type { ReadScope } from "./read-scope.js";
+import type { WriteScope } from "./write-scope.js";
 // APRV-324. Same shape as the matcher import above: this module imports a
 // FUNCTION from `sender-identity.ts`, which imports only this module's TYPES,
 // so the cycle is erased at build and the rule the loader enforces and the rule
@@ -327,6 +328,15 @@ export interface Policy {
    */
   read_scope?: ReadScope;
   /**
+   * Proposed SPEC.md §5.2 (design v4, writes outside the workspace):
+   * directories an agent's writes may land in, beyond the built-in roots.
+   * ADDITIVE, as `read_scope` is. Its presence, or a `files.write.out_of_scope`
+   * row, opts the policy in to that class (`core/write-scope.ts`,
+   * `writeScopeOptedIn`); without either a policy keeps today's answers for
+   * out-of-scope writes.
+   */
+  write_scope?: WriteScope;
+  /**
    * Amended SPEC.md §5.2 (APRV-499, proposed): harness tool names mapped to
    * declared classes, ORDERED, first match wins. Consulted by the harness hook
    * only for a call the adapter's own tables do not claim; see
@@ -520,6 +530,14 @@ export type PolicyLoadErrorCode =
    * {@link checkProtectedRouteFloor}.
    */
   | "protected-route-floor"
+  /**
+   * Proposed SPEC.md §5.2 (design v4, point 5): a row that names a class with
+   * a built-in minimum (`files.write.guarded`) below that minimum. Only the
+   * class's own key is refused; a wildcard that would resolve lighter is
+   * clamped at resolution instead, so no existing policy fails over it. See
+   * {@link checkClassMinimums}.
+   */
+  | "class-minimum"
   /**
    * Amended SPEC.md §5.2 (APRV-324): two approvers declare one sender id. Like
    * `protected-route-floor` it is a relationship between two parts of a file
@@ -1019,6 +1037,14 @@ export function loadPolicyText(
     return failure("protected-route-floor", `${resolved.path}: ${floor}`, undefined, parsed.value);
   }
 
+  // Design v4, point 5: a row naming a class with a built-in minimum below
+  // it. Beside the route floor, and for the same reason: a rule the author
+  // believes in force that the runtime would never apply.
+  const minimum = checkClassMinimums(loaded);
+  if (minimum !== null) {
+    return failure("class-minimum", `${resolved.path}: ${minimum}`, undefined, parsed.value);
+  }
+
   // APRV-500, the reservation (design rule 8). Last, because it is the one
   // refusal of a file that is otherwise wholly valid: every check above passed,
   // and the only fault is that this core would ignore what the block asks for.
@@ -1152,6 +1178,30 @@ export function checkProtectedRouteFloor(load: PolicyLoadResult): string | null 
         ? `${describeLevel(routed.declaredAutonomy, routed.liveRate)} — weaker than the \`policy.edit\` line's own ${describeLevel(line.declaredAutonomy, line.liveRate)}`
         : `${describeLevel(irreversibleRouted.declaredAutonomy, irreversibleRouted.liveRate)} for reversible: false — weaker than the \`policy.edit\` line's effective ${describeLevel(irreversibleLine.declaredAutonomy, irreversibleLine.liveRate)} for reversible: false`;
       return `protected_paths entry ${JSON.stringify(entry.path)} routes a built-in policy.edit path to ${JSON.stringify(parsedEntry.routed)}, which resolves ${comparison}. \`protected_paths\` is additive: it may widen the protected surface and may never narrow it, and routing a built-in path to a looser sub-class would narrow it without removing anything from any list. Declare ${JSON.stringify(parsedEntry.routed)} at least as strictly as \`policy.edit\`, or route a path the runtime does not already protect.`;
+    }
+  }
+  return null;
+}
+
+/**
+ * The class minimums at load (design v4, point 5): a row whose KEY is a class
+ * with a built-in minimum (`files.write.guarded`) may make it stricter and
+ * never lighter. Only that exact key is read. A wildcard row (`files.*`, `*`),
+ * `defaults.autonomy` and `allow_irreversible` are clamped at resolution
+ * (`core/policy-match.ts`, `CLASS_MINIMUMS`) rather than refused here, so a
+ * policy written before the class existed loads exactly as it did.
+ *
+ * `null` when the policy is clear; otherwise the message.
+ */
+export function checkClassMinimums(load: PolicyLoadResult): string | null {
+  if (!load.ok) return null;
+  const classes = load.policy.classes ?? {};
+  for (const [cls, minimum] of Object.entries(CLASS_MINIMUMS)) {
+    if (!Object.prototype.hasOwnProperty.call(classes, cls)) continue;
+    const rule = classes[cls];
+    if (rule === undefined) continue;
+    if (STRICTNESS[rule.autonomy] > STRICTNESS[minimum]) {
+      return `classes.${cls} declares ${rule.autonomy}, lighter than the class's built-in minimum ${minimum}. A write onto the guarded list (or to a target that cannot be read) is never lighter than ${minimum}: the runtime would clamp the row, so a policy that says otherwise is refused rather than loaded with a rule its author believes is in force. Declare ${cls} at ${minimum} or human-only, or remove the row.`;
     }
   }
   return null;
