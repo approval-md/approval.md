@@ -1517,19 +1517,27 @@ test("a credential read is walked once: it costs about what the same line with a
   // The credential answer goes on with the walk it would have taken without
   // the credential word, and its protected scan is the one the credential
   // tier already made, so the line is walked once. A ratio of CPU time over
-  // 512 KiB of plain words, each side the least of five runs, taken in turn. Measured on
-  // this change: 0.93 to 1.04 of the control; with the protected scan made a
-  // second time, 1.43 to 1.55. The rest of the walk without that scan costs
-  // too little beside the lexing to show here, made once or twice.
+  // 64 KiB of plain words. With the protected scan made a second time the
+  // line costs 1.3 to 1.6 of its control; the rest of the walk without that
+  // scan costs too little beside the lexing to show here, made once or twice.
   //
   // Every word is distinct (`x0 x1 x2 …`). The control's credential check
   // judges each of its words, as the credential line's side scan judges each
   // of its own. With one word repeated, a check that judges a word once
-  // (#682's, in `credentialTouch`) skipped all but one on the control alone:
-  // the control became cheaper than the work it stands for, and the node
-  // ratio rose from about 0.97 to about 1.1 here and 1.24 to 1.29 under CI's
-  // load, with the credential line no slower.
-  const SIZE = 512 * 1024;
+  // (#682's, in `credentialTouch`) skipped all but one on the control alone,
+  // and the control became cheaper than the work it stands for.
+  //
+  // How it is timed. A CI runner's speed moves in phases of seconds: inside
+  // one run of this test the same 512 KiB call took 0.96 to 2.07 s. Two sides
+  // each timed as the least of a few long calls then read 0.83 to 1.17 on
+  // GitHub's runner (18 samples, sd 0.08), and 1.21 to 1.29 on the runs that
+  // went red, with the code unchanged. So the line and its control are run
+  // back to back, in a short pair that one phase covers, the order turning
+  // each round, and the answer is the MEDIAN of the pairs' ratios. Measured
+  // on GitHub's runner beside a shard's other files (run 45557906118): 120
+  // pairs read 0.92 to 1.00 (18 samples, sd 0.02); with the credential side
+  // given 1.5 times the work, 40 pairs read 1.40 to 1.57.
+  const SIZE = 64 * 1024;
   let words = "";
   for (let at = 0; words.length < SIZE; at += 1) words += `x${at} `;
   const cpu = (run: () => void): number => {
@@ -1538,41 +1546,46 @@ test("a credential read is walked once: it costs about what the same line with a
     const used = process.cpuUsage(start);
     return (used.user + used.system) / 1e6;
   };
-  // The two sides are timed in turn (control, credential, control, …), each
-  // the least of five. Timed one after the other, three and three, a swing in
-  // the runner's load between the two halves moved one side alone: main
-  // 91f91756 failed its own run at 0.820 s against 0.680 s (1.21), and #682 at
-  // 1.641 s against 1.349 s, with no ratio over 1.05 in 120 quiet runs of the
-  // same trees. In turn, a swing falls on both sides.
-  const pair = (controlRun: () => void, spentRun: () => void): [number, number] => {
-    let leastControl = Infinity;
-    let leastSpent = Infinity;
-    for (let round = 0; round < 5; round += 1) {
-      leastControl = Math.min(leastControl, cpu(controlRun));
-      leastSpent = Math.min(leastSpent, cpu(spentRun));
+  /** The median, over `rounds` back-to-back pairs, of the line's cost over its control's. */
+  const medianRatio = (controlRun: () => void, spentRun: () => void, rounds: number): number => {
+    // Once each, untimed: the first call pays for the compiler.
+    controlRun();
+    spentRun();
+    const ratios: number[] = [];
+    for (let round = 0; round < rounds; round += 1) {
+      let control: number;
+      let spent: number;
+      if (round % 2 === 0) {
+        control = cpu(controlRun);
+        spent = cpu(spentRun);
+      } else {
+        spent = cpu(spentRun);
+        control = cpu(controlRun);
+      }
+      ratios.push(spent / control);
     }
-    return [leastControl, leastSpent];
+    ratios.sort((left, right) => left - right);
+    const middle = ratios.length >> 1;
+    return ratios.length % 2 === 1 ? ratios[middle]! : (ratios[middle - 1]! + ratios[middle]!) / 2;
   };
-  const [control, spent] = pair(
+  const copy = medianRatio(
     () => classifyCommand(`cp notes.txt design/x ${words}`, TWO_ROUTES),
     () => classifyCommand(`cp .approval/env design/x ${words}`, TWO_ROUTES),
+    40,
   );
-  assert.ok(spent <= 1.2 * control, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
+  assert.ok(copy <= 1.2, `cp: the median of 40 pairs is ${copy.toFixed(3)} of the control`);
   assert.deepEqual(pure(`cp .approval/env design/x ${"x ".repeat(8)}`, TWO_ROUTES), [CRED, "policy.edit.design protected-path"]);
   // With #686 in, a copy's landings cost the control most of its time, so a
-  // second text scan no longer shows on the copy (0.92 to 1.02 with it, 0.75
-  // to 0.81 without). A program with no copy plan has no landings: there the
-  // line costs 0.91 to 1.02 of its control with one scan, and 1.32 to 1.86
-  // with the scan made twice (this Mac, merge of 9122cb3e). With distinct
-  // words: 0.76 to 0.96 with one scan, on main 03931ea2 and on #682 alike
-  // (102 runs, 72 of them beside 3 or 15 more copies of this test); 1.36 to
-  // 1.48 with the protected scan made twice, 1.46 to 1.58 with the whole side
-  // scan made twice (this Mac, main 03931ea2).
-  const [plainControl, plainSpent] = pair(
+  // second text scan no longer shows on the copy (the pair reads 0.69 to 0.79
+  // on the runner either way). A program with no copy plan has no landings:
+  // there a scan made twice shows, so that pair is the one that guards it,
+  // and it takes the 120 rounds.
+  const plain = medianRatio(
     () => classifyCommand(`node x.js notes.txt design/x ${words}`, TWO_ROUTES),
     () => classifyCommand(`node x.js .approval/env design/x ${words}`, TWO_ROUTES),
+    120,
   );
-  assert.ok(plainSpent <= 1.2 * plainControl, `node: ${plainSpent.toFixed(3)} s against a control of ${plainControl.toFixed(3)} s`);
+  assert.ok(plain <= 1.2, `node: the median of 120 pairs is ${plain.toFixed(3)} of the control`);
   assert.deepEqual(pure(`node x.js .approval/env design/x ${"x ".repeat(8)}`, TWO_ROUTES), [CRED, "policy.edit.design protected-path"]);
 });
 
