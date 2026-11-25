@@ -2069,3 +2069,107 @@ test("a line of many folded segments costs about what the same line spelled cano
   const spent = cpu(() => classifyCommand(fill(`echo x > .Cursor/hoo${KELVIN}s.json; `)));
   assert.ok(spent <= 8 * control + 1, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
 });
+
+// build-1's M1 on #706, the lead's ruling CLAIMS L62686: a copy INTO a
+// credential path ADDS the class that write takes to the answer main gives
+// the line, a union and never a swap. `[line, main 91f91756's answer, now]`:
+// main's classes, in main's order, with `policy.core` first where main
+// answered with the credential class itself.
+const CRED_WRITE_UNION: readonly (readonly [string, readonly string[], readonly string[]])[] = [
+  // rsync really writes its --log-file and its --temp-dir.
+  ["rsync -a --log-file=.approval/log/events.jsonl README.md .approval/env", [CRED, "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+  ["rsync -a --temp-dir=.github/workflows README.md .approval/env", [CRED, "policy.edit protected-path"], ["policy.core protected-path", CRED, "policy.edit protected-path"]],
+  ["rsync -a --log-file=~/.hermes/scripts/x.sh README.md .approval/env", [CRED, "cron.manage protected-path"], ["policy.core protected-path", CRED, "cron.manage protected-path"]],
+  // Glob sources: GLOB-WRITE's readings of them stay.
+  ["rsync -a --remove-source-files .appr*/log/ .approval/env", [CRED, "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+  ["rsync -a .gith*/ ~/.hermes/.env", [CRED, "policy.edit protected-path", "policy.edit.ci protected-path"], ["policy.core protected-path", CRED, "policy.edit protected-path", "policy.edit.ci protected-path"]],
+  ["rsync ~/.hermes/scr*/x.sh .approval/env", [CRED, "cron.manage protected-path"], ["policy.core protected-path", CRED, "cron.manage protected-path"]],
+  ["scp .gith*/workflows/ci.yml .approval/keys/k1", [CRED, "policy.edit.ci protected-path"], ["policy.core protected-path", CRED, "policy.edit.ci protected-path"]],
+  ["rsync -a ~/.hermes/* .approval/env", [CRED, "policy.core protected-path", "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+  // Main's walk ends on a branch that drops the credential touch: it is carried (build-1's m10).
+  ["cp -t .approval/env APPROVAL.md", ["policy.core protected-path"], ["policy.core protected-path", CRED]],
+  ["cp ~/.hermes/.env -t .approval s/env", ["policy.core protected-path", "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+  ["cp ~/.hermes/.env -t .approval -t .approval s/env", ["policy.core protected-path", "log.mutate protected-path"], ["policy.core protected-path", CRED, "log.mutate protected-path"]],
+  // A landing under a directory where any name is credential material.
+  ["cp .approval/env s/k1 .approval/keys/", [CRED], ["policy.core protected-path", CRED]],
+];
+
+test("a copy into a credential path keeps every class main gave it and adds the write's (build-1's M1 on #706)", () => {
+  for (const [line, main, want] of CRED_WRITE_UNION) {
+    const got = pure(line, TWO_ROUTES);
+    assert.deepEqual(got, want, line);
+    for (const entry of main) assert.ok(got.includes(entry), `${line}: ${entry} lost`);
+  }
+  // The sources land in the last directory named (GNU cp refuses a second
+  // `-t`): a landing in an earlier one adds nothing, and main's answer stands.
+  assert.deepEqual(pure("cp ~/.hermes/.env -t .approval -t notes s/env", TWO_ROUTES), ["policy.core protected-path", "log.mutate protected-path"]);
+  // Only a name that can end a credential path lands as one; its spelling in
+  // another case does too. Main's answer for each: policy.core and the log.
+  const mainT = ["policy.core protected-path", "log.mutate protected-path"];
+  for (const name of ["ENV", "Env.local", "vault.enc"]) {
+    assert.deepEqual(pure(`cp ~/.hermes/.env -t .approval s/README.md s/${name}`, TWO_ROUTES), ["policy.core protected-path", CRED, "log.mutate protected-path"], name);
+  }
+  for (const name of ["README.md", "envoy", "enſ", "keys.txt"]) {
+    assert.deepEqual(pure(`cp ~/.hermes/.env -t .approval s/${name}`, TWO_ROUTES), mainT, name);
+  }
+});
+
+/** The read's policy LM: the credential unattended, `policy.core` a tap, the log, cron and workflow classes human-only. */
+const POLICY_LM = [
+  ...POLICY_HEAD,
+  "protected_paths:",
+  "  - { path: .github/workflows/, class: policy.edit.ci }",
+  "classes:",
+  ...POLICY_TAIL,
+  "  account.credential:",
+  "    autonomy: autonomous",
+  "  policy.core:",
+  "    autonomy: manual",
+  "  log.mutate:",
+  "    autonomy: human-only",
+  "  cron.manage:",
+  "    autonomy: human-only",
+  "  policy.edit:",
+  "    autonomy: human-only",
+  "  policy.edit.ci:",
+  "    autonomy: human-only",
+  "```",
+  "",
+].join("\n");
+
+test("through the real hook, a copy into a credential path is refused where main refused it (build-1's M1 on #706, policy LM)", { skip }, () => {
+  const dir = attestedLab(POLICY_LM);
+  for (const [command, cls] of [
+    ["rsync -a --log-file=.approval/log/events.jsonl README.md .approval/env", "log.mutate"],
+    ["rsync -a --temp-dir=.github/workflows README.md .approval/env", "policy.edit"],
+    ["rsync -a --log-file=~/.hermes/scripts/x.sh README.md .approval/env", "cron.manage"],
+  ] as const) {
+    const decision = decide(dir, bash(command));
+    assert.equal(decision.permission, "deny", `${command}: ${decision.reason}`);
+    assert.match(decision.reason, new RegExp(`^hook-class-human-only: class ${cls.replace(/\./gu, "\\.")} `, "u"), command);
+  }
+});
+
+test("a copy into a credential path with many -t targets or many sources costs about what main's walk costs (build-1's M2 and S5 on #706)", () => {
+  // The landing loop was sources times destinations; now each word is judged
+  // once. 64 KiB, CPU time, each side the least of three runs, against the
+  // same line with an ordinary source (the walk main makes).
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  const least = (run: () => void): number => Math.min(cpu(run), cpu(run), cpu(run));
+  const fill = (head: string, unit: (at: number) => string): string => {
+    let line = head;
+    for (let at = 0; line.length < 64 * 1024; at += 1) line += unit(at);
+    return line;
+  };
+  for (const unit of [(at: number) => ` -t .approval s${at}/env`, (at: number) => ` -t .approval/keys${at} s${at}/env`, (at: number) => ` -t d${at}/.approval s${at}/env.${at}`]) {
+    const line = fill("cp ~/.hermes/.env", unit);
+    const control = least(() => classifyCommand(fill("cp notes.txt", unit), TWO_ROUTES));
+    const spent = least(() => classifyCommand(line, TWO_ROUTES));
+    assert.ok(spent <= 2 * control + 0.1, `${line.slice(0, 60)}: ${spent.toFixed(3)} s against ${control.toFixed(3)} s`);
+  }
+});
