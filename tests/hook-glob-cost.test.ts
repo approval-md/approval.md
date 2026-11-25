@@ -341,11 +341,14 @@ test("a guarded name among many plain ones under an unclosed `[` run keeps its t
     { path: "SPEC.md", class: "policy.edit.spec" },
     { path: "notes-plain", class: "policy.edit.spec" },
   ];
+  // `notes-plain` routed to a class no other entry earns (above, SPEC.md
+  // earns `policy.edit.spec` again): only the plain names' own line carries it.
+  const notesOnly = [{ path: "notes-plain", class: "policy.edit.notes" }];
   const savedHome = process.env["HOME"];
   process.env["HOME"] = home;
   try {
     const run = "[".repeat(2_000);
-    const answer = (command: string, paths: typeof routed): string => {
+    const answer = (command: string, paths: readonly { path: string; class: string }[]): string => {
       const { result } = classifyForHook(command, paths, dir, [], false, [dir]);
       assert.ok(result.ok, command.slice(0, 40));
       return result.segments.map((segment) => `${segment.class}/${segment.rule}`).join(" ; ");
@@ -354,7 +357,7 @@ test("a guarded name among many plain ones under an unclosed `[` run keeps its t
     // so only a git directory's entries are on the write pass's guarded list.
     const guarded = "vcs.history.rewrite/git-dir-write";
     const resolved = (...classes: string[]): string => classes.map((cls) => ` ; ${cls}/write-resolved-landing`).join("");
-    const cases: Array<[string, typeof routed, string]> = [
+    const cases: Array<[string, readonly { path: string; class: string }[], string]> = [
       // APPROVAL.md, SPEC.md (policy.edit) and `.approval` (log.mutate) among the plain names.
       [`echo x > ${run}`, [], `${guarded}${resolved("policy.core", "policy.edit", "log.mutate")}`],
       [`echo x >> ${"[".repeat(1_100)}APPROVAL.md`, [], `${guarded}${resolved("policy.core", "policy.edit", "log.mutate")}`],
@@ -362,6 +365,9 @@ test("a guarded name among many plain ones under an unclosed `[` run keeps its t
       [`tee ${run} < README.md`, [], `${guarded} ; files.write.guarded/write-guarded${resolved("policy.core", "policy.edit", "log.mutate")}`],
       // `notes-plain` is routed: the plain names earn a class, and every match is judged together.
       [`echo x > ${run}`, routed, `${guarded}${resolved("policy.core", "policy.edit", "policy.edit.spec", "log.mutate", "policy.edit.agents", "policy.edit.ci")}`],
+      // The plain names alone earn `policy.edit.notes`: a plain line that earns a
+      // class is not set aside for the other names' line (build-1's S3 on 3f70feb7).
+      [`echo x > ${run}`, notesOnly, `${guarded}${resolved("policy.core", "policy.edit", "policy.edit.notes", "log.mutate")}`],
       // .approval/env, .git/config (also through a link), .claude/settings.json, .github/workflows/ci.yml.
       [`echo x > .approval/${run}`, [], `policy.core/redirect-protected ; ${guarded}`],
       // A git directory's entries are on the guarded list wherever it is.
@@ -380,6 +386,41 @@ test("a guarded name among many plain ones under an unclosed `[` run keeps its t
     for (const [command, paths, expected] of cases) {
       assert.equal(answer(command, paths), expected, `${command.slice(0, 40)} (${paths.length === 0 ? "no routes" : "routed"})`);
     }
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});
+
+test("a plain name that earns a class beside names that are not plain keeps its class under an unclosed `[` run (build-1's S3 on 3f70feb7)", () => {
+  // A gate directory as it is: its `log` (plain, `log.mutate`) and `env`
+  // (plain), twenty plain names, and one name that is not plain (`.Lock`). The
+  // plain names' line earns `log.mutate`, which the other names' line does
+  // not: the whole line is judged, and `log.mutate` stays.
+  const dir = join(scratch, "log-split");
+  const home = join(scratch, "log-split-home");
+  mkdirSync(join(dir, ".approval", "log"), { recursive: true });
+  mkdirSync(join(home, ".hermes"), { recursive: true });
+  const plain = Array.from({ length: 20 }, (_, index) => `p${String(index).padStart(3, "0")}${"q".repeat(60)}`);
+  for (const each of [".approval/log/events.jsonl", ".approval/env", ".approval/.Lock", ...plain.map((name) => `.approval/${name}`)]) {
+    writeFileSync(join(dir, each), "x\n", "utf8");
+  }
+  const savedHome = process.env["HOME"];
+  process.env["HOME"] = home;
+  try {
+    const answer = (command: string): string => {
+      const { result } = classifyForHook(command, [], dir, [], false, [dir]);
+      assert.ok(result.ok, command.slice(0, 40));
+      return result.segments.map((segment) => `${segment.class}/${segment.rule}`).join(" ; ");
+    };
+    // Each entry written by name.
+    assert.equal(answer("echo x > .approval/log"), "log.mutate/redirect-protected");
+    assert.equal(answer("echo x > .approval/env"), "policy.core/redirect-protected");
+    assert.equal(answer("echo x > .approval/.Lock"), "policy.core/redirect-protected");
+    // The long run: the word's own class, the git-directory pass's, and `log`'s.
+    const expected = "policy.core/redirect-protected ; vcs.history.rewrite/git-dir-write ; log.mutate/write-resolved-landing";
+    assert.equal(answer(`echo x > .approval/${"[".repeat(2_000)}`), expected);
+    assert.equal(answer(`echo x >> .approval/${"[".repeat(1_100)}env`), expected);
   } finally {
     if (savedHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = savedHome;
