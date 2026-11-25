@@ -449,6 +449,54 @@ export function braceExpansions(word: string): string[] | null {
  * group is a sequence or list of plain numbers ({@link numericRepresentative}).
  */
 export function braceCandidates(word: string): string[] | null {
+  // Remembered for one classification call ({@link withClassifyCall}): the
+  // same word is expanded by every pass over a line (the spliced reading, the
+  // line's main pass at the seam, each name reading), and a 1 MB word of
+  // groups costs seconds each time. Pure, so a hit is exactly what the
+  // expansion would give; a copy, so no caller shares it. A new call starts
+  // afresh, so a repeated measurement pays the work again.
+  if (!word.includes("{")) return [word];
+  if (classifyCallDepth === 0) return braceCandidatesOnce(word);
+  const known = braceCandidatesMemo.get(word);
+  if (known !== undefined) return known === null ? null : [...known];
+  const made = braceCandidatesOnce(word);
+  braceCandidatesMemoChars += word.length;
+  if (braceCandidatesMemoChars > BRACE_CANDIDATES_MEMO_CHARS) {
+    braceCandidatesMemo.clear();
+    braceCandidatesMemoChars = word.length;
+  }
+  braceCandidatesMemo.set(word, made === null ? null : [...made]);
+  return made;
+}
+
+/** {@link braceCandidates}' answers by word, for the current classification call. */
+const braceCandidatesMemo = new Map<string, readonly string[] | null>();
+/** How deep the exported classification calls are: the outermost starts the memo afresh. */
+let classifyCallDepth = 0;
+
+/** Run one exported classification call; the outermost starts {@link braceCandidatesMemo} afresh, and ends it. */
+function withClassifyCall<T>(run: () => T): T {
+  if (classifyCallDepth === 0) {
+    braceCandidatesMemo.clear();
+    braceCandidatesMemoChars = 0;
+  }
+  classifyCallDepth += 1;
+  try {
+    return run();
+  } finally {
+    classifyCallDepth -= 1;
+    if (classifyCallDepth === 0) {
+      braceCandidatesMemo.clear();
+      braceCandidatesMemoChars = 0;
+    }
+  }
+}
+/** The characters of the words {@link braceCandidatesMemo} holds. */
+let braceCandidatesMemoChars = 0;
+/** Most characters of words {@link braceCandidatesMemo} holds before it starts again. */
+const BRACE_CANDIDATES_MEMO_CHARS = 8_000_000;
+
+function braceCandidatesOnce(word: string): string[] | null {
   const expanded = braceExpansions(word) ?? numericRepresentative(word);
   if (expanded === null) return null;
   const out = [...expanded];
@@ -14661,7 +14709,7 @@ export function classifyCommand(
   protectedPaths: readonly ProtectedPathEntry[] = [],
   context: ClassifierContext = {},
 ): CommandClassification {
-  return unionNameReadings(eachNameReading(() => classifyCommandAsRead(command, protectedPaths, context)));
+  return withClassifyCall(() => unionNameReadings(eachNameReading(() => classifyCommandAsRead(command, protectedPaths, context))));
 }
 
 /**
@@ -14675,7 +14723,7 @@ export function classifyCommandInThisReading(
   protectedPaths: readonly ProtectedPathEntry[] = [],
   context: ClassifierContext = {},
 ): CommandClassification {
-  return classifyCommandAsRead(command, protectedPaths, context);
+  return withClassifyCall(() => classifyCommandAsRead(command, protectedPaths, context));
 }
 
 /**
