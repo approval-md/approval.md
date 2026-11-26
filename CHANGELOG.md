@@ -39,10 +39,15 @@ before a tag.
 - **`cp` and `mv` with 2,000 unclosed `[` are held to 100 CPU ms a call
   (PRIORITIES:331).** The run as the source or the destination, plain and
   under `~/.hermes/`: the median of 21 pairs is held under 100 CPU ms, as
-  `echo x >` is (measured at 21 to 65), and the 20,000-character run to 100
-  in one call. Each line prints its ratio to a same-length plain line (17 to
-  50) with no bound yet: the copy's argv of every entry is judged in each
-  name reading, and the bound returns with the argv-line split (owed).
+  `echo x >` is, and the 20,000-character run to 100 in one call. Every line
+  is measured and printed before any is asserted. Three lines are printed
+  and not yet asserted (lead ruling): `cp <run> out.txt` and `cp README.md
+  <run>`, and the 20,000-character `cp ~/.hermes/<run> out.txt`. On the
+  merge queue's node 22 they read 87.5, 79.9 and 80.3, about 1.2 times that
+  on node 20. A test holds that list to those three, and each returns to the
+  assert with the argv-line split (owed): the copy's argv of every entry is
+  judged in each name reading. Each line also prints its ratio to a
+  same-length plain line, with no bound until that split.
 
 ## 0.4.9 — 2026-11-25
 

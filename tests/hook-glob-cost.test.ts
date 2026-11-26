@@ -262,6 +262,21 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
   }
 });
 
+/**
+ * Test 4's lines printed and not held to the 100 ms bound until the argv-line
+ * split (lead ruling, CLAIMS L63667, on the owed row of L63574): by its
+ * shape, its prefix and the run's length. On the merge queue's runner (run
+ * 45745887200, node 22, every median under 100) these read highest: `cp
+ * <run> out.txt` 87.5, `cp README.md <run>` 79.9, and the single call of `cp
+ * ~/.hermes/<run> out.txt` at 20,000 characters 80.3. Node 20 reads about
+ * 1.2 times node 22 and the queue has a node-20 floor, so on it each would
+ * stand at or past the bound (about 105, 96 and 96). The cost of all three is the
+ * copy's argv of every entry, judged in each name reading; each returns to
+ * the assert with that split. Every other line keeps its bound. Test 5 holds
+ * this list to these three.
+ */
+const PRINT_ONLY: readonly string[] = ["cp, source 2000", "cp, destination 2000", "~/.hermes/ cp, source 20000"];
+
 test("cost: cp and mv with a run of unclosed `[` as an operand, through the whole classification (PRIORITIES:331)", (t) => {
   const { dir, home } = workspace();
   // Test 3's fixture: two hundred names of 250 characters beside the
@@ -306,8 +321,10 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
       ["mv, destination", (word) => `mv README.md ${word}`],
       ["mv, source", (word) => `mv ${word} out.txt`],
     ];
+    const printOnly = (shape: string, prefix: string, length: number): boolean => PRINT_ONLY.includes(`${prefix === "" ? "" : `${prefix} `}${shape} ${String(length)}`);
+    const PRINTED = "(printed, not asserted until the argv-line split: PRIORITIES)";
     for (const prefix of ["", "~/.hermes/"]) {
-      for (const [, line] of lines) {
+      for (const [shape, line] of lines) {
         const command = line(`${prefix}${run}`);
         const control = line(plain);
         const { spent, control: controlMs, ratio } = pairedCost(
@@ -316,21 +333,24 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
           21,
           5,
         );
-        const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} (no ratio bound: PRIORITIES argv-line split)`;
+        const held = !printOnly(shape, prefix, 2_000);
+        const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} (no ratio bound: PRIORITIES argv-line split)${held ? "" : ` ${PRINTED}`}`;
         t.diagnostic(`cost: ${label}`);
-        if (!(spent < BOUND_MS * 2)) over.push(label);
+        if (held && !(spent < BOUND_MS * 2)) over.push(label);
       }
     }
     // Test 3's 20,000-character run, one call each: past the longest path the
     // kernel opens, so each landing is guarded unread.
     for (const prefix of ["", "~/.hermes/"]) {
-      for (const [, line] of lines) {
+      for (const [shape, line] of lines) {
         const command = line(`${prefix}${"[".repeat(20_000)}`);
         const ms = cpuMs(() => {
           classifyForHook(command, [], dir, [], false, [dir]);
         });
-        report(t, `${command.slice(0, 30)} (20000 characters)`, ms, BOUND_MS * 2);
-        if (!(ms < BOUND_MS * 2)) over.push(`${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
+        const held = !printOnly(shape, prefix, 20_000);
+        if (held) report(t, `${command.slice(0, 30)} (20000 characters)`, ms, BOUND_MS * 2);
+        else t.diagnostic(`cost: ${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms ${PRINTED}`);
+        if (held && !(ms < BOUND_MS * 2)) over.push(`${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
       }
     }
     // Every line is measured and printed before any is held to its bound, so
@@ -340,6 +360,12 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     if (savedHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = savedHome;
   }
+});
+
+test("cost: test 4 prints only the three lines the lead named without their bound (CLAIMS L63667)", () => {
+  // The list cannot grow unseen: a line taken off the assert is a ruling, and
+  // each of these returns to it with the argv-line split.
+  assert.deepEqual([...PRINT_ONLY], ["cp, source 2000", "cp, destination 2000", "~/.hermes/ cp, source 20000"]);
 });
 
 test("a guarded name after or among unclosed `[` still takes its class: the entries a long run is judged to match keep theirs (build-5, the unclosed-`[` cost line)", () => {
