@@ -17,26 +17,26 @@ before a tag.
 
 ### Fixed
 
-- **A copy FROM a pattern that matches many entries asks the disk once per
-  path (PRIORITIES:331).** Past 1,024 glob characters a pattern matches every
-  entry of its directory, so `cp <2,000 [> out.txt` reads them all. The
-  credential pass resolved each entry's every ancestor again (about 2,000
-  `realpathSync` calls in one hook call over 200 entries), and the
+- **A copy from a pattern that matches many entries reads the disk once per
+  path in a hook call (PRIORITIES:331).** Past 1,024 glob characters a pattern
+  matches every entry of its directory, so `cp <2,000 [> out.txt` reads them
+  all. The credential pass resolved each entry's every ancestor again (about
+  2,000 `realpathSync` calls in one hook call over 200 entries), and the
   git-directory pass read each copied entry's type once per name reading and
   synthetic line. Both now go through the per-call disk memo the write pass
-  keeps (#695), so what the hook answers is unchanged, line for line. Such a
-  copy costs 14 to 30% less CPU (median of 21 pairs, nodes 20, 22 and 26); a
-  move, and a copy or move INTO such a pattern, cost what they did.
+  keeps (#695). Answers are unchanged, line for line. Such a copy costs 14 to
+  30% less CPU (median of 21 pairs, nodes 20, 22 and 26); a move, and a copy
+  or move into such a pattern, cost what they did.
 
 ### Tests
 
-- **Cost lines for `cp` and `mv` with a 2,000-character unclosed `[` run as
-  the source or the destination, plain and under `~/.hermes/`
-  (PRIORITIES:331).** Each median call is held to 100 CPU ms, as `echo x >`
-  is; measured at 21 to 65. Their ratio to a same-length plain line, 17 to 50,
-  is over the 18 `echo x >` is held to, and that line is marked as owed work
-  (`todo`): the copy's argv of every entry is classified, and every entry
-  landed, in each name reading.
+- **`cp` and `mv` with 2,000 unclosed `[` are held to 100 CPU ms a call
+  (PRIORITIES:331).** The run as the source or the destination, plain and
+  under `~/.hermes/`: the median of 21 pairs is held under 100 CPU ms, as
+  `echo x >` is (measured at 21 to 65), and the 20,000-character run to 100
+  in one call. Each line prints its ratio to a same-length plain line (17 to
+  50) with no bound yet: the copy's argv of every entry is judged in each
+  name reading, and the bound returns with the argv-line split (owed).
 
 ## 0.4.9 — 2026-11-25
 

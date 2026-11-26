@@ -262,12 +262,6 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
   }
 });
 
-/**
- * The cp and mv lines' ratios ({@link pairedCost}), as test 4 measured them,
- * for test 5's bound.
- */
-const copyRatios: Array<{ label: string; ratio: number }> = [];
-
 test("cost: cp and mv with a run of unclosed `[` as an operand, through the whole classification (PRIORITIES:331)", (t) => {
   const { dir, home } = workspace();
   // Test 3's fixture: two hundred names of 250 characters beside the
@@ -292,7 +286,16 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     // name of the same length (the workspace's), the median call under 100
     // CPU ms. On 170229db, a laptop at load 9: medians of 21 to 65 CPU ms
     // (node 20: 34 to 65) and first calls up to 108 (node 20, `cp` to the
-    // run); the ratios are test 5's.
+    // run).
+    //
+    // No ratio bound yet (lead ruling, CLAIMS L63574): the copy's or move's
+    // argv of every entry is one synthetic line, judged again in each name
+    // reading (three for these lines), where `echo x >`'s plain names are
+    // judged once for the call (test 3's split, which does not carry over to
+    // an argv: there a name's place decides what it is). So these lines read
+    // 17 to 50 times their control on main, against test 3's 18. The ratio is
+    // printed with each line, and the bound returns with the argv-line split
+    // (owed: PRIORITIES, the argv-line split).
     const run = "[".repeat(2_000);
     const plain = "a".repeat(2_000);
     const lines: Array<[string, (word: string) => string]> = [
@@ -311,9 +314,8 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
           21,
           5,
         );
-        const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${RUN_RATIO_BOUND.toFixed(1)}`;
+        const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} (no ratio bound: PRIORITIES argv-line split)`;
         t.diagnostic(`cost: ${label}`);
-        copyRatios.push({ label, ratio });
         assert.ok(spent < BOUND_MS * 2, label);
       }
     }
@@ -334,23 +336,6 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     else process.env["HOME"] = savedHome;
   }
 });
-
-test(
-  "cost: the cp and mv lines above cost at most test 3's ratio over their control (PRIORITIES:331)",
-  {
-    // Measured on 170229db at load 9, 21 pairs a line: 17 to 24 with the run
-    // as the destination and 25 to 50 as the source (nodes 20, 22, 26). Per
-    // entry these lines do more than `echo x >` does: the copy's argv is
-    // classified in each name reading (about 22 µs a name against 5.4 for a
-    // redirection's synthetic line), and a source is read and landed in more
-    // modes. Held to test 3's bound all the same, as owed work.
-    todo: "pre-existing on main 170229db: the copy's argv of every entry is classified, and every entry landed, in each name reading (build-5's hand-back, PRIORITIES:331)",
-  },
-  () => {
-    assert.ok(copyRatios.length > 0, "test 4 measured no line");
-    for (const { label, ratio } of copyRatios) assert.ok(ratio <= RUN_RATIO_BOUND, label);
-  },
-);
 
 test("a guarded name after or among unclosed `[` still takes its class: the entries a long run is judged to match keep theirs (build-5, the unclosed-`[` cost line)", () => {
   // Past 1,024 glob characters a pattern segment is judged to match every
