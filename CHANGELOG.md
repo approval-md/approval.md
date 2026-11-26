@@ -15,6 +15,16 @@ before a tag.
 
 ## Unreleased
 
+### Tests
+
+- **Cost lines for `cp` and `mv` with a 2,000-character unclosed `[` run as
+  the source or the destination, plain and under `~/.hermes/`
+  (PRIORITIES:331).** Each median call is held to 100 CPU ms, as `echo x >`
+  is; measured at 21 to 65. Their ratio to a same-length plain line, 17 to 50,
+  is over the 18 `echo x >` is held to, and that line is marked as owed work
+  (`todo`): the copy's argv of every entry is classified, and every entry
+  landed, in each name reading.
+
 ## 0.4.9 — 2026-11-25
 
 0.4.9 carries everything merged since 0.4.8. Most of it closes ways a command

@@ -262,6 +262,96 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
   }
 });
 
+/**
+ * The cp and mv lines' ratios ({@link pairedCost}), as test 4 measured them,
+ * for test 5's bound.
+ */
+const copyRatios: Array<{ label: string; ratio: number }> = [];
+
+test("cost: cp and mv with a run of unclosed `[` as an operand, through the whole classification (PRIORITIES:331)", (t) => {
+  const { dir, home } = workspace();
+  // Test 3's fixture: two hundred names of 250 characters beside the
+  // workspace's own, in the directory and in the home.
+  for (let index = 0; index < 200; index += 1) {
+    const name = `${String(index).padStart(3, "0")}${"a".repeat(247)}`;
+    writeFileSync(join(dir, name), "x\n", "utf8");
+    writeFileSync(join(home, ".hermes", name), "x\n", "utf8");
+  }
+  const savedHome = process.env["HOME"];
+  process.env["HOME"] = home;
+  try {
+    // Test 3's run of 2,000 `[`, as a copy's or a move's destination and as
+    // its source: past 1,024 glob characters it matches every entry, so the
+    // argv is written out with every entry and judged as a synthetic line in
+    // each name reading, every entry is landed as a write (a copy or move
+    // writes a tree), and a copy's source is read, so the credential pass
+    // lands every entry too. build-1 measured 148 and 127 CPU ms on node 20
+    // at #682's head, one call each, over the 100 test 3 holds `echo x >` to.
+    // One call is not a reading (test 3), so each is timed as test 3 times its
+    // lines: 21 pairs against the same line with the run replaced by a plain
+    // name of the same length (the workspace's), the median call under 100
+    // CPU ms. On 170229db, a laptop at load 9: medians of 21 to 65 CPU ms
+    // (node 20: 34 to 65) and first calls up to 108 (node 20, `cp` to the
+    // run); the ratios are test 5's.
+    const run = "[".repeat(2_000);
+    const plain = "a".repeat(2_000);
+    const lines: Array<[string, (word: string) => string]> = [
+      ["cp, destination", (word) => `cp README.md ${word}`],
+      ["cp, source", (word) => `cp ${word} out.txt`],
+      ["mv, destination", (word) => `mv README.md ${word}`],
+      ["mv, source", (word) => `mv ${word} out.txt`],
+    ];
+    for (const prefix of ["", "~/.hermes/"]) {
+      for (const [, line] of lines) {
+        const command = line(`${prefix}${run}`);
+        const control = line(plain);
+        const { spent, control: controlMs, ratio } = pairedCost(
+          () => classifyForHook(control, [], dir, [], false, [dir]),
+          () => classifyForHook(command, [], dir, [], false, [dir]),
+          21,
+          5,
+        );
+        const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${RUN_RATIO_BOUND.toFixed(1)}`;
+        t.diagnostic(`cost: ${label}`);
+        copyRatios.push({ label, ratio });
+        assert.ok(spent < BOUND_MS * 2, label);
+      }
+    }
+    // Test 3's 20,000-character run, one call each: past the longest path the
+    // kernel opens, so each landing is guarded unread.
+    for (const prefix of ["", "~/.hermes/"]) {
+      for (const [, line] of lines) {
+        const command = line(`${prefix}${"[".repeat(20_000)}`);
+        const ms = cpuMs(() => {
+          classifyForHook(command, [], dir, [], false, [dir]);
+        });
+        report(t, `${command.slice(0, 30)} (20000 characters)`, ms, BOUND_MS * 2);
+        assert.ok(ms < BOUND_MS * 2, `${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
+      }
+    }
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});
+
+test(
+  "cost: the cp and mv lines above cost at most test 3's ratio over their control (PRIORITIES:331)",
+  {
+    // Measured on 170229db at load 9, 21 pairs a line: 17 to 24 with the run
+    // as the destination and 25 to 50 as the source (nodes 20, 22, 26). Per
+    // entry these lines do more than `echo x >` does: the copy's argv is
+    // classified in each name reading (about 22 µs a name against 5.4 for a
+    // redirection's synthetic line), and a source is read and landed in more
+    // modes. Held to test 3's bound all the same, as owed work.
+    todo: "pre-existing on main 170229db: the copy's argv of every entry is classified, and every entry landed, in each name reading (build-5's hand-back, PRIORITIES:331)",
+  },
+  () => {
+    assert.ok(copyRatios.length > 0, "test 4 measured no line");
+    for (const { label, ratio } of copyRatios) assert.ok(ratio <= RUN_RATIO_BOUND, label);
+  },
+);
+
 test("a guarded name after or among unclosed `[` still takes its class: the entries a long run is judged to match keep theirs (build-5, the unclosed-`[` cost line)", () => {
   // Past 1,024 glob characters a pattern segment is judged to match every
   // name (the strict side), so the write pass lands, and writes out as a
