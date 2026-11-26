@@ -2840,11 +2840,8 @@ export function physicalLanding(from: string, text: string): string {
 
 function physicalLandingOnDisk(from: string, text: string): string {
   let current = isAbsolute(text) ? sep : from;
-  try {
-    current = realpathSync(current);
-  } catch {
-    // An ancestor that does not exist stays as spelled.
-  }
+  // An ancestor that does not exist stays as spelled.
+  current = realpathOrNull(current) ?? current;
   // The components below the first one that does not resolve, as names.
   // Nothing under a path that does not resolve can resolve, so they are not
   // looked up: each lookup joined and resolved the whole path so far, which
@@ -2868,13 +2865,34 @@ function physicalLandingOnDisk(from: string, text: string): string {
       below.push(component);
       continue;
     }
-    try {
-      current = realpathSync(join(current, component));
-    } catch {
-      below.push(component);
-    }
+    const real = realpathOrNull(join(current, component));
+    if (real === null) below.push(component);
+    else current = real;
   }
   return below.length === 0 ? current : join(current, below.join(sep));
+}
+
+/**
+ * `realpathSync`, or `null` where it throws: through the call's
+ * {@link DiskMemo} while one is live, so each directory is resolved once for
+ * all its entries (the cp/mv cost line: a copy FROM a 2,000-character `[` run
+ * reads every entry of the directory, and {@link physicalLanding} resolved
+ * each entry's every ancestor again, about 2,000 `realpathSync` calls a
+ * call). The memo's answer is `realpathSync`'s ({@link memoDiskReads}).
+ */
+function realpathOrNull(path: string): string | null {
+  return memoReadsFor(path, DIRECT_DISK).realpath(path);
+}
+
+/**
+ * The call's memo for `path` while one is live, else `disk`. Only for a path
+ * no longer than {@link MAX_LANDING_BYTES}, the bound the write pass puts on
+ * every path it hands the memo: the memo resolves a path through its parent's
+ * answer, one call a component, so a longer word (100 KB of `b/`) would
+ * overflow the stack. Such a path asks the disk as before.
+ */
+function memoReadsFor(path: string, disk: DiskReads): DiskReads {
+  return diskMemo !== null && path.length <= MAX_LANDING_BYTES ? diskMemo.reads : disk;
 }
 
 /**
@@ -5153,7 +5171,7 @@ export function refineWriteLandings(
       return out;
     }
     for (const from of here) {
-      const raised = refineGitDirWrites(plain, from, memo.disk.entry, memo.disk.gitDirLandings).result;
+      const raised = refineGitDirWrites(plain, from, memo.disk.entry, memo.disk.gitDirLandings, memo.disk.gitTrees).result;
       if (!raised.ok) {
         unreadable();
         continue;
@@ -6482,12 +6500,14 @@ interface DiskMemo {
   directory: Map<string, boolean>;
   /** {@link expandGlobPath}'s answers, keyed by whether a shell option is set as well. */
   globs: Map<string, readonly string[] | null>;
+  /** Each path's realpath and lstat, asked once ({@link memoDiskReads}): {@link realpathOrNull} and {@link canonicalPath}. */
+  reads: DiskReads;
 }
 
 let diskMemo: DiskMemo | null = null;
 
 function newDiskMemo(): DiskMemo {
-  return { canonical: new Map(), physical: new Map(), directory: new Map(), globs: new Map() };
+  return { canonical: new Map(), physical: new Map(), directory: new Map(), globs: new Map(), reads: memoDiskReads() };
 }
 
 /** `compute(key)`, kept in `map` while a {@link DiskMemo} is live. */
@@ -6696,7 +6716,7 @@ function classifyForHookAsRead(
   // directory not named `.git`. First, so the push pass below sees a segment
   // it raises as the write it is, and the history-rewrite and write-scope
   // passes do not lower or narrow it again.
-  const gitWrites = refineGitDirWrites(classified, cwd, landings.disk.entry, landings.disk.gitDirLandings);
+  const gitWrites = refineGitDirWrites(classified, cwd, landings.disk.entry, landings.disk.gitDirLandings, landings.disk.gitTrees);
   const pushed = refinePushRepo(gitWrites.result, cwd, command);
   const rewritten = refineRewrite(pushed.result, cwd);
   const scratched = refineScratchDelete(rewritten.result, roots);
@@ -12181,7 +12201,10 @@ const RECURSIVE_READERS: ReadonlySet<string> = new Set([
  * yet is judged by where it would be created (APRV-445 recheck SF2(e)).
  */
 export function canonicalPath(path: string, disk: DiskReads = DIRECT_DISK): string {
-  return remembered(diskMemo?.canonical, path, () => canonicalPathOnDisk(path, disk));
+  // A caller that names no memo asks the call's own while one is live
+  // ({@link memoReadsFor}): the answer is kept by path alone, whichever reads
+  // made it.
+  return remembered(diskMemo?.canonical, path, () => canonicalPathOnDisk(path, disk === DIRECT_DISK ? memoReadsFor(path, disk) : disk));
 }
 
 function canonicalPathOnDisk(path: string, disk: DiskReads): string {
@@ -12221,6 +12244,8 @@ export interface DiskReads {
   entry(path: string): PathEntry;
   /** The git-directory pass's walks, by path (kept by a memo; fresh per pass when absent). */
   readonly gitDirLandings?: Map<string, GitDirLanding>;
+  /** The git-directory pass's tree-copy sources that hold a `.git` entry, by path (kept by a memo; fresh per pass when absent). */
+  readonly gitTrees?: Map<string, boolean>;
   /** {@link kernelLanding}'s answers with no volatile test, by spelling (kept by a memo). */
   readonly kernelLandings?: Map<string, string | null>;
   /** A directory's entries, or the error code reading it gave ({@link listDirectory}). */
@@ -12319,7 +12344,7 @@ export function memoDiskReads(): DiskReads {
     }
     return found;
   };
-  return { realpath, link, list, entry, gitDirLandings: new Map(), kernelLandings: new Map() };
+  return { realpath, link, list, entry, gitDirLandings: new Map(), gitTrees: new Map(), kernelLandings: new Map() };
 }
 
 /** How many components {@link canonicalPath} climbs one at a time before it halves. */

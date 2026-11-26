@@ -15,6 +15,19 @@ before a tag.
 
 ## Unreleased
 
+### Fixed
+
+- **A copy FROM a pattern that matches many entries asks the disk once per
+  path (PRIORITIES:331).** Past 1,024 glob characters a pattern matches every
+  entry of its directory, so `cp <2,000 [> out.txt` reads them all. The
+  credential pass resolved each entry's every ancestor again (about 2,000
+  `realpathSync` calls in one hook call over 200 entries), and the
+  git-directory pass read each copied entry's type once per name reading and
+  synthetic line. Both now go through the per-call disk memo the write pass
+  keeps (#695), so what the hook answers is unchanged, line for line. Such a
+  copy costs 14 to 30% less CPU (median of 21 pairs, nodes 20, 22 and 26); a
+  move, and a copy or move INTO such a pattern, cost what they did.
+
 ### Tests
 
 - **Cost lines for `cp` and `mv` with a 2,000-character unclosed `[` run as
