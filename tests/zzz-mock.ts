@@ -28,6 +28,14 @@ export async function startMockZzz(token: string): Promise<MockZzz> {
   const requests: ZzzRequest[] = [];
   let next: { kind: "answer"; status: number; body: unknown; headers?: Record<string, string> } | { kind: "disconnect" } | { kind: "stall" } | null = null;
   const server: Server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+    // One connection per request. With keep-alive, fetch pools the socket and
+    // the server closes it after `keepAliveTimeout` (5 s) idle; a test file
+    // whose event loop is blocked past that (synchronous log appends on a
+    // loaded machine) then writes its next POST onto a socket the server
+    // closes at the next timers phase, and the adapter rightly reports
+    // `fetch failed` as execution-indeterminate. Closing here leaves no idle
+    // socket to race, whatever the timing.
+    response.setHeader("Connection", "close");
     const body = await bodyOf(request);
     requests.push({
       method: request.method ?? "",

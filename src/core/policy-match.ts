@@ -88,6 +88,7 @@ import type {
   SupervisionMode,
 } from "./policy-load.js";
 import { UNMAPPED_TOOL_CLASS } from "./tool-map.js";
+import { WRITE_GUARDED_CLASS, WRITE_GUARDED_MINIMUM } from "./write-scope.js";
 
 /** Where a {@link Resolution}'s autonomy came from. */
 export type Provenance =
@@ -489,7 +490,36 @@ export function resolve(
     ? fromParentOrDefaults(load, actionClass, candidates)
     : fromRules(candidates);
 
-  return applyFloor(resolution, options);
+  return applyClassMinimum(applyFloor(resolution, options), actionClass);
+}
+
+/**
+ * Built-in minimums (design v4, point 5): a class that no rule, wildcard,
+ * `defaults.autonomy`, `allow_irreversible` or supervision mode may resolve
+ * below. One entry today, the guarded write class at `manual`.
+ */
+export const CLASS_MINIMUMS: Readonly<Record<string, DeclaredAutonomy>> = {
+  [WRITE_GUARDED_CLASS]: WRITE_GUARDED_MINIMUM,
+};
+
+/**
+ * Clamp a resolution to its class's built-in minimum, at resolution and never
+ * at load, so no existing policy fails to load over it (a `files.*` or `*` row,
+ * an autonomous default). The clamp reports itself as the irreversibility floor
+ * does: provenance `floor`, `floorApplied`, every field saying the level it
+ * enforces. A stricter answer (`human-only`) stands untouched.
+ */
+function applyClassMinimum(resolution: Resolution, actionClass: string): Resolution {
+  const minimum = CLASS_MINIMUMS[actionClass];
+  if (minimum === undefined) return resolution;
+  if (STRICTNESS[resolution.declaredAutonomy] <= STRICTNESS[minimum]) return resolution;
+  return {
+    ...resolution,
+    ...supervisionOf(minimum, null),
+    declaredAutonomy: minimum,
+    provenance: "floor",
+    floorApplied: true,
+  };
 }
 
 /**

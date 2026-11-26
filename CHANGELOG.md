@@ -15,9 +15,509 @@ before a tag.
 
 ## Unreleased
 
+## 0.4.9 — 2026-11-25
+
+0.4.9 carries everything merged since 0.4.8. Most of it closes ways a command
+line could write a guarded file while the hook read it as an ordinary write: a
+glob or a `${X:-…}` default in a write target, a guarded name in another letter
+case or Unicode fold, zsh's `>!` clobber forms, a write into `.git` or a `git
+remote` change that arms a later push, deleting or locking an organ directory
+or a parent of one, and a second protected path, or a credential read's own
+write, that the class left unnamed. A guarded path spelled in a dollar quote
+(`echo x >> $'\x41PPROVAL.md'`) is now read as the shell reads it, and a
+guarded name with a parameter or a substitution spliced into it (`echo x >
+APPROVAL$E.md`) takes the guarded path's class (#709). A credential read
+through a negated bracket in its path (`cat ~/.hermes/[!x]uth.json`) is now
+`account.credential`, and the hook matches a glob in linear time, with no
+backtracking (#682). Each entry below says what such a line answers now and
+what is left as a known limit. The hook also answers within a deadline of its
+own (15 seconds, or less under a shorter harness ceiling): a call it cannot
+read in time is refused `hook-deadline` instead of running ungated when the
+harness gives up on the hook. New: the `files.write.guarded` class, with a
+built-in minimum of `manual`, and the opt-in `write_scope` policy block (#695);
+`approval propose --irreversible` (APRV-537, #681); and the CLASS-DIFF and
+NEW-CALLS release checks for the overlay (#678, #679). `SPEC.md` and
+`APPROVAL.md` are unchanged since 0.4.8; `conformance/` gains vectors.
+**Rollout notes:** a core older than 0.4.9 refuses the `write_scope` key (the
+policy schema admits no unknown key) and fails the whole policy closed, so a
+policy gains it only after every core that reads it runs 0.4.9. A core older
+than 0.4.9 refuses `approval propose --irreversible` (usage error; `approval
+serve` answers 403), and a box must not be rolled back past 0.4.9 while a key
+that flag floored is open.
+
 ### Security
 
-**Push holes open in 0.4.8, closed here (APRV-518; replaces #650).** `git
+**A dollar-quoted word is read as the text the shell makes of it (#709).**
+`echo x >> $'\x41PPROVAL.md'` writes the policy file in bash and zsh, and was
+an ordinary `files.write.workspace` (main's lexer kept the `$` and read the
+word as an unknown variable); `cat $".approval/env"` was `read.shell`. The
+lexer now reads `$"…"` as a double-quoted string and decodes `$'…'` where bash
+(3.2 and 5) and zsh decode alike: the letter escapes, `\xH`, `\xHH`, `\uHHHH`
+and octal (as a byte). An escape the shells read differently (`\cX`, `\U…`,
+`\u` with fewer than four digits, `\x` with none, `\q`), a character outside
+ASCII, and the rest of a word after a decoded NUL are unknown, the way `$X` is.
+Inside `$'…'` a `\'` no longer ends the string, so `echo $'\'' ; rm -rf
+APPROVAL.md #'` reads the `rm` bash and zsh run (it was one `echo` word).
+Wherever the lexer decoded a dollar quote, the line (and the hook's whole
+chain) is classified again with dollar quotes kept as before, and that answer
+rides beside, so nothing answers lighter than it did: `rm $'\x41PPROVAL.md'`
+is `policy.core` with the earlier `files.delete.out_of_scope` beside it, and a
+dollar-quoted program word (`$'rm' -rf x`) keeps its refusal.
+
+**An unread part spliced into a guarded name asks (#709).** `echo x > APPROVAL$E.md`,
+`echo x > .claude$S/settings.json`, `echo x >> .appro${x}val/env` and
+`echo x > {APPROVAL,x}$E.md` write the guarded file when the parameter is
+empty, and were workspace writes; `cat .approval/$F` and `cat
+.appro${x}val/env` were `read.shell` to the pure classifier. A word whose
+literal text holds an unread part (a parameter, a substitution's output, an
+unread dollar-quote escape) is now read with each part as any text, a `/`
+included, against every guarded path and `.git` (brace groups expanded
+first); a possible match takes that path's class (the strictest where several
+match, every other one beside it), with the earlier answer beside it, and a
+word read as a credential
+file (`cat`, `grep`, `<`, a copy's source) takes `account.credential`, with
+the line's earlier answer joined so a refusal stands. A match counts only
+where the word's literal text takes part in it (a `.` in a component counts:
+`.$X` may be `.approval`), and a word whose directory is wholly unread asks
+only where a guarded path ends in its tail by name: `$D/APPROVAL.md`,
+`$D/settings.json`, `.github/$W/ci.yml`, `$W/scripts/run.sh` and `.$X` ask;
+`$OUT`, `$D/$F`, `./$X`, `$D/notes.md`, `$D/env` and `out/$F` keep their
+answer. A `$` the shell reads as text (single-quoted, escaped, a dollar
+quote's) is text here, where the word is read as lexed: `--append-notes
+'A$B'` keeps its answer; a reading made from a word (an option's value, a
+default's text, a folded name) counts every `$` in it as a parameter. Past
+eight unread parts in one word the word could be any path (`log.mutate`), and
+so is a word with 32 `/` or 1,024 `\` in it or whose readings pass the
+candidate bound. On
+one day's 19,368 Bash calls holding a `$`, 11 answers moved, each stricter: 8
+writes below a `$W/scripts` directory take `cron.manage` beside (W may be the
+Hermes home), one `printf` of a format with more than eight parameters may
+read a credential, and two refusals changed their code.
+
+**A glob in a write target to a guarded path stays guarded (GLOB-WRITE, #686).**
+`echo x > ~/.hermes/auth.json` was `policy.core`, and the same write with a
+glob in any component (`~/.hermes/[!Z]uth.json`, `~/.[!Z]ermes/auth.json`,
+`~/.hermes/?uth.json`, `~/.h*/auth.json`, `.appr*/env`, `APPROVAL.m?`) was an
+ordinary `files.write.workspace`, while bash and zsh write through a glob in a
+redirect target that matches one file and every shell writes through one in a
+`cp`, `mv`, `tee`, `ln` or `install` operand. A write target the shell may
+still glob is now judged by every guarded path its pattern could match, over-
+approximated (each construct matches anything it could in any shell under any
+option, case folded), and takes every class among them, each judged by the
+policy: the classifier's rank is not a policy's order (#682; review-b N1 at
+bcb1be08), so `echo x > A*.md` is `policy.core` and `policy.edit`.
+
+- **Which words (fail closed):** redirect targets (`>`, `>>`, `>|`, `&>`,
+  `n>`), download outputs and `-t` directories, every operand of a command
+  that is not a read (`tar -C`, `rsync`, `scp`, `gunzip`, `git add`,
+  `git checkout --`, `rm`, `chmod`), and a
+  read-class command's own outputs (`sort -o F`, `uniq in F`, sed's `w F`),
+  which were judged by nothing before, plain or not. `cp`, `ln` and `install`
+  are the one narrow row: their destination only, since a glob in a copy's
+  SOURCE is a read and is left to the read jail (`cp ./*.md docs/` stays a
+  workspace write).
+- **`${X:-WORD}` defaults:** the WORD of `:-`, `-`, `:=`, `=`, `:+`, `+`,
+  `:?`, `?` is a reading of its own, since the shell substitutes it and then
+  globs it (`echo x > ${X:-.approval/env}` was a workspace write). More than
+  eight such spans in one word, or a default nested three deep, is judged
+  unknown, as a pattern past a cap is (below). zsh's `braceccl` class (`{a-z}`) is read as a class of its
+  characters, and a variable beside a glob construct may name anything.
+- **Dot-names, setter or not (lead rulings L60846, L61492, L61497):** bash's
+  `dotglob` and zsh's `globdots` may be set in the user's own start-up file,
+  where no setter on the line shows, so a write whose `*`, `?` or `[...]`
+  (or a whole `**`) would match a guarded dot-name under them is that name's
+  class: `echo x > ~/*/auth.json`, `cp README.md ~/?hermes/hermes-agent/.env`,
+  `echo x > [.]approval/env` and `echo x > ~/**/auth.json` are human-only.
+  A pattern is read with dot-names hidden and matched, and the stricter
+  answer stands. `.` and `..` are matched only by an explicit leading `.`
+  (or on a line that may set an option, as before), never by `*` or `?`.
+  The same reading covers `.git` for the git-dir write rule (a leading `*` or
+  `?` in a write target), and a copy or sync destination's globbed component
+  against the organ directories (`rsync -a pkg/ ?grok/`). The cost the lead
+  accepted: `rm -f *` or `chmod 644 *` in a directory that holds `.git` is
+  `vcs.history.rewrite`; in one holding no guarded dot-name (`rm -rf dist/*`
+  beside `dist/.cache`) the class is what it was. Case folding stays: `*` and
+  `*.md` reach `APPROVAL.md` as bash does on a case-insensitive APFS volume.
+- **Decided by what is there (lead ruling L61167):** before it classifies, the
+  hook lists the directory each write-target pattern's first globbed component
+  sits in (`src/cli/glob-listing.ts`: `fs.promises.opendir`, 2,000 entries, a
+  2 s deadline per directory, 16 directories, all at once) and the classifier
+  matches the pattern against those names (case folded, dot-names by the rule
+  above). `rm -rf dist/*`, `chmod +x scripts/*`, `git add src/*` and
+  `npx prettier --write src/*` keep main's class in a directory holding no
+  guarded name, and are `policy.core` in one holding `APPROVAL.md` (any case).
+  A directory that cannot be listed in full, a prefix the text cannot place
+  (`..`, a variable, `~user`, a line that changes directory), a deeper globbed
+  component, and every caller without listings (the core itself, `approval
+  serve`, the codex bridge) keep the strict answer. So does a line where
+  anything else may create, move, link or extract a file (only a plain `ls`,
+  `cat`, `echo`, `pwd`, `true`, `test`, `head`, `tail`, `wc`, `grep`, `date`
+  or `whoami` may keep the pattern company; no substitution, subshell or
+  heredoc), a `~` prefix on a line that names `HOME`, and a relative prefix
+  when the shell may start in another directory than the one listed. A file
+  created by another process between the listing and the run is not seen.
+- **Stricter than before, without a listing:** a write pattern that COULD name a guarded file is
+  human-only even when no such file exists. `APPROVAL.md` is guarded at any
+  depth, so a pattern for a file straight inside a directory stays strict:
+  `rm -rf dist/*`, `chmod +x scripts/*`, `git add *`, `git add src/*`,
+  `npx prettier --write src/*`, `echo x > dist/*.md`, `sed -i … *.md`. A
+  pattern that cannot reach a guarded name (`out/*.log`, `src/*.ts`,
+  `rm -rf assets/*.png`) keeps its class. A brace expansion of more than
+  4,096 candidate paths or 32 segments, a word past two million matcher
+  steps, or one whose reading the reader cannot restore is judged unknown:
+  `log.mutate`, `policy.core`, and the class of every other guarded name such
+  a pattern could match (`policy.edit`, `cron.manage` for Hermes' scripts, and
+  each of the policy's routes: `policy.edit.ci` where `.github/workflows/` is
+  routed there, `policy.edit.spec` for a routed `SPEC.md`). The word's other
+  expansions are still judged, 65,536 candidates over all of them (#682;
+  build-1's M2 at 64c43399): `tee {*/*/*/x,CLAUDE.m?}` writes `CLAUDE.md`.
+  The worst words measured cost about 0.05 CPU s.
+- **One budget (review-b M1):** the two million matcher steps are one budget
+  for the whole command line, shared by every segment, word and reading.
+  A word judged once in a list is not walked again: `rsync -aR s0/*/./a*
+  s1/*/./a* …` lands every source as the last word's `<dest>/a*`, and at
+  7 KB the repeated walks took about 50 CPU s (now about 2). Each repeat
+  still draws the steps the first walk drew, so the budget runs out where
+  it did.
+- **The listing pass is held to the hook's own deadline (#693):** the hook
+  classifies a command once to find the directories its write patterns glob
+  in, before it describes the call. That pass now runs under the same
+  deadline, for the harness ceiling the call runs under, and its time comes
+  out of the deadline and counts as reading time. Stopped at the deadline,
+  the call is refused `hook-deadline` (it ran unbounded before: a 40 KB
+  `rsync -aR` answered a 500 ms deadline after 5.5 s).
+  An open window describes the call with the same listings, so its read is
+  cut by the pass's time too (review-b A686-FOLD7 N2).
+- **Main's class is carried beside every raise (lead ruling L61926):** a line
+  any GLOB-WRITE rule fires on is classified a second time with every
+  GLOB-WRITE rule off (main's answer), and the two join: every class of each
+  rides on the line, and a refusal in either refuses. So no line's decision is
+  looser than main's under any policy: `cp a.js .github/README` is
+  `policy.edit` AND `files.write.workspace`, `mv a .gi*/config` keeps
+  `vcs.history.rewrite` beside `policy.edit`, and a line main refuses stays
+  refused. This supersedes review-b S1's reading, which left an ordinary
+  write or read class off a raised segment.
+- **Quoting (review of 3230ecb6):** only an UNQUOTED glob character, or an
+  unquoted `$` whose value or `${…}` default the shell may still glob, makes a
+  word a pattern (`"exit-$?.txt"`, `"$f[1,4]/out"` are their text), and the
+  character after `$` in `$?`, `$#`, `$*`, `$@`, `$!`, `$$`, `$-` and `$0`-`$9`
+  is a parameter's name only where every `$` in the word is a real
+  expansion (`'$'*` and `\$*` are a literal `$` and a live `*`). zsh's `^`
+  and `#` count where the line may set options.
+- **zsh's clobbering redirects (lead ruling L61195 (a); L62319 after
+  main's #700):** `>!`, `>>!`, `>|`, `>&!`, `&>|` and `&>>!` write the next
+  word, as `>` does, and the file bash writes (`!`, or `!word` when joined)
+  rides beside. Main refuses `>!`, `>>!` and `>&!` (#700, below); this
+  reading lifts that refusal only where the word is the file zsh writes, and
+  any other refusal main has for the line still stands. Kept refused, each
+  failing closed: inside a `bash -c` or `sh -c` script (bash writes `!x`
+  there); a descriptor of two or more digits (`10>!x`: zsh writes `x` and
+  passes `10` as an argument, a form this reading does not take); joined to
+  a dup's word (`2>&1>!x`) or after a line continuation, a target opening
+  `=` or `#`, and one carrying `$'…'`. `>>|`, `>&|`, `>>&!`, `>>&|` and the
+  spaced `&>! x` and `&>>! x`, which main refused before #700, stay refused
+  (lead ruling L61926).
+- **Copies, moves, links, syncs and extractions INTO a guarded directory
+  (L61195 (b); reviews of b402adec, 039b840a and e6b7bf97; the split ruling,
+  L61320):** a `cp`, `mv`, `ln`, `install`, `rsync`, `scp` or `tar -x -C`
+  whose destination IS `.claude`, `.cursor`, `.grok`, `.muse` or `.github`,
+  or a path under one, takes that directory's class by its name alone, after
+  lexical normalisation (`.claude/x/..`, `./.claude/.`, `.claude/sub/`), with
+  no listing: `cp evil/settings.json .claude/`, `cp a.txt .claude/`, `cp -r
+  x/. .claude/`, `tar -xf a.tar -C .claude`, `rsync -a src/ .claude/hooks/`.
+  `.git` keeps #683's git-dir rule. A destination is a path by construction,
+  whitespace and all (`cp x ".claude/my file"`). A copy into another
+  directory is judged by the file it lands (`cp evil/* out/` with
+  `evil/APPROVAL.md`); a copy that may keep its source's path (`cp
+  --parents`, rsync `-R`/`--relative` anywhere on the line, a `/./` cutting
+  the kept path) is judged at `<dest>/<the source's path>` beside the
+  basename landing, the stricter answering (`cp --parents
+  .claude/settings.json .`, `rsync -R .approval/env backup/..`), normalised
+  lexically; and a source
+  landing AS a guarded directory is one (`cp -r evil/.claude .`, `ln -s
+  ../evil/.claude`, which links into `.`). With no destination read, every
+  operand is judged, as before. `cp`, `mv`, `ln`, `install`, `rsync` and `scp`
+  are read by per-tool option tables, so an option's value is never the
+  destination (`rsync -a src/ .claude/ --exclude x`), and an option a table
+  does not know makes every operand a possible destination. tar's directory
+  is read in every spelling (`-C X`, `-CX`, a cluster, `--directory`/`--cd` by
+  any prefix, the dashless bundle `tar xCf .claude a.tar`). `unzip`, `ditto`,
+  `cpio`, `pax`, `bsdtar`, `gtar` and `7z` have no rule and stay refused; an
+  archive or copy tool with no table whose operand names a guarded directory
+  is that write. A contents copy or extraction into an ordinary directory or
+  an ancestor of a guarded one (`tar -xf a.tar`, `cp -r src/. .`) keeps its
+  class here; that is a follow-up. A directory the hook finds not there is
+  empty only to a glob on a one-segment line. Two `command-class` conformance
+  vectors move to the stricter answer and are regenerated:
+  `cp-dot-slash-glob-is-unmoved` (`cp ./*.md docs/`, `policy.core`: the
+  landing `docs/*.md` may be `docs/APPROVAL.md`) and
+  `prose-opening-with-a-protected-path-under-cp` (a destination under
+  `.github`, `policy.edit`); the suite's `vectors_version` was bumped at the
+  0.4.9 release cut.
+
+**Deleting, moving or locking an organ directory is that directory's class
+(lead ruling L61587; review-b A686-FOLD3 M1).** `rm -rf .claude` was an
+ordinary `files.write.workspace` on 0.4.8 and main, and it removes the hook's
+own registration (`.claude/settings.json`): an agent could switch the gate off
+in one command. The bare organ directories now take their strictest class
+exactly as bare `.approval`, `.codex` and `.hermes` already did:
+`.claude`, `.cursor`, `.grok` and `.muse` are `policy.core`, `.github` is
+`policy.edit`. Fail closed (lead ruling L62013, S2; security review of
+e9956c84): every command naming the bare folder keeps its class, a redirect
+onto it, a plain `rm`/`unlink` (the name may be a symlink) and any tool or
+option the classifier does not know included, except a short release list
+of commands that cannot remove, replace, move or change access to it. The
+spellings
+`.claude/`, `./.claude`, `.claude/.` and `.claude/x/..`, and with the glob
+readings `rm -rf .cl*`, `rm -rf .c?aude`, `rm -rf .*` and, where the hook's
+listing shows one, `rm -rf *`. An ordinary directory (`rm -rf dist`,
+`rm -rf node_modules`, `rm -rf build/`, `rm -rf .cache`) and a directory
+inside an organ that guards no file (`rm -rf .claude/commands`) keep their
+class. Released to main's class: `mkdir` (with `-p`/`-v`; not `-m`, which
+creates a missing folder with that mode) and `touch`, and only in the plain
+form: the bare command name first in its segment (no assignment such as
+`PATH=` or `TAR_OPTIONS=` before it, no wrapper, no path), every word exactly
+its text (no parameter, substitution, glob, brace or tilde), every option
+known and spelled in full, each valued option's value present. Held, for
+example: `rm -f .claude`, `unlink .claude`, `rm --r .claude`,
+`tar -czf out.tgz -C .claude .`, `tee .claude`, `> .claude`,
+`truncate -s 0 .claude`, `mkdir $X .claude`, `./mkdir .claude`. A write INTO the folder stays
+strict by the destination rule above (`cp -r evil/ .claude`,
+`rsync -a x/ .claude/`, `ln -s x .claude`, `tar -xf a.tar -C .claude`), as
+does a copy that lands one (`cp -r .claude backup/` writes
+`backup/.claude/settings.json`). Bare `.approval`, `.codex` and `.hermes`
+keep main's class for every verb.
+**The folder's contents go with it (lead ruling L62013, S1).** A command the
+rule holds on an organ folder ITSELF also takes the class of every guarded
+path inside it, the policy's routed entries included: `rm -rf .github` is
+`policy.edit` AND `policy.edit.ci` where `.github/workflows/` is routed
+there, `rm -rf .approval` is `policy.core` AND `log.mutate`, and
+`rm -rf ~/.hermes` carries `cron.manage` for its scheduled scripts. The
+classifier cannot rank routed classes (it has the policy's paths, not their
+autonomy), so each is a claim and the strictest decides under the policy in
+force. Each path inside is classified as a file under the folder would be:
+one built-in representative per organ, and one per policy entry naming a
+path under it. Not covered, a follow-up: a parent of an organ directory
+(`rm -rf .`, `rm -rf $PWD`, `rm -rf ..`, `rm -rf ~`) keeps its class;
+`chown`, `chgrp`, `unlink`, `rename` and `git clean` stay refused (no rule);
+`find . -name .claude -exec rm …` stays refused (opaque); case variants
+(`rm -rf .Claude`) as for every guarded path.
+
+**The hook's glob matching is linear, and reads globs the way the shells do
+(#682).** The credential pass matched glob paths with a backtracking regex: a
+`cat` of a path with 240 `*` and 12 `z` took 65.7 CPU s, past the harness's
+60 s hook timeout, after which the call proceeds (0.4.8: 15.2 s at 160 `*`).
+
+- **Linear matching:** `src/core/glob-match.ts` walks the set of reachable
+  pattern positions with no backtracking, at most L×(2L+1) checks per name,
+  and replaces the regex at every hook caller; `globSegmentMatches`, the
+  `.git` reader of a write, is linear too (36.7 CPU s at 8 `*` before).
+- **`[!x]` and `[^x]`:** the hook read them as the literal members `!`, `^`
+  and `x`, so `cat ~/.hermes/[!x]uth.json` was a workspace read while bash and
+  zsh open `auth.json` (`account.credential`). `[!...]` is now negated as
+  every shell negates it, and `[^...]` is any one character (dash takes `^`
+  as a member). The classifier reads both as any one character, with main's
+  reading run beside wherever that reading matched a guarded name.
+- **Line continuations:** the shell removes each `\`+newline before it reads
+  the line, so the hook classifies the joined text, once (`a\<newline>(u)th.json`
+  is `a(u)th.json`). Where a `\`+newline sits in quotes, a comment, a heredoc
+  or a substitution, which the shell may keep, the text as written is read as
+  well and the stricter answer stands.
+- **zsh's `extendedglob` and `braceccl` (lead rulings L61492, L61497):** the
+  user's zshrc may set either, so every command is also read as zsh reads it
+  with both on, unquoted text only, and the stricter answer stands: `^x`,
+  `x#` and `(#a1)` are any name, `{a-z}` is a class of its characters, `a~b`
+  is `a`, and `^#` (a bad pattern) is read as written. A segment holding such
+  a form and a `$` or a substitution is any name, unless its only forms are
+  brace groups the shell expands anyway (`{a,b}`, `{1..3}`), which braceccl
+  leaves alone, beside a value zsh never globs: `touch file{1..3}$EXT` and
+  `mkdir -p out/{a,b}_$(date +%s)` keep their class (build-1's S1 at
+  64c43399). A word with no `/` in a plain read-only command is matched
+  against the directory's real entries.
+- **One reader of write-target globs, #686's (lead ruling L62400):** #682's
+  own reader is dropped, and five of its cases are now #686's: the candidate
+  walk no longer stops at the first candidate naming the log (`echo x >>
+  [$'!'A]PPROVAL.md`, `rm -f {.approval/log/x,APPROVAL.m?}` and `cp README.md
+  ~/.hermes/**/auth.json` were allowed under a policy leaving `log.mutate`
+  autonomous), a segment's words no longer stop at the first `log.mutate`
+  answer (`tee .approval/log/x A*.md`), every class a candidate names rides
+  beside the answer, the credential deferral reads the patterns of the words
+  it writes (`rm -rf .approval/* < .approval/env` keeps `log.mutate`), and a
+  pattern past a cap is the unknown answer above, not `log.mutate` alone.
+
+**Deleting, moving or locking a PARENT of an organ directory is that
+directory's class (lead ruling L61587; #689).** `rm -rf "$PWD"`, `rm -rf ~`, `chmod
+-R 000 .` and `mv "$PWD" ../x` remove or lock every organ directory under
+them, and were `files.delete.out_of_scope` or an ordinary write. A recursive
+`rm`, a `mv` source, or a `chmod` (with or without `-R`: `chmod 000 .` locks
+every organ directory below too) whose operand is the working directory (`.`,
+`./`, `$PWD`, `"$PWD"`, `${PWD}`, `"$PWD/"`, `$(pwd)`, `$(pwd -P)`, `sub/..`,
+`../<this directory>`), an ancestor of it (`..`, `../..`, `sub/../..`, `/`),
+the home (`~`, `~/`, `$HOME`) or an ancestor of the home now takes the
+strictest class among the guarded names the hook's listing shows there: an
+organ directory (`.claude`, `.cursor`, `.grok`, `.muse`: `policy.core`;
+`.github`: `policy.edit`), `.approval`, `.codex`, `.hermes`, `APPROVAL.md` and
+the other guarded files, or `.git` (`vcs.history.rewrite`), in any case
+(`.Claude` is `.claude` on a case-insensitive volume). An ancestor is read
+together with every directory from it down to the working directory and the
+home. A path that holds neither as written, through `..` (`../other-project`)
+or absolute (`/tmp/build`), is compared with them by the canonical paths the
+hook resolves (symlinks followed, letter case as on disk): one that reaches
+either by another spelling (`/tmp/x` for /private/tmp/x, `/Users/Me/Proj` for
+/Users/me/proj) is `policy.core`, one that is provably elsewhere is read by
+its own listing, and one the hook could not resolve fails closed. A `..` after
+a name (`link/..`, `sub/../x`) is placed as the kernel reads it, after any
+symlink it follows: by the hook's resolution of the operand as written, and
+fails closed without it. A directory that holds none keeps its class,
+unchanged from main (`rm -rf .` in a tree of sources is
+`files.delete.out_of_scope`). The rule adds its class and never takes one
+away: the class the segment takes without it (main's, an ordinary write
+included) rides beside, so under a policy that holds `files.write.workspace`
+stricter than `policy.edit` main's answer stands. The rule is one of the
+GLOB-WRITE family the seam switches off for main's pass (lead ruling
+L61926), so main's answer for the whole line joins it too. Lead ruling
+L62013: a parent takes the classes of every organ folder it holds, each by
+the folder rule (the folder's contents and the policy's routed entries under
+it included: `rm -rf .` holding `.github` is `policy.edit` and
+`policy.edit.ci` where `.github/workflows/` is routed there, holding
+`.approval` it carries `log.mutate`). Lead ruling L62483: every guarded
+target below the parent is counted, never only the first or the strictest:
+`.git` beside an organ directory adds `vcs.history.rewrite`, a word that
+cannot be placed (`cd .. && rm -rf proj`, `"$PWD"` on a line that moves a
+directory) carries what the working directory, the session's directory and
+the home hold beside `policy.core`, and `mv "$PWD" /tmp/x` carries them
+(and `vcs.history.rewrite` where `.git` is all there is) beside its own
+`policy.core`. Besides `rm -r`, `mv` and `chmod`, the
+tools that delete what they read or find count, fail closed: `find P` with
+`-exec` or `-delete` (`find . -delete`, `find . -type f -delete`), `git rm -r`
+(not `--cached`), `tar` with `--remove-files` (any unique prefix) or
+`TAR_OPTIONS=` before it, `rsync` with `--remove-source-files`, and `chown`,
+`chgrp`, `git clean` and `zip -m`, which are refused today. Lead ruling
+L62435: `rsync` with `--delete` or any `--del…` spelling, `-M` or
+`--remote-option` (its value runs on the receiving side), or a batch option,
+removes what is below its destination, which is read the same way (`rsync -a
+--delete <empty>/ ./`, `~/`, `..`, `"$PWD"`; a `host:` path whatever the
+host, a relative one under the home, so `host:` and `host:/` count too; a
+daemon module, `host::module` or `rsync://`, and a `~user` path fail closed);
+`rsync -a --delete src/ build/out/` keeps main's class. A `find … -delete`
+that a `-name`/`-iname` test narrows keeps main's class (`find . -name
+'*.tmp' -delete`) when every `-delete` follows the test in a plain AND (no
+`!`, `-not`, `-o`, `,` or parenthesis), the pattern is passed exactly as
+written (quoted, no backslash or bracket), and the classifier's own matcher
+shows it can match no organ directory, no guarded name (`APPROVAL.md`,
+`CLAUDE.md`, `auth.json`, `.env`, ...), no `.git`, no part of a protected
+path and (unless it is exactly `*.<letters or digits>`, by the ruling) no
+guarded prefix (`settings*`, `.env.*`, `vault*`, `hooks*`), and (lead ruling
+L62511) when nothing inside a guarded folder below the start path matches
+it: the hook walks each organ directory, guarded name and `.git` it lists
+there (64 directories, 4,000 names, a 2-second timeout and the hook's
+deadline; symlinks not followed; breadth-first, in the order each
+directory returns its entries, with no other ordering, so what a limit
+leaves unread is whatever came later; `.git/objects` not walked but
+judged by git's own name shapes there, two-hex directories, hashes,
+`pack-*.pack` and the rest; `packed-refs` contents never read), and a folder a
+match may reach (`find . -name x.js -delete` and
+`.cursor/hooks/x.js`, `-name ci.yml` and `.github/workflows/ci.yml`, `-name
+HEAD` and `.git/HEAD`, `-name '*.pack'`, a branch name) or a routed folder
+it does not walk gives its class. With no listing (every caller but the
+hook), and for a folder whose walk a limit cut short, only `*.<ext>` with
+an extension guarded folders do not ordinarily hold stays narrowed
+(`*.tmp`, `*.pyc`, `*.log`; not `js mjs cjs ts py sh bash zsh json jsonc
+yml yaml toml md mdc txt lock env ini cfg conf xml`, nor for `.git` `pack
+idx rev bitmap keep mtimes promisor lock sample graph orig`; no plain
+name but the junk names `.DS_Store`, `Thumbs.db`, `desktop.ini` (exactly;
+any case under `-iname`) and the pattern `._*`, read as `*.tmp` is: lead
+ruling L62546). `-path`, `-regex`, `-type` or `-empty` alone narrow nothing.
+Nothing is released:
+`mkdir .` and `touch .` never reach the folders below. Names compare through
+#688's fold in the folded reading and exactly as spelled in the other, so a
+listed `.Claude` is `policy.core` with the segment's own class beside. A
+chmod mode that starts with `-` (`chmod -R -w .`) is the mode, not an
+option. A brace word is judged word by word (`rm -rf {../proj,x}` is `rm -rf
+../proj x`); past 64 words, one with a `.`, `~`, `/`, `$` or backtick is
+`policy.core`. Lead ruling L62435 (S2, narrow): after a `cd`, `chdir` or
+`pushd` to `..`, `/`, `~`, `$HOME`, `"$PWD/.."`, the home (no target) or an
+absolute directory above the working directory, a plain relative name of the
+rule's verbs (`cd .. && rm -rf proj`, `(cd .. && rm -rf proj)`) is
+`policy.core`; with the token `CDPATH` anywhere on the line, so is one after
+a `cd` to any target not led by `/`, `./` or `../`. `cd build && rm -rf
+out` keeps main's class. Words the text cannot read (lead ruling L62435,
+which reverses the earlier answer for an ordinary variable): an ordinary
+variable (`$X`, `"$OUT"`, `${X}`, `$1`, `$@`, `build-$ID`, `$NAME.log`;
+not `.$X`, `$X.`, `$X$Y`) places as a parent only where its readable part
+proves it may be one: below `..`, `~`,
+`/`, `$PWD/..`, or (by the hook's disk) an absolute directory above the
+working directory or the home (`rm -rf ../$X`, `~/$X`, `/$X` are
+`policy.core`); alone, below the working directory (`./$X`,
+`scripts/$NAME`) or below a directory that holds neither (`/tmp/$name`,
+`/private/tmp/$SESSION`) it keeps main's class, so `chmod +x "$f"` and `rm
+-rf $BUILD_DIR` answer as on main; a recursive `chmod` (`-R`,
+`--recursive`, `-Rv`) of one is `policy.core` (lead ruling L62511: `chmod
+-R 755 "$OUT"`, `chmod -R 000 ./$X`). A variable the line itself sets is read
+as written and as each value it is given, through chains to a fixpoint, the
+strictest answering (`X=. ; rm -rf $X`
+and `A=..; B=$A; rm -rf $B` are `policy.core`; `printf -v` with a plain
+format too, and `${X:=word}` or `${X=word}` in any word of the line (lead
+ruling L62511: `echo ${X:=..}; rm -rf $X`); a reading that names a guarded
+target takes that target's classes, as the word spelled so does (`D=.claude;
+rm -rf $D` is `rm -rf .claude`); partial readings are judged as well;
+one `read` or `mapfile`
+binds, a self-reference, a cycle, a nameref (`declare -n`), an indirect
+expansion (`${!X}`), `$_`, and positionals on a line that runs `set`, `shift`,
+`eval` or `source` with arguments, defines a function, or assigns `argv` or a
+numeric name are strict); after a `cd` to a parent, any variable below the
+shell's directory is strict.
+`$PWD`, `$OLDPWD`, `$HOME`, `$CLAUDE_PROJECT_DIR`, `$INIT_CWD`, `$(pwd)`,
+any other `$(...)`, any operator expansion (`${PWD%/*}`, `${X:-dist}`), `~user`,
+`~+` and `~-` stay strict, as does a word a later `..` removes
+(`$(echo sub)/..`, `$X/a/../..`). Where Claude Code's envelope names a
+session directory other than the hook's own (a `cd` in an earlier call), the
+hook lists from it too and a word is placed from both, a parent from either
+being a parent, so `rm -rf /tmp/x` and `rm -rf ../plain` keep main's class.
+Fail closed, `policy.core`: no listing (every caller but the hook), a
+directory over the listing's 2,000-entry cap, unreadable, or missing where
+an earlier segment of the line may make it, a relative or absolute parent
+spelling on a line that may change directory (as opposed to the narrow `cd`
+rule above) or that names `HOME`, and a chain of more than 8 directories to
+list. Not a parent, and unchanged: `rm -rf ./dist`, `rm -rf "$TMPDIR"/x`,
+`rm -rf $TARGET/x`, `rm -rf $X/dist`. `mv .`, `mv ./` and `mv sub/..` move
+nothing (rename(2) refuses them) and keep their class; `rm -rf $(builtin
+pwd)` and `$(command pwd)` stay refused, as on main. Not covered (follow-up;
+each equal on main): a symlink name inside the workspace that points at a
+parent (`rm -rf uplink/`), a glob after a parent (`rm -rf ../pr*`), the wide
+`cd` case (a `cd` into a name or an unreadable target, then a plain name: `cd
+"$DIR" && rm -rf x`; a parent spelled after any `cd`, `cd sub && rm -rf ..`,
+is covered), a `CDPATH` (or a variable) set only in the environment or
+inside `eval`, a sourced file, a function or an alias, an alias or function
+named `cd` or `rsync`, an ordinary variable whose value (set
+in an earlier call) is a parent, organ directories nested below a subdirectory
+(`rm -rf packages` holding `packages/a/.claude`), `rsync`'s
+`-e`/`--rsync-path` value (a command on the receiving side), an absolute
+path for a caller with no listing, `rmdir .`, `chown`/`chgrp` (refused), and
+organ directories in a sibling tree under an ancestor (`rm -rf ..` lists
+only the chain to the working directory and the home). On macOS (and GNU) `rm
+-rf .`, `./`, `..` and `sub/..` refuse to run;
+they are judged by the rule anyway, as the ruling says.
+One follow-up PR after 0.4.9 (lead ruling L62546), each equal on main: a
+name in the part of a guarded folder a cut walk left unread that a
+`*.<ext>` pattern outside the lists or a junk name matches (S-F); guarded
+folders nested below the start path's own entries or reached through a
+symlink (S-G); zsh's `${X::=..}` (S-J); and a brace or an assigned reading
+past its cap carrying `policy.core` without the classes the working
+directory and the home hold (S-E part 1, with #682's fix).
+
+**GLOB-WRITE names fold with the shared fold (#688; lead ruling 04:11Z).**
+Listing names, organ-directory names, the `.git` check on a listing and the
+glob matcher's characters compare through `foldNameExact`, so they fold what
+APFS folds (long s, the Kelvin sign, ligatures, sharp s, NFD) in the folded
+reading and compare exactly in the as-spelled one, as main does; there is one
+fold, and a case variant keeps the class main gives that spelling beside the
+guarded one (`cp a.js .gItHuB/WoRkFlOwS/Ci.yMl` is `policy.edit` and
+`files.write.workspace`; review-b A686-FOLD5 M1). The
+glob matcher folds each whole name before it matches, and reads a pattern
+character whose fold is not one character as any run (strict).
+
+**Push holes open in 0.4.8, closed here (APRV-518, #676; replaces #650).** `git
 remote add --mirror=push m <url>` classified `read.vcs.remote` (autonomous),
 and the `git push m` after it read as an implicit `vcs.push.main` while it was
 a mirror push that deleted remote branches: a two-step way around
@@ -122,7 +622,7 @@ ordinary workspace write.
   main's 354 are byte-identical. The fleet's 63 overlay recipes are unmoved.
 
 **More ways to `.git` closed, and a read of `.git` no longer counted as a
-write into it (APRV-518 follow-up).** Each of these was as loose on 0.4.8 as
+write into it (APRV-518 follow-up, #677).** Each of these was as loose on 0.4.8 as
 on the change above.
 
 - **A glob or brace target.** A write or `cd` target segment holding `*`,
@@ -153,7 +653,7 @@ on the change above.
 - **A tree that carries `.git`.** In the hook, a copy or move whose source
   holds a `.git` entry at its top (`cp -R /x/. .`, `rsync -a /x/ .`) is
   `git-dir-write`.
-- **`.git` spelled by a substitution.** Two more spellings count as the line
+- **`.git` spelled by a substitution (#680).** Two more spellings count as the line
   spelling `.git`. The first is git's own answer: a substitution that runs
   `git rev-parse` with `--git-dir`, `--absolute-git-dir`,
   `--git-common-dir`, `--git-path`, `--resolve-git-dir` or
@@ -179,6 +679,35 @@ on the change above.
   operator that transforms a value (removal, substring, replacement, case,
   `@`) counts, on any parameter. That one costs: `echo x >
   "${f%.txt}.log"` or `"${1%.md}.html"` becomes `git-dir-write`.
+- **The fold of #680's gate (#683).** printf is read only when its format is a
+  literal word using `%s`, `%b`, `%c` and `%d` alone and every word after it
+  keeps its place (a literal word or a fully quoted plain scalar); every `echo`
+  only when every word does; `printf` and `echo` named by the system's path
+  (`/usr/bin/printf`) are read, and also as the unknown output main read
+  them as, so a body is never read looser than before; any other path
+  ending in a printer's name (`/usr/bin//printf`, `/bin/../usr/bin/printf`,
+  `./printf`) counts. `printf -v` (and zsh's `print -v`) makes the line
+  count as spelling `.git`, so a target its variable reaches counts
+  (`printf -v d %.4s .gitfoo; echo x > "$d/config"`), and in a body its
+  segment counts. Anything else in a substitution body counts
+  as naming `.git`: `printf %.4ls .gitfoo` (bash skips the `l`), a format in
+  a variable (`F=%.4s; printf "$F" .gitfoo`, `printf $F`), `%q`, bash's
+  `%(…)T`, and words that may become no word or several (`printf
+  '%.4s%.0s' $u .gitfoo` is `.git` when `u` is empty), a quoted word whose
+  text the lexer does not keep as the shell's (`"\x2e""git"`), a `\c` (which
+  stops all output) in any printf or echo word, and a `%` the parse did not
+  take (`printf %`, `'%s%'`). `echo` (zsh's
+  decodes escapes with no `-e`) and `%b` of a value the text cannot read
+  count too (`X='\056git'; echo x > "$(echo "$X")/config"`, a miss on
+  main), so `"$(echo $(date +%F))"` asks. zsh's subscripts and
+  modifiers count as operators: in braces any subscript but `[@]`/`[*]`,
+  and after an unbraced parameter any `[` or `:` and a letter (`$f[1,4]`,
+  `$f:r`, `$f:S/x/i/`, `$@:r`, and the flags `$=f`, `$~f`, `$^f`).
+  Evidence: the gate's 95 shell-truth cases and 116 more, in bash 3.2 and
+  zsh: 0 looser against main and 0.4.8, 53 lines that land in `.git` now
+  counted (the 5 left are the known limits); over the gate's 3,668-line
+  corpus, 0 looser against main and 0.4.8, 9 lines stricter than main.
+  Conformance is unchanged.
 - **A line cannot be built to make the classifier slow.** A hook past its
   timeout lets the call through, so the cost of reading a line is bounded.
   The split-spelling reader tried every window of a word as its own
@@ -194,6 +723,15 @@ on the change above.
   are each read once (each took 64 to 174 s through the hook before). A
   word with outputs in it is brace-expanded to 16 alternatives, and past
   that counts (`{a,b}$(pwd)` to 1 MB took 39 s at 1,024).
+- **A word of unclosed `${` cannot make the path readers slow (#687).** The reader
+  that collapses `${NAME:-…}` to `${NAME}` before a path is split, and the
+  hook's two copies of it in its credential pass, scanned to the word's end
+  from every `${` with no `}` after it: a 1 MB redirect target took 105 s
+  through the hook, and the same word as a read took longer. curl's
+  `%output{` reader had the same shape. Each now stops at the last `}` of
+  its text, where a closed form must end, and reads the text once (under
+  0.3 s at 1 MB). No answer changes: 17,402 lines classify as before, with
+  and without the hook.
 - **Looser than the change above, by design.** A read whose only write is its
   redirection writes nothing through its own words: `cat .git/HEAD > /tmp/x`,
   `ls .git/hooks > list.txt` and the like are the workspace write 0.4.8 called
@@ -237,9 +775,367 @@ on the change above.
   and 10,000 levels of nesting each take under half a second of CPU through
   the hook.
 
+**A credential read names the protected paths it writes (#701).** A segment that
+reads credential material answered `account.credential` alone whenever no
+protected path it names outranks that class (`log.mutate`, `policy.core`).
+So with `.github/workflows/` routed to `policy.edit.ci`, `cp .approval/env
+.github/workflows/ci.yml` was the credential class alone: the workflow write
+was not named, and a policy that runs `account.credential` more lightly than
+`policy.edit.ci` let it through with no tap. The same held for a built-in
+`policy.edit` target (`cp .approval/env CLAUDE.md`), for the redirect form of
+the read (`tee .github/workflows/ci.yml < .approval/env`), for a download's
+output beside an upload of the credential, and for a Hermes-home credential
+(`cp ~/.hermes/.env design/x`). The credential class still answers, first;
+every protected class the segment's write targets take now follows it, each
+as its own entry over the same text, as the entry below reports them for
+other segments, and the hook judges each.
+
+- **Which words count is unchanged.** The classes come from the scans the
+  classifier already made: the positionals and `<` targets of an effectful
+  command, a copy's target directory, a download's outputs. The words that
+  are the credential read are left out, as they were when the classifier
+  asked whether a protected path outranks the read, so `cp .approval/env
+  notes.txt` is still the credential class alone and never `policy.core`.
+- **A reader's arguments are still not targets:** `cat .approval/env
+  .github/workflows/ci.yml` and `cat .approval/env > notes.txt` are the
+  credential class alone. A reader in front of a protected redirection
+  answers as before (`cat .approval/env > design/x` is the design class,
+  then the credential class).
+- **A copy whose destination the text cannot know** (`cp .approval/env $X`)
+  reports `policy.core` (`copy-target-unknown`) beside the credential class,
+  as `cp notes.txt $X` answers.
+- **With the glob write rules below (#686),** the segment's other words are
+  judged beside the credential class as the same line with an ordinary file
+  judges them: a glob or a `${…}` default in a target, a copy's landings and
+  guarded destinations, a read's own output. `cp .approval/env
+  .gith*/workflows/ci.yml` is the credential class, then `policy.edit.ci`
+  and `policy.edit`; `sort -o .github/workflows/ci.yml .approval/env` names
+  the workflow. A copy onto a credential path is a write (#706, below): `cp
+  notes.txt .approval/env` is `policy.core` with the credential class.
+  Through a wrapper or a program with no rule (next) the words are read as
+  written, so a pattern there is not judged for its own class (`command cp
+  .approval/env .gith*/workflows/ci.yml` is the credential class and, since
+  #706, `policy.core` for the target the shell builds, not `policy.edit.ci`).
+- **A wrapper or a program with no rule** (`command cp .approval/env
+  .github/workflows/ci.yml`, `nice cp …`, `ditto …`, `python3 x.py …`):
+  the credential class answers, as before, and nobody can say what such a
+  program writes, so every protected path its words name is reported beside
+  it, the value of an option or of a `key=value` word included
+  (`--out=.github/workflows/ci.yml`). Before,
+  one word in front of `cp` left the workflow write unnamed. Without the
+  credential word these lines are refused, as they were.
+- **Behind a wrapper, a target the shell builds fails closed (#706)** as `cp
+  .approval/env $X` does: a variable, a command substitution, a glob, a
+  brace expansion or a `~` in a word of the line (`command cp .approval/env
+  $X`, `"$(…)"`, `.gith*/workflows/ci.yml`, `{a,b}.yml`, `~bob/x`) reports
+  `policy.core` (`copy-target-unknown`) beside the credential class, after
+  the classes above, and every tail of a short option's attached value is
+  read as a word (`-o.github/workflows/ci.yml`, `-xo.github/workflows/ci.yml`);
+  an attached-option word over 256 bytes is not read tail by tail, and
+  behind a wrapper it refuses the line, as an outranking value does, so the
+  scan stays linear.
+  An attached or `=` value that outranks the credential class
+  (`-oAPPROVAL.md`, `--out=APPROVAL.md`, `-t.approval/log`) leaves the line
+  refused, as the same path as its own word does. A quoted `'$X'` is a
+  literal, and only a literal credential path (`.approval/env`,
+  `~/.hermes/.env`, `--in=.approval/env`) is left out as the read. A
+  secret-named variable is a word the shell builds like any other, as plain
+  `cp` counts it, since the name is the agent's to choose and to assign:
+  `command cp $APPROVAL_TG_TOKEN notes.txt` and `frobnicate --token
+  $APPROVAL_TG_TOKEN` are `account.credential` (`credential-env`), then
+  `policy.core`. So under a policy that runs `account.credential` more
+  lightly than `policy.core`, a program with no rule that is handed a
+  secret variable now also waits on `policy.core`; under the policy
+  `approval init` writes both classes are manual and no decision moves.
+  Before, these lines were the credential class alone.
+- **A copy INTO a credential path writes it (#706).** A credential path in a
+  copy's destination slot (by the copy tool's own option table: `cp`, `mv`,
+  `ln`, `install`, `rsync`, `scp`) was read as the credential read, so `cp
+  README.md .approval/env`, `cp ~/.hermes/.env .approval/env` and `cp
+  .approval/env ~/.hermes/auth.json`, with their brace and quoted
+  spellings, answered `account.credential` alone. The destination is now a
+  write: the class a write of that path takes (`policy.core`) outranks the
+  credential class and answers first, with the credential touch beside it,
+  as for any outranking path (`cp .approval/env APPROVAL.md`). A source
+  that lands at a credential path counts the same way. Where the table
+  cannot read the argv (an option it does not know, `cp --frob README.md
+  .approval/env`, or a word the shell may still turn into one), every
+  credential path among the words may be written: the line keeps its whole
+  answer and that path's class is added after it (a credential source there,
+  `cp --frob .approval/env notes.txt`, gains it too). So under a policy
+  that runs `account.credential` more lightly than `policy.core`, such a
+  copy now also waits on `policy.core`. A credential source is still the
+  read (`cp .approval/env notes.txt` is the credential class alone), and
+  the redirect, `tee` and `mv` forms answered `policy.core` already.
+  The write's class is ADDED to the answer the line had: every class it
+  reported stays, so `rsync -a --log-file=.approval/log/events.jsonl
+  README.md .approval/env` keeps `log.mutate` (likewise rsync's
+  `--temp-dir`, and a glob source's readings), and a refusal of the rest of
+  the walk stands. The sources land in the last target directory named.
+  A credential glob as a copy's last operand with no `-t` may expand into
+  its destination (`cp ~/.hermes/profiles/*/auth.json`, `cp
+  .approval/env{,.bak}`): that path's class is added too.
+- **A credential read spelled as a glob is still the read (#706)** where the
+  program only reads its operands (`less`, `more`, `most`, `hexdump`, `od`,
+  `strings`, `file`) and every match of the glob is a credential path (`less
+  ~/.hermes/profiles/*/auth.json`, as `less ~/.hermes/auth.json`). Anywhere
+  a match may be written (`xxd in out`, a wrapper, a program with no rule)
+  the glob is a target the shell builds, as above.
+- **Not changed:** a protected path that outranks the credential class
+  still answers first with the credential beside it, except in a copy's
+  joined target-directory flag (`cp --target-directory=.approval/log
+  .approval/env`, `-t.approval/log`), where main answered the credential
+  class alone and the outranking class now follows it; and a refusal stays
+  a refusal (`sudo cat .approval/env`). The as-spelled name reading answers
+  exactly as before.
+- The segment is still walked once: the walk goes on from the credential
+  answer, and its protected scan is the one the credential tier already
+  made.
+- Conformance: five new `command-class` vectors; the 400 before them are
+  byte-identical.
+
+**Every protected path a command writes is judged (#690).** A segment that named
+two protected paths took the class of one of them: the stricter by the
+classifier's own precedence (`log.mutate`, `policy.core`, then `policy.edit`
+and every routed sub-class together), and on equal rank the first named. So
+with `design/` routed to a class a policy runs lightly and
+`.github/workflows/` routed to one it stops for, `tee design/x
+.github/workflows/ci.yml` was the design class alone and wrote the workflow
+with no tap; `tee .github/workflows/ci.yml > design/x`, `cp design/x
+.github/workflows/ci.yml`, `echo x > design/a > .github/workflows/ci.yml` and
+`tee {design/x,.github/workflows/ci.yml}` did the same. The classifier's
+precedence is not a policy's order of strictness, so it now reports every
+protected class the segment's targets take, each as its own entry over the
+same text (the answer it gave before comes first), and the hook judges each
+and the strictest decision answers.
+
+- **Which words count is unchanged.** The other classes come from the same
+  words the classifier already scanned: the write redirections, a download's
+  outputs, a copy's target directory, the positionals and `<` targets of an
+  effectful command. A writer in front of a protected redirection is asked
+  for its own answer too. A reader's arguments are still not targets:
+  `cat SPEC.md > design/x` is the design class alone.
+- **Built-in paths too:** `tee CLAUDE.md APPROVAL.md` is `policy.core` and
+  `policy.edit`. Under a policy that holds `policy.core` the strictest, as
+  the shipped ones do, the decision is the same as before.
+- **A command naming paths of several classes a policy stops for asks once
+  per class.**
+- **One word that brace expansion makes several files of** reports each
+  file's class, and where two of them each match tied routes, every tied
+  class of both.
+- A segment whose answer is a credential read alone (`cp .approval/env
+  design/x`) reported no protected class beside it; the entry above
+  ("A credential read names the protected paths it writes") reports them.
+- The load note for a routed entry spelled like a built-in path in another
+  case is worded by tier: beside a built-in `policy.edit` path the route is
+  judged too; a built-in `policy.core` or `log.mutate` path is answered by
+  its built-in class and the route never lightens it.
+- Conformance: three new `command-class` vectors; the 392 before them are
+  byte-identical.
+
+**The hook answers before the harness stops listening (#693).** A hook the harness
+kills at its timeout is a tool call that proceeds, and reading one long word
+could take that long: `cat b/b/b/…/env`, a path of 100 KB that names nothing
+guarded, took 76 CPU seconds to classify, past Claude Code's default 60 second
+hook timeout. So a command line that long ran with no gate at all, whatever
+else was on it.
+
+- **The path walks are linear.** Two walks resolved the whole path once per
+  component: the search for a path's deepest existing ancestor
+  (`canonicalPath`) now halves after 32 climbs, and the kernel-order landing
+  (`physicalLanding`) keeps the components below the first missing one as a
+  list. Two more took each component from the front of an array, which moves
+  the rest every time; they pop from the end. Answers are unchanged, held
+  against the old walks on a fixture of links, loops and missing components.
+  That 100 KB word now takes 0.2 seconds, and a megabyte under two.
+- **Reading a call has its own deadline: 15 seconds**, or the harness ceiling
+  less two seconds where one is stated or assumed and that is shorter (Hermes's
+  30 second default leaves the whole 15; a ceiling too short to spare two
+  seconds gives a quarter of itself). With a gate window open the deadline is
+  the same one. A call
+  the hook cannot read in that time is refused `hook-deadline`, with nothing
+  registered or requested, while the hook can still say so. The deadline stops
+  the hook's own work from outside it, so no input can outrun it; it does not
+  interrupt a blocking system call. `APPROVAL_HOOK_DESCRIBE_DEADLINE_MS` can
+  shorten it and can never lengthen it. A read that is stopped is stopped part
+  way, so a process that answers many calls on one thread (the Codex bridge)
+  refuses every later call the same way, and says so, until it is started
+  again. `approval serve` retires the thread that was stopped, and the next
+  call is read by a fresh one. `hook-deadline` joins the `hook_deny_codes`
+  union of the conformance vectors.
+- **A slow read shortens the wait.** A read that takes more than one second
+  shortens the wait for a decision by the rest, so a read of several seconds
+  does not push the hook's last answer past the harness's timeout. An
+  ordinary read takes milliseconds and changes nothing: the wait, the retry
+  grace and the age at which a question counts as abandoned are as they were.
+- Still slow, and now refused rather than passed: a megabyte of many short
+  path words takes about 20 seconds to read, which is past the deadline.
+
+**Guarded names fold case on every platform (#688).** The guards compared a path's
+names with the guarded names by exact letter case, while APFS, macOS's
+default volume, opens a name under full Unicode case folding. So `echo x >
+Approval.MD`, `rm -rf .APPROVAL`, `echo x > .APPROVAL/log/events.jsonl`,
+`echo x > .Claude/settings.json`, `echo x > .Cursor/hooks.json`, `echo x >
+claude.md`, `echo x > .GitHub/workflows/ci.yml` and `echo x >
+~/.Codex/config.toml` classified as ordinary workspace writes, ran
+unattended, and each landed on the guarded file. The few rows that already
+folded (the credential rows, the Hermes home, the `.git` segment, git's ref
+names) used `toLowerCase()`, which misses ten of the eleven code points APFS
+opens as ASCII letters: `.claude/<U+017F>ettings.json`,
+`.cursor/hoo<U+212A>s.json`, `.codex/con<U+FB01>g.toml` and
+`~/.herme<U+017F>/.env` were the same holes in a narrower form.
+
+- **One fold, `foldFileName` (`src/core/name-fold.ts`).** NFD, then lower,
+  upper and lower case: the Kelvin sign is `k`, the long s is `s`, `ß` and
+  `ẞ` are `ss`, and the ligatures `ﬀ ﬁ ﬂ ﬃ ﬄ ﬅ ﬆ` are their letters, as APFS
+  opens them. It is stricter than APFS on one code point, the dotless i,
+  which it folds to `i`. It refines `toLowerCase()` (checked over every code
+  point), so no row that already folded matches less.
+- **Every guarded-name compare uses it, on every platform:** the policy file
+  names, the approval home and its log, the Claude, Cursor, Grok, Muse,
+  Codex and Hermes rows and their second segments, `CLAUDE.md`, `AGENTS.md`,
+  `.npmrc`, `.github/workflows`, a policy's own `protected_paths` entries
+  (bare and routed), the credential rows, the `.git` segment and git's
+  configuration files, git's trunk, tag and remote names, the no-rule
+  guard's name check, the hook's own credential and home passes, the
+  organ-attestation exclusions, and the Codex workspace plan's alias check.
+  On a case-sensitive volume a folded match costs an approval prompt.
+- **HFS+'s ignored code points are dropped too.** HFS+, the volume format
+  before APFS, ignores U+200C to U+200F, U+202A to U+202E, U+206A to U+206F
+  and U+FEFF inside a name (Apple TN1150; measured on an HFS+ image, every
+  code point from U+0080 tried: exactly these sixteen, and HFS+ folds ASCII
+  case but none of the APFS code points above). So on HFS+
+  `echo x > APPRO<U+200D>VAL.md` and `rm -rf .appro<U+200D>val` landed on
+  the guarded files; the fold drops them first. APFS ignores none of them,
+  so there such a name is another file and the fold costs an approval prompt.
+- **A spelling keeps the class main gave it beside its canonical class.**
+  Folding can change WHICH guarded class a path takes, not only whether it
+  takes one: `.approval/LOG/x` is `policy.core` as spelled (main) and
+  `log.mutate` folded, and with two routed entries `SPEC/` and `spec/`, both
+  now match `spec/x` and declaration order would pick one. A policy that
+  holds one class human-only and the other autonomous would have answered
+  such a spelling more lightly than main. So every guard is read twice:
+  folded, and as spelled (exactly as main compared it, exact or
+  `toLowerCase()`), and a line reports the folded answer plus every class the
+  as-spelled answer adds, as its own segment over the same text:
+  `echo x > .approval/LOG/x` is `log.mutate` and `policy.core`, and
+  `echo x > Approval.MD` is `policy.core` and `files.write.workspace`. The
+  hook judges each class and the strictest decision answers. The same holds
+  for the file tools (a Write to `.approval/LOG/x` carries both classes), the
+  hook's disk passes, the Codex file-change and `apply_patch` classes, the
+  Codex workspace plan's action legs, and the exec-code program check. A
+  refusal in either reading refuses. The second reading is skipped only when
+  no compared name differs between the readings, which cannot change the
+  answer.
+- **Grants hold in both readings.** A compare that makes a line lighter (the
+  Hermes skill-script shape, the install's `.env.example`, the protected-path
+  guard's evidence carve-out for `.approval/log/`) keeps its exact spelling,
+  and an answer that grants something (an attestable organ, a sign-off's
+  eligibility, a routed class or a granted command accepted as CI evidence)
+  must hold in both readings, so `.Claude/settings.json` is not an organ, as
+  it was not on main.
+- **The route floor reads a policy entry as spelled, as main did:** no policy
+  that loads on main fails to load here. A routed entry spelled like a
+  built-in guarded path in another case (`.APPROVAL/x`, `Approval.md`,
+  `.GitHub/workflows/`) still matches commands folded, and the built-in
+  class is always judged for that path: the organ rows answer before any
+  route, and beside a route that names a built-in `policy.edit` path only in
+  another case the path is reported as `policy.edit` too. On main such a
+  route answered alone, the floor having never judged it, so a policy that
+  routed `.GitHub/workflows/` to a class it runs unattended let
+  `echo x > .GitHub/workflows/ci.yml` through, onto the workflow file on
+  APFS. `approval policy check` names such an entry in a `note:` line.
+- **Routes of the same depth are all judged.** Two routed entries that both
+  match a path at the same depth (`SPEC/` beside `spec/`, once names fold;
+  or two folders both on one path) used to be settled by declaration order.
+  The classifier cannot say which class a policy holds stricter, so it now
+  reports every such class, the first declared first, and the hook's
+  strictest decision answers, for every spelling of the path. The most
+  specific route still wins over a shallower one. One more classification
+  pass per tied entry, on lines that name such a path.
+- **The placeholder a `$(…)` leaves in a word is not folded (#691).** It is spelled
+  in capitals, so folding it like a name made every word with a substitution
+  count as a name whose two readings differ, and the whole as-spelled reading
+  ran for it: about twice the cost on any line with a `$(…)` in a path word,
+  for an answer that could not differ. One reading runs for it now, with the
+  same answers; a name beside the substitution that does fold still runs both.
+- **The Hermes-home walk is linear.** It sliced and re-walked the rest of
+  the path at every home segment, so a 1 MiB path of `.hermes/x/` segments
+  took about a minute of CPU on main (and through the fold, `.herme<U+017F>/x/`
+  as well). Each tail's answer now comes from one pass over the path, with the
+  same answers (held against the old walk by a fuzz in the tests).
+- **Evidence.** Against main's build, pure and through the hook, over the
+  differential lines and thirteen policy entry lists (none, bare, routed, two
+  colliding orders, three colliding spellings, nested depths, case variants
+  of built-in paths, routed and tied with the canonical entry): the
+  as-spelled reading equals main's answer on every line, and the head's
+  classes contain main's on every line, with no refusal lost. The 382
+  conformance vectors and the 63 overlay recipes are unmoved. Run for real in
+  bash and zsh on APFS in a scratch folder, each case and fold spelling tried
+  landed on the guarded file, and the dotless i and a fullwidth a did not.
+  Conformance: ten new `command-class` vectors; main's 382 are
+  byte-identical. The vectors version was bumped once, at the 0.4.9 release
+  cut.
+
+**zsh's clobber redirections are refused (open in 0.4.8; #700).** In zsh `>!`,
+`>>!` and `>&!` are each one operator, and the word after it is the file:
+`echo x >! APPROVAL.md` overwrites the policy file. bash reads the same text
+as a redirection onto a file named `!`, with `APPROVAL.md` an argument of
+`echo`. The classifier read bash's, so under zsh, the shell Claude Code's
+Bash tool runs on macOS, a line that wrote a protected file was
+`files.write.workspace` and ran wherever a policy lets workspace writes run.
+
+- **The form is refused `unparseable`**, with or without a space before the
+  target, with a descriptor in front (`2>!`, `1>>!`) and after an `&`
+  (`&>!`), anywhere on the line and inside `$(…)` or a `sh -c` script. The
+  two shells write different files, so neither reading is admitted. The
+  refusal names what to write instead.
+- **Unmoved:** `>|`, the clobber operator both shells share, and a file
+  really named `!` when it is quoted, escaped or set apart (`>'!'`, `>\!`,
+  `> !`), which both shells read alike. `>>|`, `>&|`, `>>&!` and their
+  kin are zsh's alone and were refused already.
+- **Evidence.** Each form was run in zsh 5.9 and bash 3.2 in a scratch
+  folder, and the test repeats that where both shells are installed. No
+  overlay recipe and no earlier conformance vector carries the form.
+  Conformance: three new `command-class` vectors (two refusals and `>|`);
+  the 395 before them are byte-identical.
+- **With GLOB-WRITE (lead ruling L62319):** the forms above are read at the
+  word zsh writes, with bash's file beside, where that word is the file zsh
+  writes; the rest keep this refusal (the GLOB-WRITE entry lists them). The
+  two refusal vectors read `policy.core` beside `files.write.workspace`, and
+  two refused controls are added (`bash -c`, a two-digit descriptor).
+
 ### Added
 
-- **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536).**
+- **Where a write lands is judged: `files.write.guarded` and `write_scope`
+  (#695).**
+  The hook reads where each write of a shell line or a file tool lands, as
+  spelled and as the disk resolves it through links, and adds a class beside
+  the ones the line already has.
+  - `files.write.guarded`: the landing is on a built-in list (`~/.ssh`, shell
+    start files, launch agents, `/etc`, PATH folders such as `~/.local/bin`,
+    credential stores such as `~/.aws`, a git hooks folder, a Claude Code
+    hooks folder, another user's home). The class has a built-in minimum of
+    `manual`: a policy row that sets it lower is a load error
+    (`class-minimum`), and a policy that does not name it still gets `manual`.
+  - A landing the hook cannot read is guarded too: a variable or substitution
+    it cannot resolve, a link made earlier on the same line, a pattern with
+    more than 8,192 matches. A pattern it can read takes the classes its
+    matches take written out.
+  - Trees (`cp -r`, `rsync`, `tar -x`, archive tools) are guarded when the
+    landing is on, inside or above a listed place, or holds a `.git`.
+  - `write_scope.roots` in a policy is opt-in. With it, a write landing
+    outside the gate root, the session scratchpad, the temp roots and the
+    listed roots takes `files.write.out_of_scope` (the scaffold ships it
+    `supervised-retro`). Without it nothing changes for such writes.
+  - `approval doctor` has a `write-scope` row and `approval policy explain`
+    names the built-in minimum. Six new policy-resolution vectors.
+  - Known limit: a `cp` with many `-t` landings is slow through the hook.
+    Every landing is judged, under every policy, and the work grows with the
+    square of their number: a line of about 8 KiB of arguments takes several
+    seconds, and a longer one can meet the hook's deadline and be refused
+    `hook-deadline`. It fails closed. A fix (#711) is planned for 0.4.10.
+- **NEW-CALLS check for the overlay's new capabilities (B-167N, APRV-536, #679).**
   `overlay-recipes-check.mjs --expected <expected.json> --tag-corpus <corpus>`
   finds every call that is new or changed against the previous release (a new
   recipe, other command bytes, or a call the CLASS-DIFF moved between the
@@ -312,7 +1208,7 @@ on the change above.
     writer that appears, disappears or changes its class, one whose class
     cannot be read, and a plugin with such a propose and no writer all fail.
     `getattr(x, "propose")(...)` is now read as a propose too.
-- **CLASS-DIFF against the core the boxes run (B-167 release gate).**
+- **CLASS-DIFF against the core the boxes run (B-167 release gate, #678).**
   `overlay-recipes-check.mjs --diff <baseline core>` classifies the same corpus
   at a baseline core and at this one, over every recipe plus every `tools:`
   line of the template (the box harness calls), and reports each call whose
@@ -401,7 +1297,7 @@ on the change above.
   APRV-518 git rules above) the pinned corpus reads `class-diff: none`: all
   304 calls unchanged, and the box check's 96 denied runs are the seven
   entries' own.
-- **`approval propose --irreversible` (APRV-537).** An agent can now say that
+- **`approval propose --irreversible` (APRV-537, #681).** An agent can now say that
   the action it proposes cannot be undone, and a person then decides under every
   setting short of human-only. Until this, a proposal could not declare
   `reversible: false`, so under `autonomous`, `supervised-retro` and
@@ -457,6 +1353,50 @@ on the change above.
   The For Kicks entry is unchanged here: it takes the flag in the overlay PR
   that lands the card. A core without the flag refuses it (`usage`), which the
   check reads as a refused propose.
+
+### Changed
+
+- **`approval policy amend --as agent:<id>` no longer loses a stop request
+  sent during its proposal (APRV-479, #699).** A SIGINT, SIGTERM or SIGHUP that
+  landed while the `policy.proposed` append held the log lock was held by the
+  lock's guard and then dropped when the attestation wait began, so the verb
+  slept out its whole `--wait` (15 minutes by default). The verb now turns the
+  event loop once after that append, so the process dies of the signal there,
+  with the lock released and the record whole, and the wait sleeps on a timer,
+  so a signal at any later point ends it at once. What the verb writes, prints
+  and exits with is unchanged.
+- **Conformance `vectors_version`, set once at the release cut (lead ruling
+  L62887).** By `conformance/README.md`'s rule (a new vector is a minor bump,
+  a changed expectation a major one): `command-class` 2.0.0 (from 1.12.0;
+  0.4.8 shipped 1.9.0), a major because three expectations 0.4.8 released
+  moved to the stricter answer in #686: `prose-opening-with-a-protected-path-under-cp`,
+  `cp-dot-slash-glob-is-unmoved` and `a-deeper-match-than-the-head-is-unmoved`
+  (#686's entry above names the first two; in the third, a `cp` onto
+  `.github/workflows/sub dir/APPROVAL.md` also names `policy.edit` on the
+  landing `.../APPROVAL.md/a.md`). Its seventy-eight new vectors, net (354
+  to 432), came from #676 (sixteen), #677 (five), #680 (seven), #688 (ten),
+  #690 (three), #700 (three; #686 replaced two of them), #686 (four), #701
+  (four), #695 (five), #706 (one) and #709 (twenty-two). `refusal-unions`
+  32.0.0 (from 31.0.0), a major because a pinned union grew: `hook_deny_codes`
+  gained `hook-deadline` (#693).
+  `policy-resolution` 5.1.0 (from 5.0.0), a minor: six new vectors for
+  `files.write.guarded` (#695), no expectation moved, and the `algorithm` line
+  is unchanged. The regeneration moved only the three version fields and their
+  three manifest hashes.
+
+### Tests
+
+- **Tests that went red under load or on another runner now wait on events
+  and measure against their own runner (#694, #697, #698, #702, #703,
+  #705, #707).** A cost test's CPU bound follows the runner it is measured on; the
+  real-clock deadline read is sized by search; the lock-reclaim, `policy
+  amend` signal and slow-pipe follow tests wait on events, not on a clock;
+  the ZZZ mock closes each connection; and the two walked-once cost cases
+  give every word its own name and read the median of back-to-back pairs,
+  with their bounds unchanged. Tests only, with one doc comment in
+  `src/core/log.ts` reworded to say what the lock wait does; the runtime is
+  unchanged. The zsh clobber paragraph above was reworded to match the code
+  (#704, words only).
 
 ## 0.4.8 — 2026-11-20
 

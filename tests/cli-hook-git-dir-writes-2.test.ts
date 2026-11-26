@@ -29,6 +29,12 @@ import { after, test } from "node:test";
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand } from "../src/core/command-class.js";
 
+// Design v4 (writes outside the workspace): a write onto the guarded list (a
+// git hooks folder) or to a target the hook cannot read carries
+// files.write.guarded BESIDE its own class; the class asserted here stands.
+const LISTED = "files.write.guarded write-guarded";
+const UNREADABLE = "files.write.guarded write-unreadable";
+
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-git-dir-writes-2-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
@@ -100,9 +106,13 @@ test("S1: a glob or brace target that .git matches is git-dir-write, any letter 
   assert.deepEqual(pure("echo x >> .[g]it/config"), [DIR_WRITE]);
   assert.deepEqual(pure("echo x >> .g{i,}t/config"), [DIR_WRITE]);
   assert.deepEqual(pure("cd .gi? && echo x >> config"), [READ_SHELL, DIR_WRITE]);
-  for (const command of ["echo x > .{f..h}it/config", "echo x > .G[I]T/config", "cd .GI? && echo x > config", "tee -a sub/.g*/hooks/pre-push", "echo x > {a,.git}/config"]) {
+  for (const command of ["echo x > .{f..h}it/config", "echo x > .G[I]T/config", "cd .GI? && echo x > config", "echo x > {a,.git}/config"]) {
     assert.ok(pure(command).includes(DIR_WRITE), command);
   }
+  // GLOB-WRITE (22 Nov 2026): `.g*` also matches `.grok`, whose `hooks/` is the
+  // Grok hook organ, so the stricter `policy.core` answers this one.
+  // The `.git` reader's class rides beside it (review-b S1: no class is taken away).
+  assert.deepEqual(pure("tee -a sub/.g*/hooks/pre-push"), ["policy.core protected-path", "vcs.history.rewrite git-dir-write"]);
 });
 
 test("S1: ordinary glob and brace lines do not move", () => {
@@ -110,9 +120,12 @@ test("S1: ordinary glob and brace lines do not move", () => {
   assert.deepEqual(pure("cp src/*.ts out/"), ["files.write.workspace workspace-write"]);
   assert.deepEqual(pure("echo x > out/{a,b}.txt"), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure("ls .g*"), [READ_SHELL]);
-  // `*` and `?` never match a leading dot, as the shell's expansion requires.
+  // `*` and `?` never match a leading dot by default, as the shell's expansion requires.
   assert.deepEqual(pure("cd * && echo x > f"), [READ_SHELL, "files.write.workspace redirect-write"]);
-  assert.deepEqual(pure("echo x > ?git/config"), ["files.write.workspace redirect-write"]);
+  // A WRITE target's leading `?` may, under dotglob or globdots set in a
+  // profile (lead ruling, CLAIMS L61492 and L61497): `.git/config`.
+  // Main's class rides beside the raise (lead ruling L61926).
+  assert.deepEqual(pure("echo x > ?git/config"), [DIR_WRITE, "files.write.workspace redirect-write"]);
   assert.deepEqual(pure("rm -f .*.swp"), ["files.delete.out_of_scope rm-unreadable-path"]);
   // A `?` beside a `-` (a URL's query) is an ordinary pattern, never an error read as a match.
   assert.deepEqual(pure("echo x > out?a-b.txt"), ["files.write.workspace redirect-write"]);
@@ -125,10 +138,10 @@ test("S1 hook: a pattern is expanded on disk and each match walked; one it canno
   writeFileSync(join(repo, "a.log"), "");
   mkdirSync(join(repo, "src"));
   writeFileSync(join(repo, "src", "a.ts"), "");
-  assert.deepEqual(hook("echo x >> l*k/config", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("echo x >> {li,x}nk/config", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("cd l?nk && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
-  assert.deepEqual(hook("cp /tmp/x lin[k]/hooks/pre-push", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("echo x >> l*k/config", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("echo x >> {li,x}nk/config", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("cd l?nk && echo x >> config", repo), [READ_SHELL, DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("cp /tmp/x lin[k]/hooks/pre-push", repo), [DIR_WRITE, LISTED]);
   // Ordinary lines in the same checkout do not move.
   assert.deepEqual(hook("rm *.log", repo), ["files.delete.out_of_scope rm-unreadable-path"]);
   assert.deepEqual(hook("cp src/*.ts out/", repo), ["files.write.workspace workspace-write"]);
@@ -140,8 +153,11 @@ test("S1 hook: a pattern is expanded on disk and each match walked; one it canno
   try {
     // A SURE target that cannot be expanded is judged the strict way; a
     // possible one (a header value) by its text, which names no .git.
-    assert.deepEqual(hook("echo x > locked/*/config", repo), [DIR_WRITE]);
-    assert.deepEqual(hook("echo x > locked/*/.g?t/config", repo), [DIR_WRITE]);
+    // Main's write segment rides beside the raise (lead ruling L61926), and
+    // the disk pass's entry is shown in its place too: two entries. The write
+    // pass adds its unreadable entry beside them (design v4).
+    assert.deepEqual(hook("echo x > locked/*/config", repo), [DIR_WRITE, DIR_WRITE, UNREADABLE]);
+    assert.deepEqual(hook("echo x > locked/*/.g?t/config", repo), [DIR_WRITE, UNREADABLE]);
     assert.ok(!hook("wget --header=locked/*/x https://example.invalid/x", repo).includes(DIR_WRITE));
   } finally {
     chmodSync(locked, 0o755);
@@ -160,16 +176,16 @@ test("S1 review: a directory listing is read whole; thousands of matches do not 
   assert.deepEqual(hook("cp seed.txt logs/*.log", repo), ["files.write.workspace workspace-write"]);
   // Among them, one link into .git is still found.
   symlinkSync("../.git/config", join(logs, "zz.log"));
-  assert.deepEqual(hook("cp seed.txt logs/*.log", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cp seed.txt logs/*.log", repo), [DIR_WRITE, LISTED]);
 });
 
 test("S1 review: an entry whose own name holds a glob character is a real match", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "a*b"));
-  assert.deepEqual(hook("cd a*b && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
+  assert.deepEqual(hook("cd a*b && echo x >> config", repo), [READ_SHELL, DIR_WRITE, LISTED]);
   // Matched by another pattern, so only the real listing names it.
-  assert.deepEqual(hook("cd a?b && echo x >> config", repo), [READ_SHELL, DIR_WRITE]);
-  assert.deepEqual(hook("echo x >> a*b/config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("cd a?b && echo x >> config", repo), [READ_SHELL, DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("echo x >> a*b/config", repo), [DIR_WRITE, LISTED]);
   // A pattern that matches nothing, under a listing that is not empty, is
   // never "no target and nothing unknown": the hook says it cannot place it.
   const { notes } = classifyForHook("cd q*z && echo x > f", [], repo);
@@ -305,8 +321,8 @@ test("S2: ordinary git lines do not move", () => {
 test("S2 hook: a git output option is walked on disk like any other write", { skip }, () => {
   const repo = checkout();
   symlinkSync(".git", join(repo, "g"));
-  assert.deepEqual(hook("git diff --output=g/hooks/pre-push", repo), [DIR_WRITE]);
-  assert.deepEqual(hook("git log -1 --output g/config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("git diff --output=g/hooks/pre-push", repo), [DIR_WRITE, LISTED]);
+  assert.deepEqual(hook("git log -1 --output g/config", repo), [DIR_WRITE, LISTED]);
   assert.deepEqual(hook("git diff --output=out.diff", repo), ["read.shell git-read"]);
 });
 
@@ -351,7 +367,7 @@ test("N1: a link to another checkout's .GIT is a git directory (APFS folds case)
   const other = checkout(at, "other");
   if (!existsSync(join(other, ".GIT"))) return; // a case-sensitive file system: nothing to fold
   symlinkSync("../other/.GIT", join(repo, "o"));
-  assert.deepEqual(hook("echo x >> o/config", repo), [DIR_WRITE]);
+  assert.deepEqual(hook("echo x >> o/config", repo), [DIR_WRITE, LISTED]);
 });
 
 test("N1: a git directory named in another case is the git directory", { skip }, () => {
@@ -386,4 +402,85 @@ test("N2: a copy or move of a tree that carries .git at its top is git-dir-write
   // A checkout as the DESTINATION is no source: copying a file into a nested one does not move.
   checkout(repo, "vendored");
   assert.ok(!hook("cp a.txt vendored", repo).includes(DIR_WRITE));
+});
+
+test("#682's continuation cost line: a word repeated in a segment is placed once, and the first hit is the same one", { skip }, () => {
+  // `cp README.md d*/APPROVA?.md` x 4,000 walked every repeat on the disk, in
+  // each name reading: 3.6 to 9 CPU s against a bound of 8. A repeat lands
+  // where its first copy landed, so only the walks are saved.
+  const at = root();
+  const repo = checkout(at);
+  checkout(at, "tree");
+  symlinkSync(".git", join(repo, "link"));
+  mkdirSync(join(repo, "d1"));
+  writeFileSync(join(repo, "seed.txt"), "");
+  const many = (word: string, n: number): string => `${word} `.repeat(n);
+  const noteOf = (command: string): string => classifyForHook(command, [], repo).notes.find((note) => note.startsWith("git-dir-write:")) ?? "";
+  // A target after many repeated sources still lands in .git, and the note
+  // names it, as with one copy of the repeat. The write pass (#695) lists the
+  // git directory beside it, as on main.
+  for (const n of [1, 2000]) {
+    const command = `cp seed.txt ${many("d*/x", n)}l*k/config`;
+    assert.deepEqual(hook(command, repo), [DIR_WRITE, LISTED], `n=${String(n)}`);
+    assert.match(noteOf(command), /writes l\*k\/config, which lands at .*\/\.git\/config, inside a git directory/u, `n=${String(n)}`);
+  }
+  // A repeated tree source that carries .git is found, before or after other repeats.
+  for (const command of [`cp -R ${many("../tree/.", 2000)}.`, `cp -R ${many("d*/", 2000)}${many("../t*e/.", 3)}.`]) {
+    assert.ok(hook(command, repo).includes(DIR_WRITE), command.slice(0, 40));
+  }
+  // Repeated ordinary words do not move. The write pass (#695) reads no more
+  // patterns than its bound in one segment, so 2,000 of them are unreadable
+  // to it, as on main.
+  assert.deepEqual(hook(`cp seed.txt ${many("d*/x", 2000)}out/`, repo), ["files.write.workspace workspace-write", UNREADABLE]);
+  // A redirection repeated: each is a sure target; the first that lands in .git answers.
+  assert.deepEqual(hook(`echo x ${many("> d*/y", 500)}> l?nk/config`, repo).filter((entry) => entry === DIR_WRITE).length > 0, true);
+});
+
+test("#682's rm_dot_names cost line: a pattern is read from the disk once per directory it is expanded from, and every segment is still judged", () => {
+  // `rm -rf ./*; ` x 833 expanded `./*` and walked each of its entries again
+  // for every classified segment of every repeat (each class the glob guard
+  // names is its own segment with the same text): 1.3 to 1.55 times main's
+  // CPU s. The disk does not change while the hook judges a line, so each
+  // expansion (by directory AND word) and each walk is read once per pass,
+  // and its answer reused. Only the reads are saved: every segment is
+  // judged, from every directory it may run in.
+  const at = root();
+  mkdirSync(join(at, "sub"));
+  mkdirSync(join(at, "other", ".git"), { recursive: true });
+  writeFileSync(join(at, "a.txt"), "");
+  // `./*` from `at` lands nowhere near a git directory; from `sub`, its link
+  // `l` lands in one.
+  symlinkSync("../other/.git", join(at, "sub", "l"));
+  // The segments as the pass walks them, each with whether it was raised.
+  const walked = (command: string): { text: string; raised: boolean }[] => {
+    const result = classifyForHook(command, [], at).result;
+    assert.ok(result.ok, command.slice(0, 40));
+    const out: { text: string; raised: boolean }[] = [];
+    for (const segment of result.segments) {
+      if (segment.rule === "git-dir-write") (out.at(-1) as { raised: boolean }).raised = true;
+      else out.push({ text: segment.text, raised: false });
+    }
+    return out;
+  };
+  const raisedTexts = (command: string): string[] => [...new Set(walked(command).filter((each) => each.raised).map((each) => each.text))].sort();
+  // Each repeat its own text (a plain name `n<i>` after the same pattern),
+  // so each one's answer can be read apart from the others.
+  const repeats = (from: number, n: number): string[] => Array.from({ length: n }, (_, index) => `rm -rf ./* n${String(from + index)}`);
+  for (const n of [1, 2, 400]) {
+    const afterCd = repeats(n, n);
+    const segments = walked([...repeats(0, n), "cd sub", ...afterCd].join("; "));
+    const cd = segments.findIndex((each) => each.text === "cd sub");
+    // Walked before the `cd`, from `at` alone: none raised. Every repeat
+    // after it, from `at` AND `sub`, is raised, not only the first, so the
+    // expansion from `at` is never reused for `sub` (keyed by its
+    // directory). (A class the classifier appends after the whole line,
+    // `files.delete.out_of_scope` here, is walked after the `cd` too, as on
+    // main: that answer is not this pass's to read.)
+    assert.deepEqual(segments.slice(0, cd).filter((each) => each.raised), [], `n=${String(n)}`);
+    const raisedAfter = new Set(segments.slice(cd + 1).filter((each) => each.raised).map((each) => each.text));
+    assert.deepEqual(afterCd.filter((text) => !raisedAfter.has(text)), [], `n=${String(n)}`);
+  }
+  // A different word from the same directory is its own expansion.
+  assert.deepEqual(raisedTexts("rm -rf ./*; rm -rf sub/*"), ["rm -rf sub/*"]);
+  assert.deepEqual(raisedTexts("rm -rf sub/*; rm -rf ./*; rm -rf sub/*"), ["rm -rf sub/*"]);
 });

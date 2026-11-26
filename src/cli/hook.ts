@@ -82,6 +82,7 @@ import {
   realpathSync,
   statSync,
   writeSync,
+  type Dirent,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -96,27 +97,38 @@ import {
 
 import { attestationRefusal, checkAttestation, checkAttestationOfBytes } from "../core/attest.js";
 import { childEnvironment } from "../core/child-env.js";
+import { runUnderDeadline } from "../core/deadline.js";
 import {
   braceCandidates,
   copyArgvUnknown,
-  classifyCommand,
+  classifyCommandInThisReading,
+  classifyCommandInThisReadingWithMainRules,
+  collapseBracedVariables,
   commandSegmentShapes,
   copyTargetDirectories,
   fetchOutputs,
+  FIND_WRITE_PRIMARIES,
+  gitWriteTargets,
+  readWriteTargets,
   commandSegmentWords,
   CODE_EXECUTING_RULES,
   CONTRIBUTOR_SUFFIX,
   credentialReadWords,
+  eachDollarQuoteReading,
   GATE_SELF_CLASS,
   gitVerbIndex,
   isCredentialPath,
   NO_RULE_CLASS,
   NODE_SKILL_SCRIPT_RULE,
   protectedPathClass,
+  protectedPathClassReadings,
+  protectedPathClasses,
   SKILL_SCRIPT_RULE,
   SUBSTITUTION_SENTINEL,
+  unionNameReadings,
   type ClassifiedSegment,
   type CommandClassification,
+  type CommandSegmentShape,
   type ProtectedPathEntry,
 } from "../core/command-class.js";
 import {
@@ -167,6 +179,8 @@ import {
   type EventRecord,
 } from "../core/log.js";
 import { settleTerminationGuards } from "../core/log-lock.js";
+import { ANY_NAME, type GlobPattern, globPattern as compiledGlobPattern, zshOptionReading } from "../core/glob-match.js";
+import { eachNameReading, foldFileName, foldNameExact, foldNameLower, inEachEqualTurn, inEveryReading, withLocalReadingsSettled } from "../core/name-fold.js";
 import { payloadHash } from "../core/payload.js";
 import { classifyApplyPatch, parseApplyPatch } from "../core/apply-patch.js";
 import {
@@ -198,6 +212,20 @@ import {
   renderReadRoots,
 } from "../core/read-scope.js";
 import {
+  DECISION_B_UNREADABLE_CLASS,
+  DECISION_D_OVERWRITE_IS_GUARDED,
+  DECISION_E_WINDOW,
+  effectiveWriteRoots,
+  TREE_AT_A_CHECKOUT_IS_GUARDED,
+  guardedEntryBelow,
+  guardedEntryOf,
+  HOOK_SCRIPT_ENTRY,
+  isInWriteScope,
+  WRITE_GUARDED_CLASS,
+  WRITE_OUT_OF_SCOPE_CLASS,
+  writeScopeOptedIn,
+} from "../core/write-scope.js";
+import {
   harnessLaunchNeedsRule,
   harnessLaunchUnruledRefusal,
   humanOnlyRefusal,
@@ -216,8 +244,9 @@ import {
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
 import { EXIT_OK, EXIT_USAGE } from "./exit-codes.js";
 import { primaryRoot as resolvePrimaryRoot } from "./git-scope.js";
-import { refineGitDirWrites } from "./git-dir-writes.js";
+import { expandOnDisk, listDirectory, readPathEntry, refineGitDirWrites, type GitDirLanding, type PathEntry } from "./git-dir-writes.js";
 import { refinePushRepo } from "./push-repo.js";
+import { jsonStringLeaves, readJsonDocument } from "./settings-json.js";
 import { HOOK_GROK_HELP, HOOK_HELP, HOOK_HERMES_HELP, HOOK_MUSE_HELP } from "./help.js";
 import type { Streams } from "./main.js";
 import { DEFAULT_LOG_PATH } from "./paths.js";
@@ -231,6 +260,7 @@ import {
   readCodexReportedOutcome,
 } from "./hook-codex.js";
 import { bindExecCodeCommand, bindExecuteCode, describeProgram } from "./hook-exec-code.js";
+import { globDiskFor, GlobListingDeadline, listGlobWriteDirsFor, type GlobListing } from "./glob-listing.js";
 
 /** Identity accepted for the proposing side: a person or an agent. */
 const PRINCIPAL_ACTOR = /^(human|agent):.+/u;
@@ -383,6 +413,16 @@ export const HOOK_DENY_CODES = [
    * recording grants on calls nobody holds.
    */
   "hook-harness-cap-too-short",
+  /**
+   * Describing the tool call (classifying it, landing its paths on the disk)
+   * outlasted this hook's own deadline ({@link DESCRIBE_DEADLINE_MS}).
+   *
+   * A hook the harness kills at its timeout is a tool call that proceeds, so
+   * a call this hook cannot describe in time is refused while the hook can
+   * still say so. Nothing is registered and nothing is requested. The repair
+   * is the caller's: a shorter command, or the same work in several calls.
+   */
+  "hook-deadline",
   /** The gate refused intake; the gate's own code follows a colon. */
   "hook-gate-refused",
   /**
@@ -2677,7 +2717,7 @@ function steeredSegments(text: string): string[][] | null {
   if (text.includes("\\")) splittings.push(text.split(/\/+/u));
   const out: string[][] = [];
   for (const raw of splittings) {
-    const segments = raw.filter((segment) => segment.length > 0 && segment !== ".").map((segment) => segment.toLowerCase());
+    const segments = raw.filter((segment) => segment.length > 0 && segment !== ".").map(foldNameLower);
     if (segments.includes("..")) return null;
     out.push(segments);
   }
@@ -2711,7 +2751,7 @@ function configuredHermesNames(env: NodeJS.ProcessEnv): string[] {
   const names: string[] = [];
   for (const value of [env["APPROVAL_HERMES_HOME"], env["HERMES_HOME"]]) {
     if (value === undefined || value.length === 0) continue;
-    const name = basename(value).toLowerCase();
+    const name = foldNameLower(basename(value));
     if (name.length > 0 && name !== "." && name !== ".." && !names.includes(name)) names.push(name);
   }
   return names;
@@ -2762,7 +2802,7 @@ function steeredReadCouldNameCredential(
     if (hasGlobChars(segment)) {
       globs += 1;
       if (globs > STEERED_GLOB_CAP || segment.includes("**")) return true;
-      const pattern = globRegex(segment);
+      const pattern = globPattern(segment);
       const matched = representatives.filter((name) => pattern.test(name));
       if (matched.length > 0) alternatives = matched;
     }
@@ -2794,30 +2834,47 @@ function steeredReadCouldNameCredential(
  * resolves `..` lexically first, which is the reading a shell's own `cd`
  * takes; both readings are judged.
  */
-function physicalLanding(from: string, text: string): string {
+export function physicalLanding(from: string, text: string): string {
+  return remembered(diskMemo?.physical, `${from}\u0000${text}`, () => physicalLandingOnDisk(from, text));
+}
+
+function physicalLandingOnDisk(from: string, text: string): string {
   let current = isAbsolute(text) ? sep : from;
   try {
     current = realpathSync(current);
   } catch {
     // An ancestor that does not exist stays as spelled.
   }
+  // The components below the first one that does not resolve, as names.
+  // Nothing under a path that does not resolve can resolve, so they are not
+  // looked up: each lookup joined and resolved the whole path so far, which
+  // made a word of n components cost n squared (a 100 KB word of `b/` took
+  // over a minute, past the harness's own limit on this hook).
+  const below: string[] = [];
   // Fix round 2 (path-parser differential): the kernel's separator. On macOS
   // and Linux a backslash is a character of a name, never a place to climb a
   // `..` from; the credential rows still split on both (stricter).
   for (const component of text.split(KERNEL_SEPARATORS)) {
     if (component.length === 0 || component === ".") continue;
     if (component === "..") {
-      current = dirname(current);
+      if (below.length > 1) below.pop();
+      // The last name below `current`: its parent is `current`, spelled the
+      // way joining and climbing spells it.
+      else if (below.length === 1) current = dirname(join(current, below.pop() as string));
+      else current = dirname(current);
       continue;
     }
-    const next = join(current, component);
+    if (below.length > 0) {
+      below.push(component);
+      continue;
+    }
     try {
-      current = realpathSync(next);
+      current = realpathSync(join(current, component));
     } catch {
-      current = next;
+      below.push(component);
     }
   }
-  return current;
+  return below.length === 0 ? current : join(current, below.join(sep));
 }
 
 /**
@@ -3029,7 +3086,11 @@ function curlValuesNotRead(
  * pattern could name a credential at all. Over-matches rather than under:
  * `*` matches a leading dot here, which the shell's glob does not.
  */
-function expandGlobPath(path: string): string[] | null {
+function expandGlobPath(path: string): readonly string[] | null {
+  return remembered(diskMemo?.globs, `${shellOptionsSet ? 1 : 0}\u0000${path}`, () => expandGlobPathOnDisk(path));
+}
+
+function expandGlobPathOnDisk(path: string): string[] | null {
   // Fix round 2 (path-parser differential): the shell's glob splits on `/`
   // alone and reads a backslash as an escape, so a pattern holding one is not
   // listed here (the caller judges whether it could name a credential).
@@ -3038,12 +3099,15 @@ function expandGlobPath(path: string): string[] | null {
   let current: string[] = [sep];
   for (const component of components) {
     const next: string[] = [];
+    // Compiled once for every base it is listed in (review-b's M1 on
+    // 8c91e702: a big class compiled once per base, up to 256 of them).
+    const pattern = hasGlobChars(component) ? globPattern(component) : null;
     for (const base of current) {
       if (component === "..") {
         next.push(dirname(base));
         continue;
       }
-      if (!hasGlobChars(component)) {
+      if (pattern === null) {
         next.push(join(base, component));
         continue;
       }
@@ -3054,7 +3118,6 @@ function expandGlobPath(path: string): string[] | null {
         if (!existsSync(base)) continue;
         return null;
       }
-      const pattern = globRegex(component);
       for (const name of names) if (pattern.test(name)) next.push(join(base, name));
     }
     if (next.length > 256) return null;
@@ -3148,8 +3211,14 @@ export function credentialReadLandings(
   env: NodeJS.ProcessEnv = process.env,
 ): Array<{ segment: string; path: string }> {
   const found: Array<{ segment: string; path: string }> = [];
+  // Whether a path is a credential read, by path and recursion, for this
+  // call: one name reading, one set of shell options (review-b's M3 at 3774fdd4).
+  const landed = new Map<string, boolean>();
+  const recorded = new Set<string>();
   const record = (segment: string, path: string): void => {
-    if (!found.some((entry) => entry.segment === segment && entry.path === path)) {
+    const key = `${segment}\u0000${path}`;
+    if (!recorded.has(key)) {
+      recorded.add(key);
       found.push({ segment, path });
     }
   };
@@ -3265,14 +3334,19 @@ export function credentialReadLandings(
         continue;
       }
       const hit = (path: string): void => record(shape.text, path);
-      const lands = (path: string, recursive: boolean): boolean => {
-        const canonical = canonicalPath(path);
-        return (
-          isCredentialPath(path) ||
-          isCredentialPath(canonical) ||
-          (recursive && (holdsCredentials(canonical) || holdsCredentials(path)))
-        );
-      };
+      const lands = (path: string, recursive: boolean): boolean =>
+        remembered(landed, `${recursive ? 1 : 0}${path}`, () => {
+          const canonical = canonicalPath(path);
+          return (
+            isCredentialPath(path) ||
+            isCredentialPath(canonical) ||
+            (recursive && (holdsCredentials(canonical) || holdsCredentials(path)))
+          );
+        });
+      // Review-b's M3 at 3774fdd4: a word this segment already judged, with
+      // the same flags, from the same directories, records what it recorded
+      // then, so it is judged once (`grep -r ^import ^import …`).
+      const judgedHere = new Set<string>();
       // Fix round 2 (the narrowed M-B rule): is a relative word read under a
       // directory a `CDPATH` lookup may have chosen a credential read? Every
       // recursive reader is (a recursive read of an unknown directory could
@@ -3406,6 +3480,9 @@ export function credentialReadLandings(
         }
       };
       const judge = (word: string, recursive: boolean, steeredToo = true, homeSpelled = true): void => {
+        const key = `${recursive ? 1 : 0}${steeredToo ? 1 : 0}${homeSpelled ? 1 : 0}${word}`;
+        if (judgedHere.has(key)) return;
+        judgedHere.add(key);
         // APRV-524 (review-b M1): a word holding the substitution sentinel is
         // judged a second time with every sentinel removed. That is how the
         // release before APRV-511 read it, its lexer adding nothing for a
@@ -3739,6 +3816,12 @@ export function refineWriteScope(
   result: CommandClassification,
   roots: readonly string[],
   cwd: string,
+  /**
+   * Where a destination really is ({@link resolvedWriteTarget}), from the
+   * disk alone: the hook's call passes one that keeps each answer for the
+   * call ({@link WriteLandingMemo}), so every name reading asks the disk once.
+   */
+  resolveTarget: (target: string, cwd: string) => string | null = resolvedWriteTarget,
 ): RefinedClassification {
   if (!result.ok) return { result, notes: [] };
   if (roots.length === 0) return { result, notes: [] };
@@ -3776,7 +3859,7 @@ export function refineWriteScope(
     };
 
     for (const candidate of writeCandidates(parsed.args)) {
-      const resolved = resolvedWriteTarget(candidate, cwd);
+      const resolved = resolveTarget(candidate, cwd);
       if (resolved === null) {
         return reject(
           candidate,
@@ -3799,6 +3882,2206 @@ export function refineWriteScope(
     if (!classes.includes(segment.class)) classes.push(segment.class);
   }
   return { result: { ok: true, segments, classes }, notes };
+}
+
+// ===========================================================================
+// Write landings: the guarded list, unreadable targets, and the opt-in
+// out-of-scope class (design v4, writes outside the workspace)
+// ===========================================================================
+
+/**
+ * ## What this pass adds, and to whom
+ *
+ * Every write a line makes (redirects, the workspace-write row, `sed -i`, the
+ * packaging rows, `curl -o`, `wget -O`, `dd of=`) is judged where it LANDS by
+ * ONE function, {@link judgeWriteLanding}, which the file tools call too
+ * ({@link fileToolGate}). It answers, strictest first:
+ *
+ * 1. `files.write.guarded` when any landing, or the word as spelled, is on the
+ *    guarded list (`core/write-scope.ts`), tested BEFORE any root; and when
+ *    the target cannot be read after resolution (decision B): a variable the
+ *    line does not set, a command substitution, a landing the kernel cannot
+ *    place, a glob this hook could not read from the disk, or a path an
+ *    earlier segment of the same line may have changed under it.
+ * 2. `files.write.out_of_scope` when a landing is outside every write root,
+ *    ONLY for a policy that opts in (point 8). Every other policy keeps the
+ *    answer it had before the class existed.
+ *
+ * ## Only ever stricter, under every policy
+ *
+ * The class is ADDED beside the segment's own, as an entry over the same
+ * segment text (the shape `also` already has), never put in its place: the
+ * gate resolves every class of a command and the strictest decides, so no
+ * answer can get lighter through this pass, whatever the policy says of the
+ * segment's own class. Decision A is not built: a row main already tightens to
+ * `files.delete.*` keeps exactly that class, and takes no
+ * `files.write.out_of_scope` entry beside it (a guarded one still, point 5).
+ *
+ * Last in {@link classifyForHook}'s chain, after every pass that may raise a
+ * segment, so nothing re-reads an entry it added.
+ */
+
+/** What the write pass needs of the policy: the opt-in and the roots (point 8, point 2). */
+export interface WriteScopeContext {
+  /** Does the policy name `files.write.out_of_scope` or carry `write_scope`? */
+  optedIn: boolean;
+  /** The effective write roots, resolved. Read only when `optedIn`. */
+  roots: readonly string[];
+  /**
+   * The gate root (the loaded policy's own directory), whatever the opt-in:
+   * where `<gate root>/.claude/settings*.json` is read for the hook scripts it
+   * names, and what `$CLAUDE_PROJECT_DIR` in a hook command means (S2).
+   */
+  gateRoot?: string | undefined;
+}
+
+/** A policy that does not opt in, or no policy at all: the list and unreadable targets only. */
+export const WRITE_SCOPE_OFF: WriteScopeContext = { optedIn: false, roots: [] };
+
+/**
+ * The write scope a loaded policy asks for, resolved from the gate root (the
+ * loaded policy's own directory), the scratch and temp roots, and
+ * `write_scope.roots`, exactly as the read roots are (point 2).
+ */
+export function resolveWriteScope(
+  cwd: string,
+  gateRoot: string,
+  policy: Policy | null,
+): WriteScopeContext {
+  if (policy === null || !writeScopeOptedIn(policy)) return { ...WRITE_SCOPE_OFF, gateRoot };
+  const roots = effectiveWriteRoots({
+    gateRoot: resolvedPath(gateRoot) ?? gateRoot,
+    systemRoots: resolveScratchRoots(cwd),
+    ...(policy.write_scope?.roots === undefined ? {} : { declared: policy.write_scope.roots }),
+  });
+  const out: string[] = [];
+  for (const root of roots) {
+    for (const each of [root, resolvedPath(root) ?? root]) if (!out.includes(each)) out.push(each);
+  }
+  return { optedIn: true, roots: out, gateRoot };
+}
+
+/** The rule an entry for a write onto the guarded list reports. */
+export const WRITE_GUARDED_RULE = "write-guarded";
+/** The rule an entry for a write whose target cannot be read reports (decision B). */
+export const WRITE_UNREADABLE_RULE = "write-unreadable";
+/** The rule an entry for a write outside every root reports (opt-in). */
+export const WRITE_OUT_OF_SCOPE_RULE = "write-out-of-scope";
+/** The rule an entry for a resolved spelling's own class reports (review-b, CLAIMS L61530). */
+export const WRITE_RESOLVED_RULE = "write-resolved-landing";
+
+/** Every rule this pass writes, so a caller can tell its entries from the classifier's. */
+export const WRITE_LANDING_RULES: readonly string[] = [
+  WRITE_GUARDED_RULE,
+  WRITE_UNREADABLE_RULE,
+  WRITE_OUT_OF_SCOPE_RULE,
+  WRITE_RESOLVED_RULE,
+];
+
+/**
+ * The names of this hook's own location variables, in ONE place: the home
+ * (`currentHomes`), the Claude Code config folder (`currentConfigDirs`) and
+ * the project folder (`currentProjectDirs`). Lead ruling L62656 (the seat's
+ * sixth review): a chmod operand reading one is never relaxed.
+ */
+const HOME_NAME = "HOME";
+const CONFIG_DIR_NAME = "CLAUDE_CONFIG_DIR";
+const PROJECT_DIR_NAME = "CLAUDE_PROJECT_DIR";
+const HOOK_LOCATION_NAMES: readonly string[] = [HOME_NAME, CONFIG_DIR_NAME, PROJECT_DIR_NAME];
+
+/** The homes the guarded list is anchored on: `HOME` as given and resolved. */
+function currentHomes(env: NodeJS.ProcessEnv = process.env): string[] {
+  return givenAndResolved(env[HOME_NAME]);
+}
+
+/**
+ * The Claude Code config folder `CLAUDE_CONFIG_DIR` names in this hook's own
+ * environment (lead, CLAIMS L62289, S2). Read where `HOME` is read: the
+ * operator sets it, and nothing the agent writes reaches this process's
+ * environment. Absent or empty: none. A relative value is joined to this
+ * hook process's cwd, as Claude Code (started from that directory) would
+ * read it; every value has its `..` collapsed lexically, and the folder is
+ * taken both that way and through `realpath` (seat ruling on the review of
+ * 8cd41612). A leading `~` is not expanded: nothing expands it in an
+ * environment variable, so `~/x` is a folder named `~` under the cwd.
+ */
+function currentConfigDirs(env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): string[] {
+  const value = env[CONFIG_DIR_NAME];
+  if (value === undefined || value.length === 0) return [];
+  const lexical = isAbsolute(value) ? resolvePathSegments(value) : resolvePathSegments(cwd, value);
+  if (!isAbsolute(lexical)) return [];
+  const resolved = resolvedPath(lexical);
+  return resolved === null || resolved === lexical ? [lexical] : [lexical, resolved];
+}
+
+/** An absolute path as given and, when it differs, as `realpath` resolves it; `[]` for anything else. */
+function givenAndResolved(path: string | undefined): string[] {
+  if (path === undefined || path.length === 0 || !isAbsolute(path)) return [];
+  const resolved = resolvedPath(path);
+  return resolved === null || resolved === path ? [path] : [path, resolved];
+}
+
+/**
+ * What the guarded list is anchored on, for one judgement: the homes, the
+ * config folders the hook knows, and (S2) the files a settings file names as
+ * hook commands, read lazily.
+ */
+export interface LandingGuard {
+  homes: readonly string[];
+  configDirs: readonly string[];
+  /** The hook scripts the settings name, folded path keys ({@link foldedPathKey}); read on first call. */
+  hookScripts: () => ReadonlySet<string>;
+}
+
+/** The guard this hook's own environment gives, with the gate root the policy was loaded from. */
+function currentGuard(env: NodeJS.ProcessEnv = process.env, gateRoot?: string): LandingGuard {
+  const homes = currentHomes(env);
+  const configDirs = currentConfigDirs(env);
+  const home = homes[0] ?? null;
+  const projectDirs = currentProjectDirs(env, gateRoot);
+  return { homes, configDirs, hookScripts: () => namedHookScripts(home, configDirs, projectDirs) };
+}
+
+/**
+ * The project folders whose `.claude/settings*.json` are read, and what
+ * `$CLAUDE_PROJECT_DIR` (and a relative word) in a hook command is read
+ * against (seat ruling on the review of e2a76e15): the gate root, and
+ * `CLAUDE_PROJECT_DIR` from this hook's environment when it is set and
+ * absolute (Claude Code sets it for hooks). `..` collapsed lexically.
+ */
+function currentProjectDirs(env: NodeJS.ProcessEnv, gateRoot: string | undefined): string[] {
+  const out: string[] = [];
+  for (const each of [gateRoot, env[PROJECT_DIR_NAME]]) {
+    if (each === undefined || each.length === 0 || !isAbsolute(each)) continue;
+    const normal = resolvePathSegments(each);
+    if (!out.includes(normal)) out.push(normal);
+  }
+  return out;
+}
+
+/** A path as one key, each segment folded ({@link foldFileName}): how two spellings of one file compare. */
+function foldedPathKey(path: string): string {
+  return `/${path.split("/").filter((part) => part.length > 0 && part !== ".").map(foldFileName).join("/")}`;
+}
+
+/**
+ * Is a named hook script at `path`, or anywhere under it? Compared by folded
+ * segments, so `/a/hooks2` is not above `/a/hooks/x.sh`.
+ */
+function hookScriptAtOrUnder(path: string, scripts: ReadonlySet<string>): boolean {
+  if (scripts.size === 0) return false;
+  const key = foldedPathKey(path);
+  if (scripts.has(key)) return true;
+  const prefix = key === "/" ? "/" : `${key}/`;
+  for (const script of scripts) if (script.startsWith(prefix)) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// S2: the hook scripts the settings name
+// ---------------------------------------------------------------------------
+
+/** The settings files read in each folder (Claude Code's user and local ones). */
+const HOOK_SETTINGS_FILES: readonly string[] = ["settings.json", "settings.local.json"];
+
+/** A settings file larger than this is not read (S2): the landing keeps the answer it had. */
+export const HOOK_SETTINGS_MAX_BYTES = 1024 * 1024;
+
+/**
+ * The top-level keys whose string leaves are commands Claude Code runs later
+ * without being asked: every hook command, and the status line. The helper
+ * keys beside them run a command too (an API key, AWS or OpenTelemetry
+ * header helper), so a script they name is guarded the same way.
+ */
+const HOOK_SETTINGS_COMMAND_KEYS: readonly string[] = ["hooks", "statusLine", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper"];
+
+/** Once per hook process for each set of folders: the settings do not change under one judgement. */
+const namedHookScriptsMemo = new Map<string, ReadonlySet<string>>();
+
+/** How many settings files {@link namedHookScripts} has tried to read in this process (read by the tests: the read is lazy and once). */
+export const hookSettingsReads = { count: 0 };
+
+/**
+ * Every file a settings file names as a hook command (lead, CLAIMS L62289,
+ * S2), as folded path keys, as given and as resolved. The settings read are
+ * `settings.json` and `settings.local.json` in `~/.claude`, in the folder
+ * `CLAUDE_CONFIG_DIR` names, and in `<project>/.claude` for each project
+ * folder (the gate root, and `CLAUDE_PROJECT_DIR` when the hook has it
+ * absolute). Lazy: called only
+ * when a landing is judged and is not guarded already, and read at most once
+ * per hook process for the same folders. A file over
+ * {@link HOOK_SETTINGS_MAX_BYTES}, not a regular file, or not JSON is
+ * skipped, and that is not an error. No directory is walked. Nothing read is
+ * logged or printed.
+ *
+ * A word of a command is a path when it starts with `/`, `~/`, `$HOME/`,
+ * `${HOME}/` or `$CLAUDE_PROJECT_DIR/` (`${CLAUDE_PROJECT_DIR}/`), quotes
+ * removed: `~` and `$HOME` are this hook's HOME, `$CLAUDE_PROJECT_DIR` each
+ * project folder. A RELATIVE word that holds a `/` and no `$`, backtick, glob
+ * character, brace or `=` (`./scripts/h.sh`, `tools/hooks/x.py`) is read
+ * against each project folder too. A word that reads any other variable is
+ * skipped: its value cannot be known here. The file itself is guarded, not
+ * its folder (a tree written, moved or removed above it is, see
+ * {@link hookScriptAtOrUnder}). A path under `/dev` is not taken.
+ */
+export function namedHookScripts(home: string | null, configDirs: readonly string[], projectDirs: readonly string[]): ReadonlySet<string> {
+  const folders: string[] = [];
+  if (home !== null) folders.push(join(home, ".claude"));
+  for (const dir of configDirs) folders.push(dir);
+  for (const dir of projectDirs) folders.push(join(dir, ".claude"));
+  const unique = [...new Set(folders)];
+  const key = JSON.stringify([home, projectDirs, unique]);
+  const known = namedHookScriptsMemo.get(key);
+  if (known !== undefined) return known;
+  const scripts = new Set<string>();
+  for (const folder of unique) {
+    for (const name of HOOK_SETTINGS_FILES) {
+      hookSettingsReads.count += 1;
+      const document = readJsonDocument(join(folder, name), { maxBytes: HOOK_SETTINGS_MAX_BYTES });
+      if (document === null || typeof document.value !== "object" || document.value === null || Array.isArray(document.value)) continue;
+      const settings = document.value as Record<string, unknown>;
+      for (const commandKey of HOOK_SETTINGS_COMMAND_KEYS) {
+        if (!Object.prototype.hasOwnProperty.call(settings, commandKey)) continue;
+        for (const command of jsonStringLeaves(settings[commandKey])) {
+          for (const path of hookCommandPaths(command, home, projectDirs)) {
+            scripts.add(foldedPathKey(path));
+            const resolved = resolvedPath(path);
+            if (resolved !== null) scripts.add(foldedPathKey(resolved));
+          }
+        }
+      }
+    }
+  }
+  namedHookScriptsMemo.set(key, scripts);
+  return scripts;
+}
+
+/** The words of one hook command that are paths, expanded and `..`-collapsed (see {@link namedHookScripts}). */
+function hookCommandPaths(command: string, home: string | null, projectDirs: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const raw of command.split(/[\s;&|()<>`]+/u)) {
+    const word = raw.replace(/["']/gu, "");
+    const paths: string[] = [];
+    if (word.startsWith("/")) paths.push(word);
+    else if (word.startsWith("~/")) {
+      if (home !== null) paths.push(`${home}${word.slice(1)}`);
+    } else if (word.startsWith("$HOME/")) {
+      if (home !== null) paths.push(`${home}${word.slice("$HOME".length)}`);
+    } else if (word.startsWith("${HOME}/")) {
+      if (home !== null) paths.push(`${home}${word.slice("${HOME}".length)}`);
+    } else if (word.startsWith("$CLAUDE_PROJECT_DIR/")) {
+      for (const dir of projectDirs) paths.push(`${dir}${word.slice("$CLAUDE_PROJECT_DIR".length)}`);
+    } else if (word.startsWith("${CLAUDE_PROJECT_DIR}/")) {
+      for (const dir of projectDirs) paths.push(`${dir}${word.slice("${CLAUDE_PROJECT_DIR}".length)}`);
+    } else if (word.includes("/") && !/[$`*?[\]{}=~]/u.test(word)) {
+      // A relative word naming a file under the project (`./scripts/h.sh`).
+      for (const dir of projectDirs) paths.push(`${dir}/${word}`);
+    }
+    for (const path of paths) {
+      if (!isAbsolute(path)) continue;
+      const normal = resolvePathSegments(path);
+      // A device (`2>/dev/null`, `>/dev/stderr`) is no script, and guarding it
+      // would make `tee /dev/null` a card. In this extraction only: a landing
+      // under /dev is judged as before.
+      if (normal === "/dev" || normal.startsWith("/dev/")) continue;
+      out.push(normal);
+    }
+  }
+  return out;
+}
+
+/** Where one write lands, as {@link judgeWriteLanding} reads it. */
+export type WriteLanding =
+  | { kind: "guarded"; rule: string; path: string; why: string }
+  | { kind: "out"; path: string }
+  | { kind: "in" };
+
+/**
+ * THE scope test (point 3), for the shell pass and the file tools alike.
+ *
+ * `spelled` is one absolute spelling with every `..` kept
+ * ({@link spelledAbsolute}). The list is tested first, on the word as spelled
+ * (`..` collapsed by text) and on every landing: the lexical one, the kernel's
+ * (each symlink resolved before the `..` after it, {@link landingPaths}), and,
+ * where the last component is an existing symlink, the link itself as well as
+ * its target. Only then the roots, and only for a policy that opts in.
+ */
+export function judgeWriteLanding(
+  spelled: string,
+  scope: WriteScopeContext,
+  guard: LandingGuard = currentGuard(process.env, scope.gateRoot),
+  tree: boolean | "listed" = false,
+  /** The disk lookups one hook call shares ({@link memoDiskReads}); each asks the disk when absent. */
+  disk: DiskReads = DIRECT_DISK,
+): WriteLanding {
+  const { homes, configDirs } = guard;
+  // Longer than any path the kernel opens (PATH_MAX is 1024 on macOS and 4096
+  // on Linux): it cannot land anywhere this hook can name, and walking it one
+  // component at a time is the cost a 1 MiB word must not buy. Guarded.
+  if (spelled.length > MAX_LANDING_BYTES) {
+    return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: spelled.slice(0, 80), why: `a path of ${String(spelled.length)} bytes is longer than any the kernel opens, so where it lands cannot be placed` };
+  }
+  const text = resolvePathSegments(spelled);
+  const landing = landingPaths(spelled, null, disk);
+  const forms = [text, ...landing.paths];
+  const name = basename(text);
+  if (name.length > 0) forms.push(join(canonicalPath(dirname(text), disk), name));
+  const tail = basename(spelled);
+  if (tail !== ".." && tail !== "." && tail.length > 0) {
+    const parent = kernelLanding(dirname(spelled), null, disk);
+    if (parent !== null) forms.push(join(parent, tail));
+  }
+  // Each form once, in order: the readings of a plain path are often the same
+  // path, and every test below answers by the form alone (cost: a pattern
+  // matching every entry of a directory lands each entry).
+  const distinct = [...new Set(forms)];
+  for (const form of distinct) {
+    const entry = guardedEntryOf(form, homes, configDirs);
+    if (entry !== null) {
+      return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `${form} is on the guarded list (${entry})` };
+    }
+  }
+  // S2: a file a settings file names as a hook command, read only now, when
+  // nothing above has guarded the landing.
+  const scripts = guard.hookScripts();
+  if (scripts.size > 0) {
+    for (const form of distinct) {
+      if (scripts.has(foldedPathKey(form))) {
+        return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `${form} is on the guarded list (${HOOK_SCRIPT_ENTRY})` };
+      }
+    }
+  }
+  // A TREE written at the landing (a recursive copy, a move, a link, an
+  // archive, a clone) holds names this hook never reads: an entry under it is
+  // within reach.
+  if (tree !== false) {
+    for (const form of distinct) {
+      const entry = guardedEntryBelow(form, homes, configDirs);
+      if (entry !== null) {
+        return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can hold ${entry}, which is on the guarded list` };
+      }
+    }
+    // S2 (seat ruling on the review of e2a76e15): a tree written at a folder
+    // above a named hook script replaces it. Only a real tree writer
+    // (`tree === true`), not rule A's list words: `git add .` at a project
+    // root whose settings name a script under it stays as it was.
+    if (tree === true) {
+      for (const form of distinct) {
+        if (hookScriptAtOrUnder(form, scripts)) {
+          return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can replace ${HOOK_SCRIPT_ENTRY}, which is on the guarded list` };
+        }
+      }
+    }
+    // A directory holding `.git` (a folder, or a worktree's file) holds a
+    // hooks folder: a tree written there can lay one down. A landing that does
+    // not exist yet holds none today (what the tree itself carries is not
+    // read: see the hand-back).
+    if (TREE_AT_A_CHECKOUT_IS_GUARDED && tree === true) {
+      for (const form of new Set([...landing.paths, ...distinct])) {
+        try {
+          lstatSync(join(form, ".git"));
+        } catch {
+          continue;
+        }
+        return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can reach ${join(form, ".git", "hooks")}, a git hooks folder on the guarded list` };
+      }
+    }
+  }
+  if (landing.unknown) {
+    return {
+      kind: "guarded",
+      rule: WRITE_UNREADABLE_RULE,
+      path: text,
+      why: `where ${spelled} lands cannot be placed (a link loop or a process handle), so it cannot be tested against the guarded list`,
+    };
+  }
+  if (!scope.optedIn) return { kind: "in" };
+  for (const path of landing.paths) {
+    if (isInWriteScope(path, scope.roots)) continue;
+    if (DECISION_D_OVERWRITE_IS_GUARDED && existsSync(path)) {
+      return { kind: "guarded", rule: WRITE_GUARDED_RULE, path, why: `${path} is an existing file outside every write root (decision D)` };
+    }
+    return { kind: "out", path };
+  }
+  return { kind: "in" };
+}
+
+/** Bins whose every operand is a path they write (deletes are not writes here: point 7). */
+const LANDING_WRITE_EVERY: ReadonlySet<string> = new Set(["touch", "truncate", "mkdir", "tee"]);
+/** The deletes: never judged as writes, but each changes the paths after it. */
+const LANDING_DELETE_EVERY: ReadonlySet<string> = new Set(["rm", "rmdir", "shred", "unlink"]);
+
+/** chmod's long options that do not recurse (GNU's; BSD chmod has none). */
+const CHMOD_PLAIN_LONG_OPTIONS: ReadonlySet<string> = new Set(["--changes", "--silent", "--quiet", "--verbose", "--reference", "--preserve-root", "--no-preserve-root", "--help", "--version"]);
+
+/**
+ * Names the shell sets or gives a meaning, and names that locate a guarded
+ * place by convention (lead ruling L62656, the seat's fourth and sixth
+ * reviews): a chmod operand that reads one is never relaxed. The hook's own
+ * location names ({@link HOOK_LOCATION_NAMES}) and the names this pass reads
+ * from its environment ({@link STEERING_NAMES}) come from their own lists;
+ * every `BASH*`, `ZSH*`, `COMP*`, `XDG_*` and `GIT_*` name too.
+ */
+const SHELL_SPECIAL_NAMES: ReadonlySet<string> = new Set([
+  "_", "REPLY", "BASH_REMATCH", "PWD", "OLDPWD", "OPTARG", "OPTIND", "IFS", "PATH", "CDPATH",
+  "INIT_CWD", "MAPFILE", "PIPESTATUS", "FUNCNAME", "LINENO", "RANDOM", "SECONDS", "PPID", "SHLVL",
+  "UID", "EUID", "HOSTNAME", "COPROC", "argv", "status", "path", "cdpath", "fpath", "psvar", "match", "MATCH", "MBEGIN", "MEND", "mbegin", "mend",
+  "ZDOTDIR", "GNUPGHOME",
+]);
+
+/** Is this a name the shell, the hook or the harness gives a meaning? */
+function shellSpecialName(name: string): boolean {
+  return SHELL_SPECIAL_NAMES.has(name) || HOOK_LOCATION_NAMES.includes(name) || STEERING_NAMES.includes(name) || /^(?:BASH|ZSH|COMP|XDG_|GIT_)/u.test(name);
+}
+
+/** One plain parameter and nothing else (`$X`, `${X}`, `$1`): its name, or `null`. */
+function plainParameterName(word: string): string | null {
+  const match = /^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\}|([1-9]))$/u.exec(word);
+  return match === null ? null : ((match[1] ?? match[2] ?? match[3]) as string);
+}
+
+/** A word with no expansion character at all: no `$`, backtick, substitution, brace, glob or `=name` head. */
+function plainLiteralWord(word: string): boolean {
+  return !/[$`{}*?[\]]/u.test(word) && !word.includes(SUBSTITUTION_SENTINEL) && !word.startsWith("=");
+}
+
+/**
+ * The two shapes of an unread chmod operand lead ruling L62656 relaxes, read
+ * from the text alone, or `null`: (a) the whole word one plain parameter
+ * (`$SCRIPT`, `"$f"`, `$1`); (b) a literal prefix with no expansion
+ * character (no `~` either), `/`, and a final segment that is one plain
+ * parameter (`scripts/$NAME`, `./$NAME`). Whether it is relaxed is decided
+ * in {@link refineWriteLandings} (the line must not set the name; the prefix
+ * is judged as a tree).
+ */
+export function chmodRelaxedShape(word: string): { name: string; prefix: string | null } | null {
+  const whole = plainParameterName(word);
+  if (whole !== null) return { name: whole, prefix: null };
+  const slash = word.lastIndexOf("/");
+  if (slash <= 0) return null;
+  const name = plainParameterName(word.slice(slash + 1));
+  const prefix = word.slice(0, slash);
+  if (name === null || !plainLiteralWord(prefix) || prefix.startsWith("~")) return null;
+  return { name, prefix };
+}
+
+/**
+ * May a chmod take the plain path of lead ruling L62656 (it is not, and
+ * cannot become, recursive)? Every word before `--` up to and including the
+ * mode is a plain literal (so `chmod $R 755 $D`, `R=-R; chmod $R 755 $D`,
+ * `chmod {-R,-v} 755 $D`, `chmod "$@"` and `chmod -$F x` are not); the
+ * options are chmod's own (`-[RcfvhHLP]+`, main's `chmodFiles`) without `R`
+ * and long ones known not to recurse; after the mode, every word is a plain
+ * literal that is no recursing option, or one of the two relaxed shapes.
+ */
+export function chmodPlainArgv(args: readonly string[]): boolean {
+  let modeSeen = false;
+  for (const arg of args) {
+    if (arg === "--") return modeSeen;
+    if (modeSeen && chmodRelaxedShape(arg) !== null) continue;
+    if (!plainLiteralWord(arg)) return false;
+    if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      if (!CHMOD_PLAIN_LONG_OPTIONS.has(equals === -1 ? arg : arg.slice(0, equals))) return false;
+      continue;
+    }
+    if (arg.startsWith("-") && arg.slice(1).includes("R")) return false;
+    if (!modeSeen && /^-[cfvhHLP]+$/u.test(arg)) continue;
+    modeSeen = true;
+  }
+  return true;
+}
+
+/** The packaging rows APRV-402 re-reads, whose candidates over-include on purpose. */
+const LANDING_PACKAGING_RULES: ReadonlySet<string> = new Set([
+  "tar-extract",
+  "tar-create",
+  "gunzip-write",
+  "base64-write",
+  "openssl-digest-out",
+  "npm-pack",
+]);
+/** The binaries of those rows, for a segment the classifier will not answer on its own text. */
+const LANDING_PACKAGING_BINS: ReadonlySet<string> = new Set(["tar", "gunzip", "base64", "openssl", "npm"]);
+
+/**
+ * The snapshot rule (codex, CLAIMS L61466), in ONE place: which earlier
+ * segments make a later write's landing unreadable when their target is a
+ * prefix of, or equal to, that write's path. A landing read from the disk is a
+ * snapshot taken before the line runs, so it is not trusted once the same line
+ * may have changed a component of the path: `ln -s ~/.ssh ws/link; echo x >
+ * ws/link/authorized_keys`, `mv a.d b.d && echo x > b.d/y`. Keys are the kinds
+ * of change; a kind set to `false` stops counting.
+ */
+export const SNAPSHOT_CHANGERS: Record<"write" | "move" | "link" | "remove" | "mkdir", boolean> = {
+  /**
+   * A redirect, `tee`, `touch`, `truncate`, `chmod`, `sed -i`, `dd`, a
+   * download. OFF, deliberately, against the letter of the brief's addition:
+   * none of them can make a path component a symlink (a redirect follows a
+   * link and never makes one), so none can move where a later write lands, and
+   * counting them made `echo a > f && echo b >> f` a card. Measured on the
+   * design's last-day corpus: 195 of 246 guarded Bash calls came from this
+   * rule with `write` and `mkdir` on, 24 with them off. Turn on to follow the
+   * brief's list literally.
+   */
+  write: false,
+  /** `mv`, its destination and its sources. */
+  move: true,
+  /** `ln`, and `cp`, `install`, `rsync` and the packaging rows, which can make or copy a link. */
+  link: true,
+  /** `rm`, `rmdir`, `shred`, `unlink`, and any other `files.delete.*` segment. */
+  remove: true,
+  /**
+   * `mkdir`. OFF for the reason `write` is: it makes a real directory where
+   * none was, which is where the hook already lands a path not yet there
+   * (`mkdir -p build && echo x > build/out.txt` is APRV-511's own "ordinary
+   * work" control). Turn on to follow the brief's list literally.
+   */
+  mkdir: false,
+};
+
+/** One judged write, before it is attached to a segment. */
+interface WriteFinding {
+  text: string;
+  cls: string;
+  rule: string;
+  path: string;
+  note: string;
+}
+
+/**
+ * The names read from this hook's own environment (or, for `PWD`, its working
+ * directory) unless the line sets them. `HERMES_HOME` is read as the Hermes
+ * pass reads it (`APPROVAL_HERMES_HOME`, else `HERMES_HOME`): the operator sets
+ * it, and nothing the agent writes reaches this process's environment.
+ */
+const STEERING_NAMES: readonly string[] = ["HOME", "PWD", "TMPDIR", "HERMES_HOME"];
+
+/** Bins that set a shell variable by name (beside a bare `NAME=value`). */
+const VARIABLE_SETTERS: ReadonlySet<string> = new Set([
+  "read", "export", "declare", "typeset", "local", "readonly", "unset", "getopts", "mapfile", "readarray",
+  "for", "select", "let", "printf", "eval", "source", ".", "set",
+]);
+
+/** What a line tells this pass about one variable. */
+interface LineVariable {
+  /** The shape index of its one bare assignment, or -1 when it has none. */
+  at: number;
+  value: string;
+  /** Set twice, conditionally, by `read` or another setter, or as a prefix: never resolved. */
+  tainted: boolean;
+}
+
+/**
+ * Why a target word is zsh's equals expansion (S2, N1), or `null`: an
+ * unquoted, unescaped `=` opening it and anything but `=` after it, which zsh
+ * replaces by the path of a program on PATH (unless `NO_EQUALS`). The ONE
+ * check, read wherever this pass places a word. A spelling that only begins
+ * with `=` after a variable is resolved is not this form: zsh does not
+ * equals-expand the result of a parameter expansion (read in a lab).
+ */
+function equalsExpansionOf(shape: CommandSegmentShape | undefined, word: string): string | null {
+  if (!word.startsWith("=") || !(shape?.equalsWords?.includes(word) ?? false)) return null;
+  return `${word} is zsh's equals expansion, the path of a program found on PATH, which this hook does not read`;
+}
+
+/** The variables a line's own words assign, and how far each may be trusted. */
+function lineVariables(shapes: readonly CommandSegmentShape[]): Map<string, LineVariable> {
+  const vars = new Map<string, LineVariable>();
+  const taint = (name: string): void => {
+    const known = vars.get(name);
+    vars.set(name, { at: known?.at ?? -1, value: known?.value ?? "", tainted: true });
+  };
+  for (const [index, shape] of shapes.entries()) {
+    for (const assignment of shape.assignments) {
+      const equals = assignment.indexOf("=");
+      const name = assignment.slice(0, equals).replace(/\+$/u, "").replace(/\[.*$/su, "");
+      // An assignment zsh equals-expands (`X==tool`) holds a program's path, not its text (S2, N1).
+      if (shape.bin !== null || shape.conditional || assignment.slice(0, equals).endsWith("+") || vars.has(name) || (shape.equalsAssignments?.includes(assignment) ?? false)) {
+        taint(name);
+        continue;
+      }
+      vars.set(name, { at: index, value: assignment.slice(equals + 1), tainted: false });
+    }
+    if (shape.bin !== null && VARIABLE_SETTERS.has(basename(shape.bin))) {
+      for (const arg of shape.args) {
+        const word = arg.replace(/^-[A-Za-z]*v/u, "");
+        const match = /^([A-Za-z_][A-Za-z0-9_]*)/u.exec(word);
+        if (match !== null) taint(match[1] as string);
+      }
+    }
+    // A `$(…)` assigns in its own subshell: whatever it sets is never the line's.
+    for (const inner of shape.substitutions) {
+      for (const each of commandSegmentShapes(inner) ?? []) {
+        for (const assignment of each.assignments) taint(assignment.slice(0, Math.max(0, assignment.indexOf("="))).replace(/\+$/u, ""));
+      }
+    }
+  }
+  return vars;
+}
+
+/** A word, resolved the way the shell would, or why it cannot be. */
+type ResolvedWord = { unreadable: string } | { spellings: string[] };
+
+/**
+ * Resolve one target word in the shell's own order (point 1): brace groups,
+ * then a leading `~`, then `$NAME` / `${NAME}`, the line's own assignments
+ * recursively. It gives up rather than guessing: a command substitution, a
+ * name the line does not set (or sets twice, conditionally, by `read`, as a
+ * prefix), a parameter expansion with an operator (`${X:-a}`, `${#X}`), a
+ * special parameter, or `~`, `$HOME`, `$PWD` or `$TMPDIR` on a line that sets
+ * that name (a `cd` sets `PWD`).
+ */
+function resolveWriteWord(
+  word: string,
+  at: number,
+  line: {
+    shapes: readonly CommandSegmentShape[];
+    vars: Map<string, LineVariable>;
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+  },
+  depth = 0,
+): ResolvedWord {
+  if (depth > 8) return { unreadable: `${word} expands through more than eight variables` };
+  if (word.includes(SUBSTITUTION_SENTINEL) || word.includes("`")) {
+    return { unreadable: `${word} holds a command substitution` };
+  }
+  const candidates = braceCandidates(word);
+  if (candidates === null) return { unreadable: `${word} expands to more brace alternatives than this hook reads` };
+  const steered = (name: string): boolean =>
+    line.vars.has(name) ||
+    (name === "PWD" && line.shapes.slice(0, at).some((shape) => shape.bin !== null && ["cd", "pushd", "popd"].includes(basename(shape.bin))));
+  const spellings: string[] = [];
+  for (const candidate of candidates) {
+    let text = candidate;
+    const tilde = /^~([^/]*)(?=\/|$)/u.exec(text);
+    if (tilde !== null) {
+      const prefix = tilde[1] as string;
+      if (prefix === "") {
+        const home = line.env["HOME"];
+        if (steered("HOME") || home === undefined || home.length === 0) return { unreadable: `${word} names ~ on a line that sets HOME, or with no HOME` };
+        text = `${home}${text.slice(1)}`;
+      } else if (prefix === "+") {
+        text = `.${text.slice(2)}`;
+      } else {
+        return { unreadable: `${word} opens with a tilde prefix this hook does not expand` };
+      }
+    }
+    let failed = null as string | null;
+    // `[^{}$]*` stops at the next `$` or brace, so an unclosed `${` costs the
+    // distance to the next one, not the rest of the word (linear, not
+    // quadratic, in a word of 250,000 `${`). A `${` it does not close is a
+    // form this hook does not read.
+    text = text.replace(/\$\{([^{}$]*)\}|\$\{|\$([A-Za-z_][A-Za-z0-9_]*)|\$(.?)/gu, (match, braced?: string, bare?: string) => {
+      if (failed !== null) return match;
+      const name = braced ?? bare;
+      if (name === undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
+        failed = `${word} holds ${match}, a parameter expansion this hook does not read (a default, a length, a substitution or a special parameter)`;
+        return match;
+      }
+      if (STEERING_NAMES.includes(name)) {
+        if (steered(name)) {
+          failed = `${word} reads $${name} on a line that sets it`;
+          return match;
+        }
+        const value =
+          name === "PWD"
+            ? line.cwd
+            : name === "HERMES_HOME"
+              ? (line.env["APPROVAL_HERMES_HOME"] ?? line.env["HERMES_HOME"])
+              : line.env[name];
+        if (value === undefined || value.length === 0) {
+          failed = `${word} reads $${name}, which this hook does not have`;
+          return match;
+        }
+        return value;
+      }
+      const known = line.vars.get(name);
+      if (known === undefined || known.tainted || known.at < 0 || known.at >= at) {
+        failed = `${word} reads $${name}, which the line does not set once, unconditionally and before it`;
+        return match;
+      }
+      const inner = resolveWriteWord(known.value, known.at, line, depth + 1);
+      if ("unreadable" in inner) {
+        failed = inner.unreadable;
+        return match;
+      }
+      if (inner.spellings.length !== 1 || /\s/u.test(inner.spellings[0] as string)) {
+        failed = `${word} reads $${name}, whose value the shell would split or expand into several words`;
+        return match;
+      }
+      return inner.spellings[0] as string;
+    });
+    if (failed !== null) return { unreadable: failed };
+    if (text.includes("$")) return { unreadable: `${word} still holds a $ after resolution` };
+    spellings.push(text);
+  }
+  return { spellings };
+}
+
+/** The literal directory a pattern word starts from: every segment before the first pattern one. */
+function staticPrefix(text: string): string {
+  const parts = text.split("/");
+  const kept: string[] = [];
+  for (const part of parts) {
+    if (/[*?[{]/u.test(part)) break;
+    kept.push(part);
+  }
+  return kept.join("/") || (text.startsWith("/") ? "/" : ".");
+}
+
+/** A copy, move or link INTO a directory, as the write pass reads it. */
+interface IntoDir {
+  dir: string;
+  sources: string[];
+  /** Does the binary write a tree (a move, a link, an rsync, a recursive copy)? */
+  tree: boolean;
+  /** Do its contents land at `dir` itself (`src/`, `.`, `ln -n`)? */
+  contents: boolean;
+}
+
+/**
+ * THE tar reader (coordinator, review of 90b809fe, rule B): one strict table,
+ * used for both questions, what the segment does and where an extract lands.
+ *
+ * Modes: `-x` / `--extract` / `--get` (extract), `-c` / `--create` (create),
+ * `-t` / `--list` (list); exactly one. Short flags without a value: `v z j J
+ * k m o p O`; with a value (attached, or the next word): `f`, `C`. Long
+ * options, spelled exactly (no abbreviation): `--verbose --gzip --gunzip
+ * --ungzip --bzip2 --xz --keep-old-files --touch --no-same-owner
+ * --preserve-permissions --same-permissions --to-stdout`, and with a value
+ * (`=` or the next word): `--file --directory --exclude --strip-components`.
+ * An old bundled first word (`tar xzf a.tar`) is read letter by letter by the
+ * same table, each value letter taking the next word. At most one `-C` /
+ * `--directory`. Anything else (another flag, a prefix of a long option, a
+ * second `-C`, no mode or two, an assignment on the segment, `TAR_OPTIONS` or
+ * `TAR_READER_OPTIONS` in the hook's environment) is unreadable.
+ */
+const TAR_MODES: Readonly<Record<string, "extract" | "create" | "list">> = { x: "extract", c: "create", t: "list" };
+const TAR_LONG_MODES: Readonly<Record<string, "extract" | "create" | "list">> = { "--extract": "extract", "--get": "extract", "--create": "create", "--list": "list" };
+const TAR_SHORT = "vzjJkmopO";
+const TAR_SHORT_VALUE = "fC";
+const TAR_LONG: readonly string[] = [
+  "--verbose", "--gzip", "--gunzip", "--ungzip", "--bzip2", "--xz",
+  "--keep-old-files", "--touch", "--no-same-owner", "--preserve-permissions", "--same-permissions", "--to-stdout",
+];
+const TAR_LONG_VALUE: readonly string[] = ["--file", "--directory", "--exclude", "--strip-components"];
+/** The tar names read as tar (the two others are refused upstream today: no rule). */
+const TAR_BINS: ReadonlySet<string> = new Set(["tar", "gtar", "bsdtar"]);
+
+/** What a tar segment does and its one `-C`, or why that cannot be read. */
+export function readTar(
+  args: readonly string[],
+  assignments: readonly string[],
+  env: NodeJS.ProcessEnv,
+): { mode: "extract" | "create" | "list"; directory: string | null } | { unreadable: string } {
+  if (assignments.length > 0) return { unreadable: `an assignment on the tar segment (${assignments[0] as string}) may set its options` };
+  for (const name of ["TAR_OPTIONS", "TAR_READER_OPTIONS"]) {
+    const value = env[name];
+    if (value !== undefined && value.length > 0) return { unreadable: `${name} is set in the environment, adding flags the line does not show` };
+  }
+  const modes = new Set<"extract" | "create" | "list">();
+  const directories: string[] = [];
+  /** One letter, read by the table; a value letter takes `value`. */
+  const letter = (each: string, value: () => string | undefined): string | null => {
+    const mode = TAR_MODES[each];
+    if (mode !== undefined) {
+      modes.add(mode);
+      return null;
+    }
+    if (TAR_SHORT_VALUE.includes(each)) {
+      const taken = value();
+      if (taken === undefined) return `-${each} has no value`;
+      if (each === "C") directories.push(taken);
+      return null;
+    }
+    if (TAR_SHORT.includes(each)) return null;
+    return `-${each} is not a flag this hook reads for tar`;
+  };
+  let operandsOnly = false;
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (operandsOnly) continue;
+    if (arg === "--") {
+      operandsOnly = true;
+      continue;
+    }
+    if (at === 0 && /^[A-Za-z]+$/u.test(arg)) {
+      let next = at + 1;
+      for (const each of arg) {
+        const failed = letter(each, () => args[next++]);
+        if (failed !== null) return { unreadable: `the bundled first word ${arg}: ${failed}` };
+      }
+      at = next - 1;
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      const name = equals === -1 ? arg : arg.slice(0, equals);
+      const mode = TAR_LONG_MODES[name];
+      if (mode !== undefined && equals === -1) {
+        modes.add(mode);
+        continue;
+      }
+      if (TAR_LONG_VALUE.includes(name)) {
+        const value = equals === -1 ? args[(at += 1)] : arg.slice(equals + 1);
+        if (value === undefined) return { unreadable: `${name} has no value` };
+        if (name === "--directory") directories.push(value);
+        continue;
+      }
+      if (equals === -1 && TAR_LONG.includes(name)) continue;
+      return { unreadable: `${arg} is not an option this hook reads for tar (an exact spelling only)` };
+    }
+    if (arg.startsWith("-") && arg.length > 1) {
+      for (let index = 1; index < arg.length; index += 1) {
+        const each = arg[index] as string;
+        const rest = arg.slice(index + 1);
+        let consumed = false;
+        const failed = letter(each, () => {
+          consumed = true;
+          return rest.length > 0 ? rest : args[(at += 1)];
+        });
+        if (failed !== null) return { unreadable: failed };
+        if (consumed) break;
+      }
+    }
+  }
+  if (modes.size !== 1) return { unreadable: modes.size === 0 ? "no mode is read" : "more than one mode is read" };
+  if (directories.length > 1) return { unreadable: `${String(directories.length)} directories are named with -C, and each one moves the next` };
+  return { mode: [...modes][0] as "extract" | "create" | "list", directory: directories[0] ?? null };
+}
+
+/** The value half of a `key=value` operand (`dd of=FILE`), or `null`. */
+function operandValue(arg: string): string | null {
+  if (arg.startsWith("-")) return null;
+  const match = /^[A-Za-z_][A-Za-z0-9_.-]*=(.+)$/su.exec(arg);
+  return match === null ? null : (match[1] as string);
+}
+
+/** Main's write candidates, plus the value of each `key=value` operand. */
+function writeCandidatesWithValues(args: readonly string[]): string[] {
+  const out = writeCandidates(args);
+  for (const arg of args) {
+    const value = operandValue(arg);
+    if (value !== null && !out.includes(value)) out.push(value);
+  }
+  return out;
+}
+
+/**
+ * The programs known to write TREES that main does not class as a workspace
+ * write (rule A): their words are judged against the list with the whole tree
+ * test, the checkout on the disk included. A name, not a flag table.
+ */
+const TREE_PROGRAMS: ReadonlySet<string> = new Set(["rsync", "scp", "sftp", "install", "ditto", "unzip", "cpio", "pax", "7z", "7za", "7zz", "jar", "rclone"]);
+
+/**
+ * Rule A's words: every word of the segment but the program's name, the value
+ * half of each `--opt=value`, and each tail of a short cluster (`-oDIR` gives
+ * `oDIR`'s tail `DIR`; every tail of a cluster up to 64 bytes, the first tail
+ * only past that). Over-included on purpose: it can only add a card.
+ */
+function listWords(shape: CommandSegmentShape): string[] {
+  const words: string[] = [];
+  for (const arg of shape.args) {
+    if (arg.length === 0) continue;
+    words.push(arg);
+    const value = operandValue(arg);
+    if (value !== null) words.push(value);
+    if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      if (equals !== -1 && equals + 1 < arg.length) words.push(arg.slice(equals + 1));
+    } else if (arg.startsWith("-") && arg.length > 2) {
+      const last = arg.length <= 64 ? arg.length - 1 : 2;
+      for (let at = 2; at <= last; at += 1) words.push(arg.slice(at));
+    }
+  }
+  return [...new Set(words)];
+}
+
+/**
+ * What the write pass has read of the disk during ONE `classifyForHook` call,
+ * kept for every name reading of that call (cost: the chain, this pass with
+ * it, runs once per reading, and #686's pattern reading makes a pattern line
+ * run two or three of them).
+ *
+ * Only answers that cannot depend on the reading are kept:
+ * - `landings`: `judgeWriteLanding`'s answer per landing and tree mode. It
+ *   reads names through `foldFileName` (`write-scope.ts`, `foldedPathKey`),
+ *   which folds the same way in both readings, and none of the reading's
+ *   helpers (`foldNameExact`, `foldNameLower`, `nameListIncludes`,
+ *   `takeAmongEqual`); its other inputs (the scope, the guard from the
+ *   environment and the gate root) are the call's own.
+ * - `disk`: each path's realpath and lstat ({@link memoDiskReads}).
+ *
+ * The classifier's answers this pass asks for (`ownAnswer`, the synthetic
+ * lines) and `expandOnDisk` (whose entry test lowers or folds by the reading)
+ * are NOT kept: they are asked again in each reading. One exception: a
+ * synthetic line of plain names, judged once for the call, and its answer and
+ * whether that answer holds in every reading (`plainLines`,
+ * {@link inEveryReading}); where it is not known to, each reading judges the
+ * whole line, as before. Made by
+ * {@link classifyForHook} for one call and dropped with it, so nothing here
+ * reaches another command, directory, home or policy.
+ */
+export interface WriteLandingMemo {
+  readonly landings: Map<string, WriteLanding>;
+  /** `landingPaths` per spelling: the lexical and the kernel landing, from the disk alone. */
+  readonly paths: Map<string, { paths: string[]; unknown: boolean }>;
+  readonly disk: DiskReads;
+  /** {@link resolvedWriteTarget} per directory and destination: the disk alone answers it. */
+  readonly writeTarget: (target: string, cwd: string) => string | null;
+  /**
+   * Per directory state and synthetic line of plain names: the classes it
+   * earns, and whether they are its classes in every reading. Judged once for
+   * the call, in the first reading that asks ({@link inEveryReading}; the
+   * pattern pass's `redirectMatchClasses`).
+   */
+  readonly plainLines: Map<string, { readonly value: readonly PlainLineClass[]; readonly invariant: boolean }>;
+}
+
+/** A class a synthetic line earns, as the write pass attaches it ({@link WriteLandingMemo.plainLines}). */
+export type PlainLineClass = { cls: string; rule: string; path: string; why?: string };
+
+/** A fresh {@link WriteLandingMemo}, for one `classifyForHook` call. */
+export function writeLandingMemo(): WriteLandingMemo {
+  const targets = new Map<string, string | null>();
+  const writeTarget = (target: string, cwd: string): string | null => {
+    const key = `${cwd}\u0000${target}`;
+    if (targets.has(key)) return targets.get(key) as string | null;
+    const resolved = resolvedWriteTarget(target, cwd);
+    targets.set(key, resolved);
+    return resolved;
+  };
+  return { landings: new Map(), paths: new Map(), disk: memoDiskReads(), writeTarget, plainLines: new Map() };
+}
+
+/** How many landings the write pass has judged in this process (not answered from a memo): for tests. */
+let landingJudgements = 0;
+
+/** {@link landingJudgements}, for tests: one count per distinct landing and tree mode in a call. */
+export function writeLandingJudgements(): number {
+  return landingJudgements;
+}
+
+/**
+ * Judge every write a command line makes, and attach what it finds.
+ *
+ * ## No second option parser (coordinator, review of 90b809fe)
+ *
+ * This pass reads a program's flags ONLY where main's classifier already read
+ * them to give its class, and never adds a flag table of its own, because a
+ * second, looser reader beside main's is a parser differential. Three rules:
+ *
+ * - A. A segment main classes as anything but a workspace write or a read
+ *   (`network.call`, `deps.*`, `vcs.*`, `exec.*`, a copy row main tightens
+ *   to a delete class; a refusal stands as refused): no parsing. Every word but the program's name, each
+ *   `--opt=value`'s value and each tail of a short cluster is judged as a
+ *   tree root against the list only ({@link listWords}). So `scp`, `rsync`
+ *   and the rest are never parsed here.
+ * - B. `tar`, `gtar`, `bsdtar`: one strict reader ({@link readTar}) answers
+ *   both what the segment does and where an extract lands; anything it cannot
+ *   read is unreadable.
+ * - C. Everything else main classes as a workspace write: main's own
+ *   candidates (the workspace-write row's operands and `copyTargetDirectories`,
+ *   `writeCandidates`, `fetchOutputs`, `readWriteTargets`, `gitWriteTargets`),
+ *   each judged as a tree root wherever the program may write below it.
+ *
+ * Do not add a flag table here: widen what main reads instead.
+ *
+ * `cwds` are the directories the line may start in (the hook's own, and the
+ * envelope's where the harness sends one). A literal `cd` adds where it lands
+ * and keeps the directories before it (a `cd` may fail); one this hook cannot
+ * follow makes every later relative write unreadable.
+ */
+export function refineWriteLandings(
+  result: CommandClassification,
+  command: string,
+  cwds: readonly string[],
+  scope: WriteScopeContext,
+  env: NodeJS.ProcessEnv = process.env,
+  protectedPaths: readonly ProtectedPathEntry[] = [],
+  /**
+   * What the calling `classifyForHook` call has already judged in another
+   * name reading ({@link writeLandingMemo}); a fresh one when absent.
+   */
+  memo: WriteLandingMemo = writeLandingMemo(),
+): RefinedClassification {
+  if (!result.ok) return { result, notes: [] };
+  const top = commandSegmentShapes(command);
+  if (top === null) {
+    // The classifier read the line and this reader cannot: two reads of the
+    // same bytes disagree. Nothing it writes can be judged: guarded.
+    const note = `${WRITE_UNREADABLE_RULE}: \`${command.slice(0, 80)}\` could not be re-read, so where it writes cannot be judged and it is also ${WRITE_GUARDED_CLASS}`;
+    const segments = [...result.segments, { text: command, class: WRITE_GUARDED_CLASS, rule: WRITE_UNREADABLE_RULE }];
+    const classes = result.classes.includes(WRITE_GUARDED_CLASS) ? result.classes : [...result.classes, WRITE_GUARDED_CLASS];
+    return { result: { ok: true, segments, classes }, notes: [note] };
+  }
+  // A login-shell wrapper is classified by the segments of its script. Every
+  // `$(…)` runs before its segment and writes like any other: its segments
+  // are judged in place, ahead of the segment that expands them (their
+  // assignments never reach the line: `lineVariables` taints them). Each unit
+  // carries the segment it is attached to by POSITION (its host among the
+  // line's own segments), never by matching text, so a line that repeats a
+  // segment's text cannot attach a verdict to the wrong one.
+  interface Unit {
+    shape: CommandSegmentShape;
+    /** The line-level segment this unit's entries are written beside. */
+    host: CommandSegmentShape;
+    /** That segment's position among the line's segments ({@link primary}), fixed before any substitution is added. */
+    hostIndex: number;
+    /** Why what this unit writes cannot be read at all (fails to guarded), or `null`. */
+    unreadable: string | null;
+  }
+  const withSubstitutions = (shape: CommandSegmentShape, host: CommandSegmentShape, hostIndex: number, depth: number, unreadable: string | null): Unit[] => {
+    if (depth > 4 && shape.substitutions.length > 0) {
+      return [{ shape, host, hostIndex, unreadable: `\`${shape.text.slice(0, 80)}\` nests command substitutions deeper than this hook reads` }];
+    }
+    const inner = shape.substitutions.flatMap((text) => {
+      const parsed = commandSegmentShapes(text);
+      if (parsed === null) return [{ shape, host, hostIndex, unreadable: `the substitution \`$(${text.slice(0, 80)})\` could not be read` }];
+      return parsed.flatMap((each) => withSubstitutions(each, host, hostIndex, depth + 1, null));
+    });
+    return [...inner, { shape, host, hostIndex, unreadable }];
+  };
+  type Primary = { shape: CommandSegmentShape; unreadable: string | null };
+  const primary: Primary[] = top.flatMap((shape): Primary[] => {
+    if (shape.opaqueShell) return [{ shape, unreadable: `\`${shape.text.slice(0, 80)}\` runs an inline script in a shape this hook does not unwrap` }];
+    if (shape.script === null) return [{ shape, unreadable: null }];
+    const inner = commandSegmentShapes(shape.script);
+    if (inner === null) return [{ shape, unreadable: `the script of \`${shape.text.slice(0, 80)}\` could not be read` }];
+    return inner.map((each) => ({ shape: each, unreadable: null }));
+  });
+  const units: Unit[] = primary.flatMap(({ shape, unreadable }, hostIndex) => withSubstitutions(shape, shape, hostIndex, 0, unreadable));
+  const shapes = units.map((unit) => unit.shape);
+  const guard = currentGuard(env, scope.gateRoot);
+  // One disk reading per spelling per line (a cost bound: the disk does not
+  // change within the pass, and a line names the same target many times).
+  const landingMemo = memo.paths;
+  const landingPathsOnce = (spelled: string): { paths: string[]; unknown: boolean } => {
+    const known = landingMemo.get(spelled);
+    if (known !== undefined) return known;
+    const landing = landingPaths(spelled, null, memo.disk);
+    landingMemo.set(spelled, landing);
+    return landing;
+  };
+  const hookCwd = cwds.find((each) => isAbsolute(each)) ?? "/";
+
+  /**
+   * What main answers for ONE segment, judged on its own text: the classifier
+   * and the APRV-402 pass, from the hook's own directory (as main's APRV-402
+   * pass reads every segment, `cd` or not). Read for the
+   * packaging rows (whose candidates over-include) and to leave a row main
+   * already tightens to `files.delete.*` exactly as main has it. Never read by
+   * matching text against the line's segments.
+   *
+   * Read with main's rules alone (#686's GLOB-WRITE rules off): the row the
+   * segment's words are read by. #686 puts the class a write pattern may
+   * reach ahead of the row (`sed -i s/a/b/ *.md` is policy.core first, with
+   * or without the hook's listing), which would send the segment to rule A:
+   * its operands would leave the judged writes, and the out-of-scope test
+   * with them, and a pattern's matches would be landed twice. Where main's
+   * rules refuse the text (a zsh clobber form, which #686 reads), the full
+   * reading answers.
+   */
+  const ownAnswers = new Map<string, ClassifiedSegment | null>();
+  const ownAnswer = (shape: CommandSegmentShape): ClassifiedSegment | null => {
+    const known = ownAnswers.get(shape.text);
+    if (known !== undefined) return known;
+    const context = { scratchRoots: resolveScratchRoots(hookCwd) };
+    const asMain = classifyCommandInThisReadingWithMainRules(shape.text, protectedPaths, context);
+    const pure = asMain.ok ? asMain : classifyCommandInThisReading(shape.text, protectedPaths, context);
+    const raised = refineWriteScope(pure, resolveWriteRoots(hookCwd), hookCwd, memo.writeTarget).result;
+    const answer = raised.ok ? (raised.segments[0] ?? null) : null;
+    ownAnswers.set(shape.text, answer);
+    return answer;
+  };
+  const start = cwds.find((each) => isAbsolute(each)) ?? cwds[0] ?? "/";
+  const line = { shapes, vars: lineVariables(shapes), cwd: start, env };
+
+  let here = [...new Set(cwds.filter((each) => isAbsolute(each)))];
+  let cwdUnknown = here.length === 0;
+  /** What earlier segments changed: each path and everything under it. */
+  const changed: string[] = [];
+  /** `changed`, each path folded segment by segment, mapped to its spelling. */
+  const changedFolded = new Map<string, string>();
+  const noteChanged = (path: string): void => {
+    changed.push(path);
+    const key = `/${path.split("/").filter((part) => part.length > 0).map(foldFileName).join("/")}`;
+    if (key !== "/" && !changedFolded.has(key)) changedFolded.set(key, path);
+  };
+  let changedUnknown: string | null = null;
+  /**
+   * Every change an earlier segment makes, whatever SNAPSHOT_CHANGERS says
+   * (a write and a mkdir included), folded: a TREE landing with any of them
+   * under it, or a move, link or remove AT it, is not read from the disk
+   * (`mkdir -p d/.git; tar -xf a -C d`). A write or mkdir AT the landing puts
+   * nothing inside it (`mkdir -p out && cp -r src/. out` is read as usual).
+   */
+  const treeChanged = new Map<string, { raw: string; at: boolean }>();
+  let treeChangedUnknown: string | null = null;
+  const foldedKey = (path: string): string => `/${path.split("/").filter((part) => part.length > 0).map(foldFileName).join("/")}`;
+  const treeTouched = (spelled: string): string | null => {
+    if (treeChangedUnknown !== null) return treeChangedUnknown;
+    if (treeChanged.size === 0) return null;
+    for (const form of [resolvePathSegments(spelled), ...landingPathsOnce(spelled).paths]) {
+      const key = foldedKey(form);
+      for (const [changedKey, { raw, at }] of treeChanged) {
+        if ((at && changedKey === key) || changedKey.startsWith(key === "/" ? "/" : `${key}/`)) {
+          return `a tree written at ${spelled} lands where an earlier segment of this line changes ${raw}, so what is there is not read from the disk`;
+        }
+      }
+    }
+    return null;
+  };
+
+  const findings: Array<WriteFinding & { unit: number }> = [];
+
+  const stricter = (a: WriteLanding | undefined, b: WriteLanding): WriteLanding => {
+    const rank = (v: WriteLanding | undefined): number => (v === undefined ? 3 : v.kind === "guarded" ? 0 : v.kind === "out" ? 1 : 2);
+    return rank(b) < rank(a) ? b : (a as WriteLanding);
+  };
+
+  /** Every absolute spelling of a resolved word from each directory. */
+  const spellingsOf = (resolved: { spellings: string[] }): string[] | null => {
+    const out: string[] = [];
+    for (const spelling of resolved.spellings) {
+      // An empty spelling is no landing. The brace reader also hands over a
+      // word with its stray braces removed, so `{}` (a JSON body: `curl -d
+      // '{}'`) comes as `{}` and as nothing, and "nothing" joined to the
+      // directory is the directory itself: at `~` that read as a tree written
+      // over the whole home. The shell makes no word of it either: an empty
+      // alternative (`{,x}`) is dropped, and `{}` stays as written.
+      if (spelling.length === 0) continue;
+      if (isAbsolute(spelling)) {
+        out.push(spelling);
+        continue;
+      }
+      if (cwdUnknown) return null;
+      for (const from of here) out.push(spelledAbsolute(from, spelling));
+    }
+    return out;
+  };
+
+  /** The snapshot rule: has an earlier segment changed this path or a component of it? */
+  const volatileOf = (spelled: string): string | null => {
+    if (changedUnknown !== null) return changedUnknown;
+    if (changed.length === 0) return null;
+    const forms = [resolvePathSegments(spelled), ...landingPathsOnce(spelled).paths];
+    // Each form folded once, and every prefix of it looked up in the set of
+    // changed paths (folded once as they were recorded): linear in the
+    // segments of the path, not in the number of earlier changes.
+    for (const form of forms) {
+      const parts = form.split("/").filter((part) => part.length > 0).map(foldFileName);
+      let prefix = "";
+      for (const part of parts) {
+        prefix = `${prefix}/${part}`;
+        const raw = changedFolded.get(prefix);
+        if (raw !== undefined) {
+          return `${spelled} runs through ${raw}, which an earlier segment of this line changes, so its landing on the disk is not trusted`;
+        }
+      }
+    }
+    return null;
+  };
+
+  /**
+   * The snapshot rule for a pattern (third review of 2b83468a, point 2): an
+   * expansion read from the disk is not trusted when an earlier segment
+   * changed its literal prefix, a component of it, or anything under it.
+   */
+  const volatilePattern = (spelled: string): string | null => {
+    if (changedUnknown !== null) return changedUnknown;
+    const prefix = staticPrefix(spelled);
+    const through = volatileOf(prefix);
+    if (through !== null) return through;
+    const key = `/${prefix.split("/").filter((part) => part.length > 0).map(foldFileName).join("/")}`;
+    for (const [changedKey, raw] of changedFolded) {
+      if (changedKey.startsWith(key === "/" ? "/" : `${key}/`)) {
+        return `${spelled} is a pattern over ${prefix}, under which an earlier segment of this line changes ${raw}, so its listing on the disk is not trusted`;
+      }
+    }
+    return null;
+  };
+
+  /** A class one resolved word earns, before it is attached to its segment. */
+  type ResolvedClass = { cls: string; rule: string; path: string; why?: string };
+
+  /**
+   * The classes a synthetic line earns: the classifier's own answer, then the
+   * git-directory pass from every directory the segment may run in. It fails
+   * to guarded, never to nothing: a line the classifier refuses, a directory
+   * that is unknown (the git-directory pass cannot run) and a pass that is not
+   * ok each add `files.write.guarded` with the unreadable rule (review of
+   * bd1bddc6, point 1).
+   */
+  const synthetic = new Map<string, ResolvedClass[]>();
+  /** The directory state a synthetic line is judged from, as a memo key's head. */
+  const fromKey = (): string => (cwdUnknown ? "?" : here.join("\0"));
+  const classesOfSynthetic = (text: string, path: string): ResolvedClass[] => {
+    // The same synthetic line from the same directories answers the same way:
+    // judged once per line (a cost bound). The key carries the directory state.
+    const key = `${fromKey()}\0${text}`;
+    const known = synthetic.get(key);
+    if (known !== undefined) return known;
+    const out = judgeSynthetic(text, path);
+    synthetic.set(key, out);
+    return out;
+  };
+  /** {@link classesOfSynthetic}'s answer, judged now (no memo). */
+  const judgeSynthetic = (text: string, path: string): ResolvedClass[] => {
+    const out: ResolvedClass[] = [];
+    const take = (segments: readonly ClassifiedSegment[]): void => {
+      for (const segment of segments) {
+        if (segment.class.startsWith("read.") || segment.class === "files.write.workspace" || segment.class === GATE_SELF_CLASS) continue;
+        if (out.some((each) => each.cls === segment.class)) continue;
+        out.push({ cls: segment.class, rule: WRITE_RESOLVED_RULE, path });
+      }
+    };
+    const unreadable = (): void => {
+      if (!out.some((each) => each.cls === WRITE_GUARDED_CLASS)) out.push({ cls: WRITE_GUARDED_CLASS, rule: WRITE_UNREADABLE_RULE, path });
+    };
+    const plain = classifyCommandInThisReading(text, protectedPaths);
+    if (!plain.ok) {
+      unreadable();
+      return out;
+    }
+    take(plain.segments);
+    if (cwdUnknown || here.length === 0) {
+      unreadable();
+      return out;
+    }
+    for (const from of here) {
+      const raised = refineGitDirWrites(plain, from, memo.disk.entry, memo.disk.gitDirLandings).result;
+      if (!raised.ok) {
+        unreadable();
+        continue;
+      }
+      take(raised.segments);
+    }
+    return out;
+  };
+
+  /** A word as the shell would hand it over, single-quoted for a synthetic line. */
+  const quote = (word: string): string => `'${word.replaceAll("'", "'\\''")}'`;
+
+  /** `true >> 'M1' >> 'M2' …`: a redirection to each name. */
+  const redirectLine = (names: readonly string[]): string => `true ${names.map((name) => `>> ${quote(name)}`).join(" ")}`;
+
+  /**
+   * The classes `true >> M1 >> M2 …` earns, for the names a redirect target's
+   * pattern matches on the disk ({@link patternWordClasses}).
+   *
+   * Cost (the unclosed-`[` line: past 1,024 glob characters a segment matches
+   * every entry, so `echo x >` and 2,000 `[` writes out the whole directory):
+   * the line was judged in full in each name reading, and the names of a
+   * directory are mostly plain ones that earn nothing. So where at least
+   * {@link PLAIN_BATCH_NAMES} names end in a plain lower-case name, those
+   * names are judged first, as a line of their own, once for the call
+   * ({@link inEveryReading}). When that line is the same in every reading (no
+   * name compare in it diverged, or each one that did left its tier's answer
+   * the same, judged {@link withLocalReadingsSettled}; no compare offered two
+   * equal claims): where it is every name, its answer is the answer in each
+   * reading; where it earns no class, the other names' line answers alone, in
+   * each reading, and once per equal claim of its own ({@link inEachEqualTurn}).
+   * Otherwise the whole line is judged as before. The plain test only chooses
+   * the names; the classifier and the git-directory pass decide.
+   *
+   * Why the split answers as the whole line does: every word of a synthetic
+   * line is single-quoted text after `true`, so no word is a pattern, a
+   * variable or a substitution, and the line's own options (`dotglob` and the
+   * like, which make only unquoted words patterns) reach none of them. Each
+   * redirection's class is its word's: the strictest protected target and the
+   * classes beside it, the git-directory walk of each word in turn. A name
+   * that earns nothing on its own adds nothing beside the others, and leaves
+   * the first git-directory hit where it was.
+   */
+  const redirectMatchClasses = (names: readonly string[], path: string): ResolvedClass[] => {
+    const plain = names.filter(plainTail);
+    if (plain.length < PLAIN_BATCH_NAMES) return classesOfSynthetic(redirectLine(names), path);
+    const plainText = redirectLine(plain);
+    const plainKey = `${fromKey()}\0${plainText}`;
+    let judged = memo.plainLines.get(plainKey);
+    if (judged === undefined) {
+      judged = inEveryReading(() => withLocalReadingsSettled(() => judgeSynthetic(plainText, path)));
+      memo.plainLines.set(plainKey, judged);
+      // Every name is plain: that line was the whole line, judged in this reading.
+      if (plain.length === names.length) synthetic.set(plainKey, judged.value as ResolvedClass[]);
+    }
+    // Every name is plain and the line answers the same in every reading:
+    // that answer, in each reading (the classes of `~/.hermes/` and a `[` run,
+    // every entry under a home whose path folds).
+    if (judged.invariant && plain.length === names.length) return judged.value as ResolvedClass[];
+    if (!judged.invariant || judged.value.length > 0) return classesOfSynthetic(redirectLine(names), path);
+    const rest = names.filter((name) => !plainTail(name));
+    if (rest.length === 0) return [];
+    const restText = redirectLine(rest);
+    const restKey = `\u0001${fromKey()}\0${restText}`;
+    const known = synthetic.get(restKey);
+    if (known !== undefined) return known;
+    const out: ResolvedClass[] = [];
+    for (const turn of inEachEqualTurn(() => judgeSynthetic(restText, path))) {
+      for (const each of turn) if (!out.some((known) => known.cls === each.cls)) out.push(each);
+    }
+    synthetic.set(restKey, out);
+    return out;
+  };
+
+  /**
+   * Classes the RESOLVED spellings of a segment's words earn as plain ones
+   * would (review-b, CLAIMS L61530): `x=; echo x >> .appro${x}val/env` writes
+   * `.approval/env`, so it takes the class `echo x >> .approval/env` takes.
+   * Every word the resolver reads to a different spelling, not only the write
+   * targets (review of bd1bddc6, point 2): a redirect target as `true >> W`, a
+   * `<` source as `true < W`, and an argv word in the binary's own argv with
+   * that word replaced (`cp W y`, `ln W x`, `cp -t W a`), so a copy FROM a
+   * credential is a credential read and a link TO an organ is what the
+   * classifier says a link to it is. Returned, never shared: the caller
+   * attaches them once the segment is wholly judged.
+   */
+  const resolvedWordClasses = (shape: CommandSegmentShape, at: number): ResolvedClass[] => {
+    const out: ResolvedClass[] = [];
+    const add = (found: readonly ResolvedClass[]): void => {
+      for (const each of found) if (!out.some((known) => known.cls === each.cls)) out.push(each);
+    };
+    const spellingsOf1 = (word: string): string[] | null => {
+      // A variable or a tilde only: a brace group is the classifier's own
+      // reading already (it expands `.g{i,}t` itself), and the over-including
+      // brace reader would hand it spellings the shell never makes
+      // (`query=mutation{addComment{id}}` read as `query=mutationaddCommentid`).
+      if (!/[$~]/u.test(word)) return null;
+      const resolved = resolveWriteWord(word, at, line);
+      if ("unreadable" in resolved) return null;
+      return resolved.spellings.every((spelling) => spelling === word) ? null : resolved.spellings;
+    };
+    for (const word of shape.writes) for (const spelling of spellingsOf1(word) ?? []) add(classesOfSynthetic(`true >> ${quote(spelling)}`, spelling));
+    for (const word of shape.reads) for (const spelling of spellingsOf1(word) ?? []) add(classesOfSynthetic(`true < ${quote(spelling)}`, spelling));
+    if (shape.bin !== null) {
+      const bin = /^[A-Za-z0-9_./+-]+$/u.test(shape.bin) ? shape.bin : quote(shape.bin);
+      const words = shape.args;
+      const read = words.map((word) => spellingsOf1(word));
+      const settled = words.map((word, index) => {
+        const spellings = read[index] ?? null;
+        return spellings !== null && spellings.length === 1 ? (spellings[0] as string) : word;
+      });
+      const lineOf = (argv: readonly string[]): string => [bin, ...argv.map(quote)].join(" ");
+      // Every word read to ONE other spelling is in `settled` already, so one
+      // line answers for all of them. (It was one line per such word, each
+      // the same text: a line of n words built n times, the square of a
+      // `cat` of thousands of `~` paths.)
+      const first = read.find((spellings) => spellings !== null && spellings.length === 1);
+      if (first !== undefined && first !== null) add(classesOfSynthetic(lineOf(settled), first[0] as string));
+      // A word with several spellings (a brace group beside a variable): each
+      // spelling in the word's own place, for the first few such words. Past
+      // that, all of them at once, each alternative a word of its own, which
+      // is the argv the shell builds.
+      let several = 0;
+      const rest = new Set<number>();
+      for (const [index, spellings] of read.entries()) {
+        if (spellings === null || spellings.length < 2) continue;
+        if ((several += 1) > RESOLVED_ARGV_LINES) {
+          rest.add(index);
+          continue;
+        }
+        for (const spelling of spellings) {
+          const argv = [...settled];
+          argv[index] = spelling;
+          add(classesOfSynthetic(lineOf(argv), spelling));
+        }
+      }
+      if (rest.size > 0) {
+        const argv = settled.flatMap((word, index) => (rest.has(index) ? (read[index] as string[]) : [word]));
+        add(classesOfSynthetic(lineOf(argv), (read[[...rest][0] as number] as string[])[0] as string));
+      }
+    }
+    return out;
+  };
+
+  /**
+   * Classes the files a PATTERN word matches on the disk earn as plain
+   * spellings (lead, CLAIMS L61914). In a directory that holds `APPROVAL.md`,
+   * `echo x > *.md` writes it and `sed -i s/a/b/ *.md` edits it, so each takes
+   * the class the line takes with the names written out. No table of names
+   * here: the directory is listed, and the classifier answers for the argv the
+   * shell would build.
+   *
+   * - A redirect target: every match, as `true >> M1 >> M2` (bash refuses more
+   *   than one match; zsh writes them all).
+   * - The argv: every unquoted pattern word (`argFlags.expands`) replaced by
+   *   its matches at once, in the binary's own argv.
+   *
+   * A word that matches nothing stays as written, as the shell leaves it. `**`
+   * is read as one level and as none (`**` + `/*.md` finds `APPROVAL.md` beside
+   * it); deeper levels are not walked (see the hand-back).
+   *
+   * A segment main reads as a read is not looked at: it writes nothing, and
+   * listing for it would cost every `ls *` a directory read.
+   *
+   * Bounded by {@link PATTERN_LISTINGS}, {@link PATTERN_MATCH_NAMES} and
+   * {@link PATTERN_LINE_BYTES}, and by the listing's own bounds. A directory of
+   * thousands of entries is read whole and moves nothing by its size (`rm
+   * logs/*.log` over 5,000 files is what main says it is). Past a bound, or
+   * where the listing gives up, the segment is unreadable: guarded. A delete
+   * too: a bound that is passed is never "nothing found", or a directory
+   * padded with files would hide the policy file from `rm *.md`. (Main also
+   * gives a copy row a `files.delete.*` class, so the class says nothing
+   * about what the segment does.)
+   */
+  const patternWordClasses = (shape: CommandSegmentShape, at: number, segment: ClassifiedSegment | null): ResolvedClass[] => {
+    const out: ResolvedClass[] = [];
+    /**
+     * A word the shell may still turn into names: an unquoted pattern, or an
+     * unquoted variable, whose value it globs (`x='*.md'; touch $x`).
+     */
+    const openPattern = (word: string, index: number): boolean => {
+      const flags = shape.argFlags[index];
+      return ((flags?.expands ?? true) && /[*?[]/u.test(word)) || ((flags?.splits ?? true) && word.includes("$"));
+    };
+    const openTarget = (word: string): boolean => /[*?[$]/u.test(word);
+    const targets = shape.writes.some(openTarget);
+    const argv = shape.bin !== null && shape.args.some(openPattern);
+    if (!targets && !argv) return out;
+    if (!targets && segment !== null && segment.class.startsWith("read.")) return out;
+    const tooWide = (pattern: string, why: string): ResolvedClass[] =>
+      [{ cls: DECISION_B_UNREADABLE_CLASS, rule: WRITE_UNREADABLE_RULE, path: pattern, why: `${pattern} ${why}, so what \`${shape.text.slice(0, 80)}\` writes cannot be read from the disk` }];
+    const add = (found: readonly ResolvedClass[], pattern: string, count: number): void => {
+      for (const each of found) {
+        if (out.some((known) => known.cls === each.cls)) continue;
+        out.push({ ...each, path: pattern, why: `${pattern} matches ${String(count)} name${count === 1 ? "" : "s"} on the disk, and with them written out the line is ${each.cls}` });
+      }
+    };
+    for (const from of cwdUnknown ? [null] : here) {
+      let matches = 0;
+      let bytes = 0;
+      let listings = 0;
+      /** The words the shell hands over for one word: `null`, as written; a string, why it cannot be read. */
+      const matchesOf = (word: string): string[] | string | null => {
+        const resolved = resolveWriteWord(word, at, line);
+        if ("unreadable" in resolved) return null;
+        const placed: string[] = [];
+        let matched = false;
+        for (const spelling of resolved.spellings) {
+          if (!/[*?[]/u.test(spelling)) {
+            placed.push(spelling);
+            continue;
+          }
+          const absolute = isAbsolute(spelling);
+          if (!absolute && from === null) return null;
+          const kept = absolute ? 0 : (from as string).split("/").filter((part) => part.length > 0).length;
+          const levels = spelling.split("/");
+          const forms = levels.includes("**") ? [spelling, levels.filter((part) => part !== "**").join("/")] : [spelling];
+          const names: string[] = [];
+          const seen = new Set<string>();
+          for (const form of forms) {
+            if (form.length === 0) continue;
+            const spelled = absolute ? form : spelledAbsolute(from as string, form);
+            if (spelled.length > MAX_LANDING_BYTES) return "is longer than any path the kernel opens";
+            if (volatilePattern(spelled) !== null) return null;
+            // Each pattern is a listing of its own: a segment of very many
+            // patterns is not read one by one (a cost bound).
+            if ((listings += 1) > PATTERN_LISTINGS) return "is one of more patterns than this hook reads in one segment";
+            const expanded = expandOnDisk("/", spelled, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS, list: memo.disk.list });
+            if ("giveUp" in expanded) return `could not be read from the disk (${expanded.giveUp})`;
+            for (const each of expanded.paths) {
+              if (each.from !== "match") continue;
+              // A literal segment after a pattern one is joined unseen: only a
+              // name that is there is a word the shell makes.
+              if ("error" in memo.disk.entry(each.path)) continue;
+              const name = absolute ? each.path : each.path.split("/").filter((part) => part.length > 0).slice(kept).join("/");
+              if (name.length === 0 || seen.has(name)) continue;
+              seen.add(name);
+              names.push(name);
+              bytes += name.length + 4;
+              if ((matches += 1) > PATTERN_MATCH_NAMES || bytes > PATTERN_LINE_BYTES) return "matches more names than this hook reads";
+            }
+          }
+          if (names.length === 0) {
+            placed.push(spelling);
+            continue;
+          }
+          matched = true;
+          placed.push(...names);
+        }
+        return matched ? placed : null;
+      };
+      let wide = false;
+      for (const word of shape.writes) {
+        if (!openTarget(word)) continue;
+        const names = matchesOf(word);
+        if (names === null) continue;
+        if (typeof names === "string") {
+          for (const each of tooWide(word, names)) if (!out.some((known) => known.cls === each.cls)) out.push(each);
+          wide = true;
+          break;
+        }
+        add(redirectMatchClasses(names, word), word, names.length);
+      }
+      if (wide || !argv || shape.bin === null) continue;
+      const bin = /^[A-Za-z0-9_./+-]+$/u.test(shape.bin) ? shape.bin : quote(shape.bin);
+      const built: string[] = [];
+      let pattern: string | null = null;
+      let count = 0;
+      for (const [index, word] of shape.args.entries()) {
+        const names = openPattern(word, index) ? matchesOf(word) : null;
+        if (typeof names === "string") {
+          for (const each of tooWide(word, names)) if (!out.some((known) => known.cls === each.cls)) out.push(each);
+          wide = true;
+          break;
+        }
+        if (names === null) {
+          built.push(word);
+          continue;
+        }
+        pattern ??= word;
+        count += names.length;
+        built.push(...names);
+      }
+      if (wide || pattern === null) continue;
+      add(classesOfSynthetic([bin, ...built.map(quote)].join(" "), pattern), pattern, count);
+    }
+    return out;
+  };
+
+  // One landing per spelling per call: the disk is read once for a target the
+  // line names many times, and once for all the name readings of the call (a
+  // cost bound; the disk does not change within it). `judgeWriteLanding`
+  // compares names through `foldFileName` alone, which folds the same way in
+  // both readings, so its answer is the same in each (see `WriteLandingMemo`).
+  const landed = memo.landings;
+  const landOnce = (spelled: string, tree: boolean | "listed"): WriteLanding => {
+    const key = `${tree === true ? "T" : tree === false ? "F" : "L"}${spelled}`;
+    const known = landed.get(key);
+    if (known !== undefined) return known;
+    landingJudgements += 1;
+    const judged = judgeWriteLanding(spelled, scope, guard, tree, memo.disk);
+    landed.set(key, judged);
+    return judged;
+  };
+
+  const judgeWord = (word: string, at: number, tree: boolean | "listed" = false): WriteLanding => {
+    if (word.length === 0) return { kind: "in" };
+    // S2 (N1): zsh reads an unquoted `=name` as the path of the program
+    // `name` on PATH (unless NO_EQUALS is set): where it lands is not read.
+    const equals = equalsExpansionOf(shapes[at], word);
+    if (equals !== null) return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: equals };
+    const resolved = resolveWriteWord(word, at, line);
+    if ("unreadable" in resolved) {
+      return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: resolved.unreadable };
+    }
+    const spelled = spellingsOf(resolved);
+    if (spelled === null) {
+      return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: `${word} is relative, after a cd this hook cannot follow` };
+    }
+    let verdict: WriteLanding = { kind: "in" };
+    for (const each of spelled) {
+      if (each.length > MAX_LANDING_BYTES) return judgeWriteLanding(each, scope, guard, tree);
+      const moved = volatileOf(each) ?? (tree === true ? treeTouched(staticPrefix(each)) : null);
+      if (moved !== null) return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: moved };
+      if (/[*?[]/u.test(each)) {
+        // Point 6: a glob is read from the disk, bounded by entries and time;
+        // a match is judged as a landing, the pattern standing for the files
+        // it did not keep, and the word as written for no match at all.
+        const unsure = volatilePattern(each);
+        if (unsure !== null) return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: unsure };
+        const expanded = expandOnDisk("/", each, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS, list: memo.disk.list });
+        if ("giveUp" in expanded) {
+          return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: each, why: `${each} could not be read from the disk: ${expanded.giveUp}` };
+        }
+        for (const placed of expanded.paths) {
+          verdict = stricter(verdict, landOnce(placed.path, tree));
+          if (verdict.kind === "guarded") return verdict;
+        }
+        continue;
+      }
+      verdict = stricter(verdict, landOnce(each, tree));
+      if (verdict.kind === "guarded") return verdict;
+    }
+    return verdict;
+  };
+
+  /**
+   * Lead ruling L62656, the seat's fourth review: the whole line is exactly
+   * one plain chmod segment (no `;`, `&&`, `||`, pipe, subshell, loop,
+   * function, other segment, env prefix, redirect or substitution), so no
+   * part of the line sets a name the operand reads (`read X`, `for X in`,
+   * `cd` for OLDPWD, `[[ =~ ]]`, `getopts` ... set names with no
+   * assignment, so a list of setters cannot be trusted).
+   */
+  const singlePlainChmod = ((): boolean => {
+    if (top.length !== 1 || units.length !== 1) return false;
+    const only = top[0] as CommandSegmentShape;
+    return (
+      only.bin !== null &&
+      basename(only.bin) === "chmod" &&
+      only.assignments.length === 0 &&
+      only.writes.length === 0 &&
+      (only.clobberBashWrites?.length ?? 0) === 0 &&
+      only.substitutions.length === 0 &&
+      only.script === null &&
+      !only.opaqueShell &&
+      only.text.trim() === command.trim() &&
+      // No redirect (`2>/dev/null` included), pipe, list, background, group
+      // or newline anywhere in the text: kept simple, fails closed on a
+      // quoted one too.
+      !/[<>|&;()\n\r`]/u.test(command)
+    );
+  })();
+
+  /**
+   * Lead ruling L62656 (the seat's whitelist): is this plain chmod operand one
+   * the pass cannot read that keeps main's class? Only on a line that is one
+   * plain chmod segment, and only (a) one plain parameter (`$SCRIPT`,
+   * `"$f"`, `$1`), or (b) a literal prefix with no expansion character, `/`,
+   * and one such parameter (`scripts/$NAME`, `./$NAME`), whose prefix,
+   * judged as a TREE, is not at, under or above a guarded entry nor a pair's
+   * first half (`.git`, `.claude`, a config folder), and is read from the
+   * disk. The parameter is a positional or an ordinary name, never one the
+   * shell or this hook gives a meaning ({@link SHELL_SPECIAL_NAMES}). Every
+   * other unread word stays guarded.
+   */
+  const metadataRelaxed = (word: string, at: number): boolean => {
+    if (!singlePlainChmod) return false;
+    const shape = chmodRelaxedShape(word);
+    if (shape === null || shellSpecialName(shape.name)) return false;
+    if (shape.prefix !== null && judgeWord(shape.prefix, at, true).kind === "guarded") return false;
+    // The seat's fifth review: a name set in this hook's own environment is
+    // read, as HOME is. Its value split as the shell splits an unquoted word:
+    // more than one word, a word that may be an option (`-R ~/.ssh`), or a
+    // character the shell would still glob (or this pass would expand) keeps
+    // the operand strict; one plain word is judged where it lands, and a
+    // guarded landing keeps it strict too.
+    const value = env[shape.name];
+    if (value === undefined) return true;
+    const words = value.split(/[ \t\n]+/u).filter((each) => each.length > 0);
+    if (words.length === 0) return true;
+    if (words.length > 1 || words.some((each) => each.startsWith("-") || /[$`~{}*?[\]\\]/u.test(each))) return false;
+    const landing = shape.prefix === null ? (words[0] as string) : `${shape.prefix}/${words[0] as string}`;
+    return judgeWord(landing, at).kind !== "guarded";
+  };
+
+  /** A move or delete at (or above) a named hook script, as a guarded landing, or `null` (S2). */
+  const hookScriptMovedOrRemoved = (word: string, at: number): (WriteLanding & { kind: "guarded" }) | null => {
+    // A word this pass cannot place keeps the answer it had (parity ruling).
+    if (word.length === 0 || equalsExpansionOf(shapes[at], word) !== null) return null;
+    const resolved = resolveWriteWord(word, at, line);
+    if ("unreadable" in resolved) return null;
+    const spelled = spellingsOf({ spellings: resolved.spellings.map(staticPrefix) });
+    if (spelled === null) return null;
+    const scripts = guard.hookScripts();
+    if (scripts.size === 0) return null;
+    for (const each of spelled) {
+      if (each.length > MAX_LANDING_BYTES) continue;
+      for (const path of [resolvePathSegments(each), ...landingPathsOnce(each).paths]) {
+        if (hookScriptAtOrUnder(path, scripts)) {
+          return { kind: "guarded", rule: WRITE_GUARDED_RULE, path, why: `moving or removing ${path} reaches ${HOOK_SCRIPT_ENTRY}, which is on the guarded list` };
+        }
+      }
+    }
+    return null;
+  };
+
+  /** Is this word, resolved, an existing directory on every reading? Unreadable is `false`. */
+  const existingDirectory = (word: string, at: number): boolean => {
+    const resolved = resolveWriteWord(word, at, line);
+    if ("unreadable" in resolved) return false;
+    const spelled = spellingsOf(resolved);
+    if (spelled === null || spelled.length === 0) return false;
+    return spelled.every((each) => {
+      if (each.length > MAX_LANDING_BYTES || /[*?[]/u.test(each)) return false;
+      const landing = landingPathsOnce(each);
+      if (landing.unknown || landing.paths.length === 0) return false;
+      return landing.paths.every((path) => {
+        try {
+          return statSync(path).isDirectory();
+        } catch {
+          return false;
+        }
+      });
+    });
+  };
+
+  /** What this shape writes (judged) and what it changes (for the snapshot rule). */
+  const targetsOf = (shape: CommandSegmentShape, segment: ClassifiedSegment | null): {
+    writes: string[];
+    /**
+     * A plain (not recursive) chmod's operands (lead ruling L62656): judged
+     * as writes when readable; an operand this pass cannot read keeps main's
+     * class only in the shapes {@link chmodRelaxedShape} reads.
+     */
+    metadata: string[];
+    intoDirs: IntoDir[];
+    trees: string[];
+    unreadable: string | null;
+    changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[];
+  } => {
+    // A zsh clobber redirect (`>!`) writes zsh's target, in `shape.writes`,
+    // and in bash a file named `!` in the segment's directory: both are judged.
+    const writes: string[] = [...shape.writes, ...(shape.clobberBashWrites ?? [])];
+    const intoDirs: IntoDir[] = [];
+    /** Words a tree is written at (judged with {@link guardedEntryBelow} too). */
+    const trees: string[] = [];
+    const metadata: string[] = [];
+    let unreadable: string | null = null;
+    const changes: { word: string; kind: keyof typeof SNAPSHOT_CHANGERS }[] = writes.map((word) => ({ word, kind: "write" as const }));
+    const bin = shape.bin === null ? null : basename(shape.bin);
+    if (bin === null) return { writes, metadata, intoDirs, trees, unreadable, changes };
+    // Every word not spelled as a flag, and every word after `--` (`touch --
+    // -x` writes `-x`).
+    const ended = shape.args.indexOf("--");
+    const operands = shape.args.filter((arg, at) => arg.length > 0 && ((ended !== -1 && at > ended) || (!arg.startsWith("-") && arg !== "--")));
+    if (LANDING_WRITE_EVERY.has(bin)) {
+      writes.push(...operands);
+      for (const word of operands) changes.push({ word, kind: bin === "mkdir" ? "mkdir" : "write" });
+    } else if (LANDING_DELETE_EVERY.has(bin)) {
+      for (const word of operands) changes.push({ word, kind: "remove" });
+    } else if (bin === "cp" || bin === "mv" || bin === "ln") {
+      const targetDirs = copyTargetDirectories(shape.args);
+      const targetDir = targetDirs[0] ?? null;
+      const single = targetDir === null && operands.length === 1;
+      const sources = single ? operands : targetDir === null ? operands.slice(0, -1) : operands.filter((operand) => operand !== targetDir);
+      const destination = single ? "." : (targetDir ?? operands[operands.length - 1]);
+      const kind = bin === "mv" ? "move" : "link";
+      // Each writes a tree (rule C, no flag read: a copy is judged as the
+      // recursive one it may be). `src/`, `src/.` and `.` put the CONTENTS at
+      // the destination itself, and a link may replace what is there.
+      const tree = true;
+      const contents = bin === "ln" || sources.some((source) => source === "." || source === ".." || source.endsWith("/") || source.endsWith("/."));
+      // A word the shell may still turn into an option (`ln -s "$T" l`) may
+      // name the destination: what this segment changes is unknown.
+      if (copyArgvUnknown(shape.args, shape.argFlags) !== null) {
+        changes.push({ word: "$__APPROVAL_UNKNOWN_DESTINATION__", kind });
+      }
+      if (destination !== undefined) {
+        writes.push(destination);
+        changes.push({ word: destination, kind });
+        intoDirs.push({ dir: destination, sources, tree, contents });
+      }
+      for (const extra of targetDirs.slice(1)) {
+        writes.push(extra);
+        changes.push({ word: extra, kind });
+        intoDirs.push({ dir: extra, sources, tree, contents });
+      }
+      if (bin === "mv") for (const source of sources) changes.push({ word: source, kind: "move" });
+    } else if (bin === "chmod" && chmodPlainArgv(shape.args)) {
+      // Lead ruling L62656: a plain chmod changes metadata only (it makes no
+      // entry and no link), so an operand this pass cannot read keeps main's
+      // class in the two shapes `metadataRelaxed` allows (`chmod +x $SCRIPT`,
+      // `chmod +x scripts/$NAME`); a readable one is judged as before
+      // (`chmod 600 ~/.ssh/config` is guarded). Every operand, the mode
+      // included (over-included).
+      metadata.push(...operands);
+      for (const word of operands) changes.push({ word, kind: "write" });
+    } else if (bin === "chmod" || bin === "chown" || bin === "chgrp" || (bin === "sed" && (segment === null || segment.rule === "sed-in-place"))) {
+      // Every operand, the mode and the script included (over-included). A
+      // recursive chmod of a word this pass cannot read stays guarded (lead
+      // ruling L62511, S-D; L62656).
+      writes.push(...operands);
+      for (const word of operands) changes.push({ word, kind: "write" });
+    } else if (bin === "curl" || bin === "wget") {
+      // Main's own reader of the output words (`fetchOutputs`), no new table.
+      const outputs = fetchOutputs(bin, shape.args, shape.argFlags);
+      for (const word of [...outputs.files, ...outputs.directories]) {
+        writes.push(word);
+        changes.push({ word, kind: "write" });
+      }
+    } else if (TAR_BINS.has(bin)) {
+      // Rule B: every tar segment through the one reader.
+      const read = readTar(shape.args, shape.assignments, env);
+      const candidates = writeCandidates(shape.args);
+      writes.push(...candidates);
+      for (const word of candidates) changes.push({ word, kind: "link" });
+      if ("unreadable" in read) {
+        unreadable = `\`${shape.text}\` runs tar, and ${read.unreadable}, so what it writes and where is not read`;
+      } else if (read.mode === "extract") {
+        trees.push(read.directory ?? ".");
+      }
+    } else if (
+      segment === null
+        ? LANDING_PACKAGING_BINS.has(bin)
+        : LANDING_PACKAGING_RULES.has(segment.rule) ||
+          segment.rule === "packaging-write-out-of-scope" ||
+          segment.rule === "write-out-of-scope-resolved"
+    ) {
+      // A segment the classifier will not answer on its own text (a heredoc
+      // body elsewhere, say) is read as a packaging row by its binary: the
+      // candidates over-include, which only ever adds.
+      const candidates = writeCandidates(shape.args);
+      writes.push(...candidates);
+      for (const word of candidates) changes.push({ word, kind: "link" });
+    } else if (bin === "find") {
+      // EVERY find segment, whatever rule main gave it (`find . -delete
+      // -fprint F` is main's delete row and still writes F): main's own table
+      // (FIND_WRITE_PRIMARIES), the word after each is a write. A delete's
+      // start points are what it may remove (point 7: no write entry).
+      if (segment !== null && segment.class.startsWith("files.delete")) for (const word of operands) changes.push({ word, kind: "remove" });
+      for (const [at, arg] of shape.args.entries()) {
+        const file = FIND_WRITE_PRIMARIES.includes(arg) ? shape.args[at + 1] : undefined;
+        if (file === undefined) continue;
+        writes.push(file);
+        changes.push({ word: file, kind: "write" });
+      }
+    } else if (segment !== null && segment.class.startsWith("files.")) {
+      // A write or delete this pass does not model by name: each operand is a
+      // path it may change. A program main classes as a write (`npx prettier
+      // --write`, `make`, a node script, `npm run`) may write any word it is
+      // handed, and below it: each candidate (a `key=value` operand's value
+      // included) is a judged write and a tree root, against the roots and
+      // the list alike.
+      for (const word of operands) changes.push({ word, kind: segment.class.startsWith("files.delete") ? "remove" : "write" });
+      // Not a redirect's row: its class is the redirect's (judged above), and
+      // the binary's own words (`echo`'s, `cat`'s) are data, not targets.
+      if (segment.class.startsWith("files.write.") && segment.rule !== "redirect-write") trees.push(...writeCandidatesWithValues(shape.args));
+    }
+    // A reader that writes through one of its own words (`sort -o`, `uniq in
+    // out`, sed's `w`) and git's own write words (`git clone URL DIR`).
+    for (const word of [...readWriteTargets(bin, shape.args), ...(bin === "git" ? gitWriteTargets(shape.args) : [])]) {
+      if (word.length === 0 || writes.includes(word)) continue;
+      writes.push(word);
+      changes.push({ word, kind: bin === "git" ? "link" : "write" });
+    }
+    // What git writes is a checkout: a tree.
+    if (bin === "git") trees.push(...gitWriteTargets(shape.args).filter((word) => word.length > 0));
+    return { writes, metadata, intoDirs, trees, unreadable, changes };
+  };
+
+  /**
+   * The names a source lands under when copied or moved INTO a directory:
+   * its resolved basename, or each match's for a pattern read from the disk.
+   * `null` stands for a name that cannot be read (fails to guarded).
+   */
+  const intoNames = (source: string, at: number): Array<string | null> => {
+    const resolved = resolveWriteWord(source, at, line);
+    if ("unreadable" in resolved) return [null];
+    const names: Array<string | null> = [];
+    for (const spelling of resolved.spellings) {
+      if (!/[*?[]/u.test(basename(spelling))) {
+        names.push(basename(spelling));
+        continue;
+      }
+      const spelled = spellingsOf({ spellings: [spelling] });
+      if (spelled === null) return [null];
+      for (const each of spelled) {
+        if (volatilePattern(each) !== null) return [null];
+        const expanded = expandOnDisk("/", each, { keepFiles: true, deadline: Date.now() + GLOB_TIME_LIMIT_MS, list: memo.disk.list });
+        if ("giveUp" in expanded) return [null];
+        for (const placed of expanded.paths) names.push(basename(placed.path));
+      }
+    }
+    return names;
+  };
+
+  for (const [index, shape] of shapes.entries()) {
+    const bin = shape.bin === null ? null : basename(shape.bin);
+    if (bin === "cd" || bin === "pushd" || bin === "popd" || bin === "chdir") {
+      const target = bin === "popd" ? ({ kind: "unknown" } as const) : cdTarget(bin === "chdir" ? "cd" : bin, shape.args, shape.assignments);
+      if (target.kind === "unknown") {
+        cwdUnknown = true;
+        continue;
+      }
+      const word = target.kind === "home" ? "~" : target.word;
+      const resolved = resolveWriteWord(word, index, line);
+      let spelled = "unreadable" in resolved ? null : spellingsOf(resolved);
+      // A pattern is read from the disk, as a write target's is (point 6):
+      // every directory it matches, and the word as written.
+      if (spelled !== null && spelled.some((each) => /[*?[]/u.test(each))) {
+        const placed: string[] = [];
+        for (const each of spelled) {
+          if (!/[*?[]/u.test(each)) {
+            placed.push(each);
+            continue;
+          }
+          const expanded = volatilePattern(each) === null ? expandOnDisk("/", each, { deadline: Date.now() + GLOB_TIME_LIMIT_MS, list: memo.disk.list }) : null;
+          if (expanded === null || "giveUp" in expanded) {
+            spelled = null;
+            break;
+          }
+          for (const path of expanded.paths) if (path.from !== "parent") placed.push(path.path);
+        }
+        if (spelled !== null) spelled = placed;
+      }
+      if (spelled === null) {
+        cwdUnknown = true;
+        continue;
+      }
+      const next = new Set(here);
+      for (const each of spelled) {
+        if (each.length > MAX_LANDING_BYTES || volatileOf(each) !== null) {
+          cwdUnknown = true;
+          break;
+        }
+        const landing = landingPathsOnce(each);
+        if (landing.unknown) cwdUnknown = true;
+        next.add(resolvePathSegments(each));
+        for (const path of landing.paths) next.add(path);
+      }
+      here = [...next];
+      if (here.length > 64) cwdUnknown = true;
+      continue;
+    }
+
+    const unit = units[index] as Unit;
+    const host = unit.host.text;
+    if (unit.unreadable !== null) {
+      // Nothing this unit writes can be read: guarded, and nothing after it
+      // can trust the disk either.
+      findings.push({ unit: index, text: host, cls: DECISION_B_UNREADABLE_CLASS, rule: WRITE_UNREADABLE_RULE, path: shape.text.slice(0, 80), note: `${WRITE_UNREADABLE_RULE}: ${unit.unreadable}, so \`${host}\` is also ${DECISION_B_UNREADABLE_CLASS}` });
+      changedUnknown ??= `${unit.unreadable}, so no later landing on the disk is trusted`;
+      continue;
+    }
+    const segment = ownAnswer(shape);
+    const { writes, metadata, intoDirs, trees, unreadable, changes } = targetsOf(shape, segment);
+    // Both verdicts are kept (self-review of dbb980b7): a guarded landing does
+    // not hide an out-of-scope one on the same segment, so a policy that sets
+    // `files.write.out_of_scope` stricter than manual still decides. Judging
+    // stops early only once nothing more can be added.
+    let guarded: (WriteLanding & { kind: "guarded" }) | undefined =
+      unreadable === null ? undefined : { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: shape.text.slice(0, 80), why: unreadable };
+    let out: (WriteLanding & { kind: "out"; why?: string }) | undefined;
+    const take = (judged: WriteLanding): void => {
+      if (judged.kind === "guarded") guarded ??= judged;
+      else if (judged.kind === "out") out ??= judged;
+    };
+    const settled = (): boolean => guarded !== undefined && (out !== undefined || !scope.optedIn);
+    for (const word of writes) {
+      if (settled()) break;
+      take(judgeWord(word, index));
+    }
+    // Lead ruling L62656: a plain chmod's operand in a relaxed shape keeps
+    // main's class; every other one is judged as any write is.
+    for (const word of metadata) {
+      if (settled()) break;
+      if (!metadataRelaxed(word, index)) take(judgeWord(word, index));
+    }
+    for (const word of trees) {
+      if (settled()) break;
+      take(judgeWord(word, index, true));
+    }
+    // Rule A: a segment main does not class as a workspace write or a read
+    // (`network.call`, `deps.*`, `vcs.*`, `exec.*` ...) is not parsed. Every
+    // word but the program's name, each `--opt=value`'s value and each tail
+    // of a short cluster (`-oDIR` gives `DIR`), is judged as a tree root
+    // against the list only: on it, inside it, or above a listed place.
+    // A delete (`rm`, `find -delete` ...) stays out, as point 7 rules. Only a
+    // guarded verdict counts here (the words are not known targets).
+    const deletes = LANDING_DELETE_EVERY.has(bin ?? "") || (segment !== null && (segment.rule.startsWith("rm-") || segment.rule === "find-delete"));
+    if (guarded === undefined && !deletes && (segment === null || (!segment.class.startsWith("read.") && segment.class !== WORKSPACE_WRITE))) {
+      // The list test first, for every word. A program known to write trees
+      // then takes the whole tree test as an EXTRA (a checkout on the disk
+      // included), and fails closed there: an unreadable word of a tree
+      // copier (`rsync -a src/ "$DEST"`) is guarded too. So tree mode never
+      // yields less than list mode for the same word. For any other program an
+      // unreadable word names no write this hook knows of (see the hand-back).
+      const treeProgram = TREE_PROGRAMS.has(bin ?? "");
+      for (const word of listWords(shape)) {
+        const listed = judgeWord(word, index, "listed");
+        if (listed.kind === "guarded" && (listed.rule === WRITE_GUARDED_RULE || treeProgram)) {
+          guarded = listed;
+          break;
+        }
+        if (!treeProgram) continue;
+        const asTree = judgeWord(word, index, true);
+        if (asTree.kind === "guarded") {
+          guarded = asTree;
+          break;
+        }
+      }
+    }
+    // A tree at the destination itself: contents copied there, or a
+    // destination that is not an existing directory (it becomes the tree).
+    for (const { dir, tree, contents } of intoDirs) {
+      if (settled()) break;
+      if (!tree || !(contents || !existingDirectory(dir, index))) continue;
+      take(judgeWord(dir, index, true));
+    }
+    // A copy or move INTO a directory writes `<dir>/<source name>` too. A
+    // source's names do not depend on the directory: read once per segment.
+    // Each `-t` after the first is a further directory every source is judged
+    // in, so those landings are directories times names: past
+    // INTO_EXTRA_LANDINGS_CAP of them the rest are not judged and the segment
+    // is guarded as unreadable (a cost bound: GNU cp, mv and ln refuse a
+    // second `-t`, and a line of many of them reached the hook's deadline).
+    // Under a write_scope it is out of scope as well (lead ruling L63122):
+    // a landing not judged may be outside every root, and a policy that sets
+    // `files.write.out_of_scope` stricter than guarded still decides.
+    const namesOf = new Map<string, Array<string | null>>();
+    let extraLandings = 0;
+    into: for (const [dirAt, { dir, sources, tree }] of intoDirs.entries()) {
+      for (const source of sources) {
+        if (settled()) continue;
+        let names = namesOf.get(source);
+        if (names === undefined) {
+          names = intoNames(source, index);
+          namesOf.set(source, names);
+        }
+        for (const name of names) {
+          if (name === null) {
+            guarded ??= { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: source, why: `${source}'s name cannot be read, so where it lands in ${dir} cannot be tested against the guarded list` };
+            continue;
+          }
+          if (name.length === 0 || name === "." || name === "..") continue;
+          if (dirAt > 0) {
+            extraLandings += 1;
+            if (extraLandings > INTO_EXTRA_LANDINGS_CAP) {
+              const why = `\`${host.slice(0, 80)}\` names ${String(intoDirs.length)} target directories, each with every source, more landings than this hook judges`;
+              guarded ??= { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: dir, why };
+              if (scope.optedIn) out ??= { kind: "out", path: dir, why: `${why}, so whether each lands within a write root (${scope.roots.join(", ")}) is not known` };
+              break into;
+            }
+          }
+          take(judgeWord(`${dir.replace(/\/+$/u, "")}/${name}`, index, tree));
+        }
+      }
+    }
+    // S2 (seat ruling on the review of e2a76e15): a move or a delete of a
+    // named hook script, or of a folder above one, removes the hook's code or
+    // puts other code there. Only this rule reads a delete (point 7 keeps
+    // deletes off the list); a word it cannot read adds nothing here.
+    if (guarded === undefined) {
+      for (const change of changes) {
+        if (change.kind !== "move" && change.kind !== "remove") continue;
+        const found = hookScriptMovedOrRemoved(change.word, index);
+        if (found !== null) {
+          guarded = found;
+          break;
+        }
+      }
+    }
+    if (guarded !== undefined) {
+      // Every write, whatever class main gave it: the guarded minimum is the
+      // one no policy setting may lift (point 5).
+      const cls = guarded.rule === WRITE_UNREADABLE_RULE ? DECISION_B_UNREADABLE_CLASS : WRITE_GUARDED_CLASS;
+      findings.push({ unit: index, text: host, cls, rule: guarded.rule, path: guarded.path, note: `${guarded.rule}: ${guarded.why}, so \`${host}\` is also ${cls}` });
+    }
+    if (out !== undefined && scope.optedIn && !(segment?.class.startsWith("files.delete.") ?? false)) {
+      // A row main already tightens to `files.delete.*` stays exactly as main
+      // has it (decision A is not built).
+      const where = out.why ?? `\`${host}\` lands at ${out.path}, outside every write root (${scope.roots.join(", ")})`;
+      findings.push({ unit: index, text: host, cls: WRITE_OUT_OF_SCOPE_CLASS, rule: WRITE_OUT_OF_SCOPE_RULE, path: out.path, note: `${WRITE_OUT_OF_SCOPE_RULE}: ${where}, so it is also ${WRITE_OUT_OF_SCOPE_CLASS}` });
+    }
+
+    for (const found of resolvedWordClasses(shape, index)) {
+      // A class the command already carries changes no answer: no second entry.
+      if (result.classes.includes(found.cls)) continue;
+      findings.push({
+        unit: index,
+        text: host,
+        cls: found.cls,
+        rule: found.rule,
+        path: found.path,
+        note: `${found.rule}: a word of \`${host}\` resolves to ${found.path}, which is ${found.cls} as a plain spelling, so the segment is also ${found.cls}`,
+      });
+    }
+
+    for (const found of patternWordClasses(shape, index, segment)) {
+      if (result.classes.includes(found.cls)) continue;
+      findings.push({
+        unit: index,
+        text: host,
+        cls: found.cls,
+        rule: found.rule,
+        path: found.path,
+        note: `${found.rule}: ${found.why ?? found.path}, so \`${host}\` is also ${found.cls}`,
+      });
+    }
+
+    // What this segment changes is in place before the next one runs.
+    for (const change of changes) {
+      // Every change counts for a tree landing; only SNAPSHOT_CHANGERS' kinds
+      // for any other.
+      const counted = SNAPSHOT_CHANGERS[change.kind];
+      const unknown = (why: string): void => {
+        treeChangedUnknown ??= why;
+        if (counted) changedUnknown ??= why;
+      };
+      const resolved = resolveWriteWord(change.word, index, line);
+      if ("unreadable" in resolved) {
+        unknown(`an earlier segment (\`${shape.text}\`) changes ${change.word}, which cannot be read, so no later landing on the disk is trusted`);
+        continue;
+      }
+      const spelled = spellingsOf({ spellings: resolved.spellings.map(staticPrefix) });
+      if (spelled === null) {
+        unknown(`an earlier segment (\`${shape.text}\`) changes ${change.word} after a cd this hook cannot follow, so no later landing on the disk is trusted`);
+        continue;
+      }
+      for (const each of spelled) {
+        if (each.length > MAX_LANDING_BYTES) {
+          unknown(`an earlier segment (\`${shape.text}\`) changes a path longer than any the kernel opens, so no later landing on the disk is trusted`);
+          continue;
+        }
+        for (const path of [resolvePathSegments(each), ...landingPathsOnce(each).paths]) {
+          const key = foldedKey(path);
+          const at = change.kind === "move" || change.kind === "link" || change.kind === "remove";
+          if (key !== "/" && !(treeChanged.get(key)?.at ?? false)) treeChanged.set(key, { raw: path, at });
+          if (counted) noteChanged(path);
+        }
+      }
+    }
+  }
+
+  if (findings.length === 0) return { result, notes: [] };
+
+  const notes: string[] = [];
+  const appended: ClassifiedSegment[] = [];
+  const seen = new Set<string>();
+  for (const finding of findings) {
+    // One entry per class per line-level segment, keyed by position.
+    const key = `${String((units[finding.unit] as Unit).hostIndex)}\0${finding.cls}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    appended.push({ text: finding.text, class: finding.cls, rule: finding.rule, path: finding.path });
+    notes.push(finding.note);
+  }
+  const all = [...result.segments, ...appended];
+  const classes: string[] = [];
+  for (const segment of all) if (!classes.includes(segment.class)) classes.push(segment.class);
+  return { result: { ok: true, segments: all, classes }, notes };
+}
+
+/** The longest spelling this pass lands on the disk; longer is guarded (cost bound). */
+const MAX_LANDING_BYTES = 4096;
+
+/**
+ * The most `<dir>/<source name>` landings one copy, move or link segment is
+ * judged at in its target directories after the first (each further `-t`); past
+ * it the segment is guarded as unreadable (a cost bound: those landings are
+ * directories times sources, so they grow as the square of the line).
+ */
+const INTO_EXTRA_LANDINGS_CAP = 1024;
+
+/** Milliseconds one glob expansion may take before the write is guarded (point 6). */
+const GLOB_TIME_LIMIT_MS = 250;
+
+/** The most words of one segment, each with several spellings, re-read one spelling at a time (a cost bound). */
+const RESOLVED_ARGV_LINES = 16;
+
+/** The most patterns of one segment listed on the disk (a cost bound: each is a directory read). */
+const PATTERN_LISTINGS = 64;
+
+/**
+ * The most names a segment's patterns may match and still be read with them
+ * written out (a cost bound on the line re-read: about 40 microseconds a
+ * name, so a third of a second at the bound).
+ */
+const PATTERN_MATCH_NAMES = 8192;
+
+/** The longest those names may be together, in bytes (the same bound, for long names). */
+const PATTERN_LINE_BYTES = 1_048_576;
+
+/**
+ * How many of a redirect target's matches must end in a plain name before
+ * they are judged as a line of their own (the pattern pass's
+ * `redirectMatchClasses`): below it the whole line is judged as before.
+ */
+const PLAIN_BATCH_NAMES = 16;
+
+/**
+ * Does `name`'s last component read as a plain lower-case file name (no dot
+ * first, no upper case, no character a guard or the shell reads)? Only
+ * chooses which matches are judged together; it decides no class.
+ */
+function plainTail(name: string): boolean {
+  return /^[a-z0-9_-][a-z0-9._-]*$/u.test(name.slice(name.lastIndexOf("/") + 1));
 }
 
 // ===========================================================================
@@ -4084,8 +6367,219 @@ export function refineSkillScripts(
  * empty list means "do not scope reads", which is what every caller outside a
  * resolved gate scope wants and what this classifier did before the field
  * existed.
+ *
+ * The whole chain runs in both name readings (`name-fold.ts`), the classifier
+ * and every disk pass with it, and the two answers are joined as
+ * `classifyCommand` joins its own: the folded answer, plus each class the
+ * as-spelled chain gives a segment that the folded answer lacks for that
+ * segment text; a refusal in either refuses. The as-spelled chain is the chain
+ * as it read names before they folded, so the classes this returns contain
+ * the classes that chain returns, whatever the passes do with a folded name.
  */
 export function classifyForHook(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  cwd: string,
+  readRoots: readonly string[] = [],
+  execCode = false,
+  credentialCwds: readonly string[] = [],
+  noRuleSegments = false,
+  /** The write scope the loaded policy asks for ({@link classifyForHookOnce}). */
+  writeScope: WriteScopeContext = WRITE_SCOPE_OFF,
+  /**
+   * GLOB-WRITE (lead ruling L61167): the directories a write-target pattern
+   * globs in, listed BEFORE classification ({@link listGlobWriteDirsFor}).
+   * `null` (every synchronous caller) keeps the strict, over-approximated
+   * answer; with it a pattern is matched against what is there. Every reading
+   * below is classified with the same listings.
+   */
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
+): RefinedClassification {
+  // The shell removes each `\`+newline before it reads anything else, so every
+  // reader below reads the text with them removed too (the lead's ruling on
+  // review-b's M-C at bcb1be08: `a\<newline>(u)th.json` is `a(u)th.json`),
+  // with that reading's refusal standing; and the text with every
+  // `\`+newline removed, quoted or in a comment, where
+  // {@link joinContinuations} keeps one (a refusal of that reading adds
+  // nothing). The joined text is the answer's base, so its segments are the
+  // ones bound and recorded, as the shell runs them; the other reading adds
+  // only the classes it has that the answer lacks.
+  //
+  // Review-b's S1 at 41e6fd1b (lead's ruling): the command is classified ONCE,
+  // on the text after the shell's continuations are removed, never also as
+  // written (a word with a continuation was classified twice, doubling a
+  // fan-out's cost). Only where a `\`+newline sits in quotes or a comment,
+  // which the shell keeps, is the text with every one removed read as well.
+  const joined = joinContinuations(command);
+  // Security review of ec416318: joinContinuations knows quotes and comments,
+  // not a heredoc's body (where a quoted delimiter keeps every `\`+newline, so
+  // `x\<newline>EOF` still ends it) nor a nested `$(…)` or backquote. Where
+  // the text holds one of those, the text as written is read too, with its
+  // refusal standing, as before the S1 fold; elsewhere it is not (the cost).
+  const shellMayKeep = joined !== command && /<<|\$\(|`/u.test(command);
+  const bases = [...new Set([joined, command.replaceAll("\\\n", ""), ...(shellMayKeep ? [command] : [])])];
+  const outer = shellOptionsSet;
+  shellOptionsSet = outer || bases.some(setsShellOption);
+  // Review-b's M3 at 3774fdd4: every reading below lands its words on the
+  // disk again, so each landing is kept for the length of this call.
+  const outerMemo = diskMemo;
+  diskMemo ??= newDiskMemo();
+  // The write pass's landings and disk lookups (#695, the COST686 lines),
+  // made once for this call: every reading below lands the same spellings,
+  // and a landing's answer depends on neither the text's reading nor the
+  // name reading ({@link WriteLandingMemo}).
+  const landings = writeLandingMemo();
+  try {
+    const once = (text: string): RefinedClassification =>
+      classifyForHookOnce(text, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments, writeScope, globListings, landings);
+    let judged = once(joined);
+    for (const base of bases) {
+      if (base !== joined) judged = togetherIfNew(judged, once(base), base === command);
+      // Other readings of the same text, the stricter together: zsh's numeric
+      // glob where bash reads a redirect (a refusal of that reading stands),
+      // and a group a word carries, which zsh globs with no option set
+      // (`a(u)th.json` opens auth.json; security review of d0288514) and
+      // bash's extglob or zsh's extended glob read under an option (a refusal
+      // of that reading alone adds nothing, so `f() { …; }` keeps its
+      // verdict). The two compose (`p<->/a(u)th.json`; codex on 83f30bdc): the
+      // group reading is taken of the numeric reading too.
+      // The text as zsh reads it under `extendedglob` and `braceccl`, which
+      // the user's zshrc may set (the lead's ruling L61492); a reading that
+      // adds no class leaves the answer as it was.
+      const option = zshOptionCommandReading(base, isAbsolute(cwd) ? [cwd, ...credentialCwds.filter((each) => isAbsolute(each))] : null);
+      if (option !== null) {
+        judged = togetherIfNew(judged, once(option), false);
+        const grouped = optionGroupReading(option);
+        if (grouped !== null) judged = togetherIfNew(judged, once(grouped), false);
+      }
+      const zsh = zshNumericGlobReading(base);
+      if (zsh !== null) judged = together(judged, once(zsh), true);
+      for (const reading of new Set([optionGroupReading(base), zsh === null ? null : optionGroupReading(zsh)])) {
+        if (reading === null) continue;
+        judged = together(judged, once(reading), false);
+      }
+    }
+    return judged;
+  } finally {
+    shellOptionsSet = outer;
+    diskMemo = outerMemo;
+  }
+}
+
+/**
+ * What the disk answered during one {@link classifyForHook} call, by the
+ * path asked (review-b's M3 at 3774fdd4): the same word in the base text,
+ * the zsh option reading, the group readings and both name readings, or
+ * repeated n times in one command, costs one landing, not one per reading per
+ * word. Only answers the disk alone gives are kept, never one a name reading
+ * or a shell option changes; nothing writes to the disk while a command is
+ * judged, before it runs. `null` outside a call: every caller then asks the
+ * disk each time, as before.
+ */
+interface DiskMemo {
+  canonical: Map<string, string>;
+  physical: Map<string, string>;
+  directory: Map<string, boolean>;
+  /** {@link expandGlobPath}'s answers, keyed by whether a shell option is set as well. */
+  globs: Map<string, readonly string[] | null>;
+}
+
+let diskMemo: DiskMemo | null = null;
+
+function newDiskMemo(): DiskMemo {
+  return { canonical: new Map(), physical: new Map(), directory: new Map(), globs: new Map() };
+}
+
+/** `compute(key)`, kept in `map` while a {@link DiskMemo} is live. */
+function remembered<K, V>(map: Map<K, V> | undefined, key: K, compute: () => V): V {
+  if (map === undefined) return compute();
+  if (map.has(key)) return map.get(key) as V;
+  const value = compute();
+  map.set(key, value);
+  return value;
+}
+
+/**
+ * The command with each line continuation (`\` and a newline) removed, as the
+ * shell removes it before it reads the line: outside quotes and inside double
+ * quotes, never inside single quotes, ANSI-C quotes (`$'…'`) or a comment. An
+ * escaped backslash (`\\`) is not a continuation. One pass over the text.
+ */
+export function joinContinuations(text: string): string {
+  if (!text.includes("\\\n")) return text;
+  let out = "";
+  let quote: "'" | '"' | "$'" | null = null;
+  let comment = false;
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at] as string;
+    if (comment) {
+      out += char;
+      if (char === "\n") comment = false;
+      continue;
+    }
+    if (quote === "'") {
+      out += char;
+      if (char === "'") quote = null;
+      continue;
+    }
+    if (char === "\\") {
+      if (quote !== "$'" && text[at + 1] === "\n") {
+        at += 1;
+        continue;
+      }
+      out += text.slice(at, at + 2);
+      at += 1;
+      continue;
+    }
+    out += char;
+    if (quote === "$'") {
+      if (char === "'") quote = null;
+    } else if (quote === '"') {
+      if (char === '"') quote = null;
+    } else if (char === "'") {
+      quote = out.length >= 2 && out[out.length - 2] === "$" ? "$'" : "'";
+    } else if (char === '"') {
+      quote = '"';
+    } else if (char === "#" && (out.length === 1 || /[\s;&|()<>]/u.test(out[out.length - 2] as string))) {
+      comment = true;
+    }
+  }
+  return out;
+}
+
+/**
+ * Two readings of one command as one answer: every segment and class of
+ * both. A refusal of the first stands; a refusal of the second stands when
+ * `refusalStands`, else that reading adds nothing.
+ */
+function together(first: RefinedClassification, second: RefinedClassification, refusalStands: boolean): RefinedClassification {
+  if (!first.result.ok) return first;
+  if (!second.result.ok) return refusalStands ? second : first;
+  return {
+    result: {
+      ...first.result,
+      segments: [...first.result.segments, ...second.result.segments],
+      classes: [...new Set([...first.result.classes, ...second.result.classes])],
+    },
+    notes: [...first.notes, ...second.notes],
+  };
+}
+
+/**
+ * {@link together}, except that a reading which adds no class leaves the
+ * answer as it was, so a command whose continuations change nothing keeps its
+ * one set of segments.
+ */
+function togetherIfNew(first: RefinedClassification, second: RefinedClassification, refusalStands: boolean): RefinedClassification {
+  if (first.result.ok && second.result.ok) {
+    const known = new Set(first.result.classes);
+    if (second.result.classes.every((cls) => known.has(cls))) return first;
+  }
+  return together(first, second, refusalStands);
+}
+
+/** {@link classifyForHook} for one reading of the command. */
+function classifyForHookOnce(
   command: string,
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
@@ -4105,9 +6599,86 @@ export function classifyForHook(
   credentialCwds: readonly string[] = [],
   /** A no-rule segment becomes a {@link NO_RULE_CLASS} stand-in (`defaults.unclassified_command: abstain`). */
   noRuleSegments = false,
+  /**
+   * The write scope the loaded policy asks for (design v4). The default is a
+   * policy that does not opt in: the guarded list and unreadable targets are
+   * judged for every caller, the out-of-scope class only for one that opts in.
+   */
+  writeScope: WriteScopeContext = WRITE_SCOPE_OFF,
+  /**
+   * GLOB-WRITE (lead ruling L61167): the directories a write-target pattern
+   * globs in, listed BEFORE classification ({@link listGlobWriteDirsFor}).
+   * `null` (every synchronous caller) keeps the strict, over-approximated
+   * answer; with it a pattern is matched against what is there. Read by the
+   * classifier only: the write pass below lists a write pattern's matches
+   * itself, with its own bounds, whether this is given or not.
+   */
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
+  /**
+   * The write pass's landings and disk lookups, shared by this call's name
+   * readings and by nothing else (cost: the COST686 lines): made by
+   * {@link classifyForHook} once for all its readings of the text.
+   */
+  landings: WriteLandingMemo = writeLandingMemo(),
+): RefinedClassification {
+  // Every pass below reads words from the classifier's lexer, which reads a
+  // dollar-quoted word as the shell does (`$'\x41PPROVAL.md'` is the policy
+  // file). Where it read one, the whole chain runs again with dollar quotes
+  // kept as main kept them, and the two join as the name readings do, so no
+  // pass that narrows a class answers lighter than main did.
+  // The write pass's landings and disk lookups are shared by one dollar-quote
+  // reading's name readings (cost: the COST686 lines): the first reading
+  // takes the call's own (`landings`, shared with the call's other readings
+  // of the text), and a kept-quote or zsh reading a memo of its own.
+  let dollarReading = 0;
+  const [first, ...others] = eachDollarQuoteReading(() => {
+    const memo = dollarReading === 0 ? landings : writeLandingMemo();
+    dollarReading += 1;
+    return eachNameReading(() =>
+      classifyForHookAsRead(command, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments, writeScope, globListings, memo),
+    );
+  }).flat() as [RefinedClassification, ...RefinedClassification[]];
+  if (others.length === 0) return first;
+  const notes = [...first.notes];
+  const seen = new Set(notes);
+  for (const other of others) {
+    for (const note of other.notes) {
+      if (seen.has(note)) continue;
+      seen.add(note);
+      notes.push(note);
+    }
+  }
+  return { result: unionNameReadings([first.result, ...others.map((other) => other.result)]), notes };
+}
+
+/** {@link classifyForHook} in the current name reading. */
+function classifyForHookAsRead(
+  command: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  cwd: string,
+  readRoots: readonly string[],
+  execCode: boolean,
+  credentialCwds: readonly string[],
+  noRuleSegments: boolean,
+  writeScope: WriteScopeContext,
+  globListings: ReadonlyMap<string, GlobListing> | null,
+  landings: WriteLandingMemo,
 ): RefinedClassification {
   const roots = resolveScratchRoots(cwd);
-  const classified = classifyCommand(command, protectedPaths, {
+  const classified = classifyCommandInThisReading(command, protectedPaths, {
+    // Review of 6e3cbc9e (H1): a relative pattern is placed against `cwd` only
+    // when no other directory may be the shell's (`credentialCwds` empty).
+    ...(globListings === null
+      ? {}
+      : {
+          globDisk: {
+            ...globDiskFor(cwd, globListings),
+            relativeOk: credentialCwds.length === 0,
+            // Lead ruling L62435 (S7): the parents rule places a word from
+            // the session directory too, rather than failing closed.
+            ...(credentialCwds.length === 0 ? {} : { sessionCwds: credentialCwds }),
+          },
+        }),
     scratchRoots: roots,
     ...(readRoots.length === 0 ? {} : { readRoots }),
     ...(execCode ? { execCode: true } : {}),
@@ -4125,7 +6696,7 @@ export function classifyForHook(
   // directory not named `.git`. First, so the push pass below sees a segment
   // it raises as the write it is, and the history-rewrite and write-scope
   // passes do not lower or narrow it again.
-  const gitWrites = refineGitDirWrites(classified, cwd);
+  const gitWrites = refineGitDirWrites(classified, cwd, landings.disk.entry, landings.disk.gitDirLandings);
   const pushed = refinePushRepo(gitWrites.result, cwd, command);
   const rewritten = refineRewrite(pushed.result, cwd);
   const scratched = refineScratchDelete(rewritten.result, roots);
@@ -4135,15 +6706,19 @@ export function classifyForHook(
   // of the working directory and the scratch roots. Last in the chain because
   // it is the narrowest, and because nothing after it would re-read a segment
   // it has already tightened.
-  const written = refineWriteScope(scoped.result, resolveWriteRoots(cwd), cwd);
+  const written = refineWriteScope(scoped.result, resolveWriteRoots(cwd), cwd, landings.writeTarget);
   // APRV-502. Touches only the two skill-script rules, which no pass above
   // reads, so its place in the chain changes nothing for any other segment.
   const scripted = refineSkillScripts(written.result, cwd, protectedPaths);
   // APRV-522. Last, and it only ever adds: every path a segment reads, judged
   // where the disk lands it, against the same credential rule the text was.
   const credentialed = refineCredentialReads(scripted.result, command, [cwd, ...credentialCwds]);
+  // Design v4. Last of all, and it only ever adds an entry beside a segment:
+  // every write judged where it lands, from the hook's directory and the
+  // envelope's.
+  const landed = refineWriteLandings(credentialed.result, command, [cwd, ...credentialCwds], writeScope, process.env, protectedPaths, landings);
   return {
-    result: credentialed.result,
+    result: landed.result,
     notes: [
       ...gitWrites.notes,
       ...pushed.notes,
@@ -4153,6 +6728,7 @@ export function classifyForHook(
       ...written.notes,
       ...scripted.notes,
       ...credentialed.notes,
+      ...landed.notes,
     ],
   };
 }
@@ -4202,7 +6778,23 @@ export function renderClassification(
  * refusal here: it classifies against the built-ins and says on stderr that the
  * answer is the narrow one.
  */
-function commandClassify(argv: string[], streams: Streams, cwd: string): number {
+/** The command text `hook classify` classifies, or `null` when the argv names none. */
+function classifyArgvCommand(argv: string[]): string | null {
+  const separator = argv.indexOf("--");
+  const head = separator === -1 ? argv : argv.slice(0, separator);
+  const tail = separator === -1 ? [] : argv.slice(separator + 1);
+  const parsed = parseFlags(head, { ...COMMON_FLAGS, ...POLICY_FLAGS, "--json": "boolean" });
+  if (!parsed.ok) return null;
+  const command = [...parsed.positionals, ...tail].join(" ").trim();
+  return command.length === 0 ? null : command;
+}
+
+function commandClassify(
+  argv: string[],
+  streams: Streams,
+  cwd: string,
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
+): number {
   const separator = argv.indexOf("--");
   const head = separator === -1 ? argv : argv.slice(0, separator);
   const tail = separator === -1 ? [] : argv.slice(separator + 1);
@@ -4257,6 +6849,12 @@ function commandClassify(argv: string[], streams: Streams, cwd: string): number 
         readRoots,
         // APRV-510: the class the policy opens is the class the hook decides.
         execCodeGate(load.ok ? load.policy : null).shell,
+        [],
+        false,
+        // Design v4: the write scope the loaded policy asks for.
+        resolveWriteScope(cwd, policyRootOf(load, root), load.ok ? load.policy : null),
+        // GLOB-WRITE (L61167): the same listings the harness route takes.
+        globListings,
       ).result,
       boolFlag(parsed.flags, "--json"),
     ),
@@ -4783,9 +7381,18 @@ function describeCodexFileChanges(
       };
     }
     paths.push(declared);
-    const cls = protectedPathClass(resolved, protectedPaths) ?? WORKSPACE_WRITE_CLASS;
-    if (!classes.includes(cls)) classes.push(cls);
-    notes.push(`change ${declared} (${cls})`);
+    // The class EACH name reading gives it (`name-fold.ts`), each judged. A
+    // reading that protects nothing answers the workspace class, and that
+    // answer is kept beside the other reading's: `Design/x` under a protected
+    // `design/` is `policy.edit` folded and a workspace write as spelled, and
+    // a policy may hold the workspace class the stricter of the two.
+    const each: string[] = [];
+    for (const reading of protectedPathClassReadings(resolved, protectedPaths)) {
+      const cls = reading ?? WORKSPACE_WRITE_CLASS;
+      if (!each.includes(cls)) each.push(cls);
+    }
+    for (const cls of each) if (!classes.includes(cls)) classes.push(cls);
+    notes.push(`change ${declared} (${each.join(", ")})`);
   }
   return {
     kind: "gated",
@@ -4805,7 +7412,17 @@ function describeCodexFileChanges(
 
 /** What a gated file tool call asks for: one class, its bytes, its headline. */
 interface FileGate {
+  /** The folded reading's class: `classes[0]`. */
   cls: string;
+  /**
+   * Every class the target takes in either name reading (`name-fold.ts`),
+   * `cls` first, and then the write-scope classes (design v4): the guarded
+   * write class, or the out-of-scope one for a policy that opts in. The gate
+   * judges each, as it judges a shell line's classes.
+   */
+  classes: string[];
+  /** What the write-scope test found, for the verdict's notes. */
+  landingNotes: string[];
   /** Is this file one the policy protects? (APRV-303.) */
   protectedPath: boolean;
   rule: string;
@@ -4872,6 +7489,7 @@ function fileToolGate(
   toolInput: Record<string, unknown>,
   protectedPaths: readonly ProtectedPathEntry[],
   cwd: string,
+  writeScope: WriteScopeContext = WRITE_SCOPE_OFF,
 ): FileGate | null {
   const declared =
     readString(toolInput, "file_path") ??
@@ -4883,8 +7501,6 @@ function fileToolGate(
   // `.approval/log/` is `log.mutate`, and only the prose-and-configuration
   // surface stays `policy.edit`. Editing through the Edit tool must not be a
   // cheaper way to touch the gate than editing through a shell redirect.
-  const spelled = protectedPathClass(declared, protectedPaths);
-
   const file = absolute(declared, cwd);
   // APRV-511: judged where the write LANDS as well as where it is spelled, the
   // way the read tools and the shell pass already judge a path: through `..`
@@ -4898,8 +7514,48 @@ function fileToolGate(
   // a symlink lands beside `p`'s TARGET), and an unknowable one is
   // `policy.core`.
   const landing = landingPaths(spelledAbsolute(cwd, declared));
-  let surface = landing.unknown ? stricterOrganSurface(spelled, "policy.core") : spelled;
-  for (const path of landing.paths) surface = stricterOrganSurface(surface, protectedPathClass(path, protectedPaths));
+  // S2 (N2): a `file_path` of `~` or `~/...` is read both ways, joined to the
+  // cwd as before and with `~` expanded from this hook's HOME, and the
+  // stricter answer stands (whether a harness expands it is not known here).
+  const tildeHome = process.env["HOME"];
+  const tildeSpelled =
+    (declared === "~" || declared.startsWith("~/")) && tildeHome !== undefined && tildeHome.length > 0 && isAbsolute(tildeHome)
+      ? `${tildeHome.replace(/\/+$/u, "")}${declared.slice(1)}`
+      : null;
+  const tildeLanding = tildeSpelled === null ? null : landingPaths(tildeSpelled);
+  // In both name readings (`name-fold.ts`): a fold can change which class the
+  // target takes (`.approval/LOG/x` is `policy.core` as spelled, `log.mutate`
+  // folded), so each reading's class is reported and the gate judges every
+  // one, as it judges the classes of a shell line. Never picked by rank.
+  const surfaces = eachNameReading(() => {
+    const spelled = protectedPathClass(declared, protectedPaths);
+    let surface = landing.unknown || tildeLanding?.unknown === true ? stricterOrganSurface(spelled, "policy.core") : spelled;
+    for (const path of [...landing.paths, ...(tildeLanding?.paths ?? [])]) surface = stricterOrganSurface(surface, protectedPathClass(path, protectedPaths));
+    return surface;
+  });
+  const classes: string[] = [];
+  for (const surface of surfaces) {
+    const cls = surface ?? WORKSPACE_WRITE_CLASS;
+    if (!classes.includes(cls)) classes.push(cls);
+  }
+  const protectedPath = surfaces.some((surface) => surface !== null);
+  // Design v4 (point 3): the same scope test the shell pass runs, on the same
+  // spelling. Its class is carried BESIDE the ones above, never in their
+  // place. It compares through `foldFileName` itself, so it answers the same
+  // in both name readings and runs once.
+  const asJoined = judgeWriteLanding(spelledAbsolute(cwd, declared), writeScope);
+  const asExpanded = tildeSpelled === null ? null : judgeWriteLanding(tildeSpelled, writeScope);
+  const rank = (verdict: WriteLanding): number => (verdict.kind === "guarded" ? 0 : verdict.kind === "out" ? 1 : 2);
+  const judged = asExpanded !== null && rank(asExpanded) < rank(asJoined) ? asExpanded : asJoined;
+  const landingNotes: string[] = [];
+  if (judged.kind === "guarded") {
+    const cls = judged.rule === WRITE_UNREADABLE_RULE ? DECISION_B_UNREADABLE_CLASS : WRITE_GUARDED_CLASS;
+    if (!classes.includes(cls)) classes.push(cls);
+    landingNotes.push(`${judged.rule}: ${judged.why}, so ${toolName} ${declared} is also ${cls}`);
+  } else if (judged.kind === "out" && writeScope.optedIn) {
+    if (!classes.includes(WRITE_OUT_OF_SCOPE_CLASS)) classes.push(WRITE_OUT_OF_SCOPE_CLASS);
+    landingNotes.push(`${WRITE_OUT_OF_SCOPE_RULE}: ${toolName} ${declared} lands at ${judged.path}, outside every write root (${writeScope.roots.join(", ")}), so it is also ${WRITE_OUT_OF_SCOPE_CLASS}`);
+  }
   const tier = tierOf(file, cwd);
   const rule = tier.rule;
 
@@ -4924,8 +7580,10 @@ function fileToolGate(
   }
 
   return {
-    cls: surface ?? WORKSPACE_WRITE_CLASS,
-    protectedPath: surface !== null,
+    cls: classes[0] as string,
+    classes,
+    landingNotes,
+    protectedPath,
     rule,
     file,
     worktree: tier.worktree,
@@ -5070,8 +7728,11 @@ function credentialReadGate(
   // Recheck 3 (SF1a): only a directory that holds credentials (a home root, an
   // approval home, a home's `approval/`, or a directory under a home holding a
   // credential file); `skills/`, `workspace/` and the like are ordinary.
+  // A guard: either name reading (`name-fold.ts`) makes it a credential read.
   const file =
-    landing.paths.find((path) => isCredentialPath(path) || holdsCredentials(path)) ??
+    landing.paths.find((path) =>
+      eachNameReading(() => isCredentialPath(path) || holdsCredentials(path)).some((credential) => credential),
+    ) ??
     (landing.unknown ? absolute(declared, cwd) : null);
   if (file === null) return null;
   const input: Record<string, unknown> = { ...toolInput };
@@ -5151,6 +7812,12 @@ export interface HookWaitSeam {
    * the loop without writing a torn line into a log.
    */
   pollRead?: (logPath: string) => ReadRecordsResult;
+  /**
+   * The clock the read of the call is timed by ({@link waitAfterRead}).
+   * Omitted by every real caller, which gets `Date.now`; it exists so a test
+   * can make a read slow without an input that takes seconds to read.
+   */
+  readClock?: () => number;
   /**
    * Whether the party this invocation answers has gone away (APRV-427 review).
    *
@@ -5250,6 +7917,12 @@ interface HookRun {
    * changes nothing about it.
    */
   waitMs: number;
+  /**
+   * How long reading and describing this call took, in milliseconds. A read
+   * slower than {@link READ_FREE_MS} shortens the wait by the rest
+   * ({@link waitAfterRead}): the harness's timer started before the read did.
+   */
+  readMs: number;
   harness: HarnessKind;
   originApp: string;
   /** Exact native command bytes required in a Codex allow's identity update. */
@@ -6292,7 +8965,14 @@ function* gateHarnessSteps(
     expiryOf,
   );
 
-  const deadline = Date.now() + run.waitMs;
+  // A slow read has used up part of the time the harness allows this process.
+  const waitLeftMs = waitAfterRead(run.waitMs, run.readMs);
+  if (waitLeftMs < run.waitMs) {
+    streams.err(
+      `approval: reading this call took ${String(run.readMs)}ms, so the wait for a decision is ${String(waitLeftMs)}ms of its ${String(run.waitMs)}ms: the hook answers before the harness stops listening.\n`,
+    );
+  }
+  const deadline = Date.now() + waitLeftMs;
 
   // APRV-427. From the first poll to the last this invocation only READS the
   // verified log and sleeps, so an embedding caller (`approval serve`) may let
@@ -7038,6 +9718,9 @@ function abstainedEarlier(
   const load = loadPolicyText(read.path, read.bytes.toString("utf8"));
   if (!load.ok || load.policy.defaults?.unclassified_command !== "abstain") return false;
   const described = describeToolCall(
+    // A report after the tool has run: no call waits on this read, so no
+    // harness ceiling shortens its deadline.
+    describeDeadlineMs(),
     input,
     adapter,
     load.policy.protected_paths ?? [],
@@ -7046,6 +9729,7 @@ function abstainedEarlier(
     load.policy,
     true,
     execGateOf(adapter, load.policy),
+    resolveWriteScope(cwd, policyRootOf(load, root), load.policy),
   );
   if (described.kind !== "gated" || described.abstain === undefined) return false;
   if (!described.classes.every((cls) => resolvePolicy(load, cls).autonomy === "autonomous")) return false;
@@ -7223,7 +9907,134 @@ type ToolDescription =
   /** The classifier could not read it, or the input was malformed. */
   | { kind: "deny"; code: string; detail: string };
 
+/**
+ * The longest this hook spends describing one tool call before it refuses it
+ * (`hook-deadline`). Well under the shortest harness limit it runs under
+ * (Claude Code's default is 60 s), because a hook that is killed there is a
+ * call that proceeds. Describing an ordinary call takes milliseconds.
+ */
+export const DESCRIBE_DEADLINE_MS = 15_000;
+
+/**
+ * An environment variable that SHORTENS {@link DESCRIBE_DEADLINE_MS}, in
+ * whole milliseconds. It can never lengthen it: a longer deadline is the
+ * unsafe direction, and the environment is not the place to choose it.
+ */
+export const DESCRIBE_DEADLINE_ENV = "APPROVAL_HOOK_DESCRIBE_DEADLINE_MS";
+
+/**
+ * What a known harness ceiling must still leave after the read: the time this
+ * process spends outside it (starting, reading the policy and the log, writing
+ * the answer), measured at about 0.4 s on a busy machine.
+ */
+export const DESCRIBE_CAP_MARGIN_MS = 2_000;
+
+/**
+ * The deadline for describing one call: {@link DESCRIBE_DEADLINE_MS}; under a
+ * known harness ceiling, the ceiling less {@link DESCRIBE_CAP_MARGIN_MS} where
+ * that is shorter (a quarter of the ceiling when even the margin does not
+ * fit); and {@link DESCRIBE_DEADLINE_ENV} where it is shorter still.
+ *
+ * The ceiling is the harness's own hook timeout, not a number chosen here. For
+ * Hermes it is `plugins.hook_callback_timeout`, 30 s unless the operator states
+ * another with `--harness-cap` (`docs/hermes-hook.md`, "Two timeouts bound the
+ * wait"; the Hermes adapter's `capDefaultMs` and `capCeilingMs`). So a Hermes
+ * read has 15 s by default, as on every other harness, and 8 s under a stated
+ * 10 s. It was a quarter of the ceiling, 7.5 s on Hermes, which refused a read
+ * of ordinary size (review of 259711a6).
+ *
+ * The wait needs no share of the ceiling kept back here: a read slower than
+ * {@link READ_FREE_MS} is taken out of the wait ({@link waitAfterRead}).
+ */
+export function describeDeadlineMs(harnessCapMs: number | null = null, env: NodeJS.ProcessEnv = process.env): number {
+  let deadline = DESCRIBE_DEADLINE_MS;
+  if (harnessCapMs !== null) {
+    deadline = Math.min(deadline, Math.max(Math.floor(harnessCapMs / 4), harnessCapMs - DESCRIBE_CAP_MARGIN_MS));
+  }
+  const stated = env[DESCRIBE_DEADLINE_ENV];
+  if (stated !== undefined && /^\d{1,9}$/u.test(stated)) deadline = Math.min(deadline, Number(stated));
+  return Math.max(1, deadline);
+}
+
+/**
+ * Set once a description has hit its deadline in this process. Termination
+ * runs no `finally` (`core/deadline.ts`), so the classifier's own state may be
+ * half written; nothing is described again here, every later call is refused
+ * the same way.
+ */
+let describeDeadlinePassed = false;
+
+/** A read of a call that takes no longer than this costs the wait nothing. */
+export const READ_FREE_MS = 1_000;
+
+/**
+ * The wait left for a decision after a read that took `readMs`.
+ *
+ * The harness's own timer started when it spawned this process, and a hook it
+ * kills is a call that proceeds. An operator sets `--timeout` a little under
+ * the harness's timeout; a read of several seconds on top of the whole wait
+ * would end after it. So a read slower than {@link READ_FREE_MS} shortens the
+ * wait by the rest, down to none: the log is still read once, and the question
+ * stays open for the retry grace as after any wait that ran out.
+ *
+ * An ordinary read takes milliseconds and changes nothing: the wait, the
+ * grace and the age at which a question counts as abandoned are judged as
+ * they always were.
+ */
+export function waitAfterRead(waitMs: number, readMs: number): number {
+  return Math.max(0, waitMs - Math.max(0, readMs - READ_FREE_MS));
+}
+
+/**
+ * Has a description hit its deadline in this process (or this thread: a
+ * worker has its own copy of this module)? A caller that answers many calls
+ * asks after each one, and stops handing calls to a thread that says yes
+ * (`serve/hook-worker.ts`).
+ */
+export function describeDeadlineHit(): boolean {
+  return describeDeadlinePassed;
+}
+
+/**
+ * {@link describeToolCallNow} under this hook's own deadline: the description,
+ * or a `hook-deadline` deny when it could not be made in `deadlineMs`.
+ */
 function describeToolCall(
+  deadlineMs: number,
+  ...described: Parameters<typeof describeToolCallNow>
+): ToolDescription {
+  // GLOB-WRITE: the listing pass ran first, under the same deadline, and
+  // spent part of it. (`globListings` is the tenth argument, after the
+  // write scope.)
+  const listing = listingCostOf(described[9] ?? null);
+  if (listing.overran) {
+    describeDeadlinePassed = true;
+    return {
+      kind: "deny",
+      code: "hook-deadline",
+      detail: `this hook could not read the ${described[0].toolName} call within its own ${String(deadlineMs)}ms limit (finding the directories its write patterns glob in ran past it), so the call is refused rather than left to the harness's timeout, where a hook that is killed is a call that runs. Nothing was registered or requested. Make the call shorter, or do the same work in several calls.`,
+    };
+  }
+  if (describeDeadlinePassed) {
+    // A process that answers many calls (the Codex bridge): say what happened,
+    // not that THIS call was too long.
+    return {
+      kind: "deny",
+      code: "hook-deadline",
+      detail: `an earlier call in this process outlasted the hook's own limit and was stopped part way through being read, so this process reads no further call and the ${described[0].toolName} call is refused. Nothing was registered or requested. Start the process again.`,
+    };
+  }
+  const ran = runUnderDeadline(Math.max(1, deadlineMs - listing.spentMs), () => describeToolCallNow(...described));
+  if (ran.ok) return ran.value;
+  describeDeadlinePassed = true;
+  return {
+    kind: "deny",
+    code: "hook-deadline",
+    detail: `this hook could not read the ${described[0].toolName} call within its own ${String(deadlineMs)}ms limit, so the call is refused rather than left to the harness's timeout, where a hook that is killed is a call that runs. Nothing was registered or requested. Make the call shorter, or do the same work in several calls.`,
+  };
+}
+
+function describeToolCallNow(
   input: HookInput,
   adapter: HarnessAdapter,
   protectedPaths: readonly ProtectedPathEntry[],
@@ -7253,6 +10064,17 @@ function describeToolCall(
    * suspends the policy.
    */
   execGate: ExecCodeGate = closedExecCodeGate("silent"),
+  /**
+   * The write scope the loaded policy asks for (design v4). The open window
+   * passes the loaded policy's too: a window suspends the policy's ANSWER,
+   * not what a write is, so the bypass record names the class it bypassed.
+   */
+  writeScope: WriteScopeContext = WRITE_SCOPE_OFF,
+  /**
+   * GLOB-WRITE (L61167): the hook's directory listings, or `null` (strict).
+   * The tenth argument: {@link describeToolCall} reads its cost there.
+   */
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): ToolDescription {
   // APRV-510. A Hermes `execute_code` call, first, because it is claimed by the
   // rule table below and must never be described by it: the rule table binds
@@ -7401,6 +10223,8 @@ function describeToolCall(
       callGate.shell,
       credentialCwds,
       adapter.kind === "claude-code" && toolPolicy?.defaults?.unclassified_command === "abstain",
+      writeScope,
+      globListings,
     );
     const classified = refined.result;
     if (!classified.ok) {
@@ -7409,7 +10233,7 @@ function describeToolCall(
       // `exec.code` segment with it. Every other policy keeps today's refusal,
       // byte for byte.
       if (callGate.closed === "unattested" && classified.code !== "unparseable") {
-        const opened = classifyForHook(raw, protectedPaths, shellCwd ?? cwd, readRoots, true, credentialCwds).result;
+        const opened = classifyForHook(raw, protectedPaths, shellCwd ?? cwd, readRoots, true, credentialCwds, false, WRITE_SCOPE_OFF, globListings).result;
         const program = opened.ok
           ? opened.segments.find((segment) => segment.execCode !== undefined)
           : undefined;
@@ -7481,7 +10305,10 @@ function describeToolCall(
     // lands on an organ takes the organ's class, and a read that lands on a
     // credential takes `account.credential`. It only ever adds a class.
     if (shellCwd !== null) {
-      for (const cls of resolvedPathClasses(raw, classified.segments, shellCwd, protectedPaths, readRoots)) {
+      // The write pass's own entries (design v4) are left out, so the shapes
+      // line up with the classifier's segments as they did before it.
+      const own = classified.segments.filter((segment) => !WRITE_LANDING_RULES.includes(segment.rule));
+      for (const cls of resolvedPathClasses(raw, own, shellCwd, protectedPaths, readRoots)) {
         if (!classes.includes(cls)) classes.push(cls);
       }
     }
@@ -7518,16 +10345,17 @@ function describeToolCall(
         if (isSideEffectingClass(segment.class)) {
           for (const possibleCwd of possibleCwds) {
             const cwdSegments = possibleCwd.split(/[/\\]+/u);
-            const cwdClass = cwdSegments.includes(".codex")
-              ? "policy.core"
-              : protectedPathClass(possibleCwd, protectedPaths);
-            if (cwdClass !== null && !classes.includes(cwdClass)) classes.push(cwdClass);
+            // Both name readings (`name-fold.ts`), each class judged.
+            const cwdClasses = eachNameReading(() =>
+              cwdSegments.map(foldNameExact).includes(".codex")
+                ? "policy.core"
+                : protectedPathClass(possibleCwd, protectedPaths),
+            );
+            for (const cwdClass of cwdClasses) if (cwdClass !== null && !classes.includes(cwdClass)) classes.push(cwdClass);
             for (const word of parsedWords === undefined ? [] : [parsedWords.bin, ...parsedWords.args]) {
-              const cls = protectedPathClass(
-                resolvePathSegments(possibleCwd, word),
-                protectedPaths,
-              );
-              if (cls !== null && !classes.includes(cls)) classes.push(cls);
+              for (const cls of protectedPathClasses(resolvePathSegments(possibleCwd, word), protectedPaths)) {
+                if (!classes.includes(cls)) classes.push(cls);
+              }
             }
           }
         }
@@ -7671,18 +10499,18 @@ function describeToolCall(
     };
   }
 
-  const gated = fileToolGate(input.toolName, input.toolInput, protectedPaths, cwd);
+  const gated = fileToolGate(input.toolName, input.toolInput, protectedPaths, cwd, writeScope);
   if (gated === null) {
     return { kind: "allow", reason: `${input.toolName} names no file, so there is nothing to gate` };
   }
   return {
     kind: "gated",
-    classes: [gated.cls],
+    classes: gated.classes,
     payload: gated.payload,
     headline: gated.summary,
     // The tier rides in the verdict's note as well as in the payload, so an
     // `allow` says which checkout it authorized (APRV-124).
-    notes: gated.protectedPath ? [fileTierNote(gated)] : [],
+    notes: [...(gated.protectedPath ? [fileTierNote(gated)] : []), ...gated.landingNotes],
   };
 }
 
@@ -7743,7 +10571,9 @@ function describeToolCall(
  * (unclassified, so already denied), and a recursive search of an ANCESTOR of
  * the home with a filename filter.
  *
- * It only ever adds classes.
+ * It only ever adds classes. It runs in both name readings (`name-fold.ts`),
+ * and every class either reading finds is added: a fold can change which
+ * class a landing path takes, and both are judged.
  */
 function resolvedPathClasses(
   raw: string,
@@ -7752,6 +10582,26 @@ function resolvedPathClasses(
   protectedPaths: readonly ProtectedPathEntry[],
   readRoots: readonly string[] = [],
   env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const found: string[] = [];
+  // Dollar quotes as the shell reads them and as main kept them (`eachDollarQuoteReading`): both add.
+  const readings = eachDollarQuoteReading(() =>
+    eachNameReading(() => resolvedPathClassesAsRead(raw, segments, cwd, protectedPaths, readRoots, env)),
+  ).flat();
+  for (const reading of readings) {
+    for (const cls of reading) if (!found.includes(cls)) found.push(cls);
+  }
+  return found;
+}
+
+/** {@link resolvedPathClasses} in the current name reading. */
+function resolvedPathClassesAsRead(
+  raw: string,
+  segments: readonly ClassifiedSegment[],
+  cwd: string,
+  protectedPaths: readonly ProtectedPathEntry[],
+  readRoots: readonly string[],
+  env: NodeJS.ProcessEnv,
 ): string[] {
   const found: string[] = [];
   const add = (cls: string | null): void => {
@@ -8273,26 +11123,397 @@ function variableDecidesDirectory(text: string): boolean {
   return /[$`]/u.test(dirname(text)) || /^[$`]/u.test(basename(text));
 }
 
-/** `*`, `?` or `[` in a path word. */
+/**
+ * `*`, `?` or `[` in a path word. While {@link classifyForHook} judges a
+ * command that sets a shell option, also every character an option makes a
+ * glob (bash's extglob, zsh's extended glob, ksh glob and brace classes).
+ */
 function hasGlobChars(text: string): boolean {
-  return /[*?[]/u.test(text);
+  return (shellOptionsSet ? /[*?[\]^#~(){}<>|]/u : /[*?[]/u).test(text);
 }
 
-/** A shell glob component as an anchored regular expression. */
-function globRegex(component: string): RegExp {
-  let source = "";
-  for (const char of component) {
-    if (char === "*") source += ".*";
-    else if (char === "?") source += ".";
-    else if (char === "[" || char === "]") source += char;
-    else source += char.replace(/[.+^${}()|\\]/gu, "\\$&");
+/**
+ * Does the command set a shell option (lead's ruling L60846 on #682)? `shopt`,
+ * `setopt`, `unsetopt`, `emulate`, `set -o` / `set +o`, or a shell started with
+ * `-O` / `-o` or a long option, anywhere in the text: an option set before a glob on the same
+ * line (nocaseglob, dotglob, globstar, extglob, zsh's extendedglob, kshglob,
+ * globdots, braceccl, ...) changes what the glob opens, and this hook does not
+ * model the options, so every glob in such a command matches any name. An
+ * option set by an EARLIER call, in a shell that persists between calls, is
+ * not in this text and is not seen here.
+ */
+export function setsShellOption(written: string): boolean {
+  // Quotes and backslashes removed first, as the shell removes them before
+  // it runs the word (`set "-o" x`, `s'et' -o x`, `set -'o' x`; codex on
+  // 83f30bdc). Removing them everywhere can only find more.
+  const command = written.replace(/['"\\]/gu, "");
+  if (/(?:^|[^A-Za-z0-9_.-])(?:shopt|setopt|unsetopt|emulate)(?![A-Za-z0-9_.-])/u.test(command)) return true;
+  // One pass over the words (no regular expression that backtracks over a
+  // long line): after `set` or a shell's name in a segment, an option word
+  // holding `o` or `O`, its value attached or not (`-o`, `+o`, `-eo`,
+  // `-oextendedglob`, bash's `-O` and `-Oextglob`), or any long option
+  // (`--extendedglob`, `--emulate`; security review of d0288514).
+  let afterSetter = false;
+  for (const word of command.split(/(?=[;&|\n])|\s+/u)) {
+    if (/^[;&|\n]/u.test(word)) afterSetter = false;
+    const name = word.replace(/^[;&|\n(]+/u, "").split("/").pop() ?? "";
+    if (SHELL_OPTION_SETTERS.has(name)) afterSetter = true;
+    else if (afterSetter && (/^[-+][A-Za-z]*[oO]/u.test(word) || /^--[A-Za-z]/u.test(word))) return true;
   }
-  try {
-    return new RegExp(`^${source}$`, "u");
-  } catch {
-    return /^.*$/u;
-  }
+  return false;
 }
+
+/** `set` and the shells whose command line may set an option with `-o` / `-O`. */
+const SHELL_OPTION_SETTERS: ReadonlySet<string> = new Set(["set", "bash", "zsh", "sh", "ksh", "dash"]);
+
+/** Set by {@link classifyForHook} for the length of one call: see {@link setsShellOption}. */
+let shellOptionsSet = false;
+
+/** The hook's glob reader, or any name while the command sets a shell option. */
+function globPattern(component: string): GlobPattern {
+  return shellOptionsSet ? ANY_NAME : compiledGlobPattern(component);
+}
+
+/**
+ * The command as zsh reads a numeric glob in it (`p<->`, `p<1-9>`), which
+ * bash reads as a redirect (lead's ruling L60846): each `<N-M>` written as `*`,
+ * which matches at least every digit run. `null` when there is none.
+ */
+function zshNumericGlobReading(command: string): string | null {
+  if (!/<[0-9]*-[0-9]*>/u.test(command)) return null;
+  return command.replace(/<[0-9]*-[0-9]*>/gu, "*");
+}
+
+/**
+ * The command with each group a word carries (`~/(#i).HERMES`, `@(a|b)`,
+ * `x(#a1)`, nested `a((u))th.json`) and each zsh glob flag group (`(#i)`, at
+ * a word's start too) written as `*`: zsh globs a group with no option set,
+ * and bash's extglob and zsh's extended glob read more under one, while the
+ * lexer reads a `(` inside a word as the start of a subshell or a syntax
+ * error, and `#` after it as a comment. `null` when there is none.
+ *
+ * A group is word-attached when the character before its `(` is not a
+ * separator, `$`, `<`, `>`, `=` or `(` (so a substitution, a process
+ * substitution, an array and a subshell are left alone), or when `#` follows
+ * it. Only a group holding no whitespace is rewritten, and the outermost such
+ * group is written whole, so a group nested in an attached one needs no
+ * attachment of its own: its parent is written over it, or (holding
+ * whitespace) keeps a `(` the lexer refuses, and a refused reading adds
+ * nothing. (review-b's planted fault f3 at bcb1be08 found that clause
+ * changed no decision; it is gone.) One pass with a stack, so a long line
+ * costs its length.
+ */
+function optionGroupReading(command: string): string | null {
+  const open: Array<{ at: number; attached: boolean; clean: boolean }> = [];
+  const spans: Array<[number, number]> = [];
+  for (let at = 0; at < command.length; at += 1) {
+    const char = command[at] as string;
+    if (char === "(") {
+      const before = command[at - 1];
+      const attached = command[at + 1] === "#" || (before !== undefined && !/[\s;&|<>$=(]/u.test(before));
+      open.push({ at, attached, clean: true });
+    } else if (char === ")") {
+      const group = open.pop();
+      if (group === undefined) continue;
+      if (group.attached && group.clean) spans.push([group.at, at + 1]);
+      const parent = open[open.length - 1];
+      if (!group.clean && parent !== undefined) parent.clean = false;
+    } else if (/\s/u.test(char)) {
+      const top = open[open.length - 1];
+      if (top !== undefined) top.clean = false;
+    }
+  }
+  if (spans.length === 0) return null;
+  spans.sort((left, right) => left[0] - right[0]);
+  let text = "";
+  let from = 0;
+  for (const [start, end] of spans) {
+    if (start < from) continue; // inside a group already written
+    // The extglob prefix goes with its group: ksh reads `.@(e)nv` as `.env`
+    // with no option set, and `.@*nv` would need the `@` (build-2's sweep v3
+    // on 83f30bdc, under the abstain policy).
+    const prefixed = start > from && /[@!+?*]/u.test(command[start - 1] as string) ? start - 1 : start;
+    // A flag group zsh reads under `extendedglob` that is not a letter-case
+    // or anchor flag (`(#a1)` approximation, `(#c2)` repetition, `(#q)`)
+    // may let the rest of its segment be any name, a dot name too: the rest
+    // of the segment is written as `{.*,*}` (the lead's ruling L61492:
+    // `(#a1).Zermes` names `.hermes`).
+    if (command.startsWith("(#", start) && !/^\(#[ilIbBmMseUu]*\)$/u.test(command.slice(start, end))) {
+      const rest = /[/\s;&|<>'"`)]/u.exec(command.slice(end));
+      text += `${command.slice(from, prefixed)}{.*,*}`;
+      from = rest === null ? command.length : end + rest.index;
+      continue;
+    }
+    text += `${command.slice(from, prefixed)}*`;
+    from = end;
+  }
+  return text + command.slice(from);
+}
+
+/**
+ * The command with each unquoted path segment zsh reads as a glob under
+ * `extendedglob` or `braceccl` written as the plain glob it is at most
+ * ({@link zshOptionReading}): `.h^Z` as `.h*`, `.Z#hermes` as `.*hermes`,
+ * `.{hZ}ermes` as `.[hZ]ermes`, `^zz` as `*`. The user's own zshrc may set
+ * either option, so every command is read this way too and the stricter
+ * answer stands (the lead's ruling L61492).
+ *
+ * Quoting is zsh's: a quoted or escaped character is itself (written `?` when
+ * it is a glob character, which matches it), so `'a'^x.json` is `a*`; a
+ * segment whose form also holds an unquoted `$` or backquote cannot be read
+ * and is any name (`*`). A comment is left as written (security review of
+ * aec23242: no segment is skipped for its spelling).
+ *
+ * A word with no `/` names entries of the directory the command runs in,
+ * hidden ones too (`globdots` may be set as well; the lead's ruling L61497).
+ * The word is written as EVERY entry it matches there, or left as written
+ * when it matches none, only where the directory is known (`cwds`) and the
+ * command has the one shape in which nothing can change directory or make a
+ * file before the word expands ({@link listingCommand}; the coordinator's
+ * ruling after the security reviews of c53565eb and 901a37c6). Every other
+ * command reads the word as the plain glob, as it is past
+ * {@link OPTION_WORD_ENTRIES} matches for one word or
+ * {@link OPTION_COMMAND_ENTRIES} for the command. The listing is read when the
+ * hook runs, as the credential pass reads it for a plain glob. `null` when
+ * nothing changes. One pass over the text.
+ */
+export function zshOptionCommandReading(command: string, cwds: readonly string[] | null): string | null {
+  if (!/[\^#{~]/u.test(command)) return null;
+  // The directories the words expand in, where the command's shape proves
+  // what they hold when the words expand.
+  const proven = cwds !== null && listingCommand(command) ? cwds : null;
+  const listings = new Map<string, string[]>();
+  // Entries written for the whole command, every word's every match.
+  let written = 0;
+  const separator = /[\s;&|<>()]/u;
+  // The output as parts joined once at the end, and the last character
+  // written: indexing a string built by `+=` flattens it on every word.
+  const parts: string[] = [];
+  let last = "";
+  const write = (text: string): void => {
+    if (text.length === 0) return;
+    parts.push(text);
+    last = text[text.length - 1] as string;
+  };
+  let changed = false;
+  let at = 0;
+  while (at < command.length) {
+    const char = command[at] as string;
+    if (separator.test(char)) {
+      write(char);
+      at += 1;
+      continue;
+    }
+    if (char === "#" && (last === "" || /[\s;&|]/u.test(last))) {
+      const newline = command.indexOf("\n", at);
+      const stop = newline === -1 ? command.length : newline;
+      write(command.slice(at, stop));
+      at = stop;
+      continue;
+    }
+    // One word: its raw text, and each character it stands for with whether
+    // it was quoted; `$` and backquote outside single quotes mark the segment
+    // unknown.
+    const raw = at;
+    const units: Array<{ char: string; quoted: boolean; unknown: boolean; end: number; param?: true }> = [];
+    let quote: "'" | '"' | "$'" | null = null;
+    // Inside an unquoted `${…}` every character is the parameter's syntax
+    // (`${a:-x}`, `${#a}`, `${a^^}`), never a zsh glob form.
+    let paramDepth = 0;
+    while (at < command.length) {
+      const next = command[at] as string;
+      if (quote === "'" || quote === "$'") {
+        if (next === "\\" && quote === "$'") {
+          units.push({ char: command[at + 1] ?? "", quoted: true, unknown: false, end: at + 2 });
+          at += 2;
+          continue;
+        }
+        at += 1;
+        if (next === "'") quote = null;
+        else units.push({ char: next, quoted: true, unknown: false, end: at });
+        continue;
+      }
+      if (next === "\\") {
+        units.push({ char: command[at + 1] ?? "", quoted: true, unknown: false, end: at + 2 });
+        at += 2;
+        continue;
+      }
+      if (quote === '"') {
+        at += 1;
+        if (next === '"') quote = null;
+        else units.push({ char: next, quoted: true, unknown: next === "$" || next === "`", end: at });
+        continue;
+      }
+      if (next === "'" || next === '"') {
+        quote = next === "'" && command[at - 1] === "$" && units[units.length - 1]?.char === "$" ? "$'" : next;
+        if (quote === "$'") units.pop();
+        at += 1;
+        continue;
+      }
+      if (separator.test(next)) break;
+      at += 1;
+      if (next === "{" && units[units.length - 1]?.char === "$" && units[units.length - 1]?.quoted === false) paramDepth += 1;
+      const param = paramDepth > 0;
+      if (next === "}" && paramDepth > 0) paramDepth -= 1;
+      units.push({ char: next, quoted: false, unknown: next === "$" || next === "`", end: at, ...(param ? { param: true as const } : {}) });
+    }
+    const word = command.slice(raw, at);
+    // The segments, split at each unquoted `/`, each with its raw text.
+    const segments: Array<{ units: typeof units; from: number; to: number }> = [{ units: [], from: raw, to: at }];
+    for (const unit of units) {
+      const current = segments[segments.length - 1] as (typeof segments)[number];
+      if (!unit.quoted && unit.char === "/") {
+        current.to = unit.end - 1;
+        segments.push({ units: [], from: unit.end, to: at });
+      } else {
+        current.units.push(unit);
+      }
+    }
+    const hasForm = (segment: typeof units): boolean => segment.some((_, index) => optionFormAt(segment, index));
+    if (!segments.some((segment) => hasForm(segment.units))) {
+      write(word);
+      continue;
+    }
+    const read = segments.map(({ units: segment, from, to }) => {
+      if (!hasForm(segment)) return command.slice(from, to);
+      // A `$` or backquote beside a form: the segment is any name, unless its
+      // only forms are brace groups the shell expands anyway (`{a,b}`,
+      // `{1..3}`), which braceccl leaves as they are, and zsh never globs a
+      // parameter's or a substitution's value (build-1's S1 at 64c43399:
+      // `touch file{1..3}$EXT` is file1$EXT … file3$EXT, as with no option).
+      if (segment.some((unit) => unit.unknown)) return onlyExpandedBraces(segment) ? command.slice(from, to) : "*";
+      const plain = segment
+        .map((unit) => (unit.quoted && /[*?[\]^#~{}!\\'"`$\s;&|<>()]/u.test(unit.char) ? "?" : unit.char))
+        .join("");
+      return zshOptionReading(plain) ?? "*";
+    });
+    let rewritten = read.join("/");
+    if (segments.length === 1 && proven !== null) {
+      const pattern = read[0] as string;
+      const glob = globPattern(pattern);
+      const matches = new Set<string>();
+      let tooMany = false;
+      for (const directory of proven) {
+        let names = listings.get(directory);
+        if (names === undefined) {
+          try {
+            names = readdirSync(directory);
+          } catch {
+            names = [];
+          }
+          listings.set(directory, names);
+        }
+        for (const name of names) if (glob.test(name)) matches.add(name);
+        if (matches.size > OPTION_WORD_ENTRIES) tooMany = true;
+      }
+      if (written + matches.size > OPTION_COMMAND_ENTRIES) tooMany = true;
+      if (!tooMany && matches.size === 0) rewritten = word;
+      else if (!tooMany) {
+        written += matches.size;
+        rewritten = [...matches].map((name) => `'${name.replaceAll("'", "'\\''")}'`).join(" ");
+      }
+    }
+    if (rewritten !== word) changed = true;
+    write(rewritten);
+  }
+  return changed ? parts.join("") : null;
+}
+
+/** One character of a word as {@link zshOptionCommandReading} reads it. */
+interface OptionUnit {
+  char: string;
+  quoted: boolean;
+  unknown: boolean;
+  param?: true;
+}
+
+/** Is `segment[index]` a form zsh reads under `extendedglob` or `braceccl` (`^`, `#`, `{`, a `~` past the start)? */
+function optionFormAt(segment: readonly OptionUnit[], index: number): boolean {
+  const unit = segment[index] as OptionUnit;
+  return (
+    !unit.quoted &&
+    unit.param !== true &&
+    !(unit.char === "#" && segment[index - 1]?.char === "$") &&
+    (/[\^#{]/u.test(unit.char) || (unit.char === "~" && index > 0))
+  );
+}
+
+/**
+ * Is every form in `segment` ({@link optionFormAt}) the opening brace of a
+ * group the shell expands with no option set: one holding an unquoted comma
+ * outside any inner group (`{a,b}`, `{,s}`), or a sequence of plain text
+ * (`{1..3}`, `{a..c}`, `{1..9..2}`)? zsh's braceccl reads only a group that
+ * would not otherwise expand (`{AP}` is `A` and `P`), so such a segment holds
+ * nothing the option changes (build-1's S1 at 64c43399). A sequence holding a
+ * `$` (`{1..$N}`, which zsh expands after the parameter and bash not at all),
+ * an unclosed group, or a group cut by a `/` is not one. One pass over the
+ * segment, and one over each group's body.
+ */
+function onlyExpandedBraces(segment: readonly OptionUnit[]): boolean {
+  const live = (unit: OptionUnit): boolean => !unit.quoted && unit.param !== true;
+  const expanded = new Set<number>();
+  const open: number[] = [];
+  for (let index = 0; index < segment.length; index += 1) {
+    const unit = segment[index] as OptionUnit;
+    if (!live(unit)) continue;
+    if (unit.char === "{") open.push(index);
+    else if (unit.char === "}") {
+      const start = open.pop();
+      if (start !== undefined && expandsWithNoOption(segment.slice(start + 1, index))) expanded.add(start);
+    }
+  }
+  return segment.every((_, index) => !optionFormAt(segment, index) || expanded.has(index));
+}
+
+/** Does a brace group with this body expand with no option set (see {@link onlyExpandedBraces})? */
+function expandsWithNoOption(body: readonly OptionUnit[]): boolean {
+  let depth = 0;
+  for (const unit of body) {
+    if (unit.quoted || unit.param === true) continue;
+    if (unit.char === "{") depth += 1;
+    else if (unit.char === "}") depth -= 1;
+    else if (unit.char === "," && depth === 0) return true;
+  }
+  if (body.some((unit) => unit.quoted || unit.unknown || unit.param === true)) return false;
+  const text = body.map((unit) => unit.char).join("");
+  return /^(?:-?\d+\.\.-?\d+|[A-Za-z]\.\.[A-Za-z])(?:\.\.-?\d+)?$/u.test(text);
+}
+
+/** The commands whose words {@link listingCommand} lets a listing answer: none changes directory or makes a file. */
+const LISTING_COMMANDS: ReadonlySet<string> = new Set(["grep", "rg", "egrep", "fgrep", "ls", "cat", "head", "tail", "wc", "file", "stat", "sed", "awk"]);
+
+/**
+ * Is the whole command ONE simple command in which nothing can change
+ * directory or make a file before its words expand, so that a listing of the
+ * directory it starts in is what its globs match? Its command word is a plain
+ * name from {@link LISTING_COMMANDS} or `git` with `log`, `diff` or `show`
+ * next; `sed` and `awk` only with no in-place flag (`-i`, `--in-place`), no
+ * script file (`-f`) and no `w` in any word. Nowhere in the text, quoted or
+ * not, is there a `;`, `&`, `|`, newline, `(`, `)`, `>` (a writing
+ * redirection), backquote or `$(`, and no word is `{` or `}` (a brace group,
+ * and with it `always`, `while { … }` and the other reserved-word forms that
+ * need one). Strict by construction: a command it refuses reads its words as
+ * the plain glob.
+ */
+function listingCommand(command: string): boolean {
+  if (/[;&|\n\r()>`]|\$\(/u.test(command)) return false;
+  const words = command.trim().split(/[ \t]+/u);
+  if (words.some((word) => word === "{" || word === "}")) return false;
+  const [name, next] = words;
+  if (name === "git") return next === "log" || next === "diff" || next === "show";
+  if (name === undefined || !LISTING_COMMANDS.has(name)) return false;
+  if (name === "sed" || name === "awk") {
+    return !words
+      .slice(1)
+      .some((word) => /^-[^-]*[if]/u.test(word) || /^--(?:in-?place|file)/u.test(word) || word.includes("w"));
+  }
+  return true;
+}
+
+/** Past this many matching entries, a word with no `/` is read as its plain glob. */
+const OPTION_WORD_ENTRIES = 256;
+/** Past this many entries written for one command's words, a further word is read as its plain glob. */
+const OPTION_COMMAND_ENTRIES = 1024;
 
 /** Names a credential file goes by, for a pattern to be tested against. */
 const CREDENTIAL_NAMES: readonly string[] = [".env", ".env.local", ".op.env", "auth.json", "env", "vault.enc", "keys"];
@@ -8315,7 +11536,11 @@ const ORGAN_NAMES: readonly string[] = [
 function globCouldNameGateHome(path: string): boolean {
   return path
     .split(/[/\\]+/u)
-    .some((component) => hasGlobChars(component) && [".hermes", ".approval"].some((name) => globRegex(component).test(name)));
+    .some((component) => {
+      if (!hasGlobChars(component)) return false;
+      const pattern = globPattern(component);
+      return [".hermes", ".approval"].some((name) => pattern.test(name));
+    });
 }
 
 /** SF3a: a written pattern that could land on an organ. */
@@ -8329,18 +11554,22 @@ function globCouldNameOrgan(path: string): boolean {
     const component = components[index] as string;
     if (!hasGlobChars(component)) continue;
     const parent = components[index - 1] as string;
+    // A literal parent is a name the volume folds ({@link foldFileName}).
+    const folded = (at: number): string => foldNameExact(components[at] ?? "");
     const underHome =
-      parent === ".hermes" ||
+      folded(index - 1) === ".hermes" ||
       hasGlobChars(parent) ||
-      (components[index - 3] === ".hermes" && components[index - 2] === "profiles");
-    if (underHome && ORGAN_NAMES.some((name) => globRegex(component).test(name))) return true;
+      (folded(index - 3) === ".hermes" && folded(index - 2) === "profiles");
+    if (!underHome) continue;
+    const pattern = globPattern(component);
+    if (ORGAN_NAMES.some((name) => pattern.test(name))) return true;
   }
   const last = basename(path);
   if (!hasGlobChars(last)) return false;
-  const pattern = globRegex(last);
+  const pattern = globPattern(last);
   const parent = dirname(path);
   const parentIsHome =
-    parent.split(/[/\\]+/u).some((segment) => segment === ".hermes" || segment === ".approval") ||
+    parent.split(/[/\\]+/u).some((segment) => foldNameExact(segment) === ".hermes" || foldNameExact(segment) === ".approval") ||
     hasGlobChars(parent);
   return parentIsHome && ORGAN_NAMES.some((name) => pattern.test(name));
 }
@@ -8379,9 +11608,13 @@ function globCouldNameCredential(path: string): boolean {
   for (let index = 0; index < components.length - 1; index += 1) {
     const component = components[index] as string;
     if (!hasGlobChars(component)) continue;
-    const names = GLOB_DIRECTORY_NAMES.filter(
-      (name) => globRegex(component).test(name) || globRegex(component.toLowerCase()).test(name),
-    );
+    const pattern = globPattern(component);
+    // The lowered pattern stays beside the folded one: folding a pattern
+    // decomposes a bracket range's end (`[P-\u00C9]`), so the fold alone
+    // could match less than the lowered pattern did.
+    const lowered = globPattern(component.toLowerCase());
+    const folded = globPattern(foldNameLower(component));
+    const names = GLOB_DIRECTORY_NAMES.filter((name) => pattern.test(name) || lowered.test(name) || folded.test(name));
     if (names.length > 0) choices.push({ index, names });
   }
   if (choices.length === 0) return false;
@@ -8424,7 +11657,10 @@ const GLOB_DIRECTORY_NAMING_CAP = 4;
 /** A last-component pattern that could name a credential file, or any pattern that could name a home. */
 function globNamesCredentialOrHome(path: string): boolean {
   const last = basename(path);
-  if (hasGlobChars(last) && CREDENTIAL_NAMES.some((name) => globRegex(last).test(name))) return true;
+  if (hasGlobChars(last)) {
+    const pattern = globPattern(last);
+    if (CREDENTIAL_NAMES.some((name) => pattern.test(name))) return true;
+  }
   return globCouldNameGateHome(path);
 }
 
@@ -8457,7 +11693,7 @@ function globNamesCredentialOrHome(path: string): boolean {
  *   `profiles/<p>`. So an unknown last segment right under a literal home, a
  *   profile home or the `hermes-agent/` of either is a credential, and so are
  *   two unknown segments in a row at the end;
- * - ANYWHERE, an approval home (`.approval`, exact case) or an unknown segment
+ * - ANYWHERE, an approval home (`.approval`, any case) or an unknown segment
  *   is followed by `env`, `env.*`, `vault*`, `keys` or an unknown segment;
  * - a credential file name appears at or after the first unknown segment
  *   (which may have stood for a home, a profile home or a profiles directory).
@@ -8465,8 +11701,9 @@ function globNamesCredentialOrHome(path: string): boolean {
  * Not covered, by the model: in a single-file read, an unknown segment that
  * expands to several segments (a `/` or `..` inside it) and so moves the
  * literal names after it; a recursive reader of any unresolved word is
- * `account.credential` regardless. `.approval` and its file names in another
- * case are not matched, as in the classifier's text rule.
+ * `account.credential` regardless. Every name is compared folded
+ * ({@link foldFileName}), as in the classifier's text rule, so `.APPROVAL` and
+ * `.herme<U+017F>` are the homes they open on APFS.
  */
 function unresolvedReadCouldNameCredential(text: string): boolean {
   if (isCredentialPath(text) || globCouldNameCredential(text)) return true;
@@ -8480,7 +11717,7 @@ function unresolvedReadCouldNameCredential(text: string): boolean {
  */
 function spanReadingsCouldNameCredential(text: string): boolean {
   // One segment per braced variable, so a default's `/` (`${H:-$HOME/.hermes}`) splits nothing.
-  const collapsed = text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/gu, "${$1}");
+  const collapsed = collapseBracedVariables(text);
   const segments = collapsed.split(/[/\\]+/u).filter((segment) => segment.length > 0);
   // A leading `~` this hook did not expand stands for an unknown directory.
   if (!collapsed.startsWith("/") && segments[0]?.startsWith("~") === true) segments[0] = "$~";
@@ -8526,21 +11763,23 @@ function segmentsCouldNameCredential(segments: readonly string[]): boolean {
   const named =
     (name: string): Element =>
     (segment) =>
-      unknownSegment(segment) || segment.toLowerCase() === name;
+      unknownSegment(segment) || foldNameLower(segment) === name;
   const credentialFile = (segment: string): boolean => {
-    const name = segment.toLowerCase();
+    const name = foldNameLower(segment);
     return name === ".env" || name.startsWith(".env.") || name === ".op.env" || name.startsWith(".op.env.") || name === "auth.json";
   };
-  const hermesHome: Element = (segment) => unknownSegment(segment) || segment.toLowerCase() === ".hermes";
+  const hermesHome: Element = (segment) => unknownSegment(segment) || foldNameLower(segment) === ".hermes";
   const homeCredential: Element = (segment) => unknownSegment(segment) || credentialFile(segment);
   const installEnv: Element = (segment) => {
-    const name = segment.toLowerCase();
+    const name = foldNameLower(segment);
     return unknownSegment(segment) || name === ".env" || (name.startsWith(".env.") && segment !== ".env.example");
   };
   const anyName: Element = () => true;
-  const approvalHome: Element = (segment) => unknownSegment(segment) || segment === ".approval";
-  const approvalFile: Element = (segment) =>
-    unknownSegment(segment) || segment === "env" || segment.startsWith("env.") || segment.startsWith("vault") || segment === "keys";
+  const approvalHome: Element = (segment) => unknownSegment(segment) || foldNameExact(segment) === ".approval";
+  const approvalFile: Element = (segment) => {
+    const name = foldNameExact(segment);
+    return unknownSegment(segment) || name === "env" || name.startsWith("env.") || name.startsWith("vault") || name === "keys";
+  };
 
   const endsWith = (row: readonly Element[]): boolean => {
     const start = segments.length - row.length;
@@ -8579,7 +11818,7 @@ function lastComponentUnresolved(rest: string): boolean {
  * in (`.` when the word names none) and the rest, from the span's segment on.
  */
 function unresolvedPrefix(text: string): { prefix: string; rest: string } {
-  const collapsed = text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/gu, "${$1}");
+  const collapsed = collapseBracedVariables(text);
   const span = collapsed.search(/[$`]/u);
   const cut = span < 0 ? collapsed.lastIndexOf("/") : collapsed.lastIndexOf("/", span);
   if (cut < 0) return { prefix: ".", rest: collapsed };
@@ -8790,7 +12029,7 @@ function expandGlob(path: string): string[] | null {
   const parent = dirname(path);
   if (hasGlobChars(parent)) return null;
   try {
-    const pattern = globRegex(basename(path));
+    const pattern = globPattern(basename(path));
     return readdirSync(canonicalPath(parent))
       .filter((name) => pattern.test(name))
       .map((name) => join(parent, name));
@@ -8800,11 +12039,13 @@ function expandGlob(path: string): string[] | null {
 }
 
 function isDirectoryPath(path: string): boolean {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
+  return remembered(diskMemo?.directory, path, () => {
+    try {
+      return statSync(path).isDirectory();
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**
@@ -8829,10 +12070,10 @@ function gateRootKind(directory: string): "home" | "approval-home" | "home-appro
 
 function gateRootKindOf(split: readonly string[]): "home" | "approval-home" | "home-approval" | "scripts" | null {
   // APRV-522: case folded, as the credential rule is, for a case-insensitive
-  // volume (`grep -r . .APPROVAL`).
+  // volume (`grep -r . .APPROVAL`), by the full fold ({@link foldFileName}).
   const segments = split
     .filter((segment) => segment.length > 0)
-    .map((segment) => segment.toLowerCase());
+    .map(foldNameLower);
   const last = segments[segments.length - 1];
   const isHome = (at: number): boolean =>
     segments[at] === ".hermes" ||
@@ -8877,7 +12118,7 @@ function holdsCredentials(directory: string): boolean {
   if (
     !directory
       .split(/[/\\]+/u)
-      .some((segment) => [".hermes", ".approval"].includes(segment.toLowerCase()))
+      .some((segment) => [".hermes", ".approval"].includes(foldNameLower(segment)))
   ) return false;
   return CREDENTIAL_FILE_NAMES.some((name) => existsSync(join(directory, name)));
 }
@@ -8939,19 +12180,185 @@ const RECURSIVE_READERS: ReadonlySet<string> = new Set([
  * symlinked parent is judged by where it lands and a path that does not exist
  * yet is judged by where it would be created (APRV-445 recheck SF2(e)).
  */
-function canonicalPath(path: string): string {
+export function canonicalPath(path: string, disk: DiskReads = DIRECT_DISK): string {
+  return remembered(diskMemo?.canonical, path, () => canonicalPathOnDisk(path, disk));
+}
+
+function canonicalPathOnDisk(path: string, disk: DiskReads): string {
   let current = path;
   const tail: string[] = [];
-  for (;;) {
+  for (let climbed = 0; ; climbed += 1) {
+    // A path whose last many components do not exist: the deepest ancestor
+    // that does is found by halving, not by climbing one component at a time.
+    // Each climb resolved the whole remaining path, so a word of n components
+    // cost n squared; this is the same answer in about log n resolutions.
+    if (climbed === CANONICAL_CLIMBS) {
+      const found = deepestExisting(current, disk);
+      if (found !== null) {
+        tail.reverse();
+        return resolvePathSegments(found.real, [...found.rest, ...tail].join(sep));
+      }
+    }
+    const real = disk.realpath(current);
+    if (real !== null) return resolvePathSegments(real, ...tail.reverse());
+    const parent = dirname(current);
+    if (parent === current) return resolvePathSegments(path);
+    tail.push(basename(current));
+    current = parent;
+  }
+}
+
+/**
+ * The two disk lookups the landing readers make ({@link canonicalPath},
+ * {@link kernelLanding}): a path's realpath (`null` where `realpathSync`
+ * throws), and what `lstat` says of it (`undefined` where it, or the
+ * `readlink` after it, throws; `null`, not a link; else the link's target).
+ */
+export interface DiskReads {
+  realpath(path: string): string | null;
+  link(path: string): string | null | undefined;
+  /** The lstat and link the git-directory pass walks by ({@link readPathEntry}). */
+  entry(path: string): PathEntry;
+  /** The git-directory pass's walks, by path (kept by a memo; fresh per pass when absent). */
+  readonly gitDirLandings?: Map<string, GitDirLanding>;
+  /** {@link kernelLanding}'s answers with no volatile test, by spelling (kept by a memo). */
+  readonly kernelLandings?: Map<string, string | null>;
+  /** A directory's entries, or the error code reading it gave ({@link listDirectory}). */
+  list(path: string): Dirent[] | string;
+}
+
+/** Every lookup asks the disk: what every caller but the write pass uses. */
+const DIRECT_DISK: DiskReads = {
+  realpath(path) {
     try {
-      return resolvePathSegments(realpathSync(current), ...tail.reverse());
+      return realpathSync(path);
     } catch {
-      const parent = dirname(current);
-      if (parent === current) return resolvePathSegments(path);
-      tail.push(basename(current));
-      current = parent;
+      return null;
+    }
+  },
+  link(path) {
+    try {
+      const stat = lstatSync(path);
+      return stat.isSymbolicLink() ? readlinkSync(path) : null;
+    } catch {
+      return undefined;
+    }
+  },
+  list: listDirectory,
+  entry: readPathEntry,
+};
+
+/**
+ * Each path asked once (cost, #686's COST686 lines): the write pass lands
+ * thousands of words that share their parents, and each landing walked the
+ * same ancestors again. Made for one `classifyForHook` call and dropped with
+ * it, under the pass's own premise that the disk does not change within one
+ * call ("one disk reading per spelling per line").
+ */
+export function memoDiskReads(): DiskReads {
+  const reals = new Map<string, string | null>();
+  // One lstat per path for both readers of it: `link` (the write pass) and
+  // `entry` (the git-directory pass, which keeps the error code).
+  const entries = new Map<string, PathEntry>();
+  const entry = (path: string): PathEntry => {
+    let found = entries.get(path);
+    if (found === undefined) {
+      found = readPathEntry(path);
+      entries.set(path, found);
+    }
+    return found;
+  };
+  // As DIRECT_DISK.link: `undefined` when the lstat fails or a link's target cannot be read.
+  const link = (path: string): string | null | undefined => {
+    const found = entry(path);
+    return "link" in found ? found.link : undefined;
+  };
+  const realpath = (path: string): string | null => {
+    if (reals.has(path)) return reals.get(path) as string | null;
+    let real: string | null;
+    const parent = dirname(path);
+    const leaf = basename(path);
+    const normal = path.startsWith("/") && !path.endsWith("/") && !/\/\.{0,2}\//u.test(`${path}/`.slice(1));
+    if (parent === path || !normal || leaf.length === 0 || leaf === "." || leaf === "..") {
+      real = DIRECT_DISK.realpath(path);
+    } else {
+      // A path resolves only through its parent: the parent's realpath, read
+      // once for all its entries, then this one entry. Where the parent does
+      // not resolve, neither does the path; a plain entry is the parent's
+      // realpath and its own name, as `realpathSync` spells it; a link is
+      // resolved whole, as before.
+      const up = realpath(parent);
+      if (up === null) real = null;
+      else {
+        const joined = up === "/" ? `/${leaf}` : `${up}/${leaf}`;
+        const entry = link(joined);
+        real = entry === undefined ? null : entry === null ? joined : DIRECT_DISK.realpath(path);
+      }
+    }
+    reals.set(path, real);
+    return real;
+  };
+  const lists = new Map<string, Dirent[] | string>();
+  const list = (path: string): Dirent[] | string => {
+    const known = lists.get(path);
+    if (known !== undefined) return known;
+    const found = listDirectory(path);
+    lists.set(path, found);
+    // The listing already says which entries are links: an entry it names as
+    // anything else is read as the lstat would read it (`link: null`), so a
+    // directory's entries are not each asked again (the unclosed-`[` line
+    // lands every entry). A link, or an entry of a type the listing does not
+    // give, is still read by lstat.
+    if (typeof found !== "string") {
+      for (const each of found) {
+        if (each.isSymbolicLink()) continue;
+        if (!(each.isFile() || each.isDirectory() || each.isFIFO() || each.isSocket() || each.isBlockDevice() || each.isCharacterDevice())) continue;
+        const at = path === "/" ? `/${each.name}` : `${path}/${each.name}`;
+        if (!entries.has(at)) entries.set(at, { link: null });
+      }
+    }
+    return found;
+  };
+  return { realpath, link, list, entry, gitDirLandings: new Map(), kernelLandings: new Map() };
+}
+
+/** How many components {@link canonicalPath} climbs one at a time before it halves. */
+const CANONICAL_CLIMBS = 32;
+
+/**
+ * The deepest ancestor of `path` (or `path` itself) that resolves, as its
+ * realpath and the components below it, found by halving. `null` when `path`
+ * is not an absolute POSIX path in normal form (no empty, `.` or `..`
+ * component, no trailing separator), or when even the root does not resolve:
+ * the caller then climbs as it always did.
+ *
+ * Halving is sound because resolving is monotone along a normal-form path:
+ * when a prefix resolves, every shorter prefix resolves (it was traversed to
+ * get there). So the longest resolving prefix, which climbing from the leaf
+ * finds first, is the boundary a binary search finds. A `..` would break that
+ * (`realpathSync` cancels it textually, so `a/x/../b` can resolve where `a/x`
+ * does not), which is why such a path is left to the climb.
+ */
+function deepestExisting(path: string, disk: DiskReads): { real: string; rest: string[] } | null {
+  if (sep !== "/" || !path.startsWith("/")) return null;
+  const names = path.slice(1).split("/");
+  if (path.length > 1 && names.some((name) => name.length === 0 || name === "." || name === "..")) return null;
+  if (path.length === 1) names.length = 0;
+  const resolves = (count: number): string | null => disk.realpath(`/${names.slice(0, count).join("/")}`);
+  let real = resolves(0);
+  if (real === null) return null;
+  let low = 0;
+  let high = names.length;
+  while (low < high) {
+    const middle = low + Math.ceil((high - low) / 2);
+    const found = resolves(middle);
+    if (found === null) high = middle - 1;
+    else {
+      low = middle;
+      real = found;
     }
   }
+  return { real, rest: names.slice(low) };
 }
 
 /** The symlink hops the kernel follows before it answers ELOOP (Linux and macOS: 40 / 32). */
@@ -8990,7 +12397,20 @@ function spelledAbsolute(from: string, text: string): string {
  * `ln -s ~/.hermes/skills k && cat k/../.op.env` plants the link this hook
  * cannot see, and `..` out of it lands wherever the link will point.
  */
-function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | null = null): string | null {
+function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | null = null, disk: DiskReads = DIRECT_DISK): string | null {
+  // With no volatile test the answer is the disk's alone: kept for the call
+  // where the disk reads are (every entry of a listed directory lands its
+  // parent again).
+  const kept = volatile === null ? disk.kernelLandings : undefined;
+  if (kept === undefined) return kernelLandingWalk(spelled, volatile, disk);
+  const known = kept.get(spelled);
+  if (known !== undefined) return known;
+  const walked = kernelLandingWalk(spelled, null, disk);
+  kept.set(spelled, walked);
+  return walked;
+}
+
+function kernelLandingWalk(spelled: string, volatile: ((path: string) => boolean) | null, disk: DiskReads): string | null {
   const queue = spelled.split("/").filter((part) => part.length > 0 && part !== ".");
   if (
     queue[0] === "proc" &&
@@ -9003,8 +12423,11 @@ function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | 
   let resolved = "/";
   let missing = false;
   let hops = 0;
+  // Walked last first from here on, so the next component is a pop: a shift
+  // from the front of a long array moves every other component each time.
+  queue.reverse();
   while (queue.length > 0) {
-    const part = queue.shift() as string;
+    const part = queue.pop() as string;
     if (part === "..") {
       if (volatile !== null && volatile(resolved)) return null;
       resolved = dirname(resolved);
@@ -9015,11 +12438,8 @@ function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | 
       resolved = next;
       continue;
     }
-    let link: string | null = null;
-    try {
-      const stat = lstatSync(next);
-      if (stat.isSymbolicLink()) link = readlinkSync(next);
-    } catch {
+    const link = disk.link(next);
+    if (link === undefined) {
       // Absent, unreadable (a 0700 home under co-location), or under a file:
       // the rest of the spelling is applied lexically.
       missing = true;
@@ -9034,7 +12454,7 @@ function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | 
     if (hops > KERNEL_LINK_HOPS) return null;
     const parts = link.split("/").filter((piece) => piece.length > 0 && piece !== ".");
     if (link.startsWith("/")) resolved = "/";
-    queue.unshift(...parts);
+    for (let index = parts.length - 1; index >= 0; index -= 1) queue.push(parts[index] as string);
   }
   return resolved;
 }
@@ -9050,9 +12470,10 @@ function kernelLanding(spelled: string, volatile: ((path: string) => boolean) | 
 function landingPaths(
   spelled: string,
   volatile: ((path: string) => boolean) | null = null,
+  disk: DiskReads = DIRECT_DISK,
 ): { paths: string[]; unknown: boolean } {
-  const lexical = canonicalPath(resolvePathSegments(spelled));
-  const kernel = kernelLanding(spelled, volatile);
+  const lexical = canonicalPath(resolvePathSegments(spelled), disk);
+  const kernel = kernelLanding(spelled, volatile, disk);
   if (kernel === null) return { paths: [lexical], unknown: true };
   return { paths: kernel === lexical ? [lexical] : [lexical, kernel], unknown: false };
 }
@@ -9257,6 +12678,22 @@ function* runBypass(
    * shape.
    */
   decidedOn: { records: EventRecord[]; head: { seq: number; hash: string } | null } | null,
+  /**
+   * The harness ceiling this call runs under, as `commandHook` worked it out:
+   * the stated or assumed cap, less what an embedding caller already spent in
+   * line. The read's deadline follows it here as on the closed path. A window
+   * suspends the policy, not the clock: the hook must still answer before the
+   * harness stops listening (review of ab74cfbb: this path took the default
+   * 15 s whatever the ceiling was).
+   */
+  harnessCapMs: number | null,
+  /**
+   * GLOB-WRITE (L61167): the listings made before the steps ran, or `null`
+   * (strict). The window describes the call as the closed path does, and the
+   * listing pass's time comes out of this read's deadline as it does there
+   * (review-b A686-FOLD7 N2).
+   */
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): GateSteps<number> {
   const codexCommand =
     adapter.kind === "codex" ? codexBinding(input, cwd).payload.command : undefined;
@@ -9272,6 +12709,7 @@ function* runBypass(
     : `the policy did not load (${load.code}: ${load.message}), so no protected path beyond the built-ins was known here and no class could be resolved to human-only`;
 
   const described = describeToolCall(
+    describeDeadlineMs(harnessCapMs),
     input,
     adapter,
     protectedPaths,
@@ -9299,6 +12737,8 @@ function* runBypass(
     // policy statement, and the window suspends the policy; an opaque program is
     // the case this path already names as one nothing here can vouch for.
     closedExecCodeGate("window"),
+    resolveWriteScope(cwd, policyRootOf(load, scope.root), load.ok ? load.policy : null),
+    globListings,
   );
   if (described.kind === "deny" || (described.kind === "gated" && described.abstain !== undefined)) {
     const refused = described.kind === "deny" ? described : (described.abstain as { code: string; detail: string });
@@ -9323,6 +12763,18 @@ function* runBypass(
       "the approval CLI is the gate itself and is not gated by it",
       adapter.kind,
       codexCommand,
+    );
+  }
+
+  // Decision E (`core/write-scope.ts`): as recommended, the window treats the
+  // guarded write class as any `manual` class and lets it through, recorded.
+  // The other ruling keeps a card for it even inside a window.
+  if (DECISION_E_WINDOW === "refuse" && classes.includes(WRITE_GUARDED_CLASS)) {
+    return deny(
+      streams,
+      "hook-window-guarded-write",
+      `${WRITE_GUARDED_CLASS} is not reachable through the open window: a write onto the guarded list, or to a target this hook cannot read, waits for a human's decision even while a window is open. Nothing was appended.`,
+      adapter.kind,
     );
   }
 
@@ -9425,6 +12877,43 @@ function* runBypass(
   );
 }
 
+/** The flags a harness hook takes ({@link runHarnessHook}). */
+const HARNESS_HOOK_FLAGS = {
+  ...COMMON_FLAGS,
+  ...POLICY_FLAGS,
+  "--log": "string",
+  "--as": "string",
+  "--timeout": "string",
+  "--interval": "string",
+  "--retry-grace": "string",
+  "--harness-cap": "string",
+} as const;
+
+/**
+ * The harness ceiling `argv` states or the adapter assumes, read the way
+ * {@link runHarnessHook} reads it (`--harness-cap`), for the listing pass that
+ * runs before it (GLOB-WRITE). An argv that does not parse states nothing; the
+ * hook itself refuses it after.
+ */
+function harnessCapOfArgv(argv: readonly string[], adapter: HarnessAdapter): number | null {
+  const parsed = parseFlags([...argv], HARNESS_HOOK_FLAGS);
+  const capText = parsed.ok ? stringFlag(parsed.flags, "--harness-cap") : null;
+  return effectiveHarnessCapMs(adapter, capText === null ? null : parseDuration(capText));
+}
+
+/**
+ * What the listing pass of one call cost (GLOB-WRITE, {@link commandHookYielding}),
+ * keyed by the listings it handed on. It runs before the call is described and
+ * after the harness started its timer, so its time comes out of the describe
+ * deadline and counts as reading time ({@link waitAfterRead}). `overran`: its
+ * classification was stopped at the deadline, and the call is refused.
+ */
+const listingCosts = new WeakMap<ReadonlyMap<string, GlobListing>, { spentMs: number; overran: boolean }>();
+
+function listingCostOf(globListings: ReadonlyMap<string, GlobListing> | null): { spentMs: number; overran: boolean } {
+  return (globListings === null ? undefined : listingCosts.get(globListings)) ?? { spentMs: 0, overran: false };
+}
+
 function* runHarnessHook(
   argv: string[],
   streams: Streams,
@@ -9432,6 +12921,8 @@ function* runHarnessHook(
   readStdin: () => string,
   adapter: HarnessAdapter,
   waitSeam: HookWaitSeam | null,
+  /** GLOB-WRITE (L61167): listings made before the steps ran, or `null` (strict). */
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): GateSteps<number> {
   // Codex and (APRV-445) Hermes answer a misconfigured entry with a verdict:
   // on both a usage error's empty stdout is a harness that runs the call, and
@@ -9440,16 +12931,7 @@ function* runHarnessHook(
     adapter.kind === "codex" || adapter.kind === "hermes"
       ? deny(streams, "hook-io", message, adapter.kind)
       : usageError(streams, message);
-  const parsed = parseFlags(argv, {
-    ...COMMON_FLAGS,
-    ...POLICY_FLAGS,
-    "--log": "string",
-    "--as": "string",
-    "--timeout": "string",
-    "--interval": "string",
-    "--retry-grace": "string",
-    "--harness-cap": "string",
-  });
+  const parsed = parseFlags(argv, HARNESS_HOOK_FLAGS);
   if (!parsed.ok) return configurationError(parsed.message);
   if (boolFlag(parsed.flags, "--help") || boolFlag(parsed.flags, "-h")) {
     // APRV-243. Grok's help carries the `.grok/hooks/*.json` the human commits,
@@ -9838,6 +13320,8 @@ function* runHarnessHook(
       // bypass record is appended against the head they ended at, so the
       // verdict and the record are one read of the log.
       looked.records === null ? null : { records: looked.records, head: looked.head },
+      harnessCapMs,
+      globListings,
     );
   }
 
@@ -9865,6 +13349,7 @@ function* runHarnessHook(
       codexCommand,
       windowRecords: looked.records,
       waitSeam,
+      globListings,
     }),
   );
 }
@@ -9878,6 +13363,8 @@ function* runHarnessHook(
  * is the harness's own event and is treated as such throughout.
  */
 export interface DecideInput {
+  /** GLOB-WRITE (L61167): directory listings made before classification, or `null`/absent (strict). */
+  globListings?: ReadonlyMap<string, GlobListing> | null;
   streams: Streams;
   input: HookInput;
   adapter: HarnessAdapter;
@@ -10000,7 +13487,10 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
   // both paths since APRV-214 (see `describeToolCall`): the open window
   // classifies exactly as the closed one does, and a second copy of this would
   // be a second answer to "what is this command".
+  const readClock = decide.waitSeam?.readClock ?? Date.now;
+  const readBeganMs = readClock();
   const described = describeToolCall(
+    describeDeadlineMs(harnessCapMs),
     input,
     adapter,
     protectedPaths,
@@ -10009,7 +13499,11 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
     load.policy,
     true,
     execGateOf(adapter, load.policy),
+    resolveWriteScope(cwd, policyRootOf(load, root), load.policy),
+    decide.globListings ?? null,
   );
+  // The listing pass (GLOB-WRITE) read before this did, on the same timer.
+  const readMs = readClock() - readBeganMs + listingCostOf(decide.globListings ?? null).spentMs;
   if (described.kind === "deny") {
     return { permission: "deny", code: described.code, detail: described.detail };
   }
@@ -10093,6 +13587,7 @@ function* decideHarnessSteps(decide: DecideInput): GateSteps<HarnessVerdict> {
       harnessCapMs === null
         ? timeoutMs
         : Math.max(0, Math.min(timeoutMs, harnessCapMs - HARNESS_CAP_MARGIN_MS)),
+    readMs,
     harness: adapter.kind,
     originApp: adapter.originApp,
     ...(codexCommand === undefined ? {} : { codexCommand }),
@@ -10353,12 +13848,13 @@ function* commandHarnessHook(
   readStdin: () => string,
   adapter: HarnessAdapter,
   waitSeam: HookWaitSeam | null,
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): GateSteps<number> {
   if (adapter.kind === "hermes") {
-    return yield* hermesFailClosed(argv, streams, cwd, readStdin, adapter, waitSeam);
+    return yield* hermesFailClosed(argv, streams, cwd, readStdin, adapter, waitSeam, globListings);
   }
   try {
-    return yield* runHarnessHook(argv, streams, cwd, readStdin, adapter, waitSeam);
+    return yield* runHarnessHook(argv, streams, cwd, readStdin, adapter, waitSeam, globListings);
   } catch (cause) {
     // A hook that throws is a hook the harness treats as a non-blocking error,
     // which would let the command through. Every unexpected failure becomes an
@@ -10402,6 +13898,7 @@ function* hermesFailClosed(
   adapter: HarnessAdapter,
   /** APRV-427: serve's wait seam, passed through untouched (null on the CLI). */
   waitSeam: HookWaitSeam | null,
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): GateSteps<number> {
   let stdout = "";
   const tracked: Streams = {
@@ -10471,7 +13968,7 @@ function* hermesFailClosed(
   function* hermesVerdict(): GateSteps<number> {
     let code: number;
     try {
-      code = yield* runHarnessHook(argv, tracked, cwd, reading, adapter, waitSeam);
+      code = yield* runHarnessHook(argv, tracked, cwd, reading, adapter, waitSeam, globListings);
     } catch (cause) {
       // A post-event never blocks: the call already ran (see the post path).
       if (raw !== null && isHermesPostEvent(raw)) return EXIT_OK;
@@ -10571,7 +14068,73 @@ export function commandHookYielding(
   // without withdrawing. Stderr carries progress lines and never the verdict,
   // so its failure is swallowed (APRV-473 refuter).
   process.stderr.on("error", () => undefined);
-  return driveYielding(hookSteps(argv, streams, cwd, readStdin, null));
+  return (async () => {
+    // GLOB-WRITE (lead ruling L61167): the directories a write-target pattern
+    // globs in are listed HERE, before the steps classify, on the event loop
+    // with their own deadline ({@link listGlobWriteDirsFor}); the classifier
+    // stays pure and takes the result. Any failure lists nothing: the strict
+    // answer. stdin is read once and handed to the steps as read.
+    //
+    // The pass classifies the command once to find the directories, and the
+    // harness's timer is already running: it is held to the describe deadline
+    // (#693) for the ceiling this call runs under, and what it spends comes out
+    // of that deadline and counts as reading time (`listingCosts`). Stopped at
+    // the deadline, the call is refused `hook-deadline`.
+    //
+    // The pass's clock starts once stdin has been read, as the describe clock
+    // does on main: a harness slow to close stdin is not this hook reading the
+    // call, and charging that wait to the deadline refused a plain call
+    // `hook-deadline` (review of 342f233b, S1).
+    const sub = argv[0];
+    let readOnce = readStdin;
+    let globListings: ReadonlyMap<string, GlobListing> | null = null;
+    let listingBegan = Date.now();
+    let overran = false;
+    let listed = false;
+    try {
+      if (sub !== undefined && isHarnessKind(sub)) {
+        const raw = readStdin();
+        listingBegan = Date.now();
+        readOnce = () => raw;
+        const adapter = HARNESS_ADAPTERS[sub];
+        const parsedInput = parseHookInput(raw, adapter.camelCaseEnvelope === true);
+        if (parsedInput.ok && parsedInput.input.toolName === adapter.shellTool) {
+          const command = readString(parsedInput.input.toolInput, "command");
+          const perCall =
+            adapter.shellCwdKey === undefined ? null : readString(parsedInput.input.toolInput, adapter.shellCwdKey);
+          // Lead ruling L62435 (S7): where the harness sends no per-call
+          // directory, the envelope's session `cwd` is listed too when it
+          // differs, so the parents rule can place a word from it.
+          const sessionCwd = parsedInput.input.cwd;
+          const session = (perCall === null || !isAbsolute(perCall)) && isAbsolute(sessionCwd) && sessionCwd !== cwd ? [sessionCwd] : [];
+          const cwds = [cwd, ...(perCall !== null && isAbsolute(perCall) ? [perCall] : []), ...session];
+          if (command !== null) {
+            listed = true;
+            const deadlineAt = listingBegan + describeDeadlineMs(harnessCapOfArgv(argv.slice(1), adapter));
+            globListings = await listGlobWriteDirsFor(command, cwds, { deadlineAt });
+          }
+        }
+      } else if (sub === "classify") {
+        const command = classifyArgvCommand(argv.slice(1));
+        if (command !== null) globListings = await listGlobWriteDirsFor(command, [cwd]);
+      }
+    } catch (error) {
+      globListings = null;
+      if (error instanceof GlobListingDeadline) {
+        // Stopped part way: nothing in this process is classified again.
+        describeDeadlinePassed = true;
+        overran = true;
+      }
+    }
+    if (overran) {
+      // No listing is read: this map only carries the refusal to the read.
+      globListings = new Map<string, GlobListing>();
+      listingCosts.set(globListings, { spentMs: Date.now() - listingBegan, overran: true });
+    } else if (listed && globListings !== null) {
+      listingCosts.set(globListings, { spentMs: Date.now() - listingBegan, overran: false });
+    }
+    return driveYielding(hookSteps(argv, streams, cwd, readOnce, null, globListings));
+  })();
 }
 
 /**
@@ -10603,6 +14166,7 @@ function* hookSteps(
   cwd: string,
   readStdin: () => string,
   waitSeam: HookWaitSeam | null,
+  globListings: ReadonlyMap<string, GlobListing> | null = null,
 ): GateSteps<number> {
   const sub = argv[0];
   const rest = argv.slice(1);
@@ -10619,8 +14183,8 @@ function* hookSteps(
   // boundary and doctor use, so a kind that can be recorded is a kind that can
   // be invoked, and neither can be added without the other.
   if (isHarnessKind(sub)) {
-    return yield* commandHarnessHook(rest, streams, cwd, readStdin, HARNESS_ADAPTERS[sub], waitSeam);
+    return yield* commandHarnessHook(rest, streams, cwd, readStdin, HARNESS_ADAPTERS[sub], waitSeam, globListings);
   }
-  if (sub === "classify") return commandClassify(rest, streams, cwd);
+  if (sub === "classify") return commandClassify(rest, streams, cwd, globListings);
   return usageError(streams, `unknown subcommand ${JSON.stringify(sub)} for \`approval hook\``);
 }

@@ -672,8 +672,8 @@ const POLICY_EXIT_CODES = `${EXIT_CODES_POINTER}. policy check|test uses only 0,
   2  usage — a missing <class>, an unknown flag, or an invalid action class.
   4  I/O — a policy path that exists but cannot be read.`;
 
-/** The three values of manualBecause, named so an agent can branch on them. */
-const POLICY_MANUAL_BECAUSE = `manualBecause is "matched-rule", "irreversibility-floor" or "load-failure".`;
+/** The four values of manualBecause, named so an agent can branch on them. */
+const POLICY_MANUAL_BECAUSE = `manualBecause is "matched-rule", "irreversibility-floor", "load-failure" or "class-minimum".`;
 
 export const POLICY_HELP = `approval policy — explain what policy does with an action class
 
@@ -1647,7 +1647,7 @@ Commands:
   -h, --help       this text
 Codex opt-in: register exact Bash|apply_patch synchronously with timeout 600s (default wait 9m). Bash is denied because native events hide per-call workdir; direct apply_patch is experimental. PostToolUse is diagnostic.
 
-Deny: hook-unclassified, hook-class-human-only, hook-harness-launch-unruled, hook-opaque, hook-unparseable, hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout, hook-harness-cap-too-short,
+Deny: hook-unclassified, hook-class-human-only, hook-harness-launch-unruled, hook-opaque, hook-unparseable, hook-rejected, hook-revoked, hook-expired, hook-withdrawn, hook-timeout, hook-harness-cap-too-short, hook-deadline,
 hook-gate-refused:<c>, hook-grant-unverified, hook-sandbox-required, hook-policy-unavailable, hook-log-unreachable, hook-unsupported-execution-context, hook-muse-contributor-model, hook-hermes-execute-code-unbound, hook-exec-code-custody-unattested, hook-exec-code-unreadable, hook-io.
 
 ${EXIT_CODES_POINTER} (harness verbs use 0 and 2 only; 0 is a verdict, never "ask")

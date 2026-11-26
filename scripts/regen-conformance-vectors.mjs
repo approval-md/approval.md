@@ -86,6 +86,26 @@ const POLICY = [
   "",
 ].join("\n");
 
+// Design v4 (writes outside the workspace): a permissive policy written
+// before files.write.guarded existed. It must load, and the class's built-in
+// minimum must still resolve it manual.
+const POLICY_WRITE_PERMISSIVE = [
+  "# Policy",
+  "",
+  "```yaml approval-policy",
+  'version: "0.1"',
+  "defaults:",
+  "  autonomy: autonomous",
+  "classes:",
+  "  files.*:",
+  "    autonomy: autonomous",
+  "    allow_irreversible: true",
+  "  files.write.out_of_scope:",
+  "    autonomy: supervised-retro",
+  "```",
+  "",
+].join("\n");
+
 const POLICY_IRREVERSIBLE = [
   "# Policy",
   "",
@@ -652,6 +672,46 @@ const policyVectors = [
         classes: ["  harness.tool.unmapped:", "    autonomy: autonomous"],
         tools: ["tools:", "  - match: mcp__zzz__post", "    class: harness.tool.unmapped"],
       }),
+      class: "read.file",
+    },
+  },
+  // --- design v4: the guarded write class's built-in minimum -----------------
+  {
+    id: "write-guarded-minimum-clamps-a-wildcard",
+    description:
+      "`files.write.guarded` has a built-in minimum of manual. A `files.*` row at autonomous with allow_irreversible, under an autonomous default, still resolves it manual, with provenance floor; the policy written before the class existed loads exactly as it did",
+    input: { policy: POLICY_WRITE_PERMISSIVE, class: "files.write.guarded" },
+  },
+  {
+    id: "write-guarded-minimum-irreversible",
+    description: "the same with reversible: false: allow_irreversible does not lift the minimum either",
+    input: { policy: POLICY_WRITE_PERMISSIVE, class: "files.write.guarded", reversible: false },
+  },
+  {
+    id: "write-guarded-minimum-clamps-the-default",
+    description: "with no rule matching it, an autonomous `defaults.autonomy` is clamped to manual too",
+    input: { policy: POLICY_TOOLS_RECORD.replace("autonomy: manual", "autonomy: autonomous"), class: "files.write.guarded" },
+  },
+  {
+    id: "write-guarded-human-only-stands",
+    description: "a stricter answer stands: a row naming the class human-only resolves human-only",
+    input: {
+      policy: POLICY_WRITE_PERMISSIVE.replace("classes:\n", "classes:\n  files.write.guarded:\n    autonomy: human-only\n"),
+      class: "files.write.guarded",
+    },
+  },
+  {
+    id: "write-out-of-scope-resolves-by-its-row",
+    description: "`files.write.out_of_scope` has no minimum: its own row (the shipped supervised-retro) decides it",
+    input: { policy: POLICY_WRITE_PERMISSIVE, class: "files.write.out_of_scope" },
+  },
+  {
+    id: "fail-closed-write-guarded-row-below-minimum",
+    description:
+      "a row naming `files.write.guarded` itself below manual is refused at load with `class-minimum`, so every class resolves manual with no matched rule. Only the class's own key is refused: a wildcard is clamped at resolution instead",
+    control: true,
+    input: {
+      policy: POLICY_WRITE_PERMISSIVE.replace("classes:\n", "classes:\n  files.write.guarded:\n    autonomy: supervised-retro\n"),
       class: "read.file",
     },
   },
@@ -2237,6 +2297,162 @@ const commandClassVectors = [
       "a parameter expansion whose word is no .git leaves the write a workspace write (APRV-518, review of the substitution fold, S2 control)",
     input: { command: 'echo x > "${OUT:-build}/log.txt"' },
   },
+  // --- guarded names fold case on every platform -----------------------------
+  // APFS opens a name under full Unicode case folding, so each of these is the
+  // guarded file there; every spelling takes its canonical spelling's class.
+  {
+    id: "guarded-name-fold-policy-file-case",
+    description:
+      "a write to the policy file spelled in another case is policy.core: guarded names fold case on every platform",
+    input: { command: "echo x > Approval.MD" },
+  },
+  {
+    id: "guarded-name-fold-approval-home-case",
+    description:
+      "removing the approval home spelled in upper case is policy.core: guarded names fold case on every platform",
+    input: { command: "rm -rf .APPROVAL" },
+  },
+  {
+    id: "guarded-name-fold-log-case",
+    description:
+      "a write into the log directory spelled in upper case is log.mutate: guarded names fold case on every platform",
+    input: { command: "echo x > .APPROVAL/log/events.jsonl" },
+  },
+  {
+    id: "guarded-name-fold-claude-settings-case",
+    description:
+      "a write to the harness settings with the directory spelled in another case is policy.core: guarded names fold case on every platform",
+    input: { command: "echo x > .Claude/settings.json" },
+  },
+  {
+    id: "guarded-name-fold-kelvin-sign",
+    description:
+      "a write to .cursor/hooks.json spelled with the Kelvin sign (U+212A), which APFS opens as k, is policy.core",
+    input: { command: "echo x > .cursor/hooKs.json" },
+  },
+  {
+    id: "guarded-name-fold-long-s",
+    description:
+      "a write to .claude/settings.json spelled with the long s (U+017F), which APFS opens as s, is policy.core",
+    input: { command: "echo x > .claude/ſettings.json" },
+  },
+  {
+    id: "guarded-name-fold-fi-ligature",
+    description:
+      "a write to .codex/config.toml spelled with the fi ligature (U+FB01), which APFS opens as fi, is policy.core",
+    input: { command: "echo x > ~/.codex/conﬁg.toml" },
+  },
+  {
+    id: "guarded-name-fold-instructions-case",
+    description:
+      "a write to the agent instructions spelled in lower case is policy.edit: guarded names fold case on every platform",
+    input: { command: "echo x > claude.md" },
+  },
+  {
+    id: "guarded-name-fold-credential-long-s",
+    description:
+      "a read of the Hermes environment file with the home spelled with the long s (U+017F) is account.credential",
+    input: { command: "cat ~/.hermeſ/.env" },
+  },
+  {
+    id: "guarded-name-fold-control-unmoved",
+    description:
+      "a file whose name only contains a guarded name stays a workspace write (guarded names fold case control)",
+    input: { command: "echo x > approval-notes.md" },
+  },
+  // --- Claude Code config folders (S2, lead CLAIMS L62289) --------------------
+  // Every account run with `CLAUDE_CONFIG_DIR=~/.claude-<name>` reads its
+  // settings from that folder, so a `.claude-<suffix>` segment (one or more
+  // characters after the dash, through the fold) followed by `settings*` is
+  // the harness settings `.claude/settings*` is, in the FOLDED reading only:
+  // as spelled the word keeps the class it had before the rule, and both
+  // readings' classes are reported, so no policy finds the new answer
+  // lighter. A bare `.claude-` is not a config folder, and a file beside the
+  // settings keeps its class.
+  {
+    id: "claude-config-folder-settings",
+    description:
+      "a write to the settings of a .claude-<suffix> config folder is policy.core in the folded reading and keeps its workspace class as spelled: both are reported",
+    input: { command: "echo x > ~/.claude-work/settings.json" },
+  },
+  {
+    id: "claude-config-folder-settings-local-copy",
+    description:
+      "a copy onto settings.local.json in a .claude-<suffix> config folder is policy.core folded and a workspace write as spelled: both are reported",
+    input: { command: "cp a .claude-2/settings.local.json" },
+  },
+  {
+    id: "claude-config-folder-settings-case",
+    description:
+      "a write to a .claude-<suffix> config folder's settings spelled in another case is policy.core: guarded names fold case on every platform",
+    input: { command: "echo x > ~/.Claude-Work/Settings.json" },
+  },
+  {
+    id: "claude-config-folder-empty-suffix-unmoved",
+    description:
+      "a folder named .claude- with nothing after the dash is not a config folder: its settings.json stays a workspace write",
+    input: { command: "echo x > ~/.claude-/settings.json" },
+  },
+  {
+    id: "claude-config-folder-other-file-unmoved",
+    description:
+      "a file beside the settings in a .claude-<suffix> config folder stays a workspace write",
+    input: { command: "echo x > ~/.claude-work/notes.md" },
+  },
+  // --- every protected target of a segment is judged -------------------------
+  // One class named the segment, and the other protected paths it writes were
+  // judged on that class's terms. Each other class is its own entry over the
+  // same text, the one the classifier's precedence picks first.
+  {
+    id: "every-protected-target-two-positionals",
+    description:
+      "a command that writes an instruction file and the policy file is policy.core and policy.edit: every protected target's class is reported, the strictest by the classifier's precedence first",
+    input: { command: "tee CLAUDE.md APPROVAL.md" },
+  },
+  {
+    id: "every-protected-target-writer-and-redirect",
+    description:
+      "a writer in front of a redirection onto the policy file keeps the class of the protected path it names: redirect-protected policy.core, then policy.edit for the writer's own target",
+    input: { command: "tee CLAUDE.md > APPROVAL.md" },
+  },
+  {
+    id: "every-protected-target-reader-and-redirect",
+    description:
+      "a reader in front of a redirection onto the policy file adds nothing: its argument is read, not written (every-protected-target control)",
+    input: { command: "cat CLAUDE.md > APPROVAL.md" },
+  },
+  // A credential read that answers at once reports the protected paths the
+  // segment writes beside it, the credential class first.
+  {
+    id: "every-protected-target-credential-and-copy",
+    description:
+      "a copy of the environment map onto an instruction file is account.credential and policy.edit: the credential class answers first and the protected target's class is reported beside it",
+    input: { command: "cp .approval/env CLAUDE.md" },
+  },
+  {
+    id: "every-protected-target-credential-redirect-and-workflow",
+    description:
+      "a writer fed the environment map on stdin is account.credential and, for the workflow it writes, policy.edit",
+    input: { command: "tee .github/workflows/ci.yml < .approval/env" },
+  },
+  {
+    id: "every-protected-target-credential-reader",
+    description:
+      "a reader of the environment map adds nothing for the instruction file it also reads: account.credential alone (every-protected-target control)",
+    input: { command: "cat .approval/env CLAUDE.md" },
+  },
+  {
+    id: "every-protected-target-credential-through-a-wrapper",
+    description:
+      "a wrapper in front of the copy does not take the protected target off the answer: account.credential, then policy.edit for the instruction file. Without the credential word the line is refused, no rule covering `command`",
+    input: { command: "command cp .approval/env CLAUDE.md" },
+  },
+  {
+    id: "every-protected-target-credential-through-a-wrapper-built-target",
+    description:
+      "behind a wrapper, a target the shell builds fails closed as `cp .approval/env $X` does: account.credential, then policy.core (copy-target-unknown) for the variable. A quoted '$X' is a literal and the line is the credential class alone",
+    input: { command: "command cp .approval/env $X" },
+  },
   // --- launching an agent harness is its own class (APRV-354) ----------------
   {
     id: "harness-launch-bare",
@@ -2629,7 +2845,7 @@ const commandClassVectors = [
   {
     id: "prose-opening-with-a-protected-path-under-cp",
     description:
-      "the same shape under a different effectful row: cp scans its positionals source and destination alike, and a sentence is neither",
+      "the same shape under a different effectful row: cp's DESTINATION is a path by construction, whitespace and all (GLOB-WRITE, #686), and this one is under .github, so the copy is the guarded directory's write; a sentence-shaped SOURCE would still be prose",
     input: { command: 'cp a.txt ".github/workflows/pages.yml deploys the site on push"' },
   },
   {
@@ -2762,6 +2978,152 @@ const commandClassVectors = [
       "a here-string is refused as unparseable, as it was before this vector existed: parsing it could only loosen an answer, and a credential read through one has spellings that classify",
     input: { command: 'cat <<< "$(cat ~/.hermes/.env)"' },
     control: true,
+  },
+  // --- zsh's clobber redirections: read at zsh's target, or refused ----------
+  // Lead ruling L62319 (keeping L61206): a form read at the word zsh writes is
+  // read there, and the file bash writes rides beside; a form zsh reads
+  // otherwise keeps main's refusal (#700).
+  {
+    id: "zsh-clobber-redirect-is-read-at-its-target",
+    description:
+      "`>!` is one operator in zsh, and the word after it is the file written; bash reads a file named `!` and an argument. The word zsh writes is read, and the file bash writes rides beside",
+    input: { command: "echo x >! APPROVAL.md" },
+  },
+  {
+    id: "zsh-clobber-append-joined-is-read-at-its-target",
+    description: "the append form, joined to its target, with a descriptor in front: zsh appends to the policy file, bash to a file named `!APPROVAL.md`, and both are read",
+    input: { command: "echo x 1>>!APPROVAL.md" },
+  },
+  {
+    id: "zsh-clobber-in-a-bash-script-is-refused",
+    description: "inside a `bash -c` script `>!` is bash's, a file named `!APPROVAL.md`, not zsh's; the form keeps the refusal",
+    input: { command: "bash -c 'echo x >!APPROVAL.md'" },
+    control: true,
+  },
+  {
+    id: "zsh-clobber-two-digit-descriptor-is-refused",
+    description: "zsh reads `10` in front of `>!` as an argument, not a descriptor; the form keeps the refusal",
+    input: { command: "echo x 10>!APPROVAL.md" },
+    control: true,
+  },
+  {
+    id: "clobber-redirect-both-shells-share-is-read",
+    description: "beside the ones above: `>|` is the clobber operator bash and zsh share, and its target is read as any redirection target is",
+    input: { command: "echo x >| APPROVAL.md" },
+  },
+  // --- dollar-quoted words: the text the shell makes of them ----------------
+  // Lead ruling CLAIMS L62542: `$'…'` is decoded where bash and zsh decode it
+  // alike and `$"…"` is a double-quoted string; what the shells read
+  // differently is unknown, the way `$X` is. Where a dollar quote was read,
+  // the answer with dollar quotes kept as before rides beside.
+  {
+    id: "dollar-quote-ansi-c-names-the-policy-file",
+    description:
+      "`$'\\x41PPROVAL.md'` is `APPROVAL.md` to bash and zsh: the append is the policy file's write, and the earlier reading (a write to an unknown variable) rides beside",
+    input: { command: "echo x >> $'\\x41PPROVAL.md'" },
+  },
+  {
+    id: "dollar-quote-locale-string-names-a-credential",
+    description: "`$\"…\"` is a double-quoted string (the locale translation is the identity without a catalog): the read is the credential read it spells",
+    input: { command: 'cat $".approval/env"' },
+  },
+  {
+    id: "dollar-quote-escaped-quote-does-not-end-it",
+    description:
+      "inside `$'…'` a `\\'` is a quote character, so the string closes at the next quote and the words after it are commands bash and zsh run: the `rm` is read",
+    input: { command: "echo $'\\'' ; rm -rf APPROVAL.md #'" },
+  },
+  {
+    id: "dollar-quote-ordinary-message-is-unmoved",
+    description: "a commit message with escaped newlines keeps the class it had",
+    input: { command: "git commit -m $'fix\\n\\nbody'" },
+  },
+  {
+    id: "dollar-quote-escape-the-shells-read-differently-is-unknown",
+    description:
+      "bash keeps `\\V` and zsh drops its backslash, so the copy target is not settled by the text: the escape is an unread part spliced into the policy file's name (lead ruling L62568), and the copy asks with that file's class",
+    input: { command: "cp notes.txt $'APPRO\\VAL.md'" },
+  },
+  {
+    id: "dollar-quote-program-word-is-refused",
+    description: "a program spelled as a dollar quote keeps the refusal the earlier reading gives it",
+    input: { command: "$'rm' -rf x" },
+    control: true,
+  },
+  // --- an unread part spliced into a guarded name ----------------------------
+  // Lead ruling CLAIMS L62568: each unread part counts as any text, a `/`
+  // included, and the word is matched against every guarded path; a match
+  // counts where the word's literal text takes part in it, and a word opening
+  // with an unread directory asks where a guarded path ends in its tail.
+  {
+    id: "spliced-parameter-in-the-policy-file-name",
+    description: "with E empty the shell writes APPROVAL.md: the policy file's class, every other guarded class the word may reach (E holding a `/`), and the earlier workspace answer beside it",
+    input: { command: "echo x > APPROVAL$E.md" },
+  },
+  {
+    id: "spliced-parameter-after-a-guarded-folder-name",
+    description: "with S empty the write is .claude/settings.json: the settings file's class",
+    input: { command: "echo x > .claude$S/settings.json" },
+  },
+  {
+    id: "spliced-unread-directory-before-a-guarded-name",
+    description: "an unread directory whose literal tail ends a guarded path by name (.claude/settings.json) asks",
+    input: { command: "echo x > $D/settings.json" },
+  },
+  {
+    id: "spliced-unread-directory-before-an-ordinary-name-is-unmoved",
+    description: "an unread directory whose tail no guarded path ends in keeps the workspace answer (the directory alone could be .approval, which a word with no literal text reaches as well)",
+    input: { command: "echo x > $D/notes.md" },
+  },
+  {
+    id: "spliced-word-of-unread-parts-only-is-unmoved",
+    description: "a word with no literal text but `/` keeps main's answer for an unknown target",
+    input: { command: "echo x > $D/$F" },
+  },
+  {
+    id: "spliced-unread-directory-after-a-literal-folder",
+    description: "an unread directory below a literal guarded folder, with a literal tail, may be .github/workflows/ci.yml: the workflow's class (the literal text takes part)",
+    input: { command: "echo x > .github/$W/ci.yml" },
+  },
+  {
+    id: "spliced-dot-is-literal-text",
+    description: "a `.` in a component is literal text: .$X may be .approval, and the write asks with the strictest class it could reach, every other one beside it",
+    input: { command: "echo x > .$X" },
+  },
+  {
+    id: "dollar-quote-nul-then-tail",
+    description: "a dollar quote's NUL ends that quote's text in bash, and the word goes on: $'\\0'.approval/env is .approval/env (review of #709 at b58db9ec, M1)",
+    input: { command: "cat $'\\0'.approval/env" },
+  },
+  {
+    id: "dollar-quote-nul-zsh-reading",
+    description: "zsh ends the path at a dollar quote's NUL: $'APPROVAL.md\\0'.bak is APPROVAL.md to zsh, read beside bash's APPROVAL.md.bak",
+    input: { command: "echo x > $'APPROVAL.md\\0'.bak" },
+  },
+  {
+    id: "dollar-quote-short-u-escape",
+    description: "\\u with fewer than four digits is decoded where the character is ASCII, as zsh reads it (bash 3.2's reading as written is main's, beside)",
+    input: { command: "rm -f $'\\u41'PPROVAL.md" },
+  },
+  {
+    id: "dollar-quote-nested-hash",
+    description: "a nested script in a dollar quote whose # would end a comment in one reading: refused, as the reading as written is (review of #709, S3)",
+    input: { command: "bash -c $'echo hi # ; echo x > \\x41PPROVAL.md'" },
+  },
+  {
+    id: "home-variable-inside-a-word",
+    description: "a home variable is the home only as a word's first component; inside a word an unset HERMES_HOME is empty, so the word may be the policy file (review of #709, M2)",
+    input: { command: "rm -f APPROVAL${HERMES_HOME}.md" },
+  },
+  {
+    id: "spliced-credential-read",
+    description: "a read of .approval/$F may read the environment map, as cat .approval/env does: the credential's class (lead ruling L62542, for reads too)",
+    input: { command: "cat .approval/$F" },
+  },
+  {
+    id: "spliced-read-of-an-ordinary-name-is-unmoved",
+    description: "a read whose literal text no credential file holds keeps main's answer",
+    input: { command: "cat out/$F.txt" },
   },
   {
     id: "redirect-read-of-an-ordinary-file-is-a-read",
@@ -3742,6 +4104,16 @@ const commandClassVectors = [
     input: { command: "cat ~/.hermes/.op.env}" },
   },
   {
+    id: "brace-unmatched-close-approval-credential-read",
+    description: "a stray } after the approval home's environment map: the brace reader strips it, and the read is the credential's (build-6, the brace memo's review)",
+    input: { command: "cat .approval/env}" },
+  },
+  {
+    id: "brace-unmatched-close-policy-file-write",
+    description: "a stray } after the policy file's name: the brace reader strips it, and the write is the policy file's (build-6, the brace memo's review)",
+    input: { command: "echo x > APPROVAL.md}" },
+  },
+  {
     id: "brace-stray-in-ordinary-text-is-unmoved",
     description:
       "braces in ordinary text stay ordinary",
@@ -4125,7 +4497,7 @@ const commandClassVectors = [
   {
     id: "cp-dot-slash-glob-is-unmoved",
     description:
-      "./* can only expand to words beginning ./, never to an option",
+      "./* can only expand to words beginning ./, never to an option; but the copy lands docs/<each match>, and *.md may match APPROVAL.md, which is guarded at any depth (GLOB-WRITE, #686): with no listing of the source directory the landing pattern is the policy write",
     input: { command: "cp ./*.md docs/" },
   },
   {
@@ -4990,7 +5362,15 @@ const SUITES = [
     // on the box branches on these strings. Stacked on 30.0.0; if another
     // lane's major merges first, the collision rule above applies and this
     // takes the next major on regeneration.
-    vectors_version: "31.0.0",
+    //
+    // 32.0.0 (#693, the hook's own deadline; set at the 0.4.9 release cut,
+    // lead ruling L62887): `hook_deny_codes` gains `hook-deadline`, after
+    // `hook-harness-cap-too-short`: the refusal of a call the hook could not
+    // read within its own deadline, given instead of letting the call run
+    // ungated when the harness stops listening. Major for the same reason as
+    // every bump here: the vector pins the whole array in definition order.
+    // #693 merged with the number standing at 31.0.0; the release cut set it.
+    vectors_version: "32.0.0",
     algorithm: "SPEC.md §11.1 invariant 6: refusals are machine-readable and distinct",
     description:
       "The closed unions of refusal codes. A caller branches on these strings, so adding, removing, or renaming one is a breaking change and shows up here as a diff.",
@@ -5030,7 +5410,16 @@ const SUITES = [
     // and it cannot produce the new failure class `delegation-not-supported`.
     // The block's relationship checks (exact class keys, the max_autonomy pin)
     // fail as `schema-invalid` and win over the reservation.
-    vectors_version: "5.0.0",
+    // 5.1.0 (#695, `files.write.guarded` and `write_scope`; set at the 0.4.9
+    // release cut, lead ruling L62887): a MINOR bump. Six new vectors, no
+    // existing expectation moved, and the `algorithm` line is unchanged: the
+    // guarded class's built-in minimum of `manual` clamping a `files.*`
+    // wildcard row, an irreversible action and the default; a `human-only`
+    // `files.write.guarded` row standing; `files.write.out_of_scope`
+    // resolving by its own row; and a control, a `files.write.guarded` row
+    // below the minimum, which fails the whole policy closed as
+    // `class-minimum`. #695 merged with the number standing at 5.0.0.
+    vectors_version: "5.1.0",
     algorithm:
       "SPEC.md §5.2 class matching, specificity and unanimous irreversible permission, the policy.edit sub-class inheritance rule, the harness.tool.unmapped default from defaults.unmapped_tool, the tools-entry load checks, the reserved delegation block, §7 irreversibility floor",
     description:
@@ -5598,7 +5987,48 @@ const SUITES = [
     // fold adds three more in the same unreleased 1.12.0: a write through
     // `$'\x2egit'` and one through `${VAR:-.git}`, and a control,
     // `"${OUT:-build}/log.txt"`, which stays a workspace write.
-    vectors_version: "1.12.0",
+    // Guarded names fold case on every platform: ten more vectors in the same
+    // unreleased 1.12.0, and no expectation moved: a policy file, approval
+    // home, log, harness settings and instructions write spelled in another
+    // case, one spelling each with the Kelvin sign, the long s and the fi
+    // ligature that APFS opens as the ASCII name, a credential read through a
+    // long-s home, and a control, `approval-notes.md`, which stays a workspace
+    // write. Regenerating over main's 382 leaves them byte-identical. The
+    // number was bumped once, at the 0.4.9 release cut, for every change it
+    // carries.
+    // zsh's clobber redirections: five more in the same unreleased 1.12.0,
+    // `>!` and `1>>!` read at zsh's target (lead ruling L62319), `bash -c`
+    // and a two-digit descriptor refused (controls), and `>|`, which reads as
+    // it did.
+    // Claude Code config folders (S2): five more vectors in the same
+    // unreleased 1.12.0, and no expectation moved: a `.claude-<suffix>`
+    // folder's settings, settings.local.json and a case spelling are
+    // policy.core folded and keep their workspace class as spelled (both
+    // reported); a bare `.claude-` folder and a file beside the settings
+    // stay workspace writes.
+    //
+    // 2.0.0 (the 0.4.9 release cut, lead ruling L62887): a MAJOR bump,
+    // because three expectations 0.4.8 released under 1.9.0 moved in #686
+    // (GLOB-WRITE), each to the stricter answer:
+    // `prose-opening-with-a-protected-path-under-cp` (a `cp` destination
+    // under `.github` is now `policy.edit`), `cp-dot-slash-glob-is-unmoved`
+    // (`cp ./*.md docs/` is now `policy.core`: the landing `docs/*.md` may be
+    // `docs/APPROVAL.md`) and `a-deeper-match-than-the-head-is-unmoved` (the
+    // `APPROVAL.md` destination also names `policy.edit` on the landing
+    // `.../APPROVAL.md/a.md`). Against 0.4.8's 354 vectors the file has 432,
+    // seventy-eight new and none removed: sixteen from #676, five from #677
+    // and seven from #680 (the 1.10.0 to 1.12.0 minors), then, with 1.12.0
+    // standing, ten from #688, three from #690, three from #700, four from
+    // #686, four from #701 and five from #695, and one from #706 and
+    // twenty-two from #709, merged into the release branch with 2.0.0
+    // standing (the release sets the number once). #686 also replaced #700's
+    // two refused `zsh-clobber-*` vectors and moved #688's
+    // `guarded-name-fold-approval-home-case`, and #709 moved #680's
+    // `git-dir-write-split-across-substitution` and
+    // `git-dir-write-ansi-c-quoting`, none of them released. If
+    // another lane's number merges first, the collision rule (1.4.0, the
+    // number is claimed at merge) applies on regeneration.
+    vectors_version: "2.0.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:

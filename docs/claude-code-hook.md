@@ -231,6 +231,42 @@ Install the CLI on `PATH` (`npm link`, or an absolute path in the `command`).
 which means the tool call proceeds.** An uninstalled CLI is therefore an open
 gate, and `approval doctor` will not know to look for it.
 
+### The hook's own deadline: `hook-deadline`
+
+A killed hook is a call that proceeds, so the hook must never be the thing the
+harness kills. Two rules keep it inside the harness's timeout whatever the
+tool call holds:
+
+- **Reading the call has a deadline of its own: 15s**, or the harness ceiling
+  less two seconds where one is stated or assumed and that is shorter (8s
+  under `--harness-cap 10s`; under a ceiling too short to spare two seconds, a
+  quarter of it: 500ms under 2s). A call the hook cannot classify and land on the
+  disk in that time is refused `hook-deadline`, with nothing registered or
+  requested. Reading an ordinary call takes milliseconds; a megabyte of
+  command takes a second or two. The environment variable
+  `APPROVAL_HOOK_DESCRIBE_DEADLINE_MS` can shorten the deadline and can never
+  lengthen it.
+- **An entry whose `timeout` is under about 17s must say so.** The hook does
+  not see the `timeout` you wrote. Without `--harness-cap` the deadline is the
+  full 15s, and a harness that stops listening sooner has let the call through
+  before the hook refuses it. `--harness-cap <that timeout>` puts the deadline
+  inside it. (A stated cap at or under 60s still leaves no window for a human,
+  so a call that needs one is refused `hook-harness-cap-too-short`; a call that
+  needs none is answered as usual.)
+- **A slow read shortens the wait.** `--timeout` sits a little under the
+  harness's own timeout, and the harness's timer started before the read did.
+  A read that takes more than one second shortens the wait for a decision by
+  the rest, down to none; the hook says so on stderr. The question stays open
+  for the retry grace as after any wait that ran out. An ordinary read takes
+  milliseconds and changes nothing.
+
+The deadline interrupts the hook's own JavaScript. It does not interrupt a
+blocking system call. A read that is stopped is stopped part way, so a process
+that answers many calls on one thread (the Codex bridge) refuses every later
+call `hook-deadline` too, and says so, until it is started again. A hook the
+harness runs once per call starts fresh each time, and `approval serve`
+retires the thread that was stopped.
+
 ### The effective window: `--harness-cap`, and the 60s margin (APRV-423)
 
 Claude Code kills the hook process at the `timeout` in `.claude/settings.json`,
@@ -1028,11 +1064,44 @@ the shell reads it, its pieces decoded and joined (`$'\x2e'"g""i""t"`), and a
 quote that does not close counts. What `printf` or `echo` prints is read from
 the body's words with quotes removed: the format filled from its arguments,
 escapes decoded, an argument the text cannot read an unknown output, and a
-body's segments printed in turn (`$(printf .g; printf it)`). Every operator
+body's segments printed in turn (`$(printf .g; printf it)`). `printf` and
+`echo` named by the system's path (`/usr/bin/printf`) are read the same way,
+and also as an unknown output, as before they were read, so a body is never
+read looser than that (`printf .g; /usr/bin/printf x` still counts). Any
+other path whose last name is a printer (`/usr/bin//printf`,
+`/bin/../usr/bin/printf`, `./printf`) may run the system's own, and what it
+prints counts. `printf -v` and zsh's `print -v` set a variable to what
+would be printed: the line then counts as spelling `.git`, so a target the
+variable reaches counts (`printf -v d %.4s .gitfoo; echo x > "$d/config"`),
+and in a body such a segment counts.
+printf is read only when its format is a literal word using no conversion
+but `%s`, `%b`, `%c` and `%d` (with flags, width and precision) and every word
+after it keeps its place: a literal word, or a fully quoted plain scalar
+whose whole text is one name (`"$SHA"`, `"${SHA}"`). Anything else counts
+as naming `.git`: a quoted word whose text this lexer does not keep as the
+shell's (`"\x2e""git"`, whose backslash it drops), a `\c` in any printf
+or echo word (it stops all output: `printf %b '.g\cX'; printf it` is
+`.git`), a format held in a
+variable (`F=%.4s; printf "$F" .gitfoo`, `printf $F`), a length modifier
+(`%.4ls`, which bash cuts as `%.4s`), `%q`, `%Q`, bash's `%(…)T`, a `%` the
+parse did not take (`printf %`, `printf '%s%' a`; a `%%` is read), and a word that may become no word or several (`$u`,
+`"$@"`, `${a[@]}`, `${!r}`, `{a,b}`, `*`), since it moves which conversion
+takes the words after it (`printf '%.4s%.0s' $u .gitfoo` is `.git` when `u`
+is empty). `echo` is read only when every word keeps its place and holds
+no value the text cannot read, since zsh's `echo` decodes escapes without
+`-e` (`X='\056git'; echo x > "$(echo "$X")/config"` lands in `.git`); `%b`
+of such a value, zsh's `print` with one, an ANSI-C or locale word
+(`$'.gitfoo'`) and a format whose escapes decode to a `%` count too. So
+`"$(echo $(date +%F))"` asks, while `"$(cat $(date +%F))"` does not. Every operator
 that transforms a value (removal, substring, replacement, case, `@`) counts,
 on any parameter, a name the line sets included: so `echo x >
 "${f%.txt}.log"` and `"${1%.md}.html"` are `git-dir-write`, while a length,
-a plain `${f}`, an indirection and `:?` stay unknown values. (Working the
+a plain `${f}`, an indirection and `:?` stay unknown values. zsh's
+subscripts and modifiers count the same way: in braces any subscript but
+`[@]` and `[*]` (`${f[1,4]}`, `${f[2]}`), and after an unbraced parameter,
+special ones included, any `[` or a `:` then a letter or `&` (`$f[1,4]`,
+`$f:r`, `$f:S/x/i/`, `$@:r`), as do zsh's flags before an unbraced name
+(`$=f`, `$~f`, `$^f`); this also asks for `"$HOST:path"`. (Working the
 result out exactly was tried and left out: each review round found another
 shell corner.) `${!-.git}` is the default word of `$!`, read as the operator
 it is; and a `${` that does not close counts. Inside an operator's word a nested
@@ -1742,6 +1811,7 @@ The `permissionDecisionReason` is `<code>: <detail>`, and the codes are frozen i
 | `hook-expired` | the TTL lapsed before a decision |
 | `hook-timeout` | no decision inside `--timeout` (clamped to what a stated or assumed harness ceiling leaves); the request stays OPEN, and a decision inside the RETRY GRACE authorizes an identical retry, once. Past the grace it authorizes nothing: the next gated call of this actor withdraws the question, and a retry does not carry a grant written after the grace ran out (APRV-410). Under a harness ceiling the deny names the instant the request expires |
 | `hook-harness-cap-too-short` | the `--harness-cap` this hook was told about does not clear the 60s margin, so no window is left for a human. Nothing registered, nothing requested, no prompt sent |
+| `hook-deadline` | reading the call (classifying it and landing its paths on the disk) outlasted the hook's own 15s limit, shorter under a short harness ceiling. The call is refused while the hook can still say so: a hook the harness kills at its timeout is a call that proceeds. Nothing registered, nothing requested. Make the call shorter or split it |
 | `hook-withdrawn` | the request was withdrawn before a decision landed |
 | `hook-gate-refused:<code>` | the gate refused intake; `<code>` is its own frozen refusal code |
 | `hook-grant-unverified` | the grant was spent, and the verified log cannot be seen to carry the `execution.started` recording it. On this surface the record IS the authorization, because the harness executes and never sees the gate's return value, so no verdict is printed until the chain carries it. The grant is spent by then: the retry costs one prompt and authorizes nothing meanwhile |

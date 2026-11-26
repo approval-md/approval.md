@@ -30,7 +30,7 @@ import { accessSync, constants, statSync } from "node:fs";
 import { isAbsolute, join, resolve as resolvePathSegments } from "node:path";
 
 import { explain, isActionClass, type Explanation } from "../core/policy-explain.js";
-import { loadPolicy, POLICY_FILENAMES, type LoadPolicyOptions } from "../core/policy-load.js";
+import { loadPolicy, POLICY_FILENAMES, protectedRouteSpellingNotes, type LoadPolicyOptions } from "../core/policy-load.js";
 import { commandPolicyAmend } from "./amend.js";
 import { commandPolicyApply } from "./policy-apply.js";
 import { boolFlag, parseFlags, stringFlag, type FlagKind } from "./args.js";
@@ -221,7 +221,8 @@ function runVerb(argv: string[], streams: Streams, cwd: string, helpText: string
     if (!check.ok) return ioError(streams, json, check.message);
   }
 
-  const explanation = explain(loadPolicy(options), actionClass, {
+  const loaded = loadPolicy(options);
+  const explanation = explain(loaded, actionClass, {
     ...(reversibleFlag === null ? {} : { reversible: reversibleFlag === "true" }),
     // APRV-347. Resolved HERE, where the process may touch a disk, so the read
     // scope a reader is shown is the one this machine would actually enforce
@@ -233,12 +234,20 @@ function runVerb(argv: string[], streams: Streams, cwd: string, helpText: string
     streams.out(`${JSON.stringify(explanation)}\n`);
   } else {
     streams.out(renderExplainHuman(explanation, cwd, style({ json })));
+    // A routed entry spelled like a built-in guarded path in another case
+    // loads, as it did before names folded; say what it does and does not do.
+    // Human output only: `--json` keeps its frozen shape.
+    for (const note of protectedRouteSpellingNotes(loaded)) streams.out(`note: ${note}\n`);
   }
   return EXIT_OK;
 }
 
-/** `approval policy …` — dispatch to `check` / `test`, or print the help. */
-export function commandPolicy(argv: string[], streams: Streams, cwd: string): number {
+/**
+ * `approval policy …` — dispatch to `check` / `test`, or print the help.
+ * Asynchronous because `amend` and `apply` are (the agent path's wait turns
+ * the event loop; `cli/amend.ts`, `pauseForSignals`).
+ */
+export async function commandPolicy(argv: string[], streams: Streams, cwd: string): Promise<number> {
   const sub = argv[0];
   const rest = argv.slice(1);
 

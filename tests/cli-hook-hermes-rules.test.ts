@@ -712,7 +712,6 @@ test("recheck 3: ordinary work under the home is allowed; the home's roots, glob
     ["terminal", { command: "find . -name '*.md'", workdir: skills }],
     ["terminal", { command: "du -sh .", workdir: workspace }],
     ["terminal", { command: "rm -f *.tmp", workdir: workspace }],
-    ["terminal", { command: 'echo hi > "out_$N.txt"', workdir: workspace }],
     ["terminal", { command: "cp /tmp/a.txt .", workdir: workspace }],
     ["terminal", { command: "cp -r /tmp/stuff/. .", workdir: workspace }],
     ["terminal", { command: "tar -xf /tmp/x.tar", workdir: workspace }],
@@ -724,6 +723,16 @@ test("recheck 3: ordinary work under the home is allowed; the home's roots, glob
   for (const [tool, input] of allowed) {
     const run = hook(dir, event(dir, { tool_name: tool, tool_input: input }));
     assert.equal(verdictOf(run).permission, "allow", `${tool} ${JSON.stringify(input)}: ${run.stdout} ${run.stderr}`);
+  }
+  // Design v4, decision B: `$N` is a variable the line does not set, so the
+  // target cannot be read and the write is files.write.guarded (never lighter
+  // than manual, which a 30s Hermes ceiling cannot wait for). It takes no
+  // organ class: the directory is known, as recheck 3 said.
+  {
+    const run = hook(dir, event(dir, { tool_name: "terminal", tool_input: { command: 'echo hi > "out_$N.txt"', workdir: workspace } }));
+    assert.equal(verdictOf(run).permission, "deny", run.stdout);
+    assert.match(run.stdout, /files\.write\.guarded/u, run.stdout);
+    for (const organ of ["policy.core", "cron.manage", "account.credential"]) assert.equal(classesOf(run).includes(organ), false, organ);
   }
 
   const denied: Array<[string, Record<string, unknown>, string]> = [

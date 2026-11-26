@@ -40,6 +40,7 @@ import {
   isGateOrganPath,
   protectedPathClass,
 } from "../src/core/command-class.js";
+import { runner, scaledBound } from "./cost-runner.js";
 
 function classesOf(command: string): string[] {
   const result = classifyCommand(command);
@@ -296,12 +297,14 @@ test("any other unexpanded variable may be the home: its organ and credential ro
   for (const command of ["cat $X/.env", 'cat "$D/.op.env"', "cat ${D}/auth.json"]) {
     assert.deepEqual(classesOf(command), ["account.credential"], command);
   }
-  // Not the bare home, not the scheduler: `$OUT` alone and `$OUT/scripts/x`
-  // are ordinary work far more often (the Hermes hook's disk pass judges a
-  // variable that decides the directory policy.core on its own).
-  for (const command of ['echo x > "$OUT"', "echo x > $OUT/scripts/build.sh", "echo x > $OUT/notes.md"]) {
+  // Not the bare home: `$OUT` alone and `$OUT/notes.md` are ordinary work far
+  // more often (the Hermes hook's disk pass judges a variable that decides
+  // the directory policy.core on its own).
+  for (const command of ['echo x > "$OUT"', "echo x > $OUT/notes.md"]) {
     assert.deepEqual(classesOf(command), ["files.write.workspace"], command);
   }
+  // `$OUT/scripts/x` may be the scheduler's directory: cron.manage beside the write (rulings L62568, L62801).
+  assert.deepEqual(classesOf("echo x > $OUT/scripts/build.sh"), ["cron.manage", "files.write.workspace"]);
 });
 
 test("spelling variants the loaders honour: case, ./, trailing slash, .., env-file names", () => {
@@ -544,7 +547,8 @@ test("recheck S(new): the brace expander is bounded and fails to the stricter cl
   // 10.3 s and 10.4 s). About 2 CPU s on a laptop; the bound is the old one.
   const used = process.cpuUsage(start);
   const ms = (used.user + used.system) / 1000;
-  assert.ok(ms < 10_000, `took ${ms.toFixed(0)} CPU ms`);
+  const bound = scaledBound(10) * 1000;
+  assert.ok(ms < bound, `took ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (10 s x ${runner().line})`);
 });
 
 test("cost: nested literal braces are read in one pass, not one scan per brace", () => {
@@ -558,7 +562,8 @@ test("cost: nested literal braces are read in one pass, not one scan per brace",
       classes = classesOf(line);
     });
     assert.deepEqual(classes, ["files.write.workspace"], `n=${String(n)}`);
-    assert.ok(ms < 2_000, `n=${String(n)}: ${ms.toFixed(0)} CPU ms, bound 2,000`);
+    const bound = scaledBound(2) * 1000;
+    assert.ok(ms < bound, `n=${String(n)}: ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (2 s x ${runner().line})`);
   }
 });
 
@@ -729,13 +734,17 @@ test("fix round 3 S(open): an argv word the shell may still make into an option 
     ['curl -o out.json -- "$URL"', "network.call"],
     ["wget -q https://e/x -O out.html", "read.web"],
     ['cp -- "$f" bak/', "files.write.workspace"],
-    ["cp ./*.md docs/", "files.write.workspace"],
+    // GLOB-WRITE round 3 (lead ruling L61195 b): `./*.md` may be APPROVAL.md,
+    // which lands as docs/APPROVAL.md; with no listing (the core alone) that is
+    // policy.core, and the hook decides by what the directory holds. Main's
+    // class rides beside it (lead ruling L61926): see the pair below.
     ["cp src/*.ts dist/", "files.write.workspace"],
     ["mv notes.md archive/", "files.write.workspace"],
     ["cp a{1,2}.md docs/", "files.write.workspace"],
   ] as const) {
     assert.deepEqual(classesOf(command), [cls], command);
   }
+  assert.deepEqual(classesOf("cp ./*.md docs/"), ["policy.core", "files.write.workspace"]);
 });
 
 test("fix round 3 N-a: an over-cap brace word of plain numbers is judged by its first word; letters keep the stricter class", () => {

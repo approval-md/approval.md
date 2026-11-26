@@ -65,6 +65,7 @@ test("every class in the canonical policy resolves to its expected rule", () => 
     ["read.web.page", "read.*", "autonomous"],
     ["read.file", "read.*", "autonomous"],
     ["files.write.workspace", "files.write.workspace", "autonomous"],
+    ["files.write.out_of_scope", "files.write.out_of_scope", "supervised"],
     ["calendar.write.own", "calendar.write.own", "supervised"],
     ["communicate.email.draft", "communicate.email.draft", "autonomous"],
     ["communicate.email.external", "communicate.email.external", "manual"],

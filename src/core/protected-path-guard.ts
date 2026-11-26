@@ -268,14 +268,15 @@
 import { organAttestationOf, pathSignOffOf } from "./attest.js";
 import { parseApplyPatch } from "./apply-patch.js";
 import {
-  classifyCommand,
+  classifyCommandInThisReading,
   isGateOrganPath,
   isProtectedPath,
   normalizePathSpelling,
   POLICY_EDIT_SUBCLASS,
-  protectedPathClass,
+  protectedPathClassReadings,
   type ProtectedPathEntry,
 } from "./command-class.js";
+import { eachNameReading } from "./name-fold.js";
 import type { EventRecord } from "./log.js";
 import { payloadHash } from "./payload.js";
 
@@ -658,6 +659,10 @@ function namesProtectedFile(file: string, path: string): boolean {
  *
  * A command the classifier refuses (opaque, unclassifiable) yields no evidence,
  * which is the fail-closed direction: an unreadable command is not a licence.
+ *
+ * Evidence is a grant, so it must hold in both name readings (`name-fold.ts`):
+ * a fold that makes a segment a protected write does not, on its own, make a
+ * granted command evidence for a path it was not evidence for before.
  */
 function commandWritesPath(
   command: string,
@@ -665,7 +670,18 @@ function commandWritesPath(
   policyProtectedPaths: readonly ProtectedPathEntry[],
   cwd: string | undefined,
 ): { text: string; named: string } | null {
-  const classified = classifyCommand(command, policyProtectedPaths);
+  const readings = eachNameReading(() => commandWritesPathAsRead(command, path, policyProtectedPaths, cwd));
+  return readings.every((found) => found !== null) ? readings[0] : null;
+}
+
+/** {@link commandWritesPath} in the current name reading. */
+function commandWritesPathAsRead(
+  command: string,
+  path: string,
+  policyProtectedPaths: readonly ProtectedPathEntry[],
+  cwd: string | undefined,
+): { text: string; named: string } | null {
+  const classified = classifyCommandInThisReading(command, policyProtectedPaths);
   if (!classified.ok) return null;
   for (const segment of classified.segments) {
     if (!isGrantingClass(segment.class)) continue;
@@ -1088,8 +1104,10 @@ function policyAuthorizedEvidence(
 
   // The exact routed class is authority. Merely living in policy.edit.* is not.
   if (hasAmbiguousRoute(path, policyProtectedPaths)) return null;
-  const routed = protectedPathClass(path, policyProtectedPaths);
-  if (routed === null || routed === "policy.core" || routed === "log.mutate" || cls !== routed) {
+  // The routed class in every name reading (`name-fold.ts`): evidence is a
+  // grant, so the record's class must be the route in each.
+  const routes = protectedPathClassReadings(path, policyProtectedPaths);
+  if (routes.some((routed) => routed === null || routed === "policy.core" || routed === "log.mutate" || cls !== routed)) {
     return null;
   }
 
@@ -1172,8 +1190,10 @@ function startForReplayGrant(
   const hash = granted["payload_hash"];
   if (typeof cls !== "string" || typeof hash !== "string" || hash !== candidate.payloadHash) return null;
   if (hasAmbiguousRoute(path, policyProtectedPaths)) return null;
-  const routed = protectedPathClass(path, policyProtectedPaths);
-  if (routed === null || routed === "policy.core" || routed === "log.mutate" || cls !== routed) {
+  // The routed class in every name reading (`name-fold.ts`): evidence is a
+  // grant, so the record's class must be the route in each.
+  const routes = protectedPathClassReadings(path, policyProtectedPaths);
+  if (routes.some((routed) => routed === null || routed === "policy.core" || routed === "log.mutate" || cls !== routed)) {
     return null;
   }
 
@@ -1644,8 +1664,10 @@ function organKey(organPath: string, sha256: string): string {
  * a path no list protects is not.
  */
 function signOffEligible(path: string, extra: readonly ProtectedPathEntry[]): boolean {
-  const routed = protectedPathClass(path, extra);
-  return routed === "policy.edit" || (routed !== null && POLICY_EDIT_SUBCLASS.test(routed));
+  // A grant: eligible in every name reading (`name-fold.ts`).
+  return protectedPathClassReadings(path, extra).every(
+    (routed) => routed === "policy.edit" || (routed !== null && POLICY_EDIT_SUBCLASS.test(routed)),
+  );
 }
 
 /**

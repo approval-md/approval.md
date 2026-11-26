@@ -382,8 +382,13 @@ function classified(command: string, cwd: string): { class: string; rule: string
   assert.equal(result.ok, true, `${command}: ${result.ok ? "" : `${result.code}: ${result.detail}`}`);
   if (!result.ok) throw new Error("unreachable");
   const pushes = result.segments.filter((segment) => segment.rule.startsWith("git-push") || segment.rule === "git-ref-delete");
-  assert.equal(pushes.length, 1, `${command}: ${JSON.stringify(result.segments)}`);
-  const segment = pushes[0] as { class: string; rule: string };
+  // The zsh option reading (#682) may add a stricter segment beside the one
+  // as written (`HEAD~1` read as the glob `HEAD`); the one as written is the
+  // answer compared here, and the others only add classes.
+  const written = pushes.filter((segment) => segment.text === command);
+  const answer = written.length === 1 ? written : pushes;
+  assert.equal(answer.length, 1, `${command}: ${JSON.stringify(result.segments)}`);
+  const segment = answer[0] as { class: string; rule: string };
   return { class: segment.class, rule: segment.rule };
 }
 
@@ -655,7 +660,9 @@ test("review: a mirror appended to ~/.gitconfig on the same line is refused, and
     const result = classifyForHook(command, [], fixture.clone).result;
     assert.equal(result.ok, true);
     if (!result.ok) return;
-    assert.deepEqual(result.classes, ["vcs.history.rewrite"]);
+    // Design v4: ~/.gitconfig is on the guarded list, so the write is also
+    // files.write.guarded (whose minimum is manual).
+    assert.deepEqual(result.classes, ["vcs.history.rewrite", "files.write.guarded"]);
     assert.equal(result.segments[0]?.rule, "git-config-file-write");
     const before = refsOf(fixture.remote);
     assert.equal(sh(fixture.clone, command).status, 0);

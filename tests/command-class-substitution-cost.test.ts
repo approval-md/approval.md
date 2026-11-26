@@ -12,7 +12,10 @@
  *
  * CPU time, not wall-clock time: this machine is shared. Each bound is about
  * ten times the slowest figure measured (0.7 s, a word of 10,000 brace
- * groups and outputs), and far under the 60 s a hook is given. Sizes run
+ * groups and outputs), and far under the 60 s a hook is given. The bound is
+ * written for one kind of runner and stretched by how slow THIS runner is,
+ * measured in this run (`tests/cost-runner.ts`): a slow runner is measured,
+ * not guessed, and a failure names the factor it was given. Sizes run
  * smallest first, and once one line passes the bound the larger ones fail
  * at once, so a slow build fails in minutes, not after hours.
  * Hermetic: HOME is a fixture directory; git runs only to make a checkout,
@@ -28,6 +31,7 @@ import { after, test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand, globSegmentMatches } from "../src/core/command-class.js";
+import { cpuSeconds, MOST, runner, scaledBound } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-subst-cost-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -45,16 +49,12 @@ delete process.env["CDPATH"];
 const GIT = spawnSync("git", ["--version"]).status === 0;
 const skip = GIT ? false : "no git binary";
 
-/** The most CPU seconds one classification may take here. */
+/**
+ * The most CPU seconds one classification may take on the runner the bound
+ * was set on. Every use goes through {@link scaledBound}, which stretches it
+ * by this runner's measured factor.
+ */
 const BOUND = 8;
-
-/** CPU seconds (user and system) spent in `run`. */
-function cpuSeconds(run: () => void): number {
-  const start = process.cpuUsage();
-  run();
-  const used = process.cpuUsage(start);
-  return (used.user + used.system) / 1e6;
-}
 
 /** Every segment as `class rule`, pure; a refusal as `refused <code>`. */
 function pure(command: string): string[] {
@@ -74,22 +74,63 @@ function notAlreadyOver(label: string): void {
   assert.equal(overBound, null, `${label}: not timed, an earlier line passed the bound (${String(overBound)})`);
 }
 
-/** Fail if `seconds` is over {@link BOUND}, and remember it. */
-function withinBound(seconds: number, label: string): void {
-  if (seconds >= BOUND) overBound = label;
-  assert.ok(seconds < BOUND, `${label}: ${seconds.toFixed(2)} CPU s, bound ${String(BOUND)}`);
+/**
+ * The bound of ONE line, "many command words, n=400000", in CPU seconds, not
+ * stretched by the runner's factor (lead, CLAIMS L61975; review of e30fab93).
+ *
+ * The calibration does not track this line: CI's node 22 runner reads it 4.4
+ * to 4.9 times slower than a laptop does, and the calibration only 1.55
+ * times, so the factor there is 1.00 while the line sits at the general
+ * bound of 8 (8.28 CPU s in run 45219782548, a head whose cost equals
+ * main's). So its bound is set from CI's own figure for main: 1.5 times the
+ * CPU seconds main's code takes on that runner, measured in this PR's own
+ * run (it changes tests only). A head 50% slower than main still fails.
+ *
+ * The figure: 7.35 CPU s, run 45231949630, the full gate's node 22 job, shard
+ * 1 (`# cost-line:` in its log; the calibration took 0.419 CPU s in the same
+ * process). One run, one measurement, taken cold as the test takes it. A
+ * laptop reads the line in 1.4 to 1.9, so this bound is loose there: it is
+ * CI that holds the line to it. The line logs its figure in every run.
+ */
+const MANY_COMMAND_WORDS_BOUND = 1.5 * 7.35;
+
+/**
+ * Fail if `seconds` is over the bound, and remember it. The bound is
+ * {@link BOUND} as this runner stretches it, or `own` as written.
+ */
+function withinBound(seconds: number, label: string, own?: number): void {
+  const bound = own ?? scaledBound(BOUND);
+  if (seconds >= bound) overBound = label;
+  const how = own === undefined ? `${String(BOUND)} x ${runner().line}` : "this line's own bound, set from main's figure on CI and not stretched";
+  assert.ok(seconds < bound, `${label}: ${seconds.toFixed(2)} CPU s, bound ${bound.toFixed(2)} (${how})`);
 }
 
-/** Classify `command` (pure) and fail if it took more than {@link BOUND} CPU seconds. */
-function bounded(command: string, label: string): string[] {
+/**
+ * Classify `command` (pure) and fail if it took more than {@link BOUND} CPU
+ * seconds, or more than `own` where the line has a bound of its own. A line
+ * with its own bound logs what it took, so the figure the bound came from can
+ * be read again in any run.
+ */
+function bounded(command: string, label: string, own?: number): string[] {
   notAlreadyOver(label);
   let answer: string[] = [];
   const seconds = cpuSeconds(() => {
     answer = pure(command);
   });
-  withinBound(seconds, label);
+  if (own !== undefined) console.log(`# cost-line: ${label}: ${seconds.toFixed(2)} CPU s (bound ${own.toFixed(2)}; node ${process.version})`);
+  withinBound(seconds, label, own);
   return answer;
 }
+
+test("cost: this runner is measured before any bound is used, and the measurement is logged", (t) => {
+  const { seconds, factor, line } = runner();
+  // In the log of every run, so a red on a bound can be read against it.
+  t.diagnostic(line);
+  console.log(`# cost: ${line}`);
+  assert.ok(seconds > 0);
+  assert.ok(factor >= 1 && factor <= MOST, line);
+  assert.equal(scaledBound(BOUND), BOUND * factor);
+});
 
 const DIR_WRITE = "vcs.history.rewrite git-dir-write";
 const OUT = "$(:)";
@@ -132,11 +173,30 @@ test("cost: the answers of the bounded walk are the old window reading's", () =>
   const READ_OUT = "$(pwd)";
   // Each is timed too, so a slow build fails here at once, not after hours.
   // Spellings across an output's edge still count, however many outputs.
-  assert.deepEqual(bounded(`echo x >> ${READ_OUT.repeat(1000)}.g${READ_OUT}it/config`, "answer 1"), [DIR_WRITE]);
-  assert.deepEqual(bounded(`echo x >> .g${READ_OUT.repeat(1000)}t/config`, "answer 2"), [DIR_WRITE]);
-  assert.deepEqual(bounded(`echo x >> .${"*".repeat(500)}${READ_OUT}t/config`, "answer 3"), [DIR_WRITE]);
-  // And ordinary words do not, however many outputs.
-  assert.deepEqual(bounded(`echo x > out/${`${READ_OUT}-`.repeat(1000)}.txt`, "answer 4"), ["files.write.workspace redirect-write"]);
+  // Lead ruling L62568: past eight unread parts a word could be any path, so
+  // the spliced reading's strictest class rides beside the `.git` write.
+  // (Build-6 round two: past eight unread parts the word may be any path, so
+  // git's own files' class rides beside as well.)
+  const GIT_BESIDE = "vcs.history.rewrite redirect-protected";
+  assert.deepEqual(bounded(`echo x >> ${READ_OUT.repeat(1000)}.g${READ_OUT}it/config`, "answer 1"), ["log.mutate redirect-protected", DIR_WRITE, GIT_BESIDE]);
+  assert.deepEqual(bounded(`echo x >> .g${READ_OUT.repeat(1000)}t/config`, "answer 2"), ["log.mutate redirect-protected", DIR_WRITE, GIT_BESIDE]);
+  // GLOB-WRITE (22 Nov 2026): an output beside a glob construct may hold a `/`
+  // and name any directory, the approval log's among them.
+  // Every class such a directory may name is judged (#682's reader; review-b N1 at bcb1be08).
+  // (Build-6 round two, L62568: every guarded class the output may reach rides beside.)
+  assert.deepEqual(bounded(`echo x >> .${"*".repeat(500)}${READ_OUT}t/config`, "answer 3"), [
+    "log.mutate redirect-protected",
+    "vcs.history.rewrite git-dir-write",
+    "policy.core redirect-protected",
+    "cron.manage redirect-protected",
+    "policy.edit redirect-protected",
+    GIT_BESIDE,
+  ]);
+  // And ordinary words do not, however many outputs, up to the spliced
+  // reading's bound (lead ruling L62568: past eight unread parts a word could
+  // be any path, and asks with the strictest class; main's answer beside).
+  assert.deepEqual(bounded(`echo x > out/${`${READ_OUT}-`.repeat(8)}.txt`, "answer 4"), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(bounded(`echo x > out/${`${READ_OUT}-`.repeat(1000)}.txt`, "answer 4, past the bound"), ["log.mutate redirect-protected", GIT_BESIDE, "files.write.workspace redirect-write"]);
 });
 
 test("cost: a run of glob characters in a target is bounded", () => {
@@ -163,9 +223,12 @@ test("cost: a run of glob characters in a target is bounded", () => {
 test("cost: past 1,024 glob characters one pattern segment is judged to name .git", () => {
   assert.equal(globSegmentMatches(`.${"*".repeat(1024)}x`, ".git"), false);
   assert.equal(globSegmentMatches(`.${"*".repeat(1025)}x`, ".git"), true);
-  assert.deepEqual(pure(`echo x > .${"*".repeat(1023)}x`), ["files.write.workspace redirect-write"]);
-  assert.deepEqual(pure(`echo x > .${"*".repeat(1025)}x`), [DIR_WRITE]);
-  assert.deepEqual(bounded(`echo x > .${"*".repeat(100000)}x`, "100,000 *"), [DIR_WRITE]);
+  // The words end in `y`: `.*x` also matches `.codex`, a policy.core organ, and
+  // a glob in a write target is judged by every guarded name it could match
+  // (GLOB-WRITE, 22 Nov 2026), which would answer before the `.git` reader.
+  assert.deepEqual(pure(`echo x > .${"*".repeat(1023)}y`), ["files.write.workspace redirect-write"]);
+  assert.deepEqual(pure(`echo x > .${"*".repeat(1025)}y`), [DIR_WRITE]);
+  assert.deepEqual(bounded(`echo x > .${"*".repeat(100000)}y`, "100,000 *"), [DIR_WRITE]);
   // Under the bound the walk answers as the expression did.
   assert.equal(globSegmentMatches(`.${"*".repeat(1000)}t`, ".git"), true);
   assert.equal(globSegmentMatches(`.${"?*".repeat(500)}`, ".git"), false);
@@ -186,7 +249,9 @@ test("cost: a word of many nested brace groups is bounded", () => {
 });
 
 test("cost: deep nesting is read once, and refused past 128 levels", () => {
-  const nest = (n: number): string => `echo x > "${"$(echo ".repeat(n)}x${")".repeat(n)}"`;
+  // `cat`, whose output the reader does not render: zsh's echo of an unknown
+  // word counts at the first level (the sixth security review of #680's gate).
+  const nest = (n: number): string => `echo x > "${"$(cat ".repeat(n)}x${")".repeat(n)}"`;
   for (const n of [64, 128]) bounded(nest(n), `nesting ${String(n)}`);
   // Read to 64 levels; a deeper body counts as naming .git, the strict side.
   assert.deepEqual(pure(nest(64)), ["files.write.workspace redirect-write"]);
@@ -222,7 +287,7 @@ test("cost: review-b's shapes on b085cd91 (nested defaults, printf and echo bodi
     bounded(`${P}echo x > "$(printf '%.0s'${" a".repeat(n)})"`, `printf %.0s of many words, n=${String(n)}`);
     bounded(`${P}echo x > "$(printf '%s'${" a".repeat(n)})"`, `printf %s of many words, n=${String(n)}`);
     bounded(`${P}echo x > "$(echo${" -n".repeat(n)} a)"`, `echo of many flags, n=${String(n)}`);
-    bounded(`${P}echo x > "$(${"command ".repeat(n)}printf a)"`, `many command words, n=${String(n)}`);
+    bounded(`${P}echo x > "$(${"command ".repeat(n)}printf a)"`, `many command words, n=${String(n)}`, n === 400000 ? MANY_COMMAND_WORDS_BOUND : undefined);
   }
 });
 
@@ -242,7 +307,7 @@ function nearControl(line: string, control: string, label: string): void {
   const seconds = cpuSeconds(() => {
     pure(line);
   });
-  const ok = seconds < CONTROL_FACTOR * base + 1;
+  const ok = seconds < CONTROL_FACTOR * base + scaledBound(1);
   if (!ok) overBound = label;
   assert.ok(ok, `${label}: ${seconds.toFixed(2)} CPU s, the control ${base.toFixed(2)}, factor ${String(CONTROL_FACTOR)}`);
 }
@@ -280,7 +345,9 @@ test("cost: review-b's M2 on 2f4100fc, brace groups beside outputs to 1 MB, is b
   for (const n of [5000, 20000]) {
     bounded(`${P}echo x > "$(printf '${"\\x7ba..a\\x7d".repeat(n)}*')"`, `a printed glob of one-alternative groups, n=${String(n)}`);
   }
-  assert.deepEqual(pure("echo x >> .g{i..i}$(pwd)t/config"), [DIR_WRITE]);
+  // (Build-6 round two, L62568: the output may hold a `/`, so the word may
+  // also be `.g…/hooks/…t/config`; that class rides beside the `.git` one.)
+  assert.deepEqual(pure("echo x >> .g{i..i}$(pwd)t/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   // The step bound: 63 groups of one alternative finish, 64 count; in a word
   // an outputs' join reads, and in a word a default rewrites (bash 3.2 reads
   // `${a:-out}/{a..a}{a..a}.log` as `out/aa.log`).
@@ -289,7 +356,7 @@ test("cost: review-b's M2 on 2f4100fc, brace groups beside outputs to 1 MB, is b
   assert.deepEqual(pure(`echo x > out/${"{a..a}".repeat(63)}$(pwd).log`), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure(`echo x > out/${"{a..a}".repeat(64)}$(pwd).log`), [DIR_WRITE]);
   // Under the bound the expansion answers as before; past 16 alternatives, the strict side.
-  assert.deepEqual(pure("echo x >> .g{i,}$(pwd)t/config"), [DIR_WRITE]);
+  assert.deepEqual(pure("echo x >> .g{i,}$(pwd)t/config"), ["policy.core redirect-protected", DIR_WRITE, "policy.edit redirect-protected", "vcs.history.rewrite redirect-protected"]);
   assert.deepEqual(pure(`echo x > out/${"{a,b}".repeat(4)}$(pwd).log`), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure(`echo x > out/${"{a,b}".repeat(5)}$(pwd).log`), [DIR_WRITE]);
 });
@@ -299,7 +366,17 @@ test("cost: the bounded readers answer as before under their bounds", () => {
   const nest = (n: number, inner: string): string => `echo x > ${"${a:-".repeat(n)}${inner}${"}".repeat(n)}/f`;
   assert.deepEqual(pure(nest(32, "out")), ["files.write.workspace redirect-write"]);
   assert.deepEqual(pure(nest(32, ".git")), [DIR_WRITE]);
-  assert.deepEqual(pure(nest(33, "out")), [DIR_WRITE]);
+  // Past the depth the GLOB-WRITE reading of a write target's `${…}` defaults
+  // (22 Nov 2026) fails closed too, to the unknown answer: `log.mutate`,
+  // `policy.core` and every other guarded name's class, each judged (#682's
+  // cap rule; review-b N1 at bcb1be08; build-1's M2 at 64c43399).
+  assert.deepEqual(pure(nest(33, "out")), [
+    "log.mutate redirect-protected",
+    "vcs.history.rewrite git-dir-write",
+    "policy.core redirect-protected",
+    "policy.edit redirect-protected",
+    "cron.manage redirect-protected",
+  ]);
   // An unclosed `${` set aside is put back as text: what it prints still counts.
   assert.deepEqual(pure(`echo x > "$(printf '%s' 'a${"${".repeat(3)} .git')"`), [DIR_WRITE]);
   assert.deepEqual(pure(`echo x > "$(printf '%s' 'a\${b} c')"`), ["files.write.workspace redirect-write"]);
@@ -340,4 +417,116 @@ test("cost: through the hook, in a checkout, the same lines are bounded", { skip
     });
     withinBound(seconds, `hook, ${label}`);
   }
+});
+
+test("cost: the gate follow-up's readers (zsh forms, printf modifiers and words) are bounded", () => {
+  const P = "git push --force && ";
+  // Each is a walk of the line: under 0.2 CPU s at the largest size here.
+  for (const n of [2000, 20000]) {
+    bounded(`${P}f=x; echo x > "${"$f:z".repeat(n)}"`, `unbraced zsh forms that are no modifier, n=${String(n)}`);
+    bounded(`${P}echo x > "${"$OUT[@]".repeat(n)}"`, `unbraced whole-array forms, n=${String(n)}`);
+    bounded(`${P}echo x > "${"${a[@]}".repeat(n)}"`, `braced whole-array forms, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf %.4s${" \"$V\"".repeat(n)})"`, `a cut of many quoted words, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf %s${" $V".repeat(n)})"`, `many words that may split, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf %.4${"l".repeat(n * 10)}s .gitfoo)"`, `a run of length modifiers, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf %${"0".repeat(n * 10)}${"l".repeat(n * 10)}.)"`, `zeros then length modifiers and no conversion, n=${String(n)}`);
+    // Codex's SOURCE HOLD on 101630f2: four readings of path-named printers,
+    // a stray `%` beside many `%%`, and many `\c`.
+    bounded(`${P}echo x > "$(${"/usr/bin/printf x; ".repeat(n)}printf it)"`, `many printers named by path, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf '${"%%".repeat(n * 10)}%')"`, `many %% then a stray %, n=${String(n)}`);
+    bounded(`${P}echo x > "$(printf %b${" '\\cX'".repeat(n)})"`, `many words with \\c, n=${String(n)}`);
+    // review-b's read of #683: many `printf -v` segments, and printers by other paths.
+    bounded(`${P}${"printf -v d %s x; ".repeat(n)}echo x > "$d"`, `many printf -v segments, n=${String(n)}`);
+    bounded(`${P}echo x > "$(${"/usr/bin//printf x; ".repeat(n)}printf it)"`, `many printers by other paths, n=${String(n)}`);
+  }
+  assert.deepEqual(pure(`echo x > "$(printf %.4${"l".repeat(1000)}s .gitfoo)/config"`), [DIR_WRITE]);
+});
+
+test("cost: a word of many glob segments is read in one pass (security review of 54624872)", () => {
+  // Copying each prefix per segment took 11 CPU s for the second. #686's
+  // reader judges such a word past its caps as unknown: the log, the gate's
+  // organs and every other guarded name's class, each judged (#682's cap
+  // rule; review-b N1 at bcb1be08; build-1's M2 at 64c43399), with main's
+  // class for the word beside them.
+  const LOG = "log.mutate redirect-protected";
+  const CORE = "policy.core redirect-protected";
+  const EDIT = "policy.edit redirect-protected";
+  const CRON = "cron.manage redirect-protected";
+  const WORKSPACE = "files.write.workspace redirect-write";
+  assert.deepEqual(bounded(`echo x > ${"a*/".repeat(100000)}f`, "100,000 a*/"), [LOG, CORE, EDIT, CRON, WORKSPACE]);
+  assert.deepEqual(bounded(`echo x > ${"x/".repeat(100000)}.g*/hooks/pre-push`, "100,000 x/ then .g*"), [LOG, DIR_WRITE, CORE, EDIT, CRON]);
+  assert.deepEqual(pure(`echo x > ${"b*/".repeat(64)}f`), [LOG, CORE, EDIT, CRON, WORKSPACE]);
+  assert.deepEqual(pure(`echo x > ${"b*/".repeat(65)}f`), [LOG, CORE, EDIT, CRON, WORKSPACE]);
+});
+
+test("cost: a word past either glob cap keeps the stricter class it has on its own (codex on bcb1be08)", () => {
+  // An explicit log path stays log.mutate past a cap; at bcb1be08 each was
+  // demoted to policy.core. Past a cap a word is unknown: the log, the gate's
+  // organs and every other guarded name's class, each judged beside the
+  // word's own classes (review-b N1 at bcb1be08; build-1's M2 at 64c43399): a
+  // policy may hold log.mutate looser than policy.core.
+  const LOG = "log.mutate redirect-protected";
+  const CORE = "policy.core redirect-protected";
+  const EDIT = "policy.edit redirect-protected";
+  const CRON = "cron.manage redirect-protected";
+  const WORKSPACE = "files.write.workspace redirect-write";
+  // Every candidate under the log is the log.
+  assert.deepEqual(pure("echo x > .approval/log/*/*"), [LOG]);
+  assert.deepEqual(pure(`echo x > .approval/log/${"b*/".repeat(65)}x`), [LOG, CORE, EDIT, CRON]);
+  assert.deepEqual(pure("echo x > {.approval/log,build}/*/*"), [LOG, CORE, EDIT, CRON]);
+  // A plain path past either cap: the log and the organs, beside main's
+  // workspace write (lead ruling L61926).
+  assert.deepEqual(pure(`echo x > build/${"b*/".repeat(65)}x`), [LOG, CORE, EDIT, CRON, WORKSPACE]);
+  assert.deepEqual(pure(`echo x > build/${"b*/".repeat(64)}x`), [LOG, CORE, EDIT, CRON, WORKSPACE]);
+  // Under the caps every class a candidate names is judged: `build/*/*` may be
+  // `build/x/.approval`, `build/x/AGENTS.md` or `build/x/.hermes`.
+  assert.deepEqual(pure("echo x > build/*/*"), [LOG, CORE, EDIT, CRON, WORKSPACE]);
+  assert.deepEqual(pure("echo x > build/b*/*"), [CORE, EDIT, WORKSPACE, LOG, CRON]);
+});
+
+test("cost: a command with a line continuation is classified once, not again as written (review-b S1 at 41e6fd1b)", () => {
+  // At 41e6fd1b the hook classified the text as written and again with the
+  // continuations removed: 30 CPU s at 500 KB against main's 14. Now the
+  // joined text is classified once, so the same words with a continuation in
+  // each cost about what they cost without one.
+  const repo = mkdtempSync(join(tmpdir(), "aprv-s1-cont-"));
+  try {
+    const words = (sep: string) => `cp README.md ${`d*/APPROVA${sep}?.md `.repeat(4000)}`;
+    const time = (command: string) => cpuSeconds(() => { classifyForHook(command, [], repo); });
+    time(words("")); // warm the compiled readers once
+    const plain = time(words(""));
+    const continued = time(words("\\\n"));
+    withinBound(continued, "hook, 4,000 continued words");
+    assert.ok(continued < plain * 1.5 + 0.5, `continued ${continued.toFixed(2)} s against plain ${plain.toFixed(2)} s`);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("cost: a word the zsh option reading changes, repeated, is landed on the disk once (review-b's M3 and S1 at 3774fdd4)", () => {
+  // Every command is read as zsh reads it under extendedglob and braceccl
+  // too (the lead's ruling L61492), and each reading landed each word on the
+  // disk again: through the real hook at 3774fdd4, `grep -r ^import` x n took
+  // 107 CPU s at 80 KB (main 6) and `cat ~/.hermes/(#a1)auth.json` x n 82 s at
+  // 320 KB (main 0.3). In process, 40 KB of the first took 14 s there. Now a
+  // landing is kept for the call and a word judged once per segment.
+  const dir = join(scratch, "m3-words");
+  mkdirSync(join(dir, "src"), { recursive: true });
+  for (let at = 0; at < 40; at += 1) writeFileSync(join(dir, `f${String(at)}.txt`), "x\n");
+  mkdirSync(join(HOME, ".hermes"), { recursive: true });
+  writeFileSync(join(HOME, ".hermes", "auth.json"), "SYNTHETIC=1\n");
+  const hook = (command: string): number => cpuSeconds(() => { classifyForHook(command, [], dir, [], false, [dir]); });
+  const words = (word: string): string => `git push --force && grep -r${` ${word}`.repeat(Math.floor(40000 / (word.length + 1)))}`;
+  hook(words("import")); // warm the compiled readers once
+  const plain = hook(words("import"));
+  for (const word of ["^import", "~/.hermes/(#a1)auth.json", "~/^zz/auth.json", "~/.hermes/{a-z}uth.json", "~/.hermes/au#th.json"]) {
+    notAlreadyOver(word);
+    const seconds = hook(words(word));
+    withinBound(seconds, `${word} x n, 40 KB`);
+    assert.ok(seconds < plain * 1.5 + 0.5, `${word}: ${seconds.toFixed(2)} s against the plain word's ${plain.toFixed(2)} s`);
+  }
+  // The same answer as the plain reading gives each word alone: the credential
+  // the option forms name is still read.
+  const judged = classifyForHook(words("~/.hermes/(#a1)auth.json"), [], dir, [], false, [dir]).result;
+  assert.ok(judged.ok && judged.classes.includes("account.credential"), JSON.stringify(judged.ok ? judged.classes : judged));
 });
