@@ -289,8 +289,10 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     // run).
     //
     // Pattern-expanded sources are partitioned with a fixed destination.
-    // The invariant plain batch is judged once for the call; every line now
-    // keeps test 3's ratio bound as well as the absolute CPU bound.
+    // The invariant plain batch is judged once for the call. Every line keeps
+    // the 100 CPU ms bound. Doubling the pattern run must cost at most 2.6x;
+    // control ratios are diagnostic because the one-landing control does not
+    // exercise the expanded argv and landing work.
     const run = "[".repeat(2_000);
     const plain = "a".repeat(2_000);
     /** Each line over its bound, named with its figures, asserted at the end. */
@@ -302,7 +304,7 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
       ["mv, source", (word) => `mv ${word} out.txt`],
     ];
     for (const prefix of ["", "~/.hermes/"]) {
-      for (const [shape, line] of lines) {
+      for (const [, line] of lines) {
         const command = line(`${prefix}${run}`);
         const control = line(plain);
         const { spent, control: controlMs, ratio } = pairedCost(
@@ -311,20 +313,34 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
           21,
           5,
         );
-        const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${RUN_RATIO_BOUND.toFixed(1)}`;
+        const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} (diagnostic)`;
         t.diagnostic(`cost: ${label}`);
-        if (!(spent < BOUND_MS * 2) || !(ratio < RUN_RATIO_BOUND)) over.push(label);
+        if (!(spent < BOUND_MS * 2)) over.push(label);
+        const doubled = line(`${prefix}${"[".repeat(4_000)}`);
+        const growth = pairedCost(
+          () => classifyForHook(command, [], dir, [], false, [dir]),
+          () => classifyForHook(doubled, [], dir, [], false, [dir]),
+          21,
+        );
+        const growthLabel = `${command.slice(0, 30)} (4000/2000 characters): median ${growth.spent.toFixed(1)}/${growth.control.toFixed(1)} CPU ms, ratio ${growth.ratio.toFixed(2)} of 2.60`;
+        t.diagnostic(`cost: ${growthLabel}`);
+        if (!(growth.spent <= 2.6 * growth.control)) over.push(growthLabel);
       }
     }
-    // Test 3's 20,000-character run, one call each: past the longest path the
-    // kernel opens, so each landing is guarded unread.
+    // Past the longest path the kernel opens, every landing is guarded unread.
+    // Use the same median protocol so the formerly print-only Hermes source
+    // has a measured margin as well as its restored absolute assertion.
     for (const prefix of ["", "~/.hermes/"]) {
-      for (const [shape, line] of lines) {
+      for (const [, line] of lines) {
         const command = line(`${prefix}${"[".repeat(20_000)}`);
-        const ms = cpuMs(() => {
-          classifyForHook(command, [], dir, [], false, [dir]);
-        });
-        report(t, `${command.slice(0, 30)} (20000 characters)`, ms, BOUND_MS * 2);
+        const control = line("a".repeat(20_000));
+        const { spent: ms, control: controlMs, ratio } = pairedCost(
+          () => classifyForHook(control, [], dir, [], false, [dir]),
+          () => classifyForHook(command, [], dir, [], false, [dir]),
+          21,
+          5,
+        );
+        report(t, `${command.slice(0, 30)} (20000 characters, median; control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} diagnostic)`, ms, BOUND_MS * 2);
         if (!(ms < BOUND_MS * 2)) over.push(`${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
       }
     }
@@ -629,5 +645,32 @@ test("cp and mv source batches preserve destinations, options and positive plain
   for (const bin of ["cp", "mv"]) {
     assert.deepEqual(classes(`${bin} ${run} out`, []), ["policy.core", "vcs.history.rewrite"]);
     assert.deepEqual(classes(`${bin} ${run} -t out`), expected);
+  }
+});
+
+test("cp and mv batches keep whole-argv git semantics for an unplaceable destination", () => {
+  const dir = join(scratch, "copy-argv-enotdir");
+  mkdirSync(dir, { recursive: true });
+  for (const name of ["APPROVAL.md", "blocker", ...Array.from({ length: 20 }, (_, index) => `plain${index}`)]) {
+    writeFileSync(join(dir, name), "x\n");
+  }
+  const cases: Array<[string, { path: string; class: string }[]]> = [["", []], ["notes-plain", [{ path: "notes-plain", class: "policy.edit.notes" }]]];
+  for (const [routedName, paths] of cases) {
+    if (routedName) {
+      // Now the protected source belongs to the plain partition and the
+      // remaining uppercase name would otherwise acquire sure-target rules.
+      rmSync(join(dir, "APPROVAL.md"));
+      writeFileSync(join(dir, "README.md"), "x\n");
+      writeFileSync(join(dir, routedName), "x\n");
+    }
+    for (const bin of ["cp", "mv"]) {
+      const command = `${bin} * blocker/child`;
+      const result = classifyForHook(command, paths, dir, [], false, [dir]).result;
+      assert.ok(result.ok, command);
+      assert.ok(result.classes.includes(routedName ? "policy.edit.notes" : "policy.core"), command);
+      // The whole protected line does not call this unplaceable operand a
+      // sure file-write target. The plain partition must not add that verdict.
+      assert.ok(!result.classes.includes("vcs.history.rewrite"), `${command}: ${JSON.stringify(result.classes)}`);
+    }
   }
 });

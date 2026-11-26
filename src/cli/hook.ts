@@ -5288,7 +5288,9 @@ export function refineWriteLandings(
    * destination and source-to-landing pairs. organDestinationRule and
    * copyTargetDirectories depend only on that retained destination; the
    * protected/credential scans, organParentOperands and treeSources judge
-   * sources individually. Their union therefore keeps every source verdict.
+   * sources individually. The git-directory pass also depends on the line's
+   * class: if either partition earns a rewrite verdict, keep the whole line
+   * to preserve its sure-target semantics for unplaceable operands.
    *
    * The deliberately narrow option grammar falls back for any other option
    * (including a match that becomes an option). Option values never enter the
@@ -5335,10 +5337,18 @@ export function refineWriteLandings(
       memo.plainLines.set(plainKey, judged);
     }
     if (!judged.invariant) return whole();
+    // Removing a protected source can make the plain line a files.* write.
+    // The git-directory pass then treats an unplaceable operand as a sure
+    // target, where the whole protected line treats it as only possible.
+    // Such a rewrite verdict is not additive: retain the whole argv answer.
+    if (other.size > 0 && judged.value.some((each) => each.cls === "vcs.history.rewrite")) return whole();
     if (other.size === 0) return judged.value as ResolvedClass[];
     const rest = words.filter((_, index) => !plain.has(index));
     const out = [...judged.value] as ResolvedClass[];
     for (const turn of inEachEqualTurn(() => judgeSynthetic(lineOf(rest), path))) {
+      // The remaining line can acquire sure-target semantics too, when the
+      // removed plain sources carry the whole line's protected class.
+      if (turn.some((each) => each.cls === "vcs.history.rewrite")) return whole();
       for (const each of turn) if (!out.some((known) => known.cls === each.cls)) out.push(each);
     }
     return out;
