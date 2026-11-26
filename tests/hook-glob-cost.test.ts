@@ -262,6 +262,120 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
   }
 });
 
+/**
+ * Test 4's lines printed and not held to the 100 ms bound until the argv-line
+ * split (the owed row of L63574), each by its shape, its prefix and the run's
+ * length. Two are the lead's ruling, CLAIMS L63667: `cp <run> out.txt` and
+ * `cp README.md <run>` at 2,000 characters, 87.5 and 79.9 on the merge
+ * queue's runner (run 45745887200, node 22, every median under 100). The
+ * third, the single call of `cp ~/.hermes/<run> out.txt` at 20,000
+ * characters (80.3 there), is the lead's by the same reasoning, CLAIMS
+ * L63680. Node 20 reads about 1.2 times node 22 and the queue has a node-20
+ * floor, so on it each would stand at or past the bound (about 105, 96 and
+ * 96). The cost of all three is the copy's argv of every entry, judged in
+ * each name reading; each returns to the assert with that split. Every other
+ * line keeps its bound: test 4 counts the thirteen it asserts, and test 5
+ * holds this list to these three.
+ */
+const PRINT_ONLY: readonly string[] = ["cp, source 2000", "cp, destination 2000", "~/.hermes/ cp, source 20000"];
+
+test("cost: cp and mv with a run of unclosed `[` as an operand, through the whole classification (PRIORITIES:331)", (t) => {
+  const { dir, home } = workspace();
+  // Test 3's fixture: two hundred names of 250 characters beside the
+  // workspace's own, in the directory and in the home.
+  for (let index = 0; index < 200; index += 1) {
+    const name = `${String(index).padStart(3, "0")}${"a".repeat(247)}`;
+    writeFileSync(join(dir, name), "x\n", "utf8");
+    writeFileSync(join(home, ".hermes", name), "x\n", "utf8");
+  }
+  const savedHome = process.env["HOME"];
+  process.env["HOME"] = home;
+  try {
+    // Test 3's run of 2,000 `[`, as a copy's or a move's destination and as
+    // its source: past 1,024 glob characters it matches every entry, so the
+    // argv is written out with every entry and judged as a synthetic line in
+    // each name reading, every entry is landed as a write (a copy or move
+    // writes a tree), and a copy's source is read, so the credential pass
+    // lands every entry too. build-1 measured 148 and 127 CPU ms on node 20
+    // at #682's head, one call each, over the 100 test 3 holds `echo x >` to.
+    // One call is not a reading (test 3), so each is timed as test 3 times its
+    // lines: 21 pairs against the same line with the run replaced by a plain
+    // name of the same length (the workspace's), the median call under 100
+    // CPU ms. On 170229db, a laptop at load 9: medians of 21 to 65 CPU ms
+    // (node 20: 34 to 65) and first calls up to 108 (node 20, `cp` to the
+    // run).
+    //
+    // No ratio bound yet (lead ruling, CLAIMS L63574): the copy's or move's
+    // argv of every entry is one synthetic line, judged again in each name
+    // reading (three for these lines), where `echo x >`'s plain names are
+    // judged once for the call (test 3's split, which does not carry over to
+    // an argv: there a name's place decides what it is). So these lines read
+    // 17 to 50 times their control on main, against test 3's 18. The ratio is
+    // printed with each line, and the bound returns with the argv-line split
+    // (owed: PRIORITIES, the argv-line split).
+    const run = "[".repeat(2_000);
+    const plain = "a".repeat(2_000);
+    /** Each line over its bound, named with its figures, asserted at the end. */
+    const over: string[] = [];
+    /** The lines held to their bound: every line but the three PRINT_ONLY names. */
+    let asserted = 0;
+    const lines: Array<[string, (word: string) => string]> = [
+      ["cp, destination", (word) => `cp README.md ${word}`],
+      ["cp, source", (word) => `cp ${word} out.txt`],
+      ["mv, destination", (word) => `mv README.md ${word}`],
+      ["mv, source", (word) => `mv ${word} out.txt`],
+    ];
+    const printOnly = (shape: string, prefix: string, length: number): boolean => PRINT_ONLY.includes(`${prefix === "" ? "" : `${prefix} `}${shape} ${String(length)}`);
+    const PRINTED = "(printed, not asserted until the argv-line split: PRIORITIES)";
+    for (const prefix of ["", "~/.hermes/"]) {
+      for (const [shape, line] of lines) {
+        const command = line(`${prefix}${run}`);
+        const control = line(plain);
+        const { spent, control: controlMs, ratio } = pairedCost(
+          () => classifyForHook(control, [], dir, [], false, [dir]),
+          () => classifyForHook(command, [], dir, [], false, [dir]),
+          21,
+          5,
+        );
+        const held = !printOnly(shape, prefix, 2_000);
+        const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} (no ratio bound: PRIORITIES argv-line split)${held ? "" : ` ${PRINTED}`}`;
+        t.diagnostic(`cost: ${label}`);
+        if (held) asserted += 1;
+        if (held && !(spent < BOUND_MS * 2)) over.push(label);
+      }
+    }
+    // Test 3's 20,000-character run, one call each: past the longest path the
+    // kernel opens, so each landing is guarded unread.
+    for (const prefix of ["", "~/.hermes/"]) {
+      for (const [shape, line] of lines) {
+        const command = line(`${prefix}${"[".repeat(20_000)}`);
+        const ms = cpuMs(() => {
+          classifyForHook(command, [], dir, [], false, [dir]);
+        });
+        const held = !printOnly(shape, prefix, 20_000);
+        if (held) asserted += 1;
+        if (held) report(t, `${command.slice(0, 30)} (20000 characters)`, ms, BOUND_MS * 2);
+        else t.diagnostic(`cost: ${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms ${PRINTED}`);
+        if (held && !(ms < BOUND_MS * 2)) over.push(`${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
+      }
+    }
+    // Every line is measured and printed before any is held to its bound, so
+    // one run (a CI shard) reads them all.
+    assert.deepEqual(over, [], `over the bound:\n${over.join("\n")}`);
+    // Each PRINT_ONLY name took exactly one of the sixteen lines off the assert.
+    assert.equal(asserted, 13);
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});
+
+test("cost: test 4 prints only the three lines the lead ruled off the assert, two by CLAIMS L63667 and one by L63680", () => {
+  // The list cannot grow unseen: a line taken off the assert is a ruling, and
+  // each of these returns to it with the argv-line split.
+  assert.deepEqual([...PRINT_ONLY], ["cp, source 2000", "cp, destination 2000", "~/.hermes/ cp, source 20000"]);
+});
+
 test("a guarded name after or among unclosed `[` still takes its class: the entries a long run is judged to match keep theirs (build-5, the unclosed-`[` cost line)", () => {
   // Past 1,024 glob characters a pattern segment is judged to match every
   // name (the strict side), so the write pass lands, and writes out as a
@@ -386,6 +500,47 @@ test("a guarded name among many plain ones under an unclosed `[` run keeps its t
     for (const [command, paths, expected] of cases) {
       assert.equal(answer(command, paths), expected, `${command.slice(0, 40)} (${paths.length === 0 ? "no routes" : "routed"})`);
     }
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});
+
+test("a copy into a pattern still finds a checkout among its matches: only a listed FILE is read as holding no `.git` (PRIORITIES:331)", () => {
+  // The write pass answers `lstat(<entry>/.git)` (a tree written at a
+  // checkout can lay down hooks) from the listing where the entry is a
+  // regular file, which holds no names (ENOTDIR). A directory, or a link,
+  // is still asked: `co` is a checkout (a `.git` folder) and `wt` a linked
+  // worktree (a `.git` file), each beside plain files the pattern matches.
+  const dir = join(scratch, "checkout-among");
+  const home = join(scratch, "checkout-among-home");
+  mkdirSync(join(dir, "co", ".git"), { recursive: true });
+  mkdirSync(join(dir, "wt"), { recursive: true });
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(dir, "wt", ".git"), "gitdir: /nowhere\n", "utf8");
+  for (const name of ["README.md", "cfile", "wfile", "plain.txt"]) writeFileSync(join(dir, name), "x\n", "utf8");
+  const savedHome = process.env["HOME"];
+  process.env["HOME"] = home;
+  try {
+    const reaches = (command: string): string[] => {
+      const { result, notes } = classifyForHook(command, [], dir, [], false, [dir]);
+      assert.ok(result.ok, command.slice(0, 40));
+      assert.ok(result.classes.includes("files.write.guarded"), `${command.slice(0, 40)}: ${JSON.stringify(result.classes)}`);
+      return notes
+        .filter((note) => note.includes("can reach"))
+        .map((note) => /a tree written at (\S+) can reach/u.exec(note)?.[1] ?? note)
+        .map((path) => path.slice(dir.length + 1))
+        .sort();
+    };
+    // Each command's first checkout found, in the listing's order.
+    for (const command of [`cp README.md ${"[".repeat(2_000)}`, `mv README.md ${"[".repeat(2_000)}`, "cp -R README.md c*"]) {
+      assert.deepEqual(reaches(command), ["co"], command.slice(0, 40));
+    }
+    assert.deepEqual(reaches("cp -R README.md w*"), ["wt"]);
+    // The plain files beside them are no checkout.
+    const { result } = classifyForHook("cp -R README.md p*", [], dir, [], false, [dir]);
+    assert.ok(result.ok);
+    assert.ok(!result.classes.includes("files.write.guarded"), JSON.stringify(result.classes));
   } finally {
     if (savedHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = savedHome;
