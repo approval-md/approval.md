@@ -17,16 +17,22 @@ before a tag.
 
 ### Fixed
 
-- **A copy from a pattern that matches many entries reads the disk once per
-  path in a hook call (PRIORITIES:331).** Past 1,024 glob characters a pattern
-  matches every entry of its directory, so `cp <2,000 [> out.txt` reads them
-  all. The credential pass resolved each entry's every ancestor again (about
-  2,000 `realpathSync` calls in one hook call over 200 entries), and the
+- **A copy or move from or into a pattern that matches many entries reads the
+  disk once per path in a hook call (PRIORITIES:331).** Past 1,024 glob
+  characters a pattern matches every entry of its directory, so `cp <2,000 [>
+  out.txt` reads them all and `cp README.md <2,000 [>` writes into them all.
+  The credential pass resolved each entry's every ancestor again (about 2,000
+  `realpathSync` calls in one hook call over 200 entries), and the
   git-directory pass read each copied entry's type once per name reading and
-  synthetic line. Both now go through the per-call disk memo the write pass
-  keeps (#695). Answers are unchanged, line for line. Such a copy costs 14 to
-  30% less CPU (median of 21 pairs, nodes 20, 22 and 26); a move, and a copy
-  or move into such a pattern, cost what they did.
+  synthetic line. The write pass landed each entry in each tree mode afresh
+  (its forms, the guarded list, the settings' hook scripts), and asked
+  `lstat` for a `.git` under each listed file, which holds none. Each is now
+  read once per call: the per-call disk memo the write pass keeps (#695)
+  answers a name under a listed regular file as absent (ENOTDIR), as `lstat`
+  does, and a directory or a link is still asked. Answers are unchanged,
+  line for line. A copy from such a pattern costs 14 to 30% less CPU, and a
+  copy or move into one 16 to 25% less (median of 21 pairs, nodes 20, 22
+  and 26); a move from one costs what it did.
 
 ### Tests
 

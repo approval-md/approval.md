@@ -4049,6 +4049,10 @@ export interface LandingGuard {
   configDirs: readonly string[];
   /** The hook scripts the settings name, folded path keys ({@link foldedPathKey}); read on first call. */
   hookScripts: () => ReadonlySet<string>;
+  /** {@link guardedEntryOf} with this guard's homes and folders, kept per form while the guard is (absent: asked each time). */
+  entryOf?: (form: string) => string | null;
+  /** {@link guardedEntryBelow} likewise. */
+  entryBelow?: (form: string) => string | null;
 }
 
 /** The guard this hook's own environment gives, with the gate root the policy was loaded from. */
@@ -4057,7 +4061,19 @@ function currentGuard(env: NodeJS.ProcessEnv = process.env, gateRoot?: string): 
   const configDirs = currentConfigDirs(env);
   const home = homes[0] ?? null;
   const projectDirs = currentProjectDirs(env, gateRoot);
-  return { homes, configDirs, hookScripts: () => namedHookScripts(home, configDirs, projectDirs) };
+  // Both answers read the form, the homes and the folders alone: kept per
+  // form for as long as this guard is (one write pass), so a form landed in
+  // several tree modes is tested once.
+  const of = new Map<string, string | null>();
+  const below = new Map<string, string | null>();
+  let scripts: ReadonlySet<string> | undefined;
+  return {
+    homes,
+    configDirs,
+    hookScripts: () => (scripts ??= namedHookScripts(home, configDirs, projectDirs)),
+    entryOf: (form) => remembered(of, form, () => guardedEntryOf(form, homes, configDirs)),
+    entryBelow: (form) => remembered(below, form, () => guardedEntryBelow(form, homes, configDirs)),
+  };
 }
 
 /**
@@ -4239,22 +4255,9 @@ export function judgeWriteLanding(
   if (spelled.length > MAX_LANDING_BYTES) {
     return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: spelled.slice(0, 80), why: `a path of ${String(spelled.length)} bytes is longer than any the kernel opens, so where it lands cannot be placed` };
   }
-  const text = resolvePathSegments(spelled);
-  const landing = landingPaths(spelled, null, disk);
-  const forms = [text, ...landing.paths];
-  const name = basename(text);
-  if (name.length > 0) forms.push(join(canonicalPath(dirname(text), disk), name));
-  const tail = basename(spelled);
-  if (tail !== ".." && tail !== "." && tail.length > 0) {
-    const parent = kernelLanding(dirname(spelled), null, disk);
-    if (parent !== null) forms.push(join(parent, tail));
-  }
-  // Each form once, in order: the readings of a plain path are often the same
-  // path, and every test below answers by the form alone (cost: a pattern
-  // matching every entry of a directory lands each entry).
-  const distinct = [...new Set(forms)];
+  const { text, landing, distinct } = landingFormsOf(spelled, disk);
   for (const form of distinct) {
-    const entry = guardedEntryOf(form, homes, configDirs);
+    const entry = guard.entryOf === undefined ? guardedEntryOf(form, homes, configDirs) : guard.entryOf(form);
     if (entry !== null) {
       return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `${form} is on the guarded list (${entry})` };
     }
@@ -4274,7 +4277,7 @@ export function judgeWriteLanding(
   // within reach.
   if (tree !== false) {
     for (const form of distinct) {
-      const entry = guardedEntryBelow(form, homes, configDirs);
+      const entry = guard.entryBelow === undefined ? guardedEntryBelow(form, homes, configDirs) : guard.entryBelow(form);
       if (entry !== null) {
         return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can hold ${entry}, which is on the guarded list` };
       }
@@ -4296,11 +4299,8 @@ export function judgeWriteLanding(
     // read: see the hand-back).
     if (TREE_AT_A_CHECKOUT_IS_GUARDED && tree === true) {
       for (const form of new Set([...landing.paths, ...distinct])) {
-        try {
-          lstatSync(join(form, ".git"));
-        } catch {
-          continue;
-        }
+        // `lstat`, through the call's disk reads: nothing there is an error.
+        if ("error" in disk.entry(join(form, ".git"))) continue;
         return { kind: "guarded", rule: WRITE_GUARDED_RULE, path: form, why: `a tree written at ${form} can reach ${join(form, ".git", "hooks")}, a git hooks folder on the guarded list` };
       }
     }
@@ -4322,6 +4322,42 @@ export function judgeWriteLanding(
     return { kind: "out", path };
   }
   return { kind: "in" };
+}
+
+/** The forms {@link judgeWriteLanding} tests a spelling by: its text, where the disk lands it, and its parent's landings with its name. */
+interface LandingForms {
+  text: string;
+  landing: { paths: string[]; unknown: boolean };
+  /** Each form once, in order. */
+  distinct: string[];
+}
+
+/**
+ * {@link LandingForms} of a spelling: the disk's answer alone, so kept for
+ * the call where the disk reads are ({@link DiskReads.landingForms}). A
+ * spelling is landed once in each tree mode (a copy into a pattern of every
+ * entry lands each entry as a write, a listed word and a tree, and its
+ * source's name under each): one reading of the disk serves them all.
+ */
+function landingFormsOf(spelled: string, disk: DiskReads): LandingForms {
+  const known = disk.landingForms?.get(spelled);
+  if (known !== undefined) return known;
+  const text = resolvePathSegments(spelled);
+  const landing = landingPaths(spelled, null, disk);
+  const forms = [text, ...landing.paths];
+  const name = basename(text);
+  if (name.length > 0) forms.push(join(canonicalPath(dirname(text), disk), name));
+  const tail = basename(spelled);
+  if (tail !== ".." && tail !== "." && tail.length > 0) {
+    const parent = kernelLanding(dirname(spelled), null, disk);
+    if (parent !== null) forms.push(join(parent, tail));
+  }
+  // Each form once, in order: the readings of a plain path are often the same
+  // path, and every test below answers by the form alone (cost: a pattern
+  // matching every entry of a directory lands each entry).
+  const found: LandingForms = { text, landing, distinct: [...new Set(forms)] };
+  disk.landingForms?.set(spelled, found);
+  return found;
 }
 
 /** Bins whose every operand is a path they write (deletes are not writes here: point 7). */
@@ -12248,6 +12284,8 @@ export interface DiskReads {
   readonly gitTrees?: Map<string, boolean>;
   /** {@link kernelLanding}'s answers with no volatile test, by spelling (kept by a memo). */
   readonly kernelLandings?: Map<string, string | null>;
+  /** {@link landingFormsOf}'s answers, by spelling (kept by a memo). */
+  readonly landingForms?: Map<string, LandingForms>;
   /** A directory's entries, or the error code reading it gave ({@link listDirectory}). */
   list(path: string): Dirent[] | string;
 }
@@ -12285,10 +12323,16 @@ export function memoDiskReads(): DiskReads {
   // One lstat per path for both readers of it: `link` (the write pass) and
   // `entry` (the git-directory pass, which keeps the error code).
   const entries = new Map<string, PathEntry>();
+  // The entries a listing names as regular files: a path directly under one
+  // is no entry, and its lstat says so with ENOTDIR (a file holds no names),
+  // so it is answered without asking (a copy into a pattern of every entry
+  // tests each entry's `.git` and its source's name under each). Only a
+  // regular file: a directory or a link is asked as before.
+  const files = new Set<string>();
   const entry = (path: string): PathEntry => {
     let found = entries.get(path);
     if (found === undefined) {
-      found = readPathEntry(path);
+      found = files.has(dirname(path)) ? { error: "ENOTDIR" } : readPathEntry(path);
       entries.set(path, found);
     }
     return found;
@@ -12340,11 +12384,12 @@ export function memoDiskReads(): DiskReads {
         if (!(each.isFile() || each.isDirectory() || each.isFIFO() || each.isSocket() || each.isBlockDevice() || each.isCharacterDevice())) continue;
         const at = path === "/" ? `/${each.name}` : `${path}/${each.name}`;
         if (!entries.has(at)) entries.set(at, { link: null });
+        if (each.isFile()) files.add(at);
       }
     }
     return found;
   };
-  return { realpath, link, list, entry, gitDirLandings: new Map(), gitTrees: new Map(), kernelLandings: new Map() };
+  return { realpath, link, list, entry, gitDirLandings: new Map(), gitTrees: new Map(), kernelLandings: new Map(), landingForms: new Map() };
 }
 
 /** How many components {@link canonicalPath} climbs one at a time before it halves. */

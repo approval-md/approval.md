@@ -298,6 +298,8 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     // (owed: PRIORITIES, the argv-line split).
     const run = "[".repeat(2_000);
     const plain = "a".repeat(2_000);
+    /** Each line over its bound, named with its figures, asserted at the end. */
+    const over: string[] = [];
     const lines: Array<[string, (word: string) => string]> = [
       ["cp, destination", (word) => `cp README.md ${word}`],
       ["cp, source", (word) => `cp ${word} out.txt`],
@@ -316,7 +318,7 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
         );
         const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} (no ratio bound: PRIORITIES argv-line split)`;
         t.diagnostic(`cost: ${label}`);
-        assert.ok(spent < BOUND_MS * 2, label);
+        if (!(spent < BOUND_MS * 2)) over.push(label);
       }
     }
     // Test 3's 20,000-character run, one call each: past the longest path the
@@ -328,9 +330,12 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
           classifyForHook(command, [], dir, [], false, [dir]);
         });
         report(t, `${command.slice(0, 30)} (20000 characters)`, ms, BOUND_MS * 2);
-        assert.ok(ms < BOUND_MS * 2, `${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
+        if (!(ms < BOUND_MS * 2)) over.push(`${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
       }
     }
+    // Every line is measured and printed before any is held to its bound, so
+    // one run (a CI shard) reads them all.
+    assert.deepEqual(over, [], `over the bound:\n${over.join("\n")}`);
   } finally {
     if (savedHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = savedHome;
@@ -461,6 +466,47 @@ test("a guarded name among many plain ones under an unclosed `[` run keeps its t
     for (const [command, paths, expected] of cases) {
       assert.equal(answer(command, paths), expected, `${command.slice(0, 40)} (${paths.length === 0 ? "no routes" : "routed"})`);
     }
+  } finally {
+    if (savedHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = savedHome;
+  }
+});
+
+test("a copy into a pattern still finds a checkout among its matches: only a listed FILE is read as holding no `.git` (PRIORITIES:331)", () => {
+  // The write pass answers `lstat(<entry>/.git)` (a tree written at a
+  // checkout can lay down hooks) from the listing where the entry is a
+  // regular file, which holds no names (ENOTDIR). A directory, or a link,
+  // is still asked: `co` is a checkout (a `.git` folder) and `wt` a linked
+  // worktree (a `.git` file), each beside plain files the pattern matches.
+  const dir = join(scratch, "checkout-among");
+  const home = join(scratch, "checkout-among-home");
+  mkdirSync(join(dir, "co", ".git"), { recursive: true });
+  mkdirSync(join(dir, "wt"), { recursive: true });
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(dir, "wt", ".git"), "gitdir: /nowhere\n", "utf8");
+  for (const name of ["README.md", "cfile", "wfile", "plain.txt"]) writeFileSync(join(dir, name), "x\n", "utf8");
+  const savedHome = process.env["HOME"];
+  process.env["HOME"] = home;
+  try {
+    const reaches = (command: string): string[] => {
+      const { result, notes } = classifyForHook(command, [], dir, [], false, [dir]);
+      assert.ok(result.ok, command.slice(0, 40));
+      assert.ok(result.classes.includes("files.write.guarded"), `${command.slice(0, 40)}: ${JSON.stringify(result.classes)}`);
+      return notes
+        .filter((note) => note.includes("can reach"))
+        .map((note) => /a tree written at (\S+) can reach/u.exec(note)?.[1] ?? note)
+        .map((path) => path.slice(dir.length + 1))
+        .sort();
+    };
+    // Each command's first checkout found, in the listing's order.
+    for (const command of [`cp README.md ${"[".repeat(2_000)}`, `mv README.md ${"[".repeat(2_000)}`, "cp -R README.md c*"]) {
+      assert.deepEqual(reaches(command), ["co"], command.slice(0, 40));
+    }
+    assert.deepEqual(reaches("cp -R README.md w*"), ["wt"]);
+    // The plain files beside them are no checkout.
+    const { result } = classifyForHook("cp -R README.md p*", [], dir, [], false, [dir]);
+    assert.ok(result.ok);
+    assert.ok(!result.classes.includes("files.write.guarded"), JSON.stringify(result.classes));
   } finally {
     if (savedHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = savedHome;
