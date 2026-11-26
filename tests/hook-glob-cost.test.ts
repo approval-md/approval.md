@@ -262,21 +262,6 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
   }
 });
 
-/**
- * Test 4's lines printed and not held to the 100 ms bound until the argv-line
- * split (lead ruling, CLAIMS L63667, on the owed row of L63574): by its
- * shape, its prefix and the run's length. On the merge queue's runner (run
- * 45745887200, node 22, every median under 100) these read highest: `cp
- * <run> out.txt` 87.5, `cp README.md <run>` 79.9, and the single call of `cp
- * ~/.hermes/<run> out.txt` at 20,000 characters 80.3. Node 20 reads about
- * 1.2 times node 22 and the queue has a node-20 floor, so on it each would
- * stand at or past the bound (about 105, 96 and 96). The cost of all three is the
- * copy's argv of every entry, judged in each name reading; each returns to
- * the assert with that split. Every other line keeps its bound. Test 5 holds
- * this list to these three.
- */
-const PRINT_ONLY: readonly string[] = ["cp, source 2000", "cp, destination 2000", "~/.hermes/ cp, source 20000"];
-
 test("cost: cp and mv with a run of unclosed `[` as an operand, through the whole classification (PRIORITIES:331)", (t) => {
   const { dir, home } = workspace();
   // Test 3's fixture: two hundred names of 250 characters beside the
@@ -303,14 +288,9 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     // (node 20: 34 to 65) and first calls up to 108 (node 20, `cp` to the
     // run).
     //
-    // No ratio bound yet (lead ruling, CLAIMS L63574): the copy's or move's
-    // argv of every entry is one synthetic line, judged again in each name
-    // reading (three for these lines), where `echo x >`'s plain names are
-    // judged once for the call (test 3's split, which does not carry over to
-    // an argv: there a name's place decides what it is). So these lines read
-    // 17 to 50 times their control on main, against test 3's 18. The ratio is
-    // printed with each line, and the bound returns with the argv-line split
-    // (owed: PRIORITIES, the argv-line split).
+    // Pattern-expanded sources are partitioned with a fixed destination.
+    // The invariant plain batch is judged once for the call; every line now
+    // keeps test 3's ratio bound as well as the absolute CPU bound.
     const run = "[".repeat(2_000);
     const plain = "a".repeat(2_000);
     /** Each line over its bound, named with its figures, asserted at the end. */
@@ -321,8 +301,6 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
       ["mv, destination", (word) => `mv README.md ${word}`],
       ["mv, source", (word) => `mv ${word} out.txt`],
     ];
-    const printOnly = (shape: string, prefix: string, length: number): boolean => PRINT_ONLY.includes(`${prefix === "" ? "" : `${prefix} `}${shape} ${String(length)}`);
-    const PRINTED = "(printed, not asserted until the argv-line split: PRIORITIES)";
     for (const prefix of ["", "~/.hermes/"]) {
       for (const [shape, line] of lines) {
         const command = line(`${prefix}${run}`);
@@ -333,10 +311,9 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
           21,
           5,
         );
-        const held = !printOnly(shape, prefix, 2_000);
-        const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} (no ratio bound: PRIORITIES argv-line split)${held ? "" : ` ${PRINTED}`}`;
+        const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${RUN_RATIO_BOUND.toFixed(1)}`;
         t.diagnostic(`cost: ${label}`);
-        if (held && !(spent < BOUND_MS * 2)) over.push(label);
+        if (!(spent < BOUND_MS * 2) || !(ratio < RUN_RATIO_BOUND)) over.push(label);
       }
     }
     // Test 3's 20,000-character run, one call each: past the longest path the
@@ -347,10 +324,8 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
         const ms = cpuMs(() => {
           classifyForHook(command, [], dir, [], false, [dir]);
         });
-        const held = !printOnly(shape, prefix, 20_000);
-        if (held) report(t, `${command.slice(0, 30)} (20000 characters)`, ms, BOUND_MS * 2);
-        else t.diagnostic(`cost: ${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms ${PRINTED}`);
-        if (held && !(ms < BOUND_MS * 2)) over.push(`${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
+        report(t, `${command.slice(0, 30)} (20000 characters)`, ms, BOUND_MS * 2);
+        if (!(ms < BOUND_MS * 2)) over.push(`${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
       }
     }
     // Every line is measured and printed before any is held to its bound, so
@@ -360,12 +335,6 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     if (savedHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = savedHome;
   }
-});
-
-test("cost: test 4 prints only the three lines the lead named without their bound (CLAIMS L63667)", () => {
-  // The list cannot grow unseen: a line taken off the assert is a ruling, and
-  // each of these returns to it with the argv-line split.
-  assert.deepEqual([...PRINT_ONLY], ["cp, source 2000", "cp, destination 2000", "~/.hermes/ cp, source 20000"]);
 });
 
 test("a guarded name after or among unclosed `[` still takes its class: the entries a long run is judged to match keep theirs (build-5, the unclosed-`[` cost line)", () => {
@@ -624,5 +593,41 @@ test("cost: a big class after a directory pattern over 250 directories is compil
   } finally {
     if (savedHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = savedHome;
+  }
+});
+
+test("cp and mv source batches preserve destinations, options and positive plain-name classes", () => {
+  const dir = join(scratch, "copy-argv-split");
+  mkdirSync(dir, { recursive: true });
+  const plain = Array.from({ length: 20 }, (_, index) => `plain${String(index)}`);
+  for (const name of [".env", "APPROVAL.md", "README.md", "notes-plain", ...plain]) writeFileSync(join(dir, name), "x\n");
+  const run = "[".repeat(2_000);
+  const paths = [{ path: "notes-plain", class: "policy.edit.notes" }];
+  const classes = (line: string, routed = paths): string[] => {
+    const result = classifyForHook(line, routed, dir, [], false, [dir]).result;
+    assert.ok(result.ok, line.slice(0, 60));
+    return [...new Set(result.classes)].sort();
+  };
+  // These are the whole-argv implementation's answers on this fixture.
+  // notes-plain earns a class that no other operand does; retaining it checks
+  // a positive invariant batch as well as the usual empty plain answer.
+  const expected = ["policy.core", "policy.edit.notes", "vcs.history.rewrite"];
+  for (const bin of ["cp", "mv"]) {
+    for (const args of [
+      `${run} out.txt`,
+      `README.md ${run}`,
+      `-t out ${run}`,
+      `${run} -t out`,
+      `-- ${run} out.txt`,
+      `-R ${run} out`,
+      `--target-directory=out ${run}`,
+    ]) assert.deepEqual(classes(`${bin} ${args}`), expected, `${bin} ${args.replaceAll(run, "<run>")}`);
+  }
+  // An expansion that produces an option marker must keep the whole argv:
+  // deleting its neighbouring matches could change how following -t reads.
+  writeFileSync(join(dir, "--"), "x\n");
+  for (const bin of ["cp", "mv"]) {
+    assert.deepEqual(classes(`${bin} ${run} out`, []), ["policy.core", "vcs.history.rewrite"]);
+    assert.deepEqual(classes(`${bin} ${run} -t out`), expected);
   }
 });
