@@ -21,8 +21,7 @@ before a tag.
   disk once per path in a hook call (PRIORITIES:331).** Past 1,024 glob
   characters a pattern matches every entry of its directory, so `cp <2,000 [>
   out.txt` reads them all and `cp README.md <2,000 [>` writes into them all.
-  The credential pass resolved each entry's every ancestor again (about 2,000
-  `realpathSync` calls in one hook call over 200 entries), and the
+  The credential pass resolved each entry's every ancestor again, and the
   git-directory pass read each copied entry's type once per name reading and
   synthetic line. The write pass landed each entry in each tree mode afresh
   (its forms, the guarded list, the settings' hook scripts), and asked
@@ -40,11 +39,12 @@ before a tag.
   (PRIORITIES:331).** The run as the source or the destination, plain and
   under `~/.hermes/`: the median of 21 pairs is held under 100 CPU ms, as
   `echo x >` is, and the 20,000-character run to 100 in one call. Every line
-  is measured and printed before any is asserted. Three lines are printed
-  and not yet asserted (lead ruling): `cp <run> out.txt` and `cp README.md
-  <run>`, and the 20,000-character `cp ~/.hermes/<run> out.txt`. On the
-  merge queue's node 22 they read 87.5, 79.9 and 80.3, about 1.2 times that
-  on node 20. A test holds that list to those three, and each returns to the
+  is measured and printed before any is asserted. Three lines are printed and
+  not yet asserted: `cp <run> out.txt` and `cp README.md <run>` (lead ruling),
+  and the 20,000-character `cp ~/.hermes/<run> out.txt` (a second ruling, by
+  the same reasoning). On the merge queue's node 22 they read 87.5, 79.9 and
+  80.3 in one run and 89.3, 95.4 and 80.0 in another; node 20 reads about 1.2
+  times that. A test holds that list to those three, and each returns to the
   assert with the argv-line split (owed): the copy's argv of every entry is
   judged in each name reading. Each line also prints its ratio to a
   same-length plain line, with no bound until that split.

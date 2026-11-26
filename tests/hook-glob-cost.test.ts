@@ -264,16 +264,18 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
 
 /**
  * Test 4's lines printed and not held to the 100 ms bound until the argv-line
- * split (lead ruling, CLAIMS L63667, on the owed row of L63574): by its
- * shape, its prefix and the run's length. On the merge queue's runner (run
- * 45745887200, node 22, every median under 100) these read highest: `cp
- * <run> out.txt` 87.5, `cp README.md <run>` 79.9, and the single call of `cp
- * ~/.hermes/<run> out.txt` at 20,000 characters 80.3. Node 20 reads about
- * 1.2 times node 22 and the queue has a node-20 floor, so on it each would
- * stand at or past the bound (about 105, 96 and 96). The cost of all three is the
- * copy's argv of every entry, judged in each name reading; each returns to
- * the assert with that split. Every other line keeps its bound. Test 5 holds
- * this list to these three.
+ * split (the owed row of L63574), each by its shape, its prefix and the run's
+ * length. Two are the lead's ruling, CLAIMS L63667: `cp <run> out.txt` and
+ * `cp README.md <run>` at 2,000 characters, 87.5 and 79.9 on the merge
+ * queue's runner (run 45745887200, node 22, every median under 100). The
+ * third, the single call of `cp ~/.hermes/<run> out.txt` at 20,000
+ * characters (80.3 there), is the lead's by the same reasoning, CLAIMS
+ * L63680. Node 20 reads about 1.2 times node 22 and the queue has a node-20
+ * floor, so on it each would stand at or past the bound (about 105, 96 and
+ * 96). The cost of all three is the copy's argv of every entry, judged in
+ * each name reading; each returns to the assert with that split. Every other
+ * line keeps its bound: test 4 counts the thirteen it asserts, and test 5
+ * holds this list to these three.
  */
 const PRINT_ONLY: readonly string[] = ["cp, source 2000", "cp, destination 2000", "~/.hermes/ cp, source 20000"];
 
@@ -315,6 +317,8 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     const plain = "a".repeat(2_000);
     /** Each line over its bound, named with its figures, asserted at the end. */
     const over: string[] = [];
+    /** The lines held to their bound: every line but the three PRINT_ONLY names. */
+    let asserted = 0;
     const lines: Array<[string, (word: string) => string]> = [
       ["cp, destination", (word) => `cp README.md ${word}`],
       ["cp, source", (word) => `cp ${word} out.txt`],
@@ -336,6 +340,7 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
         const held = !printOnly(shape, prefix, 2_000);
         const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} (no ratio bound: PRIORITIES argv-line split)${held ? "" : ` ${PRINTED}`}`;
         t.diagnostic(`cost: ${label}`);
+        if (held) asserted += 1;
         if (held && !(spent < BOUND_MS * 2)) over.push(label);
       }
     }
@@ -348,6 +353,7 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
           classifyForHook(command, [], dir, [], false, [dir]);
         });
         const held = !printOnly(shape, prefix, 20_000);
+        if (held) asserted += 1;
         if (held) report(t, `${command.slice(0, 30)} (20000 characters)`, ms, BOUND_MS * 2);
         else t.diagnostic(`cost: ${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms ${PRINTED}`);
         if (held && !(ms < BOUND_MS * 2)) over.push(`${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
@@ -356,13 +362,15 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     // Every line is measured and printed before any is held to its bound, so
     // one run (a CI shard) reads them all.
     assert.deepEqual(over, [], `over the bound:\n${over.join("\n")}`);
+    // Each PRINT_ONLY name took exactly one of the sixteen lines off the assert.
+    assert.equal(asserted, 13);
   } finally {
     if (savedHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = savedHome;
   }
 });
 
-test("cost: test 4 prints only the three lines the lead named without their bound (CLAIMS L63667)", () => {
+test("cost: test 4 prints only the three lines the lead ruled off the assert, two by CLAIMS L63667 and one by L63680", () => {
   // The list cannot grow unseen: a line taken off the assert is a ruling, and
   // each of these returns to it with the argv-line split.
   assert.deepEqual([...PRINT_ONLY], ["cp, source 2000", "cp, destination 2000", "~/.hermes/ cp, source 20000"]);
