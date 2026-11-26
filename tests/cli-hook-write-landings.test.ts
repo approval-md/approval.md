@@ -1458,6 +1458,31 @@ const S2_SETTINGS = JSON.stringify({
   permissions: { allow: ["Bash(~/not-a-hook/x.sh)"] },
 });
 
+test("each spelling answers by its own landing forms: a folder landed from a second run directory keeps its guard (PRIORITIES:331, review-a S1 on 6390d987)", () => {
+  // The call keeps each spelling's landing forms (landingFormsOf, one reading
+  // of the disk for every tree mode). From the cwd `<at>/sub`, `cp README.md
+  // sub` lands `<at>/sub/sub`; from `<at>`, the other directory the line may
+  // run in, it lands `<at>/sub`, a folder that holds a hook script the
+  // settings name. Kept under its parent's spelling, `<at>/sub/sub`'s forms
+  // would answer for `<at>/sub`, and the guard would go.
+  const at = join(base, "forms-own");
+  mkdirSync(join(at, "sub", "deep"), { recursive: true });
+  writeFileSync(join(at, "sub", "deep", "d.sh"), "# hook\n", "utf8");
+  const h = freshHome({ "settings.json": JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: "command", command: `${at}/sub/deep/d.sh arg` }] }] } }) });
+  withHome(h, undefined, () => {
+    for (const command of ["cp README.md sub", "mv README.md sub", "cp README.md sub/x sub"]) {
+      const { result, notes } = classifyForHook(command, [], join(at, "sub"), [], false, [at]);
+      assert.ok(result.ok, command);
+      assert.ok(result.classes.includes(GUARDED), `${command}: ${JSON.stringify(result.classes)}`);
+      assert.ok(notes.some((note) => note.includes(`${join(at, "sub")} `) && note.includes("a hook script the settings name")), `${command}: ${notes.join("\n")}`);
+    }
+    // From the cwd alone the line lands only `<at>/sub/sub`, beside the hook script: no guard.
+    const alone = classifyForHook("cp README.md sub", [], join(at, "sub"), [], false, [join(at, "sub")]).result;
+    assert.ok(alone.ok);
+    assert.ok(!alone.classes.includes(GUARDED), JSON.stringify(alone.classes));
+  });
+});
+
 test("S2.2 Bash: a file the settings name as a hook command is guarded, exactly, through the fold; the folder beside it is not", () => {
   const h = freshHome({ "settings.json": S2_SETTINGS });
   mkdirSync(join(h, "tools", "hooks"), { recursive: true });

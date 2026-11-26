@@ -400,6 +400,15 @@ function entryExists(path: string): boolean {
   }
 }
 
+/** Is `path` a directory (followed) that holds a `.git` entry? */
+function carriesGitEntry(path: string): boolean {
+  try {
+    return statSync(path).isDirectory() && existsSync(join(path, ".git"));
+  } catch {
+    return false;
+  }
+}
+
 /** The commands that copy or move a whole tree, `.git` entry included. */
 const TREE_COPIERS: ReadonlySet<string> = new Set(["cp", "mv", "rsync", "ditto"]);
 
@@ -566,6 +575,15 @@ export function refineGitDirWrites(
    * A walk reads the disk alone, through `read`.
    */
   landings: Map<string, GitDirLanding> = new Map(),
+  /**
+   * Whether each source path of a tree copy is a directory that holds a
+   * `.git` entry ({@link carriesGitEntry}), kept as long as the caller keeps
+   * this map (the hook: one call, every reading and synthetic line); a fresh
+   * one for this pass when absent. It reads the disk alone. The copy of every
+   * entry a 2,000-character `[` run names (`cp` of the run, judged as one
+   * synthetic line in each reading) asked each entry once a reading.
+   */
+  trees: Map<string, boolean> = new Map(),
 ): GitDirWriteRefinement {
   if (!result.ok) return { result, notes: [] };
   const notes: string[] = [];
@@ -773,11 +791,8 @@ export function refineGitDirWrites(
           const last = path.replace(/(?:\/\.?)+$/u, "").split("/").pop() ?? "";
           let carries = foldNameLower(last) === ".git";
           if (!carries) {
-            try {
-              carries = statSync(path).isDirectory() && existsSync(join(path, ".git"));
-            } catch {
-              carries = false;
-            }
+            carries = trees.get(path) ?? carriesGitEntry(path);
+            trees.set(path, carries);
           }
           if (carries) {
             hit = { word, landed: `${path}, a tree that carries a .git entry` };

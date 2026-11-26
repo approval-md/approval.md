@@ -404,6 +404,23 @@ test("N2: a copy or move of a tree that carries .git at its top is git-dir-write
   assert.ok(!hook("cp a.txt vendored", repo).includes(DIR_WRITE));
 });
 
+test("N2: each tree source is asked by its own path: two folders of one name, the second a checkout (PRIORITIES:331, review-a S1 on 6390d987)", { skip }, () => {
+  // The call remembers each source tree's answer (whether it carries `.git`
+  // at its top) by its path. `a/tree` is a plain folder and `b/tree` a
+  // checkout: remembered by the last name, `b/tree` would take `a/tree`'s
+  // answer and the copy would lose git-dir-write.
+  const at = root();
+  const repo = checkout(at);
+  mkdirSync(join(repo, "a", "tree"), { recursive: true });
+  checkout(join(repo, "b"), "tree");
+  for (const command of ["cp -R a/tree b/tree dest", "mv a/tree b/tree dest", "cp -R b/tree a/tree dest"]) {
+    assert.ok(hook(command, repo).includes(DIR_WRITE), command);
+  }
+  // Two plain folders of one name: no git-dir-write.
+  mkdirSync(join(repo, "c", "tree"), { recursive: true });
+  assert.ok(!hook("cp -R a/tree c/tree dest", repo).includes(DIR_WRITE));
+});
+
 test("#682's continuation cost line: a word repeated in a segment is placed once, and the first hit is the same one", { skip }, () => {
   // `cp README.md d*/APPROVA?.md` x 4,000 walked every repeat on the disk, in
   // each name reading: 3.6 to 9 CPU s against a bound of 8. A repeat lands
