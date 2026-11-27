@@ -9377,6 +9377,39 @@ interface CredentialWrites {
 
 const NO_CREDENTIAL_WRITES: CredentialWrites = { words: new Set(), landings: [], possible: [] };
 
+/**
+ * The program a segment runs behind the words in front of it that the
+ * classifier has no rule for (build-1's S1 on #706, review-a's N1 at CLAIMS
+ * L63058): `nice cp`, `command -p cp`, `stdbuf -o0 cp`, `command nice cp`.
+ * The classifier keeps no list of such wrappers; it reads them as {@link
+ * tailReachesRule} does, where `caffeinate -i npm publish` runs `npm
+ * publish`: a word no rule names may run the words after it. So from a
+ * program with no rule and no copy table, every later word is passed over
+ * (a flag, a flag's value, another such wrapper) until one is a program the
+ * classifier knows. A program with a copy table ({@link COPY_OPTION_TABLES})
+ * is `copy`: its table reads the words after it. Any other known program is
+ * `known` (`nice cat .approval/env` runs `cat`, a reader), and with none,
+ * `none` (`frobnicate README.md .approval/env`: what it writes is unknown).
+ * `at` is the index in `args` of the program found, or -1. Linear in the
+ * words; the words are only compared by name.
+ */
+interface WrappedProgram {
+  kind: "copy" | "known" | "none";
+  at: number;
+  basename: string;
+}
+
+function wrappedProgram(basename: string, args: readonly string[]): WrappedProgram {
+  if (COPY_OPTION_TABLES[basename] !== undefined) return { kind: "copy", at: -1, basename };
+  if (knownRuleBin(basename) || GLOB_READ_BINS.has(basename)) return { kind: "known", at: -1, basename };
+  for (const [at, word] of args.entries()) {
+    const name = pathSegments(word).slice(-1)[0] ?? word;
+    if (COPY_OPTION_TABLES[name] !== undefined) return { kind: "copy", at, basename: name };
+    if (knownRuleBin(name) || GLOB_READ_BINS.has(name)) return { kind: "known", at, basename: name };
+  }
+  return { kind: "none", at: -1, basename };
+}
+
 function credentialWrites(
   basename: string,
   args: readonly string[],
@@ -15012,10 +15045,39 @@ function classifySegmentWithVerb(
   const argvUnknown = (): string | null => (unknownMemo ??= { value: copyArgvUnknown(args, argFlags) }).value;
   // The credential paths a copy WRITES ({@link credentialWrites}): folded
   // reading only, as the rest of this tier's additions (as spelled, main's).
+  // Behind a wrapper the classifier has no rule for (`nice cp README.md
+  // .approval/env`), the copy program's own table reads the words after it
+  // ({@link wrappedProgram}; build-1's S1 on #706): the write's class is
+  // added to main's answer as for plain `cp`. Only a copy program is read
+  // so: behind a wrapper, a reader or a program with no table is left as main
+  // answers it (`nice cat .approval/env`, `nice frobnicate README.md
+  // .approval/env`).
+  const wrapped = credential === null && redirectCredential === null ? null : wrappedProgram(basename, args);
+  const peeled = wrapped !== null && wrapped.kind === "copy" && wrapped.at !== -1 ? wrapped : null;
   const copyWrites =
-    credential === null && redirectCredential === null
+    wrapped === null
       ? NO_CREDENTIAL_WRITES
-      : (foldedOnly(() => [credentialWrites(basename, args, argFlags, argsPlan, argvUnknown)])[0] ?? NO_CREDENTIAL_WRITES);
+      : peeled === null
+        ? (foldedOnly(() => [credentialWrites(basename, args, argFlags, argsPlan, argvUnknown)])[0] ?? NO_CREDENTIAL_WRITES)
+        : (foldedOnly(() => {
+            const innerArgs = args.slice(peeled.at + 1);
+            const innerFlags = argFlags.slice(peeled.at + 1);
+            const read = credentialWrites(
+              peeled.basename,
+              innerArgs,
+              innerFlags,
+              () => copyPlan(peeled.basename, innerArgs),
+              () => copyArgvUnknown(innerArgs, innerFlags),
+            );
+            // Only the paths the table reads as WRITTEN (a destination word, a
+            // landing). Where it cannot read the argv (`possible`), the branch
+            // below already answers for the words the shell builds (a target
+            // the shell builds is `copy-target-unknown`), and a literal
+            // credential path behind a wrapper is the read (build-1's S2 on
+            // #701, the seat's ruling): `command cp .approval/env '$X'` and
+            // `command cp --in=.approval/env notes.txt` are reads, as on main.
+            return [read.words.size === 0 && read.landings.length === 0 ? NO_CREDENTIAL_WRITES : { ...read, possible: [] }];
+          })[0] ?? NO_CREDENTIAL_WRITES);
   const sideScan =
     credential === null && redirectCredential === null
       ? null
@@ -15089,7 +15151,10 @@ function classifySegmentWithVerb(
       // refusal stands (the review of the M1 fold on #706). Its answer at
       // dbebd65d was that walk, deferred; a refusal is the strictest answer,
       // so the union of main's answer and the write's class is the refusal.
-      if (copyWrites.words.size > 0 || copyWrites.landings.length > 0) {
+      // Behind a wrapper the walk refuses for the wrapper (`no rule for
+      // nice`), and main answered with the credential class and the branch
+      // below: that answer is the one the write's class is added to.
+      if (peeled === null && (copyWrites.words.size > 0 || copyWrites.landings.length > 0)) {
         refused.outcome = rest;
         return [];
       }
