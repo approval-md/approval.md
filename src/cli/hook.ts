@@ -5325,6 +5325,11 @@ export function refineWriteLandings(
     }
     const sources = targetNamed ? operands : operands.slice(0, -1);
     if (sources.length === 0) return whole();
+    // An expanded final operand can contribute sources as well as the actual
+    // destination. Keep that constructed argv whole; only source expansions
+    // beside a literal destination take the batching path.
+    const destination = operands[operands.length - 1];
+    if (!targetNamed && destination !== undefined && expanded[destination]) return whole();
     const plain = new Set(sources.filter((index) => expanded[index] && plainTail(words[index] as string)));
     if (plain.size < PLAIN_BATCH_NAMES) return whole();
     const other = new Set(sources.filter((index) => !plain.has(index)));
