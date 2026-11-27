@@ -32,6 +32,14 @@ before a tag.
   line for line. A copy from such a pattern costs 14 to 30% less CPU, and a
   copy or move into one 16 to 25% less (median of 21 pairs, nodes 20, 22
   and 26); a move from one costs what it did.
+- **A copy or move from a pattern of many entries judges its plain sources
+  once per call (APRV-538).** The argv of every entry was one synthetic line,
+  judged again in each name reading. Now only the pattern-expanded sources are
+  split off, with every option and the destination kept on both lines, and the
+  plain batch is judged once when every reading names it alike; any other
+  option, an expansion that yields an option marker, or a `vcs.history.rewrite`
+  verdict on either part keeps the whole line, as before. Answers are
+  unchanged.
 
 ### Tests
 
@@ -39,15 +47,13 @@ before a tag.
   (PRIORITIES:331).** The run as the source or the destination, plain and
   under `~/.hermes/`: the median of 21 pairs is held under 100 CPU ms, as
   `echo x >` is, and the 20,000-character run to 100 in one call. Every line
-  is measured and printed before any is asserted. Three lines are printed and
-  not yet asserted: `cp <run> out.txt` and `cp README.md <run>` (lead ruling),
-  and the 20,000-character `cp ~/.hermes/<run> out.txt` (a second ruling, by
-  the same reasoning). On the merge queue's node 22 they read 87.5, 79.9 and
-  80.3 in one run and 89.3, 95.4 and 80.0 in another; node 20 reads about 1.2
-  times that. A test holds that list to those three, and each returns to the
-  assert with the argv-line split (owed): the copy's argv of every entry is
-  judged in each name reading. Each line also prints its ratio to a
-  same-length plain line, with no bound until that split.
+  is measured and printed before any is asserted, and all sixteen are
+  asserted. Three of them, `cp <run> out.txt`, `cp README.md <run>` and the
+  20,000-character `cp ~/.hermes/<run> out.txt`, were printed only until the
+  argv-line split (APRV-538), by a lead ruling: 87.5, 79.9 and 80.3 on the
+  merge queue's node 22 before it. Each line also prints its ratio to a
+  same-length plain line, with no bound, and doubling the run to 4,000
+  characters may cost at most 2.6 times the 2,000-character line.
 
 ## 0.4.9 — 2026-11-25
 
