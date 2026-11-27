@@ -2607,6 +2607,21 @@ test("behind a wrapper, a built target the copy writes: the read's S2 lines pinn
     ["nice cat .approval/env .gith*/workflows/ci.yml", [CRED, UNKNOWN]],
     // A literal target: main's answer (the protected scan already names it).
     ["command cp .approval/env .github/workflows/ci.yml", [CRED, "policy.edit.ci protected-path"]],
+    // A built word plain `cp` takes for the credential read (two unread parts
+    // may spell `.approval/env`) is left out as plain `cp` leaves it out.
+    ["command cp .approval/env $A-$B", [CRED, UNKNOWN]],
+    ["command cp .approval/env $'~/.hermes/.env'", ["policy.core protected-path", CRED]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+  for (const [line, want] of [
+    // `mv` writes every path it names: its built words are all read, as
+    // plain `mv`'s are.
+    ["command mv .approval/env $'~/.hermes/.env'", ["policy.core protected-path", CRED, "log.mutate protected-path", "cron.manage protected-path"]],
+    // `install` has no rule, so its own walk refuses: its built target is
+    // read the same way, with or without a wrapper.
+    ["install $APPROVAL_TG_TOKEN .appr*/log/x", [ENV, UNKNOWN, "log.mutate protected-path"]],
+    ["command install $APPROVAL_TG_TOKEN .appr*/log/x", [ENV, UNKNOWN, "log.mutate protected-path"]],
   ] as const) {
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
   }

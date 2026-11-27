@@ -15202,18 +15202,32 @@ function classifySegmentWithVerb(
       // rides beside, after the unknown target (`command cp .approval/env
       // .gith*/workflows/ci.yml` names the workflow, as plain `cp` does). The
       // words read are the ones plain `cp`'s walk reads as written (its
-      // `writtenOperands`): its sources are not. Only behind a wrapper of a
-      // copy program ({@link wrappedProgram}): what a program with no table
-      // writes is unknown, and a reader writes none of its operands.
-      const plan = peeled === null || builtAt.length === 0 ? null : peeledPlan();
+      // `writtenOperands`), less the ones it takes for the credential read
+      // ({@link isCredentialReadWord}: `$A-$B` may spell `.approval/env`): its
+      // sources are not. Only for a copy program ({@link wrappedProgram}),
+      // behind a wrapper or not (`install`, which has no rule, refuses its
+      // walk too): what a program with no table writes is unknown, and a
+      // reader writes none of its operands.
+      const copying = wrapped !== null && wrapped.kind === "copy" && builtAt.length > 0 ? wrapped : null;
+      const copyArgs = copying === null ? [] : copying.at === -1 ? args : args.slice(copying.at + 1);
+      const plan = copying === null ? null : copying.at === -1 ? argsPlan() : peeledPlan();
       const written = ((): ReadonlySet<string> | null => {
-        if (peeled === null || builtAt.length === 0) return null;
-        const innerPositionals = args.slice(peeled.at + 1).filter((arg) => !isFlag(arg));
-        if (plan === null || !["cp", "ln", "install"].includes(peeled.basename)) return new Set(globWriteOperands(peeled.basename, innerPositionals));
+        if (copying === null) return null;
+        const copyPositionals = copyArgs.filter((arg) => !isFlag(arg));
+        if (plan === null || !["cp", "ln", "install"].includes(copying.basename)) return new Set(globWriteOperands(copying.basename, copyPositionals));
         if (plan.unknown !== null) return new Set([...plan.operands, ...plan.dests]);
-        return new Set(plan.dests.length === 0 || plan.implicitDest === true ? [...innerPositionals, ...plan.dests] : plan.dests);
+        return new Set(plan.dests.length === 0 || plan.implicitDest === true ? [...copyPositionals, ...plan.dests] : plan.dests);
       })();
-      const builtWritten = written === null ? [] : builtAt.filter((at) => written.has((segment.words[at] as LexWord).text));
+      // A program that writes every path it names keeps them all, as plain
+      // `mv` does ({@link credentialSideScan}'s rule).
+      const writesOnly = copying !== null && (credentialWritesOnly(copying.basename, copyArgs) || credentialProtectedScanKeeps(copying.basename));
+      const builtWritten =
+        written === null
+          ? []
+          : builtAt.filter((at) => {
+              const text = (segment.words[at] as LexWord).text;
+              return written.has(text) && (writesOnly || !isCredentialReadWord(text, protectedPaths));
+            });
       const reading =
         builtWritten.length === 0
           ? null
@@ -15224,7 +15238,6 @@ function classifySegmentWithVerb(
               false,
               glob,
               null,
-              builtWritten.map((at) => wordLiterals[at]),
             );
       // The copy fills a destination it may name with any name, as plain
       // `cp`'s does: where that destination is a built word, an organ
