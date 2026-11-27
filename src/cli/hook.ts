@@ -4524,6 +4524,15 @@ interface LineVariable {
   value: string;
   /** Set twice, conditionally, by `read` or another setter, or as a prefix: never resolved. */
   tainted: boolean;
+  /**
+   * Every bare, unconditional assignment, in line order (S1 of #709, the
+   * two-step form): read only by {@link resolveWriteWord}'s `asAssigned`
+   * reading of a {@link STEERING_NAMES} name, and only while `unsure` is
+   * unset. An ordinary name set twice stays unresolved, as before.
+   */
+  sets: { at: number; value: string }[];
+  /** Tainted for any reason but a second bare assignment (a setter, a condition, a prefix, two in one segment). */
+  unsure: boolean;
 }
 
 /**
@@ -4544,18 +4553,30 @@ function lineVariables(shapes: readonly CommandSegmentShape[]): Map<string, Line
   const vars = new Map<string, LineVariable>();
   const taint = (name: string): void => {
     const known = vars.get(name);
-    vars.set(name, { at: known?.at ?? -1, value: known?.value ?? "", tainted: true });
+    vars.set(name, { at: known?.at ?? -1, value: known?.value ?? "", tainted: true, sets: known?.sets ?? [], unsure: true });
   };
   for (const [index, shape] of shapes.entries()) {
     for (const assignment of shape.assignments) {
       const equals = assignment.indexOf("=");
       const name = assignment.slice(0, equals).replace(/\+$/u, "").replace(/\[.*$/su, "");
       // An assignment zsh equals-expands (`X==tool`) holds a program's path, not its text (S2, N1).
-      if (shape.bin !== null || shape.conditional || assignment.slice(0, equals).endsWith("+") || vars.has(name) || (shape.equalsAssignments?.includes(assignment) ?? false)) {
+      if (shape.bin !== null || shape.conditional || assignment.slice(0, equals).endsWith("+") || (shape.equalsAssignments?.includes(assignment) ?? false)) {
         taint(name);
         continue;
       }
-      vars.set(name, { at: index, value: assignment.slice(equals + 1), tainted: false });
+      const value = assignment.slice(equals + 1);
+      const known = vars.get(name);
+      if (known !== undefined) {
+        // Set again: never resolved as an ordinary name. The steering names'
+        // second reading follows the sets in order, unless two share a segment.
+        // (Appended in place, and only the last set compared: the sets are in
+        // line order, so a line of many assignments stays linear.)
+        const again = known.sets.length > 0 && (known.sets[known.sets.length - 1] as { at: number }).at === index;
+        known.sets.push({ at: index, value });
+        vars.set(name, { ...known, tainted: true, unsure: known.unsure || again });
+        continue;
+      }
+      vars.set(name, { at: index, value, tainted: false, sets: [{ at: index, value }], unsure: false });
     }
     if (shape.bin !== null && VARIABLE_SETTERS.has(basename(shape.bin))) {
       for (const arg of shape.args) {
@@ -4572,6 +4593,18 @@ function lineVariables(shapes: readonly CommandSegmentShape[]): Map<string, Line
     }
   }
   return vars;
+}
+
+/** The last of `sets` (in line order) before shape `at`, by bisection, or `null`. */
+function lastSetBefore(sets: readonly { at: number; value: string }[], at: number): { at: number; value: string } | null {
+  let low = 0;
+  let high = sets.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if ((sets[middle] as { at: number }).at < at) low = middle + 1;
+    else high = middle;
+  }
+  return low === 0 ? null : (sets[low - 1] as { at: number; value: string });
 }
 
 /** A word, resolved the way the shell would, or why it cannot be. */
@@ -4670,11 +4703,18 @@ function resolveWriteWord(
         }
       }
       const known = line.vars.get(name);
-      if (known === undefined || known.tainted || known.at < 0 || known.at >= at) {
+      // The two-step form (S1 of #709): in the second reading a steering name
+      // set several times, each time bare and unconditionally, takes its last
+      // value before the word, which reads the one before it in turn
+      // (`HERMES_HOME=.approval; HERMES_HOME=$HERMES_HOME/log`). Bounded by
+      // the depth above: past eight steps the word is unreadable.
+      const set = asAssigned && STEERING_NAMES.includes(name) && known !== undefined && !known.unsure ? lastSetBefore(known.sets, at) : null;
+      if (set === null && (known === undefined || known.tainted || known.at < 0 || known.at >= at)) {
         failed = `${word} reads $${name}, which the line does not set once, unconditionally and before it`;
         return match;
       }
-      const inner = resolveWriteWord(known.value, known.at, line, depth + 1, asAssigned);
+      const from = set ?? (known as LineVariable);
+      const inner = resolveWriteWord(from.value, from.at, line, depth + 1, asAssigned);
       if ("unreadable" in inner) {
         failed = inner.unreadable;
         return match;

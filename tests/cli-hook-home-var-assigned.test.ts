@@ -92,8 +92,8 @@ test("the four weak rows reach what their D= twins reach, and keep the guarded c
     ["HERMES_HOME=.claude; echo x > $HERMES_HOME/settings.json", "D=.claude; echo x > $D/settings.json", "policy.core"],
     ["HERMES_HOME=.github/workflows; echo x > $HERMES_HOME/ci.yml", "D=.github/workflows; echo x > $D/ci.yml", "policy.edit"],
     // The two-step: the D= twin's own reading gives up on a name set twice
-    // (guarded only), so the home form equals it here.
-    ["HERMES_HOME=.approval; HERMES_HOME=$HERMES_HOME/log; echo x >> $HERMES_HOME/events.jsonl", "D=.approval; D=$D/log; echo x >> $D/events.jsonl", null],
+    // (guarded only); the home's second reading follows the sets in order.
+    ["HERMES_HOME=.approval; HERMES_HOME=$HERMES_HOME/log; echo x >> $HERMES_HOME/events.jsonl", "D=.approval; D=$D/log; echo x >> $D/events.jsonl", "log.mutate"],
   ];
   for (const [line, twin, cls] of rows) {
     covers(line, twin, hook, "hook");
@@ -230,4 +230,35 @@ test("every name of the hook's STEERING_NAMES list, one row each", () => {
   assert.ok(!cd.includes("log.mutate") && cd.includes(GUARDED), JSON.stringify(cd));
   // HERMES_HOME: the row itself.
   assert.ok(classesOf(hook("HERMES_HOME=.approval/log; echo x >> $HERMES_HOME/events.jsonl"), "HERMES_HOME").includes("log.mutate"));
+});
+
+test("the two-step form: a steering name set again, each time bare and unconditionally, takes its last value before the word", () => {
+  for (const [line, cls] of [
+    ["HERMES_HOME=.approval; HERMES_HOME=$HERMES_HOME/log; echo x >> $HERMES_HOME/events.jsonl", "log.mutate"],
+    ["HERMES_HOME=a; HERMES_HOME=.approval/log; echo x >> $HERMES_HOME/events.jsonl", "log.mutate"],
+    // Set again only after the word: the value at the word is the first.
+    ["HERMES_HOME=.approval/log; echo x >> $HERMES_HOME/events.jsonl; HERMES_HOME=a", "log.mutate"],
+    ["PWD=.approval; PWD=$PWD/log; echo x >> $PWD/events.jsonl", "log.mutate"],
+  ] as const) {
+    const classes = classesOf(hook(line), line);
+    assert.ok(classes.includes(cls) && classes.includes(GUARDED), `${line}: ${JSON.stringify(classes)}`);
+  }
+  // Where the line's last value is another, or the sets cannot be followed
+  // (two in one segment, one behind a condition), nothing is added; guarded stays.
+  for (const line of [
+    "HERMES_HOME=.approval/log; HERMES_HOME=a; echo x >> $HERMES_HOME/events.jsonl",
+    "HERMES_HOME=.approval HERMES_HOME=$HERMES_HOME/log; echo x >> $HERMES_HOME/events.jsonl",
+    "true && HERMES_HOME=a; HERMES_HOME=.approval; HERMES_HOME=$HERMES_HOME/log; echo x >> $HERMES_HOME/events.jsonl",
+  ]) {
+    const classes = classesOf(hook(line), line);
+    assert.ok(!classes.includes("log.mutate") && classes.includes(GUARDED), `${line}: ${JSON.stringify(classes)}`);
+  }
+  // An ordinary name set twice is not followed: its D= reading is as before.
+  const twin = classesOf(hook("D=.approval; D=$D/log; echo x >> $D/events.jsonl"), "D two-step");
+  assert.ok(!twin.includes("log.mutate") && twin.includes(GUARDED), JSON.stringify(twin));
+  // Bounded: past eight steps the word is unreadable (guarded), whatever the chain spells.
+  const steps = (n: number): string => `HERMES_HOME=.approval; ${Array.from({ length: n }, () => "HERMES_HOME=$HERMES_HOME/.").join("; ")}; HERMES_HOME=$HERMES_HOME/log; echo x >> $HERMES_HOME/events.jsonl`;
+  assert.ok(classesOf(hook(steps(6)), "6 steps").includes("log.mutate"));
+  const deep = classesOf(hook(steps(400)), "400 steps");
+  assert.ok(deep.includes(GUARDED) && !deep.includes("log.mutate"), JSON.stringify(deep));
 });
