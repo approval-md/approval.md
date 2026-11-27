@@ -63,6 +63,9 @@ for (const path of [
 }
 // A link to the approval home that exists beforehand (the `.git` rule's form).
 symlinkSync(".approval", join(ws, "applink"));
+// A guarded NAME that is a link to an ordinary folder (the reverse of `applink`).
+mkdirSync(join(ws, "packages", "y"), { recursive: true });
+symlinkSync("../../docs", join(ws, "packages", "y", ".claude"));
 const SRC = join(ws, "README.md");
 
 /** The hook chain's classes, or `REF:<code>` for a refused line. */
@@ -213,6 +216,25 @@ test("a cd through a variable the line sets, and through a home variable it sets
 test("a cd into a link to a guarded folder is followed, as the .git rule's link is", () => {
   covers("cd applink && echo x > env", "echo x > .approval/env");
   covers("cd applink && echo x >> log/events.jsonl", "echo x >> .approval/log/events.jsonl");
+});
+
+test("a cd that may fail before `;` or `||`, a pipeline's stages, and a guarded name that links elsewhere", () => {
+  // `;` after a cd that may fail: the shell may still stand where the failed cd left it.
+  holds("cd .claude && cd missing; echo x > settings.json", "policy.core");
+  holds("cd .approval && cd missing; echo x >> log/events.jsonl", "log.mutate");
+  // `a && b && c || d`: d runs where b failed, and b failed where a landed.
+  holds("cd .claude && cd missing && true || echo x > settings.json", "policy.core");
+  holds("cd .approval && cd missing && true || echo x >> log/events.jsonl", "log.mutate");
+  // A cd in an earlier stage of a pipeline ran in a subshell: a later stage stands where the line did.
+  assert.deepEqual(hook("cd .approval | echo x > env"), ALLOWED);
+  assert.deepEqual(hook("cd .claude | tee settings.json"), ALLOWED);
+  // A cd in the last stage may run in the shell itself (zsh): what follows is judged there too.
+  holds("true | cd .approval; echo x > env", "policy.core");
+  // A guarded name that links to an ordinary folder: a plain cd keeps the name
+  // its direct spelling has; `cd -P` lands at the folder the link names.
+  covers("cd packages/y/.claude && echo x > settings.json", "echo x > packages/y/.claude/settings.json");
+  holds("cd packages/y/.claude && echo x > settings.json", "policy.core");
+  assert.deepEqual(hook("cd -P packages/y/.claude && echo x > settings.json"), ALLOWED);
 });
 
 test("over-asking: a cd into an ordinary folder then a build, a test or a write moves nothing", () => {
