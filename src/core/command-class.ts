@@ -15283,31 +15283,42 @@ function classifySegmentWithVerb(
       // rides beside, after the unknown target (`command cp .approval/env
       // .gith*/workflows/ci.yml` names the workflow, as plain `cp` does). The
       // words read are the ones plain `cp`'s walk reads as written (its
-      // `writtenOperands`), less the ones it takes for the credential read
-      // ({@link isCredentialReadWord}: `$A-$B` may spell `.approval/env`): its
-      // sources are not. Only for a copy program ({@link wrappedProgram}),
-      // behind a wrapper or not (`install`, which has no rule, refuses its
-      // walk too): what a program with no table writes is unknown, and a
-      // reader writes none of its operands.
+      // `writtenOperands`): its sources are not. Only for a copy program
+      // ({@link wrappedProgram}), behind a wrapper or not (`install`, which
+      // has no rule, refuses its walk too): what a program with no table
+      // writes is unknown, and a reader writes none of its operands.
       const copying = wrapped !== null && wrapped.kind === "copy" && builtAt.length > 0 ? wrapped : null;
       const copyArgs = copying === null ? [] : copying.at === -1 ? args : args.slice(copying.at + 1);
       const plan = copying === null ? null : copying.at === -1 ? argsPlan() : peeledPlan();
+      const copyPositionals = copyArgs.filter((arg) => !isFlag(arg));
       const written = ((): ReadonlySet<string> | null => {
         if (copying === null) return null;
-        const copyPositionals = copyArgs.filter((arg) => !isFlag(arg));
         if (plan === null || !["cp", "ln", "install"].includes(copying.basename)) return new Set(globWriteOperands(copying.basename, copyPositionals));
         if (plan.unknown !== null) return new Set([...plan.operands, ...plan.dests]);
         return new Set(plan.dests.length === 0 || plan.implicitDest === true ? [...copyPositionals, ...plan.dests] : plan.dests);
       })();
-      // A program that writes every path it names keeps them all, as plain
-      // `mv` does ({@link credentialSideScan}'s rule).
+      // A built word that may also spell a credential path (`$A-$B` may
+      // spell `.approval/env`, {@link isCredentialReadWord}) may be the read
+      // or the write. In the copy's DESTINATION it takes both readings: the
+      // credential class stays, and the write's classes ride beside it (the
+      // automated security review of #714: a union, never one reading in
+      // place of the other). The destination is the plan's when its argv
+      // reads (`-t` included), else the last operand, as an unreadable argv's
+      // credential path is read (S1 of #706). Elsewhere (an `rsync` or `scp`
+      // source, which `writtenOperands` counts as written) it stays the read,
+      // as plain `cp`'s scans leave it, so a read through a wrapper takes no
+      // write class (the read-only bar). A program that writes every path it
+      // names keeps them all, as plain `mv` does ({@link credentialSideScan}'s
+      // rule).
+      const lastOperand = copyPositionals.length >= 2 ? copyPositionals.slice(-1) : [];
+      const destination = new Set(plan !== null && plan.unknown === null && plan.dests.length > 0 && plan.implicitDest !== true ? plan.dests : lastOperand);
       const writesOnly = copying !== null && (credentialWritesOnly(copying.basename, copyArgs) || credentialProtectedScanKeeps(copying.basename));
       const builtWritten =
         written === null
           ? []
           : builtAt.filter((at) => {
               const text = (segment.words[at] as LexWord).text;
-              return written.has(text) && (writesOnly || !isCredentialReadWord(text, protectedPaths));
+              return written.has(text) && (writesOnly || destination.has(text) || !isCredentialReadWord(text, protectedPaths));
             });
       const reading =
         builtWritten.length === 0
