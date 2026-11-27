@@ -3501,6 +3501,8 @@ export interface ClassifierContext {
   organParentsOff?: boolean;
   /** The values the line (and any line it sits in) assigns each variable, for the parents rule (lead ruling L62435). Internal. */
   lineAssigned?: ReadonlyMap<string, readonly string[]>;
+  /** The home variables the line (or one it sits in) assigns in a segment of assignments alone ({@link homesAssignedBare}; #709's owed row, S1). Internal. */
+  lineAssignedHomes?: ReadonlySet<string>;
   /** An earlier segment of the line moved the shell to a parent spelling (`cd ..`; lead ruling L62435, S2). Internal. */
   organCdParent?: boolean;
   /** The line (or one it sits in) assigns `CDPATH` (security review of the fold, 15). Internal. */
@@ -10539,7 +10541,7 @@ function strictestProtectedWrite(
     if (!inexact(word)) {
       // A substitution leaves its word `exact` to the lexer, and its output is
       // an unread part all the same (`APPROVAL$(true).md`).
-      if (word.includes(SUBSTITUTION_SENTINEL) && !(skipProse && /\s/u.test(word))) offerSpliced(splicedGuardClass(word, protectedPaths, glob.budget, glob.options, globLive(glob, word), literalAt), word);
+      if (word.includes(SUBSTITUTION_SENTINEL) && !(skipProse && /\s/u.test(word))) offerSpliced(splicedGuardClass(word, protectedPaths, glob.budget, glob.options, globLive(glob, word), literalAt, glob.homesAssigned), word);
       continue;
     }
     if (skipProse && /\s/u.test(word)) continue;
@@ -10564,7 +10566,7 @@ function strictestProtectedWrite(
       // An unread part spliced into literal text (lead ruling CLAIMS L62568):
       // `APPROVAL$E.md` is the policy file when E is empty, inside double
       // quotes too (the value is spliced in, only not globbed).
-      offerSpliced(splicedGuardClass(reading, protectedPaths, glob.budget, glob.options, globLive(glob, word), reading === word ? literalAt : undefined), word);
+      offerSpliced(splicedGuardClass(reading, protectedPaths, glob.budget, glob.options, globLive(glob, word), reading === word ? literalAt : undefined, glob.homesAssigned), word);
     }
     spent.set(spentKey, budgetBefore - glob.budget.left);
   }
@@ -10605,6 +10607,13 @@ interface GlobReading {
   budget: { left: number };
   off: boolean;
   tracker?: { raised: boolean; parent?: boolean };
+  /**
+   * The home variables ({@link HOME_VARIABLES}) the line assigns itself
+   * (`HERMES_HOME=.claude; echo x > $HERMES_HOME/settings.json`): a word that
+   * opens with one is read as the home AND as an unread part, the way `$D`
+   * is read ({@link assignedHomeAsPart}; #709's owed row, S1).
+   */
+  homesAssigned?: ReadonlySet<string>;
 }
 /**
  * `(text) => words.some((word) => word.includes(text))`, the segment's
@@ -13217,12 +13226,13 @@ function splicedGuardClass(
   options: boolean,
   live: boolean,
   literalAt?: readonly number[],
+  homesAssigned?: ReadonlySet<string>,
 ): { surface: string | null; also: readonly string[] } {
   // Every class a counted candidate takes, not only the strictest: the plain
   // spelling's class rides beside a stricter one (`.$X/settings.json` may be
   // `.approval/log/settings.json` or `.claude/settings.json`).
   const also = new Set<string>();
-  const surface = splicedClass(word, budget, options, live, (path) => protectedPathClass(path, protectedPaths), protectedPaths, "log.mutate", false, also, literalAt);
+  const surface = splicedClass(word, budget, options, live, (path) => protectedPathClass(path, protectedPaths), protectedPaths, "log.mutate", false, also, literalAt, homesAssigned);
   // A word whose literal text and unread parts may join into `.git` (`.$X/hooks/x`)
   // is a git-dir write as well, as {@link splicedNamesGit} reads it alone.
   if (surface !== null) {
@@ -13315,21 +13325,73 @@ function splicedClass(
   directoryKeeps = false,
   also?: Set<string>,
   literalAt?: readonly number[],
+  homesAssigned?: ReadonlySet<string>,
 ): string | null {
-  const own = splicedClassOf(word, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also, literalAt);
-  // A home variable's default (`${HOME:-/x}`), read as the home in `own`, is
-  // read as its default too: the strictest of the two answers, every class
-  // either reached beside (review of the home-operator reading).
+  let answer = splicedClassOf(word, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also, literalAt);
+  const join = (other: string | null): void => {
+    if (other !== null) also?.add(other);
+    if (other !== null && (answer === null || protectedRank(other) < protectedRank(answer))) answer = other;
+  };
+  // A home variable's default (`${HOME:-/x}`), read as the home in the first
+  // answer, is read as its default too: the strictest of the two answers,
+  // every class either reached beside (review of the home-operator reading).
   const defaulted = mainRulesOnly ? null : homeDefaultReading(word);
-  if (defaulted === null) return own;
-  const other =
-    unreadParts(defaulted) === null
-      ? judge(defaulted)
-      : splicedClassOf(defaulted, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also);
-  if (other !== null) also?.add(other);
-  if (own === null) return other;
-  if (other === null) return own;
-  return protectedRank(other) < protectedRank(own) ? other : own;
+  if (defaulted !== null) {
+    join(
+      unreadParts(defaulted) === null
+        ? judge(defaulted)
+        : splicedClassOf(defaulted, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also),
+    );
+  }
+  // A home variable the line assigns itself, read as the home above, is read
+  // as an unread part too, as `$D` is (#709's owed row, S1): the union of the
+  // two readings, never one in place of the other.
+  const asPart = mainRulesOnly || homesAssigned === undefined ? null : assignedHomeAsPart(word, homesAssigned);
+  if (asPart !== null) join(splicedClassOf(asPart, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also));
+  return answer;
+}
+
+/** The variables the spliced reading takes as a home when they open a word (the list {@link unreadPartsOf} reads). */
+const HOME_VARIABLES: readonly string[] = ["HOME", "HERMES_HOME"];
+
+/**
+ * The home variables ({@link HOME_VARIABLES}) a line assigns itself in a
+ * segment of assignments alone (`HERMES_HOME=.claude;`, `HERMES_HOME=a
+ * HOME=b &&`), with the ones a line it sits in assigns (`outer`), as a
+ * {@link ClassifierContext} field. A prefix assignment (`HERMES_HOME=. tee
+ * $HERMES_HOME/x`) is not one: the shell expands the command's own words
+ * before it applies, so that word keeps its answer. Any other binding of a
+ * home variable (`export`, `read`, `for`, `${NAME:=…}`) is refused before
+ * this reading. Wherever on the line, before or after the word: `$D` is an
+ * unread part with no assignment at all, so this reading is never wider than
+ * D's. None, no field.
+ */
+function homesAssignedBare(segments: readonly LexSegment[], outer: ReadonlySet<string> | undefined): { lineAssignedHomes?: ReadonlySet<string> } {
+  let names: Set<string> | null = outer === undefined ? null : new Set(outer);
+  for (const segment of segments) {
+    if (segment.words.length === 0 || !segment.words.every((word) => word.assignment)) continue;
+    for (const word of segment.words) {
+      const name = assignedName(word.text);
+      if (HOME_VARIABLES.includes(name)) (names ??= new Set()).add(name);
+    }
+  }
+  return names === null || names.size === 0 ? {} : { lineAssignedHomes: names };
+}
+
+/**
+ * A word that opens with a home variable the line assigns (`$HERMES_HOME/x`,
+ * `${HERMES_HOME}/x`, `${HERMES_HOME:-d}/x`, as the word's first component:
+ * the place {@link unreadPartsOf} reads as the home) with that variable as an
+ * unread part, the way `$D/x` is read, or `null`. The line's value may not be
+ * what the operator set, so the word is any path that ends as it does: the
+ * spliced reading of an unread part (#709).
+ */
+function assignedHomeAsPart(word: string, homes: ReadonlySet<string>): string | null {
+  if (!word.startsWith("$")) return null;
+  const opening = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::?-[^$}]*)?\}|([A-Za-z_][A-Za-z0-9_]*))(?=\/|$)/u.exec(word);
+  const name = opening?.[1] ?? opening?.[2];
+  if (opening === null || name === undefined || !homes.has(name)) return null;
+  return `${SUBSTITUTION_SENTINEL}${word.slice(opening[0].length)}`;
 }
 
 /**
@@ -14702,6 +14764,7 @@ function classifySegmentWithVerb(
     budget: context.globBudget ?? { left: GLOB_GUARD_STEP_CAP },
     off: context.globPatternsOff === true,
     ...(context.globTracker === undefined ? {} : { tracker: context.globTracker }),
+    ...(context.lineAssignedHomes === undefined ? {} : { homesAssigned: context.lineAssignedHomes }),
   };
   const redirected = strictestProtectedWrite(
     everyWriteTarget,
@@ -16312,8 +16375,9 @@ function classifyCommandAsReadWithRules(
     globBudget: context.globBudget ?? { left: GLOB_GUARD_STEP_CAP },
   };
   const lineAssigned = lineAssignments(lexed.segments, context.lineAssigned);
-  context = { ...context, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned };
-  execContext = { ...execContext, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned };
+  const homesField = homesAssignedBare(lexed.segments, context.lineAssignedHomes);
+  context = { ...context, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned, ...homesField };
+  execContext = { ...execContext, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned, ...homesField };
   // Lead ruling L62435 (S2, narrow): a `cd` to a parent spelling earlier on the line.
   let cdParent = context.organCdParent === true;
   // Security review of the fold, 15, 19 and 20: the token `CDPATH` anywhere

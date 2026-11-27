@@ -4585,6 +4585,18 @@ type ResolvedWord = { unreadable: string } | { spellings: string[] };
  * prefix), a parameter expansion with an operator (`${X:-a}`, `${#X}`), a
  * special parameter, or `~`, `$HOME`, `$PWD` or `$TMPDIR` on a line that sets
  * that name (a `cd` sets `PWD`).
+ *
+ * `asAssigned` is the second reading of #709's owed row (S1): a
+ * {@link STEERING_NAMES} name the line itself sets (`HERMES_HOME=.approval/log;
+ * echo x >> $HERMES_HOME/events.jsonl`) is read with the value the line gives
+ * it, under exactly the rules an ordinary name is (`D=`): set once, with no
+ * setter, unconditionally, before the word. Never in place of the reading
+ * above: a caller that judges where a word lands keeps "unreadable" (the
+ * guarded class), and only the callers that ADD the classes a resolved
+ * spelling earns ask for this one too ({@link resolvedOrAssigned}). A `cd`
+ * before the word leaves `$PWD` unread here as well. `~` is not read this
+ * way: a line that assigns `HOME` is refused by the classifier before this
+ * pass runs.
  */
 function resolveWriteWord(
   word: string,
@@ -4596,6 +4608,7 @@ function resolveWriteWord(
     env: NodeJS.ProcessEnv;
   },
   depth = 0,
+  asAssigned = false,
 ): ResolvedWord {
   if (depth > 8) return { unreadable: `${word} expands through more than eight variables` };
   if (word.includes(SUBSTITUTION_SENTINEL) || word.includes("`")) {
@@ -4603,9 +4616,9 @@ function resolveWriteWord(
   }
   const candidates = braceCandidates(word);
   if (candidates === null) return { unreadable: `${word} expands to more brace alternatives than this hook reads` };
-  const steered = (name: string): boolean =>
-    line.vars.has(name) ||
-    (name === "PWD" && line.shapes.slice(0, at).some((shape) => shape.bin !== null && ["cd", "pushd", "popd"].includes(basename(shape.bin))));
+  const changesDirectoryBefore = (): boolean =>
+    line.shapes.slice(0, at).some((shape) => shape.bin !== null && ["cd", "pushd", "popd"].includes(basename(shape.bin)));
+  const steered = (name: string): boolean => line.vars.has(name) || (name === "PWD" && changesDirectoryBefore());
   const spellings: string[] = [];
   for (const candidate of candidates) {
     let text = candidate;
@@ -4636,27 +4649,32 @@ function resolveWriteWord(
       }
       if (STEERING_NAMES.includes(name)) {
         if (steered(name)) {
-          failed = `${word} reads $${name} on a line that sets it`;
-          return match;
+          // The second reading (S1 of #709): the value the line assigns, read
+          // below as an ordinary name's is. A `cd` before the word sets `PWD`.
+          if (!asAssigned || (name === "PWD" && changesDirectoryBefore())) {
+            failed = `${word} reads $${name} on a line that sets it`;
+            return match;
+          }
+        } else {
+          const value =
+            name === "PWD"
+              ? line.cwd
+              : name === "HERMES_HOME"
+                ? (line.env["APPROVAL_HERMES_HOME"] ?? line.env["HERMES_HOME"])
+                : line.env[name];
+          if (value === undefined || value.length === 0) {
+            failed = `${word} reads $${name}, which this hook does not have`;
+            return match;
+          }
+          return value;
         }
-        const value =
-          name === "PWD"
-            ? line.cwd
-            : name === "HERMES_HOME"
-              ? (line.env["APPROVAL_HERMES_HOME"] ?? line.env["HERMES_HOME"])
-              : line.env[name];
-        if (value === undefined || value.length === 0) {
-          failed = `${word} reads $${name}, which this hook does not have`;
-          return match;
-        }
-        return value;
       }
       const known = line.vars.get(name);
       if (known === undefined || known.tainted || known.at < 0 || known.at >= at) {
         failed = `${word} reads $${name}, which the line does not set once, unconditionally and before it`;
         return match;
       }
-      const inner = resolveWriteWord(known.value, known.at, line, depth + 1);
+      const inner = resolveWriteWord(known.value, known.at, line, depth + 1, asAssigned);
       if ("unreadable" in inner) {
         failed = inner.unreadable;
         return match;
@@ -5053,6 +5071,20 @@ export function refineWriteLandings(
   };
   const start = cwds.find((each) => isAbsolute(each)) ?? cwds[0] ?? "/";
   const line = { shapes, vars: lineVariables(shapes), cwd: start, env };
+  /**
+   * A word resolved for the classes its spellings earn (S1 of #709): as
+   * {@link resolveWriteWord} reads it, and where that is unreadable, with the
+   * value the line assigns a {@link STEERING_NAMES} name it sets, as `D=` is
+   * read. Only the passes that ADD classes read it this way; where the word
+   * lands is still judged by the first reading alone, so the guarded class it
+   * gives stays beside whatever the assigned value adds (a union, never a swap).
+   */
+  const resolvedOrAssigned = (word: string, at: number): ResolvedWord => {
+    const resolved = resolveWriteWord(word, at, line);
+    if (!("unreadable" in resolved) || !STEERING_NAMES.some((name) => line.vars.has(name))) return resolved;
+    const assigned = resolveWriteWord(word, at, line, 0, true);
+    return "unreadable" in assigned ? resolved : assigned;
+  };
 
   let here = [...new Set(cwds.filter((each) => isAbsolute(each)))];
   let cwdUnknown = here.length === 0;
@@ -5305,7 +5337,7 @@ export function refineWriteLandings(
       // brace reader would hand it spellings the shell never makes
       // (`query=mutation{addComment{id}}` read as `query=mutationaddCommentid`).
       if (!/[$~]/u.test(word)) return null;
-      const resolved = resolveWriteWord(word, at, line);
+      const resolved = resolvedOrAssigned(word, at);
       if ("unreadable" in resolved) return null;
       return resolved.spellings.every((spelling) => spelling === word) ? null : resolved.spellings;
     };
@@ -5411,7 +5443,7 @@ export function refineWriteLandings(
       let listings = 0;
       /** The words the shell hands over for one word: `null`, as written; a string, why it cannot be read. */
       const matchesOf = (word: string): string[] | string | null => {
-        const resolved = resolveWriteWord(word, at, line);
+        const resolved = resolvedOrAssigned(word, at);
         if ("unreadable" in resolved) return null;
         const placed: string[] = [];
         let matched = false;
@@ -5521,8 +5553,20 @@ export function refineWriteLandings(
     if (equals !== null) return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: equals };
     const resolved = resolveWriteWord(word, at, line);
     if ("unreadable" in resolved) {
-      return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: resolved.unreadable };
+      const unread: WriteLanding = { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: resolved.unreadable };
+      // S1 of #709: where the value a line gives a name it sets lands on the
+      // guarded list, that landing is the verdict (the same kind, named as
+      // `D=`'s is); anywhere else the word stays unreadable, so guarded.
+      const assigned = resolvedOrAssigned(word, at);
+      if ("unreadable" in assigned) return unread;
+      const landed = judgeSpellings(word, assigned, tree);
+      return landed.kind === "guarded" && landed.rule === WRITE_GUARDED_RULE ? landed : unread;
     }
+    return judgeSpellings(word, resolved, tree);
+  };
+
+  /** {@link judgeWord} for a word read to its spellings. */
+  const judgeSpellings = (word: string, resolved: { spellings: string[] }, tree: boolean | "listed"): WriteLanding => {
     const spelled = spellingsOf(resolved);
     if (spelled === null) {
       return { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: word, why: `${word} is relative, after a cd this hook cannot follow` };
