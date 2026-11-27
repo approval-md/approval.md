@@ -2576,6 +2576,15 @@ interface LexSegment {
    * skip it, or run it in a process whose variables the line never sees.
    */
   conditional: boolean;
+  /**
+   * The and-or operator this segment follows (`a && b`, `a || b`), with only a
+   * `(` or a newline between; `|` for a later stage of a pipeline (`a | b`,
+   * `a |& b`); or `null` after any other separator (`;`, `&`, `)`) and at the
+   * line's start. Read only by the hook's write pass (cd-guarded-write), which
+   * follows where a `cd` that succeeded, or failed, leaves the shell for the
+   * segments that run after it.
+   */
+  listOp: "&&" | "||" | "|" | null;
 }
 
 type LexResult =
@@ -2651,6 +2660,7 @@ function lex(command: string, bodiesCut = false): LexResult {
   let segmentStart = 0;
   let index = 0;
   let conditional = false;
+  let listOp: "&&" | "||" | "|" | null = null;
   // Where the last descriptor dup's word ended (`2>&1`): zsh refuses a
   // redirect operator joined to it (`2>&1>!x` writes nothing).
   let dupEnd = -1;
@@ -2668,8 +2678,10 @@ function lex(command: string, bodiesCut = false): LexResult {
         stdinFed,
         subshell: depth !== 0,
         conditional,
+        listOp,
       });
       conditional = false;
+      listOp = null;
       // Kept across an EMPTY flush, so the `&` of `|&` (or a newline after a
       // trailing `|`) does not drop the pipe into the next real segment.
       stdinFed = false;
@@ -3102,11 +3114,17 @@ function lex(command: string, bodiesCut = false): LexResult {
       const boundary = index;
       // APRV-510: a single `|` (or `|&`) pipes the previous segment into the next.
       const pipe = ch === "|" && command[index + 1] !== "|";
+      const andOr = ch === "&" && command[index + 1] === "&" ? "&&" : ch === "|" && command[index + 1] === "|" ? "||" : null;
       index += ch === "&" && command[index + 1] === "&" ? 2 : ch === "|" && command[index + 1] === "|" ? 2 : 1;
       flush(boundary);
       // Design v4: every operator but `;` makes what follows conditional, or
       // separate from the line's own shell (read by the hook's write pass).
       if (ch !== ";") conditional = true;
+      // cd-guarded-write: `a && (b)` runs `b` as `&&` does, and a pipeline's
+      // later stages (`|`, `|&`) run in the step its first stage opened; any
+      // other operator ends the and-or step.
+      if (pipe) listOp = "|";
+      else if (!(ch === "(" || (ch === "&" && command[boundary - 1] === "|" && listOp === "|"))) listOp = andOr;
       // APRV-510 (refuter rS2): the subshell depth, read by the next flush.
       if (ch === "(") depth += 1;
       if (ch === ")") depth -= 1;
@@ -16636,6 +16654,10 @@ export interface CommandSegmentShape {
    * write pass trusts no variable assigned in such a segment.
    */
   conditional: boolean;
+  /** Is this segment inside a subshell `( … )`? ({@link LexSegment.subshell}; cd-guarded-write.) */
+  subshell: boolean;
+  /** The and-or operator this segment follows, or `|` in a pipeline ({@link LexSegment.listOp}; cd-guarded-write). */
+  listOp: "&&" | "||" | "|" | null;
   /**
    * The inner text of every `$(…)` this segment expands: in its words, its
    * redirection targets and an unquoted heredoc's body (APRV-522), so the
@@ -16719,6 +16741,8 @@ function shapesOf(lexed: LexResult): CommandSegmentShape[] | null {
         .map((redirect) => redirect.target.text),
       stdinFed: segment.stdinFed,
       conditional: segment.conditional || segment.subshell,
+      subshell: segment.subshell,
+      listOp: segment.listOp,
       substitutions: [
         ...segment.words.flatMap((word) => word.substitutions),
         ...segment.redirects.flatMap((redirect) => redirect.target.substitutions),

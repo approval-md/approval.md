@@ -118,6 +118,7 @@ import {
   GATE_SELF_CLASS,
   gitVerbIndex,
   isCredentialPath,
+  mayNameGitDirectory,
   NO_RULE_CLASS,
   NODE_SKILL_SCRIPT_RULE,
   protectedPathClass,
@@ -5909,9 +5910,253 @@ export function refineWriteLandings(
     return names;
   };
 
+  // -------------------------------------------------------------------------
+  // cd-guarded-write (build-6): a relative word judged where a followed cd
+  // lands it, as its direct spelling is.
+  //
+  // `here` above holds every directory an earlier cd may have left the shell
+  // in, and a landing is judged from each against the guarded list and the
+  // write roots; but no class was taken from where it lands, so
+  // `cd .approval && echo x >> log/events.jsonl` was a workspace write where
+  // `echo x >> .approval/log/events.jsonl` is `log.mutate`. This pass keeps
+  // its own record of where the shell may stand (`standing`), read in the
+  // shell's order: after `cd d`, a segment joined by `&&` runs only where the
+  // cd succeeded, one joined by `||` only where it failed, and any other
+  // separator (`;`, a newline, `|`, `&`) takes both; a path skipped by an
+  // and-or step comes back at the step that runs it (`a || b && c` is
+  // `(a || b) && c`). A subshell's cds end with it. Each relative word a
+  // segment writes is then spelled from the line's start (or absolute, where
+  // it lands outside every start), and where that spelling is guarded (a
+  // protected path, a credential path, or a git directory, read as text) the
+  // segment is classified with it, as written in its own argv; that line's
+  // classes are added (a union: nothing the line had is taken away). A word
+  // whose spelling from the start is not guarded moves nothing, so a cd into
+  // an ordinary folder then a build or a write keeps its answer. A cd this
+  // pass cannot follow (an unread word, `cd -`, `popd`) stops it: the line
+  // keeps today's answer, a relative write after it guarded as unreadable.
+  // -------------------------------------------------------------------------
+  /** The directories the line may start in: a word that lands at one of them was judged as written. */
+  const starts = [...here];
+  const startForms = [...new Set([...starts, ...starts.flatMap((each) => resolvedPath(each) ?? [])])];
+  /** A set of directories, or `null` where the shell may stand somewhere this pass cannot name. */
+  type Standing = string[] | null;
+  // Past 64 directories the set is unknown, as `here` is: a line of many cds
+  // is not followed one directory at a time (a cost bound), and the hook's own
+  // `here`, a superset, is unknown by then too, so a relative write after it
+  // is already guarded as unreadable.
+  const joinStanding = (a: Standing, b: Standing): Standing => {
+    if (a === null || b === null) return null;
+    if (b.length === 0) return a;
+    if (a.length === 0) return b;
+    const joined = [...new Set([...a, ...b])];
+    return joined.length > 64 ? null : joined;
+  };
+  let standing: Standing = here.length === 0 ? null : [...here];
+  /** Paths an `&&` step skipped (resume at the next `||` or separator) and an `||` step skipped (at the next `&&` or separator). */
+  let skippedFailed: Standing = [];
+  let skippedSucceeded: Standing = [];
+  /** The previous segment's outcome: where it leaves the shell when it succeeds and when it fails. */
+  let outcome: { ok: Standing; failed: Standing } | null = null;
+  /** The state as a subshell opened, restored at its end. */
+  let subshellFrame: { standing: Standing; skippedFailed: Standing; skippedSucceeded: Standing } | null = null;
+  /** The state as a `$(…)` opened, restored at the segment that expands it. */
+  let substitutionFrame: { standing: Standing; skippedFailed: Standing; skippedSucceeded: Standing } | null = null;
+  let lastHost = -1;
+  /** Move `standing` to where the segment at `index` runs. */
+  const enterSegment = (index: number): void => {
+    const unit = units[index] as Unit;
+    const substitution = unit.shape !== unit.host;
+    if (unit.host.subshell !== true && subshellFrame !== null) {
+      // The subshell leaves the shell where it was, whatever it ran.
+      ({ standing, skippedFailed, skippedSucceeded } = subshellFrame);
+      outcome = null;
+      subshellFrame = null;
+    }
+    if (!substitution && substitutionFrame !== null) {
+      // A `$(…)` runs in a subshell of its own, ahead of the segment that
+      // expands it: that segment runs where the shell stood as the first one
+      // opened, and its operator was taken then.
+      ({ standing, skippedFailed, skippedSucceeded } = substitutionFrame);
+      outcome = null;
+      substitutionFrame = null;
+      lastHost = unit.hostIndex;
+      return;
+    }
+    // A substitution runs as its host's step: the first of its segments takes the host's operator.
+    const entering = substitution && unit.hostIndex !== lastHost;
+    const op = entering ? unit.host.listOp : unit.shape.listOp;
+    lastHost = unit.hostIndex;
+    const ok = outcome === null ? standing : outcome.ok;
+    const failed = outcome === null ? standing : outcome.failed;
+    outcome = null;
+    if (op === "|") {
+      // A later stage of a pipeline runs in the step its first stage opened,
+      // where the shell stood: a cd in an earlier stage ran in a subshell.
+    } else if (op === "&&") {
+      standing = joinStanding(ok, skippedSucceeded);
+      skippedSucceeded = [];
+      skippedFailed = joinStanding(skippedFailed, failed);
+    } else if (op === "||") {
+      standing = joinStanding(failed, skippedFailed);
+      skippedFailed = [];
+      skippedSucceeded = joinStanding(skippedSucceeded, ok);
+    } else {
+      standing = joinStanding(joinStanding(joinStanding(ok, failed), skippedFailed), skippedSucceeded);
+      skippedFailed = [];
+      skippedSucceeded = [];
+    }
+    if (unit.host.subshell === true && subshellFrame === null) subshellFrame = { standing, skippedFailed, skippedSucceeded };
+    if (entering) substitutionFrame = { standing, skippedFailed, skippedSucceeded };
+  };
+  /** Where a `cd`, `chdir` or `pushd` at `index` lands from `from`, or `null` where it cannot be named. */
+  const cdLanding = (shape: CommandSegmentShape, index: number, bin: string, from: readonly string[]): Standing => {
+    const target = bin === "popd" ? ({ kind: "unknown" } as const) : cdTarget(bin === "chdir" ? "cd" : bin, shape.args, shape.assignments);
+    if (target.kind === "unknown") return null;
+    // As the resolved pass reads a word: the line's own value of a name it sets (`D=.approval; cd $D`).
+    const resolved = resolvedOrAssigned(target.kind === "home" ? "~" : target.word, index);
+    if ("unreadable" in resolved) return null;
+    // `cd -P` lands where the kernel resolves the word; any other cd at the
+    // logical landing, or at the kernel's where the shell chases links
+    // (zsh's CHASE_LINKS, bash's `set -P`): both are kept. The last of `-L`
+    // and `-P` before the operand wins, as {@link cdTarget} reads the flags.
+    const flags = shape.args.slice(0, target.kind === "home" ? shape.args.length : Math.max(0, shape.args.indexOf(target.word))).join("");
+    const physical = flags.lastIndexOf("P") > flags.lastIndexOf("L");
+    const out = new Set<string>();
+    for (const spelling of resolved.spellings) {
+      if (spelling.length === 0) return null;
+      for (const each of isAbsolute(spelling) ? [spelling] : from.map((dir) => spelledAbsolute(dir, spelling))) {
+        let placed = [each];
+        if (/[*?[]/u.test(each)) {
+          // A pattern is read from the disk, as the cd above reads it.
+          const expanded = volatilePattern(each) === null ? expandOnDisk("/", each, { deadline: Date.now() + GLOB_TIME_LIMIT_MS, list: memo.disk.list }) : null;
+          if (expanded === null || "giveUp" in expanded) return null;
+          placed = expanded.paths.filter((path) => path.from !== "parent").map((path) => path.path);
+        }
+        for (const dir of placed) {
+          if (dir.length > MAX_LANDING_BYTES || volatileOf(dir) !== null) return null;
+          const landing = landingPathsOnce(dir);
+          if (landing.unknown) return null;
+          // `paths` is the lexical landing, then the kernel's where it differs.
+          if (physical) {
+            out.add(landing.paths[landing.paths.length - 1] as string);
+            continue;
+          }
+          out.add(resolvePathSegments(dir));
+          for (const path of landing.paths) out.add(path);
+        }
+      }
+    }
+    return out.size > 64 ? null : [...out];
+  };
+  /** Record the outcome of a `cd` at `index`. */
+  const followCd = (shape: CommandSegmentShape, index: number, bin: string): void => {
+    outcome = { ok: standing === null ? null : cdLanding(shape, index, bin, standing), failed: standing };
+  };
+  /** A relative word's spellings from the line's start, after the cds this pass follows (only those that differ). */
+  const fromStart = (word: string, at: number): string[] => {
+    if (standing === null || word.length === 0) return [];
+    const moved = standing.filter((dir) => !startForms.includes(dir));
+    if (moved.length === 0) return [];
+    let spellings = [word];
+    if (/[$`~]/u.test(word)) {
+      const resolved = resolvedOrAssigned(word, at);
+      if ("unreadable" in resolved) return [];
+      spellings = resolved.spellings;
+    }
+    const out: string[] = [];
+    for (const spelling of spellings) {
+      if (spelling.length === 0 || isAbsolute(spelling) || spelling.startsWith("~") || /[$`]/u.test(spelling)) continue;
+      for (const dir of moved) {
+        const landed = resolvePathSegments(dir, spelling);
+        const start = startForms.find((each) => landed === each || landed.startsWith(each.endsWith("/") ? each : `${each}/`));
+        const text = start === undefined ? landed : landed === start ? "." : landed.slice(start.length + (start.endsWith("/") ? 0 : 1));
+        if (text !== spelling && !out.includes(text)) out.push(text);
+      }
+    }
+    return out;
+  };
+  /** Is this spelling one whose direct write the classifier may class above a workspace write? Text only. */
+  const guardedSpelling = (text: string): boolean =>
+    protectedPathClass(text, protectedPaths) !== null || isCredentialPath(text) || mayNameGitDirectory(text);
+  const movedLines = new Map<string, ResolvedClass[] | null>();
+  /** A synthetic line's classes, its words spelled from the line's start; `null` where the classifier refuses it. */
+  const movedLineClasses = (text: string, path: string): ResolvedClass[] | null => {
+    const key = `${text}\0${path}`;
+    const known = movedLines.get(key);
+    if (known !== undefined) return known;
+    const plain = classifyCommandInThisReading(text, protectedPaths);
+    let out: ResolvedClass[] | null = null;
+    if (plain.ok) {
+      out = [];
+      const found = out;
+      const take = (segments: readonly ClassifiedSegment[]): void => {
+        for (const segment of segments) {
+          if (segment.class.startsWith("read.") || segment.class === "files.write.workspace" || segment.class === GATE_SELF_CLASS) continue;
+          if (!found.some((each) => each.cls === segment.class)) found.push({ cls: segment.class, rule: WRITE_RESOLVED_RULE, path });
+        }
+      };
+      // The classifier's answer alone: where the disk lands a word in a git
+      // directory is the git-directory pass's own (it follows the line's cds,
+      // `refineGitDirWrites` in the chain), and a spelling reaches this line
+      // only when its text is guarded already.
+      take(plain.segments);
+    }
+    movedLines.set(key, out);
+    return out;
+  };
+  /** A redirection's synthetic line: its classes, or the guarded class where the classifier refuses it. */
+  const redirectClasses = (text: string, path: string): ResolvedClass[] =>
+    movedLineClasses(text, path) ?? [{ cls: WRITE_GUARDED_CLASS, rule: WRITE_UNREADABLE_RULE, path }];
+  /**
+   * The classes a segment's relative words earn where the cds this pass
+   * follows land them. `candidates` are the words the write pass reads as
+   * written ({@link targetsOf}); only those are spelled again in the argv.
+   */
+  const movedWordClasses = (shape: CommandSegmentShape, at: number, candidates: ReadonlySet<string>): ResolvedClass[] => {
+    const out: ResolvedClass[] = [];
+    if (standing === null) return out;
+    const add = (found: readonly ResolvedClass[]): void => {
+      for (const each of found) if (!out.some((known) => known.cls === each.cls)) out.push(each);
+    };
+    const guarded = (word: string): string[] => fromStart(word, at).filter(guardedSpelling);
+    for (const word of shape.writes) for (const spelling of guarded(word)) add(redirectClasses(`true >> ${quote(spelling)}`, spelling));
+    for (const word of shape.reads) for (const spelling of guarded(word)) add(redirectClasses(`true < ${quote(spelling)}`, spelling));
+    if (shape.bin === null) return out;
+    // Each argv word the pass reads as written, spelled from the start where
+    // that is guarded; a `key=value` word (`of=`, `--output=`) by its value.
+    const alternatives = shape.args.map((arg): string[] => {
+      if (candidates.has(arg)) return guarded(arg);
+      const keyed = /^(-{0,2}[A-Za-z][A-Za-z0-9_-]*=)(.+)$/u.exec(arg);
+      if (keyed !== null && candidates.has(keyed[2] as string)) return guarded(keyed[2] as string).map((spelling) => `${keyed[1] as string}${spelling}`);
+      return [];
+    });
+    const lines = Math.min(RESOLVED_ARGV_LINES, Math.max(0, ...alternatives.map((each) => each.length)));
+    const bin = /^[A-Za-z0-9_./+-]+$/u.test(shape.bin) ? shape.bin : quote(shape.bin);
+    for (let turn = 0; turn < lines; turn += 1) {
+      const argv = shape.args.map((arg, index) => {
+        const spellings = alternatives[index] as string[];
+        return spellings[turn] ?? spellings[0] ?? arg;
+      });
+      const replaced = argv.filter((word, index) => word !== shape.args[index]);
+      const text = [bin, ...argv.map(quote)].join(" ");
+      const classes = movedLineClasses(text, replaced[0] as string);
+      if (classes !== null) {
+        add(classes);
+        continue;
+      }
+      // The program's line with the word in place is refused (a word that is
+      // no path to it, a mode or a script): each such word is judged as a
+      // write, the strictest reading of a path the program may be handed.
+      for (const word of replaced) add(redirectClasses(`true >> ${quote(word.replace(/^-{0,2}[A-Za-z][A-Za-z0-9_-]*=/u, ""))}`, word));
+    }
+    return out;
+  };
+
   for (const [index, shape] of shapes.entries()) {
     const bin = shape.bin === null ? null : basename(shape.bin);
+    enterSegment(index);
     if (bin === "cd" || bin === "pushd" || bin === "popd" || bin === "chdir") {
+      followCd(shape, index, bin);
       const target = bin === "popd" ? ({ kind: "unknown" } as const) : cdTarget(bin === "chdir" ? "cd" : bin, shape.args, shape.assignments);
       if (target.kind === "unknown") {
         cwdUnknown = true;
@@ -6108,6 +6353,20 @@ export function refineWriteLandings(
         rule: found.rule,
         path: found.path,
         note: `${found.rule}: a word of \`${host}\` resolves to ${found.path}, which is ${found.cls} as a plain spelling, so the segment is also ${found.cls}`,
+      });
+    }
+
+    // cd-guarded-write: the words this pass reads as written, where a followed cd lands them.
+    const candidates = new Set<string>([...writes, ...metadata, ...trees, ...intoDirs.map((each) => each.dir), ...changes.map((each) => each.word)]);
+    for (const found of movedWordClasses(shape, index, candidates)) {
+      if (result.classes.includes(found.cls)) continue;
+      findings.push({
+        unit: index,
+        text: host,
+        cls: found.cls,
+        rule: found.rule,
+        path: found.path,
+        note: `${found.rule}: after a cd this hook follows, a word of \`${host}\` lands at ${found.path}, which is ${found.cls} as a plain spelling, so the segment is also ${found.cls}`,
       });
     }
 
