@@ -15054,6 +15054,10 @@ function classifySegmentWithVerb(
   // .approval/env`).
   const wrapped = credential === null && redirectCredential === null ? null : wrappedProgram(basename, args);
   const peeled = wrapped !== null && wrapped.kind === "copy" && wrapped.at !== -1 ? wrapped : null;
+  // The copy program's table reading of the words after it, made once.
+  let peeledPlanMemo: { value: CopyPlan | null } | undefined;
+  const peeledPlan = (): CopyPlan | null =>
+    (peeledPlanMemo ??= { value: peeled === null ? null : copyPlan(peeled.basename, args.slice(peeled.at + 1)) }).value;
   const copyWrites =
     wrapped === null
       ? NO_CREDENTIAL_WRITES
@@ -15062,13 +15066,7 @@ function classifySegmentWithVerb(
         : (foldedOnly(() => {
             const innerArgs = args.slice(peeled.at + 1);
             const innerFlags = argFlags.slice(peeled.at + 1);
-            const read = credentialWrites(
-              peeled.basename,
-              innerArgs,
-              innerFlags,
-              () => copyPlan(peeled.basename, innerArgs),
-              () => copyArgvUnknown(innerArgs, innerFlags),
-            );
+            const read = credentialWrites(peeled.basename, innerArgs, innerFlags, peeledPlan, () => copyArgvUnknown(innerArgs, innerFlags));
             // Only the paths the table reads as WRITTEN (a destination word, a
             // landing). Where it cannot read the argv (`possible`), the branch
             // below already answers for the words the shell builds (a target
@@ -15178,17 +15176,65 @@ function classifySegmentWithVerb(
         refused.outcome = rest;
         return [];
       }
-      const built = segment.words
+      const builtAt = segment.words
         .slice(cursor + 1)
-        .find(
-          (word) =>
-            (word.splits || word.expands || !word.exact || word.substitutions.length > 0) &&
-            !isCredentialArgWord(word, protectedPaths, GLOB_READ_BINS.has(basename)),
+        .flatMap((word, at) =>
+          (word.splits || word.expands || !word.exact || word.substitutions.length > 0) &&
+          !isCredentialArgWord(word, protectedPaths, GLOB_READ_BINS.has(basename))
+            ? [cursor + 1 + at]
+            : [],
         );
+      const built = builtAt.length === 0 ? undefined : segment.words[builtAt[0] as number];
       const named = [sideScan?.found ?? null, optionHit, attachedHit];
       const unknown: ProtectedBeside[] =
         built === undefined ? [] : [{ class: "policy.core", rule: "copy-target-unknown", path: built.text }];
-      return besideProtected(answered.class, named, "protected-path", unknown).more ?? [];
+      // build-1's S2 on #706: behind a wrapper, a target the shell builds
+      // that the copy program writes is read as GLOB-WRITE reads plain
+      // `cp`'s ({@link strictestProtectedWrite}: the `${X:-…}` default, every
+      // guarded path a pattern may match), and each class a reading names
+      // rides beside, after the unknown target (`command cp .approval/env
+      // .gith*/workflows/ci.yml` names the workflow, as plain `cp` does). The
+      // words read are the ones plain `cp`'s walk reads as written (its
+      // `writtenOperands`): its sources are not. Only behind a wrapper of a
+      // copy program ({@link wrappedProgram}): what a program with no table
+      // writes is unknown, and a reader writes none of its operands.
+      const plan = peeled === null || builtAt.length === 0 ? null : peeledPlan();
+      const written = ((): ReadonlySet<string> | null => {
+        if (peeled === null || builtAt.length === 0) return null;
+        const innerPositionals = args.slice(peeled.at + 1).filter((arg) => !isFlag(arg));
+        if (plan === null || !["cp", "ln", "install"].includes(peeled.basename)) return new Set(globWriteOperands(peeled.basename, innerPositionals));
+        if (plan.unknown !== null) return new Set([...plan.operands, ...plan.dests]);
+        return new Set(plan.dests.length === 0 || plan.implicitDest === true ? [...innerPositionals, ...plan.dests] : plan.dests);
+      })();
+      const builtWritten = written === null ? [] : builtAt.filter((at) => written.has((segment.words[at] as LexWord).text));
+      const reading =
+        builtWritten.length === 0
+          ? null
+          : strictestProtectedWrite(
+              builtWritten.map((at) => (segment.words[at] as LexWord).text),
+              protectedPaths,
+              inexact,
+              false,
+              glob,
+              null,
+              builtWritten.map((at) => wordLiterals[at]),
+            );
+      // The copy fills a destination it may name with any name, as plain
+      // `cp`'s does: where that destination is a built word, an organ
+      // directory its pattern may match takes its class too ({@link
+      // organDestination}: `.gith*/workflows/ci.yml` may be under `.github`).
+      const anyName = new Set(plan?.anyName ?? []);
+      const organ = builtWritten.flatMap((at) => {
+        const text = (segment.words[at] as LexWord).text;
+        const hit = anyName.has(text) ? organDestination(text, inexact, glob) : null;
+        return hit === null ? [] : [hit];
+      });
+      const readings: ProtectedBeside[] = [...(reading === null ? [] : [reading, ...reading.others]), ...organ].map((hit) => ({
+        class: hit.surface,
+        rule: "protected-path",
+        path: hit.path,
+      }));
+      return besideProtected(answered.class, named, "protected-path", [...unknown, ...readings]).more ?? [];
     });
     if (refused.outcome !== undefined) return refused.outcome;
     return addWritten(addPossible({ ok: true, ...answered, ...(more.length === 0 ? {} : { more: [...more] }) }));
