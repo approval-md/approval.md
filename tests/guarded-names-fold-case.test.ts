@@ -2494,6 +2494,12 @@ test("behind a wrapper, only a copy program's table is read: a read, an unknown 
     ["command cp .approval/env '$X'", [CRED]],
     ["command cp --in=.approval/env notes.txt", [CRED]],
     ["command cp --frob .approval/env notes.txt", [CRED]],
+    // The value of an option cp does not know may be read or written (plain
+    // `cp` adds policy.core for `--out=` and `--in=` alike): behind a
+    // wrapper it is the read, as on main.
+    ["command cp --out=.approval/env ~/.hermes/.env", [CRED]],
+    // An attached value of a program with no table: as on main.
+    ["frobnicate -o.approval/env ~/.hermes/.env", [CRED]],
     // The program behind the wrapper is a known reader: its words are not a
     // copy's, though one of them is spelled `cp`.
     ["nice grep cp README.md .approval/env", [CRED]],
