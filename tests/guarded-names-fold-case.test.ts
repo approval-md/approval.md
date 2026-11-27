@@ -2630,6 +2630,12 @@ test("behind a wrapper, a built target the copy writes: the read's S2 lines pinn
     ["command scp $'~/.hermes/.env' notes.txt", [CRED, UNKNOWN]],
     ["command cp -t backup/ .approval/env $A-$B", [CRED, UNKNOWN]],
     ["nice cp .approval/env $A-$B notes.txt", [CRED, UNKNOWN]],
+    // An argv the copy table cannot read (`--frob`): the destination is the
+    // last operand, so a built word there is still read both ways, and one
+    // before it stays the read. (The heavy phase's mutant F4: without the
+    // last-operand fallback no test failed.)
+    ["command cp --frob .approval/env $A-$B", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["command cp --frob .approval/env $A-$B notes.txt", [CRED, UNKNOWN]],
   ] as const) {
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
     assert.deepEqual(hook(line, TWO_ROUTES), want, `${line} through the hook`);
