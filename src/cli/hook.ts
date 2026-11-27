@@ -6130,7 +6130,10 @@ export function refineWriteLandings(
       if (keyed !== null && candidates.has(keyed[2] as string)) return guarded(keyed[2] as string).map((spelling) => `${keyed[1] as string}${spelling}`);
       return [];
     });
-    const lines = Math.min(RESOLVED_ARGV_LINES, Math.max(0, ...alternatives.map((each) => each.length)));
+    // A fold, not `Math.max(...)`: a line may hold more argv words than a call takes arguments (a spread over
+    // 160,000 words overflowed the stack, and the hook answered hook-io for a line main reads).
+    const most = alternatives.reduce((longest, each) => Math.max(longest, each.length), 0);
+    const lines = Math.min(RESOLVED_ARGV_LINES, most);
     const bin = /^[A-Za-z0-9_./+-]+$/u.test(shape.bin) ? shape.bin : quote(shape.bin);
     for (let turn = 0; turn < lines; turn += 1) {
       const argv = shape.args.map((arg, index) => {
