@@ -2488,11 +2488,12 @@ test("behind a wrapper, only a copy program's table is read: a read, an unknown 
     ["nice cp .approval/env notes.txt", [CRED]],
     ["command cp ~/.hermes/.env notes.txt", [CRED]],
     ["stdbuf -o0 rsync -a .approval/env backup/", [CRED]],
-    // The table's unread argv adds nothing behind a wrapper: a literal
-    // credential path there is the read (build-1's S2 on #701).
+    // Where the table cannot read the argv, a credential path behind a
+    // wrapper is the read unless it sits in the copy's last slot (below): a
+    // literal credential path there is the read (build-1's S2 on #701).
     ["command cp .approval/env '$X'", [CRED]],
     ["command cp --in=.approval/env notes.txt", [CRED]],
-    ["command cp --frob README.md .approval/env", [CRED]],
+    ["command cp --frob .approval/env notes.txt", [CRED]],
     // The program behind the wrapper is a known reader: its words are not a
     // copy's, though one of them is spelled `cp`.
     ["nice grep cp README.md .approval/env", [CRED]],
@@ -2542,6 +2543,11 @@ test("a copy into a credential path behind a wrapper: the forms of the read's S1
     ["command /bin/cp README.md .approval/env", [CRED], ["policy.core protected-path", CRED]],
     ["caffeinate -i -t 60 cp README.md .approval/env", [CRED], ["policy.core protected-path", CRED]],
     ["busybox cp README.md .approval/env", [CRED], ["policy.core protected-path", CRED]],
+    // An argv the table cannot read (an unknown option, a word with a `$`):
+    // the credential path in the last slot may be written, as plain `cp`
+    // reads it; the class is added after main's.
+    ["command cp --frob README.md .approval/env", [CRED], [CRED, "policy.core protected-path"]],
+    ["nice cp '$X' .approval/env", [CRED], [CRED, "policy.core protected-path"]],
   ] as const) {
     assert.deepEqual(spelledPure(line, TWO_ROUTES), main.filter((entry) => entry === CRED), `${line} as spelled`);
     const got = pure(line, TWO_ROUTES);

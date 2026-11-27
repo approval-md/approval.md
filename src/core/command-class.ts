@@ -15067,14 +15067,21 @@ function classifySegmentWithVerb(
             const innerArgs = args.slice(peeled.at + 1);
             const innerFlags = argFlags.slice(peeled.at + 1);
             const read = credentialWrites(peeled.basename, innerArgs, innerFlags, peeledPlan, () => copyArgvUnknown(innerArgs, innerFlags));
-            // Only the paths the table reads as WRITTEN (a destination word, a
-            // landing). Where it cannot read the argv (`possible`), the branch
-            // below already answers for the words the shell builds (a target
-            // the shell builds is `copy-target-unknown`), and a literal
-            // credential path behind a wrapper is the read (build-1's S2 on
-            // #701, the seat's ruling): `command cp .approval/env '$X'` and
-            // `command cp --in=.approval/env notes.txt` are reads, as on main.
-            return [read.words.size === 0 && read.landings.length === 0 ? NO_CREDENTIAL_WRITES : { ...read, possible: [] }];
+            // The paths the table reads as WRITTEN (a destination word, a
+            // landing). Where it cannot read the argv (`possible`: an option
+            // it does not know, a word that may become one), only a credential
+            // path in the copy's last slot is taken as written (`command cp
+            // '$X' .approval/env`, `command cp --frob README.md .approval/env`);
+            // any other credential path behind a wrapper is the read, as on
+            // main (build-1's S2 on #701, the seat's ruling): `command cp
+            // .approval/env '$X'`, `command cp --in=.approval/env notes.txt`,
+            // and a lone operand (`command cp .approval/env -oX`).
+            const operands = innerArgs.filter((arg) => !isFlag(arg));
+            const last = operands.length < 2 ? undefined : operands[operands.length - 1];
+            const possible = read.possible.filter((word) => word === last);
+            return [
+              read.words.size === 0 && read.landings.length === 0 && possible.length === 0 ? NO_CREDENTIAL_WRITES : { ...read, possible },
+            ];
           })[0] ?? NO_CREDENTIAL_WRITES);
   const sideScan =
     credential === null && redirectCredential === null
