@@ -2613,12 +2613,34 @@ test("behind a wrapper, a built target the copy writes: the read's S2 lines pinn
     ["nice cat .approval/env .gith*/workflows/ci.yml", [CRED, UNKNOWN]],
     // A literal target: main's answer (the protected scan already names it).
     ["command cp .approval/env .github/workflows/ci.yml", [CRED, "policy.edit.ci protected-path"]],
-    // A built word plain `cp` takes for the credential read (two unread parts
-    // may spell `.approval/env`) is left out as plain `cp` leaves it out.
-    ["command cp .approval/env $A-$B", [CRED, UNKNOWN]],
-    ["command cp .approval/env $'~/.hermes/.env'", ["policy.core protected-path", CRED]],
+    // A built word that may spell a credential path (two unread parts may
+    // spell `.approval/env`) in the copy's DESTINATION is read both ways (the
+    // automated security review of #714): the credential class stays and the
+    // write's classes ride beside it.
+    ["command cp .approval/env $A-$B", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["command cp .approval/env $'~/.hermes/.env'", ["policy.core protected-path", CRED, "log.mutate protected-path", "cron.manage protected-path"]],
+    ["command cp .approval/env ${X:-.approval/env}", [CRED, UNKNOWN]],
+    ["command cp -t $A-$B .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["command rsync -a .approval/env $A-$B", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    // In a SOURCE slot it stays the read, as plain `cp` leaves it, though
+    // `rsync` and `scp` count every operand as written: a read through a
+    // wrapper takes no write class.
+    ["command rsync -a .approval/env $A-$B backup/", [CRED, UNKNOWN]],
+    ["command scp .approval/env $'~/.hermes/.env' host:x", [CRED, UNKNOWN]],
+    ["command scp $'~/.hermes/.env' notes.txt", [CRED, UNKNOWN]],
+    ["command cp -t backup/ .approval/env $A-$B", [CRED, UNKNOWN]],
+    ["nice cp .approval/env $A-$B notes.txt", [CRED, UNKNOWN]],
   ] as const) {
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    assert.deepEqual(hook(line, TWO_ROUTES), want, `${line} through the hook`);
+  }
+  // The two lines of the review: what plain `cp` names, the wrapped line names.
+  for (const target of ["$A-$B", "${X:-.approval/env}", "$'~/.hermes/.env'"]) {
+    for (const wrapper of ["command", "nice"]) {
+      const line = `${wrapper} cp .approval/env ${target}`;
+      const got = classSet(line);
+      for (const cls of classSet(`cp .approval/env ${target}`)) assert.ok(got.includes(cls), `${line}: ${cls} of plain cp missing`);
+    }
   }
   for (const [line, want] of [
     // `mv` writes every path it names: its built words are all read, as
