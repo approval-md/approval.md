@@ -5283,6 +5283,78 @@ export function refineWriteLandings(
   };
 
   /**
+   * Split only pattern-expanded cp/mv sources. Both lines retain every other
+   * option and the actual destination, so copyPlan/copyLandings keep the same
+   * destination and source-to-landing pairs. organDestinationRule and
+   * copyTargetDirectories depend only on that retained destination; the
+   * protected/credential scans, organParentOperands and treeSources judge
+   * sources individually. The git-directory pass also depends on the line's
+   * class: if either partition earns a rewrite verdict, keep the whole line
+   * to preserve its sure-target semantics for unplaceable operands.
+   *
+   * The deliberately narrow option grammar falls back for any other option
+   * (including a match that becomes an option). Option values never enter the
+   * partition. At least one source remains in each line, preserving the
+   * ordinary two-operand or target-directory reading. The plain line is
+   * reusable only after the runtime proves its name comparisons invariant.
+   */
+  const copyMatchClasses = (bin: string, words: readonly string[], expanded: readonly boolean[], path: string): ResolvedClass[] => {
+    const lineOf = (args: readonly string[]): string => [bin, ...args.map(quote)].join(" ");
+    const whole = (): ResolvedClass[] => classesOfSynthetic(lineOf(words), path);
+    if (bin !== "cp" && bin !== "mv") return whole();
+    const operands: number[] = [];
+    let targetNamed = false;
+    let options = true;
+    for (let index = 0; index < words.length; index += 1) {
+      const word = words[index] as string;
+      if (options && word === "--") {
+        if (expanded[index]) return whole();
+        options = false;
+        continue;
+      }
+      if (options && (word === "-t" || word === "--target-directory")) {
+        // An option or its value expanded by a pattern keeps the old whole
+        // argv: expansion can change which following words are operands.
+        if (expanded[index] || words[index + 1] === undefined || expanded[index + 1]) return whole();
+        targetNamed = true;
+        index += 1;
+        continue;
+      }
+      if (options && word.startsWith("-")) return whole();
+      operands.push(index);
+    }
+    const sources = targetNamed ? operands : operands.slice(0, -1);
+    if (sources.length === 0) return whole();
+    const plain = new Set(sources.filter((index) => expanded[index] && plainTail(words[index] as string)));
+    if (plain.size < PLAIN_BATCH_NAMES) return whole();
+    const other = new Set(sources.filter((index) => !plain.has(index)));
+    const plainWords = words.filter((_, index) => !other.has(index));
+    const plainText = lineOf(plainWords);
+    const plainKey = `${fromKey()}\0${plainText}`;
+    let judged = memo.plainLines.get(plainKey);
+    if (judged === undefined) {
+      judged = inEveryReading(() => withLocalReadingsSettled(() => judgeSynthetic(plainText, path)));
+      memo.plainLines.set(plainKey, judged);
+    }
+    if (!judged.invariant) return whole();
+    // Removing a protected source can make the plain line a files.* write.
+    // The git-directory pass then treats an unplaceable operand as a sure
+    // target, where the whole protected line treats it as only possible.
+    // Such a rewrite verdict is not additive: retain the whole argv answer.
+    if (other.size > 0 && judged.value.some((each) => each.cls === "vcs.history.rewrite")) return whole();
+    if (other.size === 0) return judged.value as ResolvedClass[];
+    const rest = words.filter((_, index) => !plain.has(index));
+    const out = [...judged.value] as ResolvedClass[];
+    for (const turn of inEachEqualTurn(() => judgeSynthetic(lineOf(rest), path))) {
+      // The remaining line can acquire sure-target semantics too, when the
+      // removed plain sources carry the whole line's protected class.
+      if (turn.some((each) => each.cls === "vcs.history.rewrite")) return whole();
+      for (const each of turn) if (!out.some((known) => known.cls === each.cls)) out.push(each);
+    }
+    return out;
+  };
+
+  /**
    * Classes the RESOLVED spellings of a segment's words earn as plain ones
    * would (review-b, CLAIMS L61530): `x=; echo x >> .appro${x}val/env` writes
    * `.approval/env`, so it takes the class `echo x >> .approval/env` takes.
@@ -5474,6 +5546,7 @@ export function refineWriteLandings(
       if (wide || !argv || shape.bin === null) continue;
       const bin = /^[A-Za-z0-9_./+-]+$/u.test(shape.bin) ? shape.bin : quote(shape.bin);
       const built: string[] = [];
+      const expanded: boolean[] = [];
       let pattern: string | null = null;
       let count = 0;
       for (const [index, word] of shape.args.entries()) {
@@ -5485,14 +5558,16 @@ export function refineWriteLandings(
         }
         if (names === null) {
           built.push(word);
+          expanded.push(false);
           continue;
         }
         pattern ??= word;
         count += names.length;
         built.push(...names);
+        expanded.push(...names.map(() => true));
       }
       if (wide || pattern === null) continue;
-      add(classesOfSynthetic([bin, ...built.map(quote)].join(" "), pattern), pattern, count);
+      add(copyMatchClasses(bin, built, expanded, pattern), pattern, count);
     }
     return out;
   };
