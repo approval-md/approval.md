@@ -674,3 +674,47 @@ test("cp and mv batches keep whole-argv git semantics for an unplaceable destina
     }
   }
 });
+
+test("cp and mv into an expanded destination retain the whole argv's protected and git verdicts", () => {
+  const dir = join(scratch, "copy-expanded-destination");
+  mkdirSync(join(dir, "co", ".git", "hooks"), { recursive: true });
+  mkdirSync(join(dir, ".approval"), { recursive: true });
+  for (const name of ["README.md", "APPROVAL.md", "notes-plain", "blocker", ...Array.from({ length: 20 }, (_, index) => `plain${index}`)]) {
+    writeFileSync(join(dir, name), "x\n");
+  }
+  writeFileSync(join(dir, "co", ".git", "config"), "x\n");
+  writeFileSync(join(dir, ".approval", "env"), "x\n");
+  const run = "[".repeat(2_000);
+  const paths = [{ path: "notes-plain", class: "policy.edit.notes" }];
+  const answer = (command: string): { classes: string[]; segments: string[] } => {
+    const { result } = classifyForHook(command, paths, dir, [], false, [dir]);
+    assert.ok(result.ok, command.slice(0, 60));
+    return {
+      classes: result.classes,
+      segments: result.segments.map((segment) => `${segment.class}/${segment.rule}`),
+    };
+  };
+  for (const bin of ["cp", "mv"]) {
+    for (const args of [
+      `README.md ${run}`,
+      `${run} ${run}`,
+      `-- README.md ${run}`,
+      `README.md co/${run}`,
+      `README.md .approval/${run}`,
+      `${run} blocker/child`,
+      `${run} out.txt`,
+      `-t out ${run}`,
+      `-t ${run} README.md`,
+    ]) {
+      // -v affects only command output. Its unsupported batching grammar
+      // selects whole(), independently of the destination-expansion guard.
+      // Compare every ordered class/rule, including the git-directory pass,
+      // rather than merely checking that a protected class remains present.
+      assert.deepEqual(answer(`${bin} ${args}`), answer(`${bin} -v ${args}`), `${bin} ${args.replaceAll(run, "<run>")}`);
+    }
+    const destination = answer(`${bin} README.md ${run}`);
+    assert.ok(destination.classes.includes("policy.core"));
+    assert.ok(destination.classes.includes("policy.edit.notes"));
+    assert.ok(answer(`${bin} README.md co/${run}`).classes.includes("vcs.history.rewrite"));
+  }
+});
