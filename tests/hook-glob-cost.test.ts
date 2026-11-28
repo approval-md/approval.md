@@ -77,6 +77,27 @@ function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number
 }
 
 /**
+ * A line and its control read `rounds` times, the control first each round
+ * (as #719's `held` reads its lines), and the least reading of each, in CPU
+ * ms: the least of several calls is what the code costs, where one call also
+ * holds the first call's compile and the runner's phase (#720's list).
+ */
+function leastCost(controlRun: () => void, spentRun: () => void, rounds: number): { spent: number; control: number; ratio: number; spents: number[]; controls: number[] } {
+  const spents: number[] = [];
+  const controls: number[] = [];
+  for (let round = 0; round < rounds; round += 1) {
+    controls.push(cpuMs(controlRun));
+    spents.push(cpuMs(spentRun));
+  }
+  const spent = Math.min(...spents);
+  const control = Math.min(...controls);
+  return { spent, control, ratio: spent / Math.max(control, 0.001), spents, controls };
+}
+
+/** How many times {@link leastCost} reads each line and its control. */
+const LEAST_ROUNDS = 5;
+
+/**
  * Print one case's CPU time against its bound, pass or fail, so a green run's
  * log shows the margin (as #707's ratio cases print theirs).
  */
@@ -108,6 +129,22 @@ function workspace(): { dir: string; home: string } {
 // from a directory holding `auth.json`, and from one holding only `env` and
 // `keys` 160 took 4.9 CPU s and 240 took 35.7 CPU s.
 const STAR_COUNTS = [12, 160, 240, 2000];
+
+/** Test 2's six lines, by name: each takes the word of `*` (the line) or of plain `a` (its control). */
+const STAR_SHAPES: ReadonlyArray<readonly [string, (word: string) => string]> = [
+  ["cat", (word) => `cat ${word}`],
+  ["cat ~/.hermes/", (word) => `cat ~/.hermes/${word}`],
+  ["echo x > ~/.hermes/", (word) => `echo x > ~/.hermes/${word}`],
+  ["echo x >", (word) => `echo x > ${word}`],
+  ["cat */…/x", (word) => `cat */${word}/x`],
+  ["echo x > ~/.hermes/*/", (word) => `echo x > ~/.hermes/*/${word}`],
+];
+
+/** Test 3's two long words, by name. */
+const LONG_WORDS: ReadonlyArray<readonly [string, string]> = [
+  ["20,000 [", "[".repeat(20_000)],
+  ["*[5,000 z]X", `*[${"z".repeat(5_000)}]X`],
+];
 
 /**
  * The bound: 50 CPU ms for one word through the credential pass, 100 through
@@ -163,35 +200,33 @@ test("cost: the whole hook classification of a long `*` run is bounded in CPU ti
   try {
     // 8 first: the `.git` reader of a write (`echo x > ~/.hermes/...`) took
     // 36.7 CPU s at 8 `*` on a521a91d.
+    //
+    // Each line is held by the RATIO rule ({@link STAR_RATIO_BOUND}), not by
+    // the fixed 100 CPU ms of one call, which is printed beside it: CI read
+    // these lines at up to 75.8 CPU ms of 100 with the code unchanged (#720's
+    // list). The control is the same line with the run of `*` spelled as plain
+    // `a`, which no reader backtracks on.
+    const over: string[] = [];
     for (const stars of [8, ...STAR_COUNTS]) {
       const word = `${"*".repeat(stars)}${"z".repeat(12)}`;
-      for (const shape of [
-        (each: string) => `cat ${each}`,
-        (each: string) => `cat ~/.hermes/${each}`,
-        (each: string) => `echo x > ~/.hermes/${each}`,
-        (each: string) => `echo x > ${each}`,
-        (each: string) => `cat */${each}/x`,
-        (each: string) => `echo x > ~/.hermes/*/${each}`,
-      ]) {
+      const plainWord = `${"a".repeat(stars)}${"z".repeat(12)}`;
+      for (const [name, shape] of STAR_SHAPES) {
         const command = shape(word);
-        const ms = cpuMs(() => {
-          classifyForHook(command, [], dir, [], false, [dir]);
-        });
-        // Measuring only (#720's list, HGC2): two more calls of the line, and
-        // three of the same line with the run of `*` replaced by plain `a`, the
-        // least of each printed. Nothing here is asserted.
-        const again = [1, 2].map(() => cpuMs(() => { classifyForHook(command, [], dir, [], false, [dir]); }));
-        const plainLine = shape(`${"a".repeat(stars)}${"z".repeat(12)}`);
-        const plains = [1, 2, 3].map(() => cpuMs(() => { classifyForHook(plainLine, [], dir, [], false, [dir]); }));
-        const calls = [ms, ...again];
-        t.diagnostic(
-          `cost-measure: HGC2 ${command.slice(0, 30)} (${String(stars)} stars): calls ${calls.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...calls).toFixed(1)} CPU ms; ` +
-            `plain ${plains.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...plains).toFixed(1)}; ratio of the least ${(Math.min(...calls) / Math.max(Math.min(...plains), 0.001)).toFixed(2)} (the runner's line is test 4's)`,
+        const control = shape(plainWord);
+        const { spent, control: controlMs, ratio } = leastCost(
+          () => classifyForHook(control, [], dir, [], false, [dir]),
+          () => classifyForHook(command, [], dir, [], false, [dir]),
+          LEAST_ROUNDS,
         );
-        report(t, `${command.slice(0, 30)} (${String(stars)} stars)`, ms, BOUND_MS * 2);
-        assert.ok(ms < BOUND_MS * 2, `${command.slice(0, 30)} (${String(stars)} stars): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
+        const ciMs = STAR_CONTROL_CI_MS[name]!;
+        const { controlBound, lineOver, controlOver } = heldBy(ratio, controlMs, ciMs, runner().factor, STAR_RATIO_BOUND, LEAST_CONTROL_MOST);
+        const label = `${command.slice(0, 30)} (${String(stars)} stars): least ${spent.toFixed(1)} CPU ms, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${String(STAR_RATIO_BOUND)}; the control's own bound ${controlBound.toFixed(1)}; the fixed ${String(BOUND_MS * 2)} ms is printed, not asserted`;
+        t.diagnostic(`cost: ${label}`);
+        if (lineOver) over.push(label);
+        if (controlOver) over.push(`the control of ${label} (${String(LEAST_CONTROL_MOST)} x its CI ${ciMs.toFixed(1)}, ${runner().line})`);
       }
     }
+    assert.deepEqual(over, [], `over the bound:\n${over.join("\n")}`);
   } finally {
     if (savedHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = savedHome;
@@ -250,37 +285,45 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
         21,
         5,
       );
-      const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${most.toFixed(1)}`;
+      // The median call's fixed 100 CPU ms is printed, not asserted (#720's
+      // list: CI read 50.4 of it with the code unchanged); the control holds
+      // a bound of its own instead ({@link RUN_CONTROL_CI_MS}).
+      const ciMs = RUN_CONTROL_CI_MS[prefix]!;
+      const { controlBound, controlOver } = heldBy(ratio, controlMs, ciMs, runner().factor, most, CONTROL_MOST);
+      const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)} (printed, not asserted), control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${most.toFixed(1)}; the control's own bound ${controlBound.toFixed(1)}`;
       t.diagnostic(`cost: ${label}`);
-      assert.ok(spent < BOUND_MS * 2, label);
       assert.ok(ratio <= most, label);
+      assert.ok(!controlOver, `the control of ${label} (${String(CONTROL_MOST)} x its CI ${ciMs.toFixed(1)}, ${runner().line})`);
     }
-    const words = ["[".repeat(20_000), `*[${"z".repeat(5_000)}]X`];
-    for (const word of words) {
+    // The 20,000-character run and the 5,004-character class, each held by
+    // the RATIO rule ({@link LONG_RATIO_BOUND}) against the same line with a
+    // plain name of the same length; the fixed 100 CPU ms of one call is
+    // printed, not asserted (#720's list: CI read 62.7 of it).
+    const over: string[] = [];
+    for (const [wordName, word] of LONG_WORDS) {
       // A `cat` of a long `[` run is left out: its cost is the kernel refusing
       // a path that long (lstat through realpath, about 7 CPU ms a call,
       // the same before and after this change), not either glob reader.
-      const reads = word.startsWith("*") ? [(each: string) => `cat ${each}`, (each: string) => `cat ~/.hermes/${each}`] : [];
-      for (const shape of [(each: string) => `echo x > ${each}`, (each: string) => `echo x > ~/.hermes/${each}`, ...reads]) {
+      const reads: Array<[string, (each: string) => string]> = word.startsWith("*") ? [["cat", (each) => `cat ${each}`], ["cat ~/.hermes/", (each) => `cat ~/.hermes/${each}`]] : [];
+      const shapes: Array<[string, (each: string) => string]> = [["echo x >", (each) => `echo x > ${each}`], ["echo x > ~/.hermes/", (each) => `echo x > ~/.hermes/${each}`], ...reads];
+      for (const [shapeName, shape] of shapes) {
         const command = shape(word);
-        const ms = cpuMs(() => {
-          classifyForHook(command, [], dir, [], false, [dir]);
-        });
-        // Measuring only (#720's list, HGC3): four more calls of the line, and
-        // three of the same line with a plain name of the same length, the
-        // least of each printed. Nothing here is asserted.
-        const again = [1, 2, 3, 4].map(() => cpuMs(() => { classifyForHook(command, [], dir, [], false, [dir]); }));
-        const plainLine = shape("a".repeat(word.length));
-        const plains = [1, 2, 3].map(() => cpuMs(() => { classifyForHook(plainLine, [], dir, [], false, [dir]); }));
-        const calls = [ms, ...again];
-        t.diagnostic(
-          `cost-measure: HGC3 ${command.slice(0, 30)} (${String(word.length)} characters): calls ${calls.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...calls).toFixed(1)} CPU ms; ` +
-            `plain ${plains.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...plains).toFixed(1)}; ratio of the least ${(Math.min(...calls) / Math.max(Math.min(...plains), 0.001)).toFixed(2)} (the runner's line is test 4's)`,
+        const control = shape("a".repeat(word.length));
+        const { spent, control: controlMs, ratio } = leastCost(
+          () => classifyForHook(control, [], dir, [], false, [dir]),
+          () => classifyForHook(command, [], dir, [], false, [dir]),
+          LEAST_ROUNDS,
         );
-        report(t, `${command.slice(0, 30)} (${String(word.length)} characters)`, ms, BOUND_MS * 2);
-        assert.ok(ms < BOUND_MS * 2, `${command.slice(0, 30)} (${String(word.length)} characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
+        const name = `${shapeName} ${wordName}`;
+        const ciMs = LONG_CONTROL_CI_MS[name]!;
+        const { controlBound, lineOver, controlOver } = heldBy(ratio, controlMs, ciMs, runner().factor, LONG_RATIO_BOUND, LEAST_CONTROL_MOST);
+        const label = `${command.slice(0, 30)} (${String(word.length)} characters): least ${spent.toFixed(1)} CPU ms, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${String(LONG_RATIO_BOUND)}; the control's own bound ${controlBound.toFixed(1)}; the fixed ${String(BOUND_MS * 2)} ms is printed, not asserted`;
+        t.diagnostic(`cost: ${label}`);
+        if (lineOver) over.push(label);
+        if (controlOver) over.push(`the control of ${label} (${String(LEAST_CONTROL_MOST)} x its CI ${ciMs.toFixed(1)}, ${runner().line})`);
       }
     }
+    assert.deepEqual(over, [], `over the bound:\n${over.join("\n")}`);
   } finally {
     if (savedHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = savedHome;
@@ -293,11 +336,16 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
  * `cp ~/.hermes/<run> out.txt`, 80.3 CPU ms on the merge queue's runner (run
  * 45745887200, node 22) and about 96 on node 20, the lead's by CLAIMS L63680.
  * Its cost is the copy's argv of every entry, judged in each name reading; it
- * returns to the assert with that split. The other seven 20,000-character
- * lines keep the bound. The eight 2,000-character lines are held another way:
- * see {@link COPY_RATIO_BOUND}.
+ * returns to the assert with that split. The eight 2,000-character lines are
+ * held another way: see {@link COPY_RATIO_BOUND}.
+ *
+ * Empty since #720: that line was printed only because one call against a
+ * fixed 100 ms judged it. All eight 20,000-character lines are now held by the
+ * RATIO rule ({@link COPY_20K_RATIO_BOUND}), that line's ratio to its plain
+ * control included (it held, see the constant), so none is left printed only.
+ * A line taken off the assert again is a ruling, and named here.
  */
-const PRINT_ONLY: readonly string[] = ["~/.hermes/ cp, source 20000"];
+const PRINT_ONLY: readonly string[] = [];
 
 /**
  * The most a 2,000-character `cp` or `mv` line of test 4 may cost over its
@@ -346,8 +394,110 @@ const CONTROL_FAST_MS: Readonly<Record<string, number>> = {
   "~/.hermes/ mv, source": 3.0,
 };
 
-/** The most a control may read of its faster-runner figure, before the runner's factor. */
+/** The most a control may read of its CI figure, before the runner's factor. */
 const CONTROL_MOST = 2;
+
+/*
+ * #720's list: every other line of this file that held one reading to a fixed
+ * bound is held by the RATIO rule ({@link heldBy}): each line beside a control
+ * read in the same test, the least of {@link LEAST_ROUNDS} readings of each
+ * ({@link leastCost}), the line at most a ratio bound times its control, and
+ * the control at most {@link LEAST_CONTROL_MOST} times its CI figure below,
+ * stretched by the runner's factor. The fixed bounds these lines held are
+ * printed beside each line, not asserted: one call read up to 75.8 (test 2),
+ * 62.7 (test 3) and 89.1 (test 4) CPU ms of 100 on CI with the code
+ * unchanged, and 141 on the line PRINT_ONLY kept off the assert.
+ *
+ * Each ratio bound is about three times the largest ratio CI read, and under
+ * half of what the walk its test guards against reads. Each control figure is
+ * the largest least reading of that control on CI. The figures are named with
+ * their runs: 46140003817 (attempt 1, node 22, at e84e394a) and 46137342920
+ * (node 22, at 34d33e22).
+ */
+
+/**
+ * The most a control of the lines below may read of its CI figure, before the
+ * runner's factor. Three, where test 4's 2,000-character controls have
+ * {@link CONTROL_MOST} two: these figures are from node 22 runs only (a pull
+ * request's full gate has no node 20 floor), and the slower runner read test
+ * 4's controls up to 1.54 times the faster one's.
+ */
+const LEAST_CONTROL_MOST = 3;
+
+/**
+ * Test 2: the most a line may cost over its control (the same line with the
+ * run of `*` spelled as plain `a`). CI's largest: 5.25, `echo x >` with 8 `*`
+ * (46140003817, attempt 1); the rest 0.9 to 5.1. The walk the test guards
+ * against, the old matcher's backtracking, took 0.95 CPU s at 12 `*` in the
+ * credential pass and 36.7 at 8 `*` in the write pass on a521a91d, against
+ * controls of 1 to 21 CPU ms: hundreds to thousands of times.
+ */
+const STAR_RATIO_BOUND = 16;
+
+/** Test 2's controls by shape, CPU ms: the largest least reading over the five star counts (46140003817, attempt 1). */
+const STAR_CONTROL_CI_MS: Readonly<Record<string, number>> = {
+  cat: 3.6,
+  "cat ~/.hermes/": 3.2,
+  "echo x > ~/.hermes/": 6.1,
+  "echo x >": 2.8,
+  "cat */…/x": 2.5,
+  "echo x > ~/.hermes/*/": 21.1,
+};
+
+/**
+ * Test 3's 2,000-character control by prefix, CPU ms: its largest median (the
+ * mean of 5 calls a pair) in five full-gate runs on both node versions
+ * (46129727550, 46122809349, 46120820750, 46123343466, 46140003817 attempt
+ * 1): 4.6 (46123343466, node 20) and 3.1 (46123343466, node 22). Held to
+ * {@link CONTROL_MOST} times it: these figures include the slower runner.
+ */
+const RUN_CONTROL_CI_MS: Readonly<Record<string, number>> = {
+  "": 4.6,
+  "~/.hermes/": 3.1,
+};
+
+/**
+ * Test 3's long words: the most a line may cost over its control (a plain
+ * name of the same length). CI's largest: 6.42, `echo x > *[5,000 z]X`
+ * (46140003817, attempt 1); the rest 1.2 to 2.3. The walks the test guards
+ * against, on bfa73710: 20,000 `[` 2.8 CPU s (each `[` scanned to the end)
+ * against a control of 12.5, about 220 times; `cat *[5,000 z]X` 160 CPU ms
+ * (each character tested against every member) against 2.6, about 60 times.
+ * Nineteen is under half of the smaller.
+ */
+const LONG_RATIO_BOUND = 19;
+
+/** Test 3's long words' controls, CPU ms: the largest least reading (46140003817, attempt 1). */
+const LONG_CONTROL_CI_MS: Readonly<Record<string, number>> = {
+  "echo x > 20,000 [": 12.5,
+  "echo x > ~/.hermes/ 20,000 [": 17.8,
+  "echo x > *[5,000 z]X": 2.4,
+  "echo x > ~/.hermes/ *[5,000 z]X": 7.0,
+  "cat *[5,000 z]X": 2.6,
+  "cat ~/.hermes/ *[5,000 z]X": 3.7,
+};
+
+/**
+ * Test 4's 20,000-character lines: the most a line may cost over its control
+ * (the same line with a plain name of 20,000 characters; the seat's choice).
+ * CI's largest: 4.17, `mv <run> out.txt` (46137342920: least 47.1 beside
+ * 11.3); the rest 0.7 to 3.1, `~/.hermes/ cp, source` (PRINT_ONLY's line)
+ * 2.55. The walk the test guards against, a run of `[` scanned from every
+ * `[` (2.8 CPU s for 20,000 on bfa73710), is 47 to 230 times these controls.
+ */
+const COPY_20K_RATIO_BOUND = 13;
+
+/** Test 4's 20,000-character controls, CPU ms: the largest least reading (46137342920 and 46140003817 attempt 1). */
+const COPY_20K_CONTROL_CI_MS: Readonly<Record<string, number>> = {
+  "cp, destination": 38.7,
+  "cp, source": 19.9,
+  "mv, destination": 36.1,
+  "mv, source": 12.3,
+  "~/.hermes/ cp, destination": 46.5,
+  "~/.hermes/ cp, source": 60.4,
+  "~/.hermes/ mv, destination": 52.2,
+  "~/.hermes/ mv, source": 51.2,
+};
 
 /**
  * One 2,000-character line of test 4 judged with its control: whether the
@@ -356,8 +506,18 @@ const CONTROL_MOST = 2;
  * tested with figures).
  */
 function judged(ratio: number, controlMs: number, fastMs: number, runnerFactor: number): { controlBound: number; lineOver: boolean; controlOver: boolean } {
-  const controlBound = CONTROL_MOST * fastMs * runnerFactor;
-  return { controlBound, lineOver: !(ratio < COPY_RATIO_BOUND), controlOver: !(controlMs < controlBound) };
+  return heldBy(ratio, controlMs, fastMs, runnerFactor, COPY_RATIO_BOUND, CONTROL_MOST);
+}
+
+/**
+ * The RATIO rule of #718 and #719, for any line of this file: the line is over
+ * when its ratio to its control reaches `ratioBound`, and the control is over
+ * when it reaches {@link CONTROL_MOST} times its CI figure `ciMs`, stretched by
+ * the runner's factor (passed in so the rule can be tested with figures).
+ */
+function heldBy(ratio: number, controlMs: number, ciMs: number, runnerFactor: number, ratioBound: number, most: number): { controlBound: number; lineOver: boolean; controlOver: boolean } {
+  const controlBound = most * ciMs * runnerFactor;
+  return { controlBound, lineOver: !(ratio < ratioBound), controlOver: !(controlMs < controlBound) };
 }
 
 test("cost: a 2,000-character copy or move is held by its ratio to its control, and the control by its own bound (CLAIMS L66128)", () => {
@@ -380,6 +540,46 @@ test("cost: a 2,000-character copy or move is held by its ratio to its control, 
   assert.deepEqual(Object.keys(CONTROL_FAST_MS).sort(), [...shapes, ...shapes.map((shape) => `~/.hermes/ ${shape}`)].sort());
   for (const fast of Object.values(CONTROL_FAST_MS)) assert.ok(fast > 0);
   assert.equal(scaledBound(CONTROL_MOST * 5.4), CONTROL_MOST * 5.4 * runner().factor);
+});
+
+test("cost: the lines that held a fixed bound are held by their ratio and their control by its own bound (#720's list)", () => {
+  for (const [ratioBound, figures, most] of [
+    [STAR_RATIO_BOUND, STAR_CONTROL_CI_MS, LEAST_CONTROL_MOST],
+    [RUN_RATIO_BOUND, RUN_CONTROL_CI_MS, CONTROL_MOST],
+    [LONG_RATIO_BOUND, LONG_CONTROL_CI_MS, LEAST_CONTROL_MOST],
+    [COPY_20K_RATIO_BOUND, COPY_20K_CONTROL_CI_MS, LEAST_CONTROL_MOST],
+  ] as const) {
+    for (const ciMs of Object.values(figures)) {
+      assert.ok(ciMs > 0);
+      // A line under its ratio beside a control at its CI figure passes.
+      assert.deepEqual(heldBy(ratioBound - 0.01, ciMs, ciMs, 1, ratioBound, most), { controlBound: most * ciMs, lineOver: false, controlOver: false });
+      // At the ratio bound the line is red, on any runner.
+      assert.equal(heldBy(ratioBound, ciMs, ciMs, 1, ratioBound, most).lineOver, true);
+      assert.equal(heldBy(ratioBound, ciMs, ciMs, 4, ratioBound, most).lineOver, true);
+      // A change that slows the line and its control together keeps the ratio
+      // and reds on the control: at `most` times its figure.
+      assert.deepEqual(heldBy(1, most * ciMs, ciMs, 1, ratioBound, most), { controlBound: most * ciMs, lineOver: false, controlOver: true });
+      // The runner's factor stretches the control's bound and nothing else.
+      assert.equal(heldBy(1, most * ciMs, ciMs, 1.5, ratioBound, most).controlOver, false);
+    }
+  }
+  // Each table names every line it holds.
+  assert.deepEqual(Object.keys(STAR_CONTROL_CI_MS).sort(), STAR_SHAPES.map(([name]) => name).sort());
+  assert.deepEqual(Object.keys(RUN_CONTROL_CI_MS).sort(), ["", "~/.hermes/"]);
+  assert.deepEqual(Object.keys(LONG_CONTROL_CI_MS).sort(), [
+    "cat *[5,000 z]X",
+    "cat ~/.hermes/ *[5,000 z]X",
+    "echo x > *[5,000 z]X",
+    "echo x > 20,000 [",
+    "echo x > ~/.hermes/ *[5,000 z]X",
+    "echo x > ~/.hermes/ 20,000 [",
+  ]);
+  assert.deepEqual(Object.keys(COPY_20K_CONTROL_CI_MS).sort(), Object.keys(CONTROL_FAST_MS).sort());
+  assert.equal(LEAST_ROUNDS, 5);
+  assert.equal(LEAST_CONTROL_MOST, 3);
+  assert.equal(STAR_RATIO_BOUND, 16);
+  assert.equal(LONG_RATIO_BOUND, 19);
+  assert.equal(COPY_20K_RATIO_BOUND, 13);
 });
 
 test("cost: cp and mv with a run of unclosed `[` as an operand, through the whole classification (PRIORITIES:331)", (t) => {
@@ -421,12 +621,10 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     const plain = "a".repeat(2_000);
     /** Each line over its bound, named with its figures, asserted at the end. */
     const over: string[] = [];
-    /** The 20,000-character lines held to the fixed bound: every one but the PRINT_ONLY name. */
-    let asserted = 0;
+    /** The 20,000-character lines held to their ratio and their control's bound: every one but a PRINT_ONLY name. */
+    let ratioHeld20k = 0;
     /** The 2,000-character lines held to their ratio and their control's bound: all eight. */
     let ratioHeld = 0;
-    /** Each shape's 2,000-character control, median CPU ms, for the measuring lines below. */
-    const controlOf = new Map<string, number>();
     const lines: Array<[string, (word: string) => string]> = [
       ["cp, destination", (word) => `cp README.md ${word}`],
       ["cp, source", (word) => `cp ${word} out.txt`],
@@ -451,7 +649,6 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
         const { controlBound, lineOver, controlOver } = judged(ratio, controlMs, fastMs, runner().factor);
         const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${String(COPY_RATIO_BOUND)}; the control's own bound ${controlBound.toFixed(1)}; the ${String(BOUND_MS * 2)} ms is printed, not asserted until the argv-line split: PRIORITIES`;
         t.diagnostic(`cost: ${label}`);
-        controlOf.set(named(shape, prefix), controlMs);
         ratioHeld += 1;
         if (lineOver) over.push(label);
         // The control's own bound: it is the classifier too, and a change
@@ -459,52 +656,55 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
         if (controlOver) over.push(`the control of ${command.slice(0, 30)} (2000 characters): median ${controlMs.toFixed(1)} CPU ms, its own bound ${controlBound.toFixed(1)} (${String(CONTROL_MOST)} x its ${fastMs.toFixed(1)} on the faster runner, ${runner().line})`);
       }
     }
-    // Test 3's 20,000-character run, one call each: past the longest path the
-    // kernel opens, so each landing is guarded unread.
+    // Test 3's 20,000-character run: past the longest path the kernel opens,
+    // so each landing is guarded unread. Each line is held by the RATIO rule
+    // ({@link COPY_20K_RATIO_BOUND}) against the same line with a plain name of
+    // 20,000 characters (the 2,000-character control is too small to be a
+    // steady divisor); the fixed 100 CPU ms of one call is printed, not
+    // asserted (#720's list: CI read 89.1 of it, and 141 on the line PRINT_ONLY
+    // held, with the code unchanged).
     for (const prefix of ["", "~/.hermes/"]) {
       for (const [shape, line] of lines) {
         const command = line(`${prefix}${"[".repeat(20_000)}`);
-        const ms = cpuMs(() => {
-          classifyForHook(command, [], dir, [], false, [dir]);
-        });
-        // Measuring only (HGC20K): four more calls of the line, and three of
-        // the same line with a plain name of the same length, printed beside
-        // the shape's 2,000-character control. Nothing here is asserted.
-        const again = [1, 2, 3, 4].map(() => cpuMs(() => { classifyForHook(command, [], dir, [], false, [dir]); }));
-        const plainLine = line(`${prefix}${"a".repeat(20_000)}`);
-        const plains = [1, 2, 3].map(() => cpuMs(() => { classifyForHook(plainLine, [], dir, [], false, [dir]); }));
-        const calls = [ms, ...again];
-        const median = (values: number[]): number => [...values].sort((x, y) => x - y)[Math.floor(values.length / 2)] as number;
-        t.diagnostic(
-          `cost-measure: HGC20K ${named(shape, prefix)}: calls ${calls.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...calls).toFixed(1)}, median ${median(calls).toFixed(1)} CPU ms; ` +
-            `plain 20,000 ${plains.map((x) => x.toFixed(1)).join(" ")}; the 2,000-character control ${(controlOf.get(named(shape, prefix)) ?? Number.NaN).toFixed(1)}; ${runner().line}`,
+        const control = line(`${prefix}${"a".repeat(20_000)}`);
+        const { spent, control: controlMs, ratio } = leastCost(
+          () => classifyForHook(control, [], dir, [], false, [dir]),
+          () => classifyForHook(command, [], dir, [], false, [dir]),
+          LEAST_ROUNDS,
         );
-        const held = !printOnly(shape, prefix, 20_000);
-        if (held) asserted += 1;
-        if (held) report(t, `${command.slice(0, 30)} (20000 characters)`, ms, BOUND_MS * 2);
-        else t.diagnostic(`cost: ${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms ${PRINTED}`);
-        if (held && !(ms < BOUND_MS * 2)) over.push(`${command.slice(0, 30)} (20000 characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
+        const name = named(shape, prefix);
+        const ciMs = COPY_20K_CONTROL_CI_MS[name]!;
+        const { controlBound, lineOver, controlOver } = heldBy(ratio, controlMs, ciMs, runner().factor, COPY_20K_RATIO_BOUND, LEAST_CONTROL_MOST);
+        const label = `${command.slice(0, 30)} (20000 characters): least ${spent.toFixed(1)} CPU ms, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${String(COPY_20K_RATIO_BOUND)}; the control's own bound ${controlBound.toFixed(1)}; the fixed ${String(BOUND_MS * 2)} ms is printed, not asserted`;
+        if (printOnly(shape, prefix, 20_000)) {
+          t.diagnostic(`cost: ${label} ${PRINTED}`);
+          continue;
+        }
+        t.diagnostic(`cost: ${label}`);
+        ratioHeld20k += 1;
+        if (lineOver) over.push(label);
+        if (controlOver) over.push(`the control of ${label} (${String(LEAST_CONTROL_MOST)} x its CI ${ciMs.toFixed(1)}, ${runner().line})`);
       }
     }
     // Every line is measured and printed before any is held to its bound, so
     // one run (a CI shard) reads them all.
     assert.deepEqual(over, [], `over the bound:\n${over.join("\n")}`);
-    // All eight 2,000-character lines hold their ratio; the PRINT_ONLY name
-    // took exactly one of the eight 20,000-character lines off the assert.
+    // All eight 2,000-character lines hold their ratio, and every
+    // 20,000-character line but a PRINT_ONLY name holds its own.
     assert.equal(ratioHeld, 8);
-    assert.equal(asserted, 7);
+    assert.equal(ratioHeld20k, 8 - PRINT_ONLY.length);
   } finally {
     if (savedHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = savedHome;
   }
 });
 
-test("cost: test 4 prints only the one 20,000-character line the lead ruled off the assert (CLAIMS L63680); the 2,000-character lines hold a ratio (L66128)", () => {
-  // The list cannot grow unseen: a line taken off the assert is a ruling, and
-  // this one returns to it with the argv-line split. The two plain `cp` lines
-  // of 2,000 characters that CLAIMS L63667 had here hold COPY_RATIO_BOUND now,
-  // as all eight do.
-  assert.deepEqual([...PRINT_ONLY], ["~/.hermes/ cp, source 20000"]);
+test("cost: test 4 prints no line only: the 20,000-character line the lead ruled off the assert (CLAIMS L63680) is held by its ratio (#720); the 2,000-character lines hold a ratio (L66128)", () => {
+  // The list cannot grow unseen: a line taken off the assert is a ruling. The
+  // one CLAIMS L63680 took off (`~/.hermes/ cp, source`, 20,000 characters)
+  // holds COPY_20K_RATIO_BOUND now, as all eight do; the two plain `cp` lines
+  // of 2,000 characters that CLAIMS L63667 had here hold COPY_RATIO_BOUND.
+  assert.deepEqual([...PRINT_ONLY], []);
   assert.equal(COPY_RATIO_BOUND, 60);
   assert.equal(CONTROL_MOST, 2);
 });
