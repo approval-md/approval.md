@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-28 14:31'
-updated_date: '2026-11-28 15:17'
+updated_date: '2026-11-28 15:26'
 labels:
   - classifier
   - security
@@ -70,4 +70,6 @@ Sweep over the corpora at 5b04a6bd (1,378 commands):
 Over the corpora at 5467a7b1 plus the new tests (1,640 commands), head differs from 5467a7b1 on 8. Every one returns to base's answer.
 
 SPEC.md is not edited (a protected path). The closed list is in docs/claude-code-hook.md, and a proposed SPEC section 7 paragraph is in the lane report.
+
+Flagged gap, fixed in the commits after c561778b (tests first; red 57 of 187): the toolchain's names that fetch or load code from outside the workspace, pick another toolchain binary or redirect network trust are steering. They are TOOLCHAIN_STEERING_NAMES, TOOLCHAIN_STEERING_SHAPE and TOOLCHAIN_STEERING_FOLDED (npm_config_, yarn_, pnpm_ and the proxy and TLS variables, in any case). docs/claude-code-hook.md states the principle and that the steering list is a denylist, deciding only in front of workspace-code rules. No existing line moved.
 <!-- SECTION:NOTES:END -->
