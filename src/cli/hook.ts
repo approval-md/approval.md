@@ -6344,6 +6344,20 @@ export function refineWriteLandings(
         }
       }
     }
+    // review-b's M4 on #715: a delete, or a move's source, named relative
+    // after a cd this hook cannot follow (`cd - && rm -f env`) removes a name
+    // whose folder is not known, so guarded as a relative write there is.
+    // Point 7 keeps a delete off the list where the folder is known; a word
+    // this pass cannot read at all keeps the answer it had (parity ruling).
+    if (guarded === undefined && cwdUnknown) {
+      for (const change of changes) {
+        if (change.kind !== "remove" && change.kind !== "move") continue;
+        const resolved = resolveWriteWord(change.word, index, line);
+        if ("unreadable" in resolved || spellingsOf(resolved) !== null) continue;
+        guarded = { kind: "guarded", rule: WRITE_UNREADABLE_RULE, path: change.word, why: `${change.word} is relative, after a cd this hook cannot follow, so where it is removed from cannot be read` };
+        break;
+      }
+    }
     // S2 (seat ruling on the review of e2a76e15): a move or a delete of a
     // named hook script, or of a folder above one, removes the hook's code or
     // puts other code there. Only this rule reads a delete (point 7 keeps

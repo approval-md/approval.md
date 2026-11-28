@@ -271,3 +271,17 @@ test("an empty alternative in the cd word: bash's landing is followed, and what 
   // A pattern that matches several folders is several words too (.claude, .codex, .cursor).
   holds("cd .c* && echo x > notes.md", "files.write.guarded");
 });
+
+test("a delete or a move's source after a cd this hook cannot follow is guarded, as a write there is (review-b's M4 on #715)", () => {
+  for (const cd of ["cd -", "cd $UNSET_B6", 'cd "$(echo .approval/log)"', "cd {,}"]) {
+    // (`unlink` and `shred` are refused by the classifier on this base: refused whole, so not listed.)
+    for (const form of ["rm -f events.jsonl", "rm settings.json", "rm -rf log", "rmdir log", "mv env /tmp/b6-x", "find . -delete"]) {
+      holds(`${cd} && ${form}`, "files.write.guarded");
+    }
+  }
+  // An absolute word after it, and the same delete with no cd or after a cd it follows, keep their answers.
+  const absolute = hook(`cd - && rm -f ${ws}/notes.md`);
+  assert.ok(typeof absolute !== "string" && !absolute.includes("files.write.guarded"), JSON.stringify(absolute));
+  assert.deepEqual(hook("rm -f notes.md"), ["files.write.workspace"]);
+  assert.deepEqual(hook("cd docs && rm -f notes.md"), ALLOWED);
+});

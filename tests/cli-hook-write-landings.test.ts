@@ -1780,9 +1780,11 @@ test("S2.3 through the real hook: the file tools onto the new entries are denied
 test("S2.2 fold parity: a move or delete whose word cannot be read, placed or trusted keeps the answer it had at bceddb81", () => {
   // The ancestor check only ever ADDS a guarded entry, and only for a word it
   // can place; where it cannot, the answer is what the guarded-list judgement
-  // gave before S2 (read with the same settings at bceddb81). The three that
-  // stay unguarded are known gaps for the lead: `rm -rf $X`, a delete after a
-  // cd the hook cannot follow, and a delete through a link the same line makes.
+  // gave before S2 (read with the same settings at bceddb81). The two that
+  // stay unguarded are known gaps for the lead: `rm -rf $X` and a delete
+  // through a link the same line makes. A delete after a cd the hook cannot
+  // follow was the third; since review-b's M4 on #715 its relative word is
+  // guarded as unreadable, as a relative write there is.
   const h = freshHome({ "settings.json": JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "python3 ~/tools/hooks/guard.py" }] }] } }) });
   mkdirSync(join(h, "tools", "hooks"), { recursive: true });
   writeFileSync(join(h, "tools", "hooks", "guard.py"), "#\n", "utf8");
@@ -1793,7 +1795,7 @@ test("S2.2 fold parity: a move or delete whose word cannot be read, placed or tr
   withHome(h, undefined, () => {
     assert.deepEqual(at("rm -rf $X"), [[DELETE_OUT, "rm-unreadable-path"]]);
     assert.deepEqual(at("mv $X y"), [["policy.core", "copy-target-unknown"], [GUARDED, "write-unreadable"]]);
-    assert.deepEqual(at("cd $D && rm -rf tools"), [["read.shell", "read-shell"], [WORKSPACE, "rm-workspace"]]);
+    assert.deepEqual(at("cd $D && rm -rf tools"), [["read.shell", "read-shell"], [WORKSPACE, "rm-workspace"], [GUARDED, "write-unreadable"]]);
     assert.deepEqual(at("cd $D && mv hooks y"), [["read.shell", "read-shell"], [WORKSPACE, "workspace-write"], [GUARDED, "write-unreadable"]]);
     assert.deepEqual(at("rm -rf loop/x"), [[WORKSPACE, "rm-workspace"], ["vcs.history.rewrite", "git-dir-write"]]);
     assert.deepEqual(at("mv loop/x y"), [[WORKSPACE, "workspace-write"], ["vcs.history.rewrite", "git-dir-write"]]);
