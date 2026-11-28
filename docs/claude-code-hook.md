@@ -362,6 +362,109 @@ a word that begins with `-`) may name a write target this text cannot see, so
 the command is `policy.core` (`fetch-output-unknown`, `copy-target-unknown`)
 unless the word follows `--` (APRV-511 fix round 3).
 
+### Assignments in front of a command (APRV-521, APRV-540, APRV-541)
+
+A `NAME=value` word in front of a command can change which program runs or
+what it loads (`PATH=. cat f` runs `./cat`, `GH_PAGER=./x gh pr diff 1` runs
+`./x`), so every classified command is judged by the assignments in front of
+it as well as by its verb. One table answers, in three parts:
+
+- **Admitted** words keep the command's class: a plain locale (`LANG`,
+  `LC_*`) or zone (`TZ`); `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`,
+  `FORCE_COLOR`, `CI`, `GH_PROMPT_DISABLED`, `GH_NO_UPDATE_NOTIFIER` and
+  `GH_SPINNER_DISABLED` as switches; `COLUMNS` and `LINES` as digits; `TERM`
+  as a name; `GH_PAGER=cat` or empty; `GH_REPO=OWNER/REPO`; and git's own
+  no-op words (`GIT_TERMINAL_PROMPT=0`, `GIT_PAGER=cat`, `PAGER=cat`,
+  `GIT_EDITOR`, `EDITOR` or `VISUAL` set to `true` or `:`).
+- **Steering** names are refused in front of every command: `PATH`, `IFS`,
+  `ENV`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `PROMPT_COMMAND`, `ZDOTDIR`,
+  `CDPATH`, `SHELL`, `HOME`, `CURL_HOME`, `WGETRC`, `RIPGREP_CONFIG_PATH`,
+  `TMPDIR`, `VISUAL`, `MANOPT`, `GREP_OPTIONS`, `GZIP`, `BZIP2`, `XZ_OPT`,
+  `XZ_DEFAULTS`, `TAR_OPTIONS`, `ZIPOPT`, `UNZIP`, `UNZIPOPT`,
+  `POSIXLY_CORRECT`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS`,
+  `CLASSPATH`, `LANG`, `LANGUAGE`, `TZ`, `TZDIR`, `LOCPATH`, `GCONV_PATH`,
+  `NLSPATH`, `TERMINFO`, `TERMINFO_DIRS`, `TERMCAP` (`LANG`, `LC_*` and `TZ`
+  only with a value that is not a plain locale or zone); every name starting
+  `LD_`, `DYLD_`, `BASH_`, `XDG_`, `GH_`, `GIT_`, `OPENSSL_`, `LESS`, `LC_`,
+  `PYTHON`, `PERL`, `RUBY`, `NODE_`, `npm_config_`, `NPM_CONFIG_`, `BUN_` or
+  `DENO_`; every name ending `PAGER`, `EDITOR`, `BROWSER` or `ASKPASS`; and
+  the names git and the programs it starts read (`LV`, `SSH_ASKPASS`,
+  `GNUPGHOME` and the rest of APRV-521's list). A steering name set bare
+  earlier on the line (`IFS=x; cat f`, `GH_PAGER=./x && gh pr diff 1`,
+  `printf -v`, `${NAME:=v}`) refuses the commands after it too.
+  The toolchain's names are steering too: `npm_config_*`, `yarn_*` and
+  `pnpm_*` in any case (npm reads its own in any case), `YARN_`, `PNPM_`,
+  `COREPACK_`, `TS_NODE_`, `TSX_`, `CARGO_`, `RUSTC`, `RUSTUP_`, `PIP_`,
+  `UV_`, `POETRY_`, `PYTEST_`, `BUNDLE_`, `GEM_`, `CCACHE_`, `DISTCC_`,
+  `CGO_` names, `MAKEFILES`, `MAKEFLAGS`, `MFLAGS`, `GNUMAKEFLAGS`, `MAKE`,
+  `VPATH`, GNU make's "Variables Used by Implicit Rules" (the programs `CC`,
+  `CXX`, `CPP`, `LD`, `AR`, `AS`, `NM`, `RANLIB`, `STRIP`, `RM`, `YACC`,
+  `LEX`, `FC`, `F77`, `M2C`, `PC`, `M4`, `CO`, `GET`, `LINT`, `MAKEINFO`,
+  `TEX`, `TEXI2DVI`, `WEAVE`, `CWEAVE`, `TANGLE`, `CTANGLE`, and the flags
+  `CFLAGS`, `CXXFLAGS`, `CPPFLAGS`, `LDFLAGS`, `ARFLAGS`, `ASFLAGS`,
+  `YFLAGS`, `LFLAGS`, `FFLAGS`, `RFLAGS`, `PFLAGS`, `COFLAGS`, `GFLAGS`,
+  `LINTFLAGS`, `LDLIBS`, `LOADLIBES`, `TARGET_ARCH`), `INSTALL`, `AWK`,
+  `SED`, `PKG_CONFIG`, `PKG_CONFIG_PATH`, the gcc and clang driver's
+  `GCC_EXEC_PREFIX`, `COMPILER_PATH`, `LIBRARY_PATH`, `CPATH`,
+  `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`,
+  `DEPENDENCIES_OUTPUT`, `SUNPRO_DEPENDENCIES`, `ESBUILD_BINARY_PATH`,
+  `GOFLAGS`, `GOPROXY`, `GOPATH`, `GOROOT`, `GOTOOLCHAIN`, `GOSUMDB`,
+  `GONOSUMDB`, `GOPRIVATE`, `GONOPROXY`, `GOINSECURE`, `GOBIN`, `GOENV`,
+  `GOWORK`, `GOEXPERIMENT`, `GOMODCACHE`, `GOCACHE`, `GOVCS`, `GOAUTH`,
+  `GOFIPS140`, `GOTOOLDIR`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `JAVA_HOME`,
+  `JAVA_OPTS`, `JVM_OPTS`, `MAVEN_OPTS`, `MAVEN_ARGS`, `MAVEN_CONFIG`,
+  `GRADLE_OPTS`, `GRADLE_HOME`, `GRADLE_USER_HOME`, `SBT_OPTS`, `ANT_OPTS`,
+  `ANT_ARGS`, and, in either case, `http_proxy`, `https_proxy`,
+  `ftp_proxy`, `all_proxy`, `no_proxy`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+  `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE` and `NODE_EXTRA_CA_CERTS`.
+  A short, common-looking name such as `RM` or `AWK` is refused in front of
+  `make`, `npm test` and the other workspace-code commands on purpose:
+  make's built-in rules run its value as a command (`RM='sh -c …' make
+  clean` runs the value, with no change to any workspace file). `MAKELEVEL`
+  only counts make's recursion and stays an unknown name.
+- **Unknown** names (any other) are refused, except in front of a command
+  that already runs the workspace's own code, where they keep its class.
+
+The principle. In front of a workspace-code command an unknown name is kept,
+because the command already runs the workspace's code and the name gains an
+agent nothing it lacks without it. A name is on the steering list when it can
+make the toolchain run or fetch code from outside the workspace, pick another
+toolchain binary, or redirect its network trust; a package script or a
+Makefile can call any tool, so every tool's family counts. The steering list
+is a denylist, and a denylist can be incomplete. That is why it decides only
+in front of the workspace-code rules below, where the command runs arbitrary
+workspace code anyway; everywhere else the admitted list (an allowlist)
+decides, and an unknown name is refused.
+
+The rules that run the workspace's own code are a closed list, by rule id
+(and, where one rule names several programs, by program):
+
+| rule | commands | why it runs workspace code |
+|---|---|---|
+| `npm-script` | `npm`, `pnpm`, `yarn`, `bun` with `run`, `run-script`, `test`, `start`, `build`, `lint`, `exec` | runs a `package.json` script, or a package binary, the workspace names |
+| `node-script` | `node <file>` | runs a JavaScript file |
+| `workspace-tool` | `npx`, `tsx`, `ts-node`, `vitest`, `jest`, `make` only | a package binary, a TypeScript file, test files, a Makefile's recipes |
+
+The same row's `tsc`, `oxlint` and `backlog` run no workspace code, and
+`eslint` and `prettier` load a JavaScript config only when one exists, so an
+unknown name in front of them stays refused, as it does in front of `npm
+pack`, `npm init <pkg>`, an install, a harness launch, and every reading,
+writing, network, VCS or gate command. In front of these three rules two
+steering names are kept as well: `TMPDIR` (it says where temporary files go
+and names no program) and `NODE_ENV` (it names a mode the project reads to
+pick its own configuration). So `NODE_ENV=test npm test`, `PORT=3000 npm
+start` and `FOO=bar make` keep their class, while `NODE_OPTIONS=--require=./x
+npm test` and `PATH=. npm test` are refused, and `FOO=1 cat f` and `FOO=1
+touch x` are refused.
+
+The decision reads the word right after the assignments: behind a sandbox
+wrapper (`approval sandbox --`, `node <cli> sandbox --`, `sandbox-exec -f`)
+the assignment steers the wrapper, so `FOO=1 approval sandbox -- npm test` is
+refused; a bare `cd` is left to its own rules. A refusal is `unclassified`,
+and its detail says why and what to do: run the command without the
+assignment, or have a person set the variable in the environment the session
+starts from.
+
 ### The rule table
 
 One row per binary group. The first row whose binary and subcommand match

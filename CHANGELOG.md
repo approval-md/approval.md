@@ -17,6 +17,34 @@ before a tag.
 
 ### Fixed
 
+- **An environment assignment in front of any classified command is judged
+  as one in front of a reader is (APRV-541).** APRV-540's closed list covered
+  readers only, so `PATH=. touch x` and `PATH=. mkdir x` stayed
+  `files.write.workspace` (autonomous under `approval init`'s policy) and ran
+  `./touch`, `PATH=. approval status` stayed `gate.self`, and
+  `NODE_OPTIONS=--require=./x node --version` stayed `files.write.workspace`.
+  Now one helper judges the assignments in front of every classified command,
+  whatever its class; git keeps its own list and text through the same
+  helper, and a bare `cd` keeps its own rules. In front of a command that
+  already runs the workspace's own code (rules `npm-script`, `node-script`,
+  and `workspace-tool` for `npx`, `tsx`, `ts-node`, `vitest`, `jest` and
+  `make`; docs/claude-code-hook.md lists them) an unknown name keeps the
+  command's class, and so do `TMPDIR` and `NODE_ENV`: `NODE_ENV=test npm
+  test`, `PORT=3000 npm start` and `FOO=bar make` are unchanged, while a
+  steering name (`PATH`, `NODE_OPTIONS`, a pager, a preload) is refused there
+  as everywhere, and so are the toolchain's names that fetch or load code from
+  outside the workspace, pick another toolchain binary or redirect its network
+  trust (`npm_config_*` in any case, `YARN_*`, `COREPACK_*`, `MAKEFLAGS`, `CC`,
+  `GOPROXY`, `CARGO_*`, `PIP_*`, the proxy and TLS variables, and kin). The
+  steering list is a denylist, so it decides only there; everywhere else the
+  admitted list does. Cost: an unknown name in front of a reader or a plain writer
+  (`FOO=1 touch x`), and any name off the admitted list in front of an asked
+  class, a harness launch or a sandbox wrapper, is refused (drop the
+  assignment, or have a person set the variable in the environment the
+  session starts from). The refusal says why and what to do, naming the
+  program that follows the assignments. Conformance command-class 3.0.0:
+  `FOO=1 grok run` moved from `harness.launch.grok` to `unclassified`.
+
 - **An environment assignment in front of a reader no longer rides the read
   (APRV-540).** The classifier read past every `NAME=value` word in front of a
   command and classified it by its verb alone, except in front of git

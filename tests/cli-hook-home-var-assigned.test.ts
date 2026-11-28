@@ -179,23 +179,23 @@ test("a prefix assignment does not apply to its own command's words", () => {
   // pass gives up on the name (a prefix taints it), as for `D`, and the
   // classifier does not count a prefix as the line's own binding: the word
   // keeps the answer it had before this change (pinned here as it was).
-  for (const line of ["HERMES_HOME=.claude tee $HERMES_HOME/settings.json </dev/null"]) {
-    assert.deepEqual(classesOf(hook(line), line), ["files.write.workspace", GUARDED], line);
-    assert.deepEqual(classesOf(pure(line), line), ["files.write.workspace"], line);
-  }
-  // APRV-540: `echo` is a reader, and an assignment off the admitted list in
-  // front of a reader refuses the segment, so this spelling is refused
-  // outright (the stricter answer); `tee` above is a writer and keeps its pin.
-  for (const line of ["HERMES_HOME=.approval/log echo x >> $HERMES_HOME/events.jsonl"]) {
+  // APRV-540, APRV-541: an assignment off the admitted list in front of any
+  // classified command refuses the segment, so both spellings are refused
+  // outright (the stricter answer); the prefix is still not the line's own
+  // binding, which the bare-then-prefix line below shows.
+  for (const line of ["HERMES_HOME=.approval/log echo x >> $HERMES_HOME/events.jsonl", "HERMES_HOME=.claude tee $HERMES_HOME/settings.json </dev/null"]) {
     assert.equal(hook(line), "REF:unclassified", line);
     assert.equal(pure(line), "REF:unclassified", line);
   }
   // The D= twin of the second has policy.core from the spliced reading alone
   // (`$D/settings.json` is an unread part with or without an assignment), not
   // from the prefix's value; the home form keeps the home reading there.
-  assert.ok(classesOf(hook("D=.claude tee $D/settings.json </dev/null"), "D prefix").includes("policy.core"));
+  // APRV-541: the prefix itself now refuses both (D and HERMES_HOME are off
+  // the admitted list); before it they took policy.core, stricter than the
+  // tee's own class, and a refusal is stricter still.
+  assert.equal(hook("D=.claude tee $D/settings.json </dev/null"), "REF:unclassified");
   // A bare assignment before it on the line does count.
-  assert.ok(classesOf(pure("HERMES_HOME=.claude; HERMES_HOME=x tee $HERMES_HOME/settings.json </dev/null"), "bare then prefix").includes("policy.core"));
+  assert.equal(pure("HERMES_HOME=.claude; HERMES_HOME=x tee $HERMES_HOME/settings.json </dev/null"), "REF:unclassified");
 });
 
 test("scope: what the D= reading does not carry to the word, the home's does not either", () => {

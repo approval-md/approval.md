@@ -207,7 +207,9 @@ test("a $(…) in every position the shell expands is classified, or the segment
     [`a[$(${RM})]=1`, "refused:opaque"],
     [`echo \${a[$(${RM})]}`, "refused:opaque"],
     [`(( a[$(${RM})] ))`, "refused:opaque"],
-    [`declare a[$(${RM})]=1`, "refused:opaque"],
+    // APRV-541: the line scan reads `declare a[$(…)]` as a name the text does
+    // not settle, and the substitution's `rm` is refused by it first.
+    [`declare a[$(${RM})]=1`, "refused:unclassified"],
     // ${…} with a nested $(…).
     [`echo \${X:-$(${RM})}`, "refused:opaque"],
     [`echo "\${X/a/$(${RM})}"`, "refused:opaque"],

@@ -325,7 +325,6 @@ const FIXTURES: readonly Fixture[] = [
   { command: "approval gate close", class: "policy.core", rule: "approval-gate-close", row: "approval" },
   // APRV-455: an agent that could start a relay with a secret of its own could
   // write records reading as an EdgeOS session's gestures. Operator ceremony.
-  { command: "APPROVAL_RELAY_SECRET=abc approval channel relay --port 4999", class: "policy.core", rule: "approval-channel-relay", row: "approval" },
   { command: "approval channel relay", class: "policy.core", rule: "approval-channel-relay", row: "approval" },
   { command: "approval channel telegram listen", class: GATE_SELF_CLASS, rule: "approval" },
   { command: "node ./cli.js gate open --for 5m --reason x", class: "policy.core", rule: "approval-gate-open", row: "node" },
@@ -786,8 +785,17 @@ const FIXTURES: readonly Fixture[] = [
 
   { command: "ls src > listing.txt", class: "files.write.workspace", rule: "redirect-write" },
   { command: "APPROVAL_HUMAN=human:alice", class: "read.shell", rule: "assignment" },
-  { command: "APPROVAL_HUMAN=human:alice approval queue", class: GATE_SELF_CLASS, rule: "approval" },
 ];
+
+// APRV-541: an assignment in front of any classified command is judged by the
+// admitted list, so these two, classified before, are refused now: a relay
+// secret and a human identity spelled through the environment.
+test("an assignment in front of the approval CLI is unclassified (APRV-541)", () => {
+  for (const command of ["APPROVAL_RELAY_SECRET=abc approval channel relay --port 4999", "APPROVAL_HUMAN=human:alice approval queue"]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok ? "classified" : result.code, "unclassified", command);
+  }
+});
 
 for (const fixture of FIXTURES) {
   if (fixture.rule === "") continue;
@@ -2549,10 +2557,6 @@ test("the skill-script rule leaves every other bun, node and python argv where i
     // pre-APRV-502 answer.
     ["node skills/x/scripts/f.ts $(cat args.txt)", "files.write.workspace", "node-script"],
     ["node --require ./x.js skills/x/scripts/f.ts", "files.write.workspace", "node-script"],
-    // An assignment prefix declines it too (`NODE_OPTIONS='--require …'` is
-    // the same flag spelled through the environment).
-    ["NODE_OPTIONS='--require ./x.js' node skills/x/scripts/f.ts", "files.write.workspace", "node-script"],
-    ["HOME=/x node skills/x/scripts/f.ts", "files.write.workspace", "node-script"],
     ["node cli.js status", GATE_SELF_CLASS, "node-approval-cli"],
   ];
   for (const [command, cls, rule] of cases) {
@@ -2561,6 +2565,13 @@ test("the skill-script rule leaves every other bun, node and python argv where i
     if (!result.ok) continue;
     assert.equal(result.segments[0]?.class, cls, command);
     assert.equal(result.segments[0]?.rule, rule, command);
+  }
+  // An assignment prefix declines it too (`NODE_OPTIONS='--require …'` is
+  // the same flag spelled through the environment), and since APRV-541 the
+  // assignment refuses the segment outright.
+  for (const command of ["NODE_OPTIONS='--require ./x.js' node skills/x/scripts/f.ts", "HOME=/x node skills/x/scripts/f.ts"]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok ? "classified" : result.code, "unclassified", command);
   }
 });
 

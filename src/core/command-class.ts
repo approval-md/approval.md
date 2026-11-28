@@ -5001,9 +5001,8 @@ function isHarmlessGitAssignment(word: LexWord): boolean {
  * `null` when every one is harmless (APRV-521).
  */
 function gitAssignmentRefusal(prefix: readonly LexWord[]): string | null {
-  const word = prefix.find((candidate) => !isHarmlessGitAssignment(candidate));
-  if (word === undefined) return null;
-  return `no rule for ${assignmentHead(word.text)}… in front of git: an environment assignment can run a program, repoint the repository or its configuration, or write a file`;
+  // APRV-541: the one helper, with git's own admitted list and text.
+  return assignmentRefusal(prefix, "git", GIT_ASSIGNMENTS);
 }
 
 /**
@@ -5143,9 +5142,10 @@ const SWITCH_VALUE = /^[A-Za-z0-9]{0,16}$/u;
 
 /**
  * The names admitted in front of a reader beyond git's list (APRV-540), each
- * with the only values admitted. A CLOSED list: in front of a command whose
- * class is a read, any other assignment leaves the segment `unclassified`
- * ({@link readerAssignmentRefusal}). None of these names a program, a library,
+ * with the only values admitted. A CLOSED list: in front of any classified
+ * command (a read since APRV-540, every class since APRV-541, as {@link
+ * assignmentRuleCovers} says), any other assignment leaves the segment
+ * `unclassified` ({@link assignmentRefusal}). None of these names a program, a library,
  * a directory or a configuration file, and no admitted value is a path:
  *
  * - `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `FORCE_COLOR`: colour switches
@@ -5284,9 +5284,97 @@ const READER_STEERING_NAMES: readonly string[] = [
 const READER_STEERING_SHAPE =
   /^(?:LD_|DYLD_|BASH_|XDG_|GH_|GIT_|OPENSSL_|LESS|LC_|PYTHON|PERL|RUBY|NODE_|npm_config_|NPM_CONFIG_|BUN_|DENO_)|(?:PAGER|EDITOR|BROWSER|ASKPASS)$/u;
 
-/** Is this a name that steers a reader ({@link READER_STEERING_NAMES})? */
+/**
+ * The toolchain's steering names (APRV-541, a flagged gap in option (a)):
+ * names that make a command which runs the workspace's own code do MORE,
+ * fetch or load code from outside the workspace, pick another toolchain
+ * binary, or redirect its network trust. A package script or a Makefile can
+ * call any tool, so every family is reachable through `npm test` and `make`.
+ * Matched case-sensitively, as the tools read them, except where the tool
+ * itself folds case ({@link TOOLCHAIN_STEERING_FOLDED}).
+ *
+ * - make: `MAKEFILES` (extra makefiles read first), `MAKEFLAGS`, `MFLAGS`,
+ *   `GNUMAKEFLAGS` (options, `-f`, `-I`, `--eval`), and the implicit rules'
+ *   programs and flags `CC`, `CXX`, `CPP`, `LD`, `AR`, `AS`, `NM`, `RANLIB`,
+ *   `STRIP`, `CFLAGS`, `CXXFLAGS`, `CPPFLAGS`, `LDFLAGS` (`-B<dir>` and
+ *   `-fplugin=` pick binaries and plugins), `PKG_CONFIG`, `PKG_CONFIG_PATH`;
+ *   the rest of GNU make's "Variables Used by Implicit Rules", programs
+ *   (`RM`, `YACC`, `LEX`, `FC`, `F77`, `M2C`, `PC`, `M4`, `CO`, `GET`, `LINT`,
+ *   `MAKEINFO`, `TEX`, `TEXI2DVI`, `WEAVE`, `CWEAVE`, `TANGLE`, `CTANGLE`)
+ *   and flags (`ARFLAGS`, `ASFLAGS`, `YFLAGS`, `LFLAGS`, `FFLAGS`, `RFLAGS`,
+ *   `PFLAGS`, `COFLAGS`, `GFLAGS`, `LINTFLAGS`, `LDLIBS`, `LOADLIBES`,
+ *   `TARGET_ARCH`), the programs makefiles commonly call by variable
+ *   (`INSTALL`, `AWK`, `SED`), and make's own `MAKE` (what a recursive
+ *   `$(MAKE)` runs) and `VPATH` (where prerequisites are looked for). A short,
+ *   common-looking name such as `RM` or `AWK` is here because make's built-in
+ *   rules run its value as a command. `MAKELEVEL` only counts recursion and
+ *   is left an unknown name; `.SHELLFLAGS` cannot be an environment name.
+ * - The gcc and clang driver: `GCC_EXEC_PREFIX`, `COMPILER_PATH` (where the
+ *   driver finds cc1, as and ld), `LIBRARY_PATH`, `CPATH`, `C_INCLUDE_PATH`,
+ *   `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`, `DEPENDENCIES_OUTPUT`,
+ *   `SUNPRO_DEPENDENCIES` (write a file), `CCACHE_*` (`CCACHE_PREFIX` runs a
+ *   program), `DISTCC_*` (sends the build to other hosts).
+ * - TypeScript runners: `ESBUILD_BINARY_PATH` (the esbuild binary tsx runs),
+ *   `TS_NODE_*` (compiler, project, `TS_NODE_COMPILER`), `TSX_*`.
+ * - Go: `GOFLAGS`, `GOPROXY`, `GOPATH`, `GOROOT`, `GOTOOLCHAIN` (downloads a
+ *   toolchain), `GOSUMDB`, `GONOSUMDB`, `GOPRIVATE`, `GONOPROXY`,
+ *   `GOINSECURE`, `GOBIN`, `GOENV`, `GOWORK` (other modules' code),
+ *   `GOEXPERIMENT`, `GOMODCACHE`, `GOCACHE` (a planted build cache),
+ *   `GOVCS`, `GOAUTH` (runs a command), `GOFIPS140`, `GOTOOLDIR`, `CGO_*`
+ *   (`CGO_CFLAGS`, `CGO_LDFLAGS` reach the C compiler).
+ * - Rust: `CARGO_*`, `RUSTC*` (`RUSTC`, `RUSTC_WRAPPER`), `RUSTFLAGS`,
+ *   `RUSTDOCFLAGS`, `RUSTUP_*` (picks a toolchain).
+ * - Python: `PIP_*` (index URL, config file), `UV_*`, `POETRY_*`, `PYTEST_*`
+ *   (`PYTEST_ADDOPTS`, `PYTEST_PLUGINS` load plugins); `PYTHON*` already.
+ * - JVM and Ruby: `JAVA_HOME`, `JAVA_OPTS`, `JVM_OPTS`, `MAVEN_OPTS`,
+ *   `MAVEN_ARGS`, `MAVEN_CONFIG`, `GRADLE_OPTS`, `GRADLE_HOME`,
+ *   `GRADLE_USER_HOME`, `SBT_OPTS`, `ANT_OPTS`, `ANT_ARGS`, `BUNDLE_*`,
+ *   `GEM_*`; `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`, `_JAVA_OPTIONS`,
+ *   `CLASSPATH` and `RUBY*` already.
+ * - Package managers: `YARN_*`, `PNPM_*`, `COREPACK_*` (downloads a package
+ *   manager from a URL); `npm_config_*`, `BUN_*`, `DENO_*`, `NODE_*` already.
+ */
+const TOOLCHAIN_STEERING_NAMES: readonly string[] = [
+  "MAKEFILES", "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS",
+  "CC", "CXX", "CPP", "LD", "AR", "AS", "NM", "RANLIB", "STRIP",
+  "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "PKG_CONFIG", "PKG_CONFIG_PATH",
+  "RM", "YACC", "LEX", "FC", "F77", "M2C", "PC", "M4", "CO", "GET", "LINT", "MAKEINFO", "TEX", "TEXI2DVI",
+  "WEAVE", "CWEAVE", "TANGLE", "CTANGLE", "INSTALL", "AWK", "SED", "MAKE", "VPATH",
+  "ARFLAGS", "ASFLAGS", "YFLAGS", "LFLAGS", "FFLAGS", "RFLAGS", "PFLAGS", "COFLAGS", "GFLAGS", "LINTFLAGS",
+  "LDLIBS", "LOADLIBES", "TARGET_ARCH",
+  "GCC_EXEC_PREFIX", "COMPILER_PATH", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH",
+  "OBJC_INCLUDE_PATH", "DEPENDENCIES_OUTPUT", "SUNPRO_DEPENDENCIES",
+  "ESBUILD_BINARY_PATH",
+  "GOFLAGS", "GOPROXY", "GOPATH", "GOROOT", "GOTOOLCHAIN", "GOSUMDB", "GONOSUMDB", "GOPRIVATE", "GONOPROXY", "GOINSECURE", "GOBIN", "GOENV",
+  "GOWORK", "GOEXPERIMENT", "GOMODCACHE", "GOCACHE", "GOVCS", "GOAUTH", "GOFIPS140", "GOTOOLDIR",
+  "RUSTFLAGS", "RUSTDOCFLAGS",
+  "JAVA_HOME", "JAVA_OPTS", "JVM_OPTS", "MAVEN_OPTS", "MAVEN_ARGS", "MAVEN_CONFIG", "GRADLE_OPTS", "GRADLE_HOME", "GRADLE_USER_HOME",
+  "SBT_OPTS", "ANT_OPTS", "ANT_ARGS",
+];
+
+/** {@link TOOLCHAIN_STEERING_NAMES}' prefixes. */
+const TOOLCHAIN_STEERING_SHAPE = /^(?:TS_NODE_|TSX_|CARGO_|RUSTC|RUSTUP_|PIP_|UV_|POETRY_|PYTEST_|BUNDLE_|GEM_|YARN_|PNPM_|COREPACK_|CCACHE_|DISTCC_|CGO_)/u;
+
+/**
+ * The names a tool reads in any case, matched so: npm reads `npm_config_*`
+ * case-insensitively (as yarn 1 and pnpm read their own), and curl and most
+ * HTTP clients read the proxy variables in lower and upper case; the TLS
+ * trust variables are matched in both cases too, fail closed. Proxies and
+ * trust redirect where the toolchain fetches code from and whom it believes.
+ */
+const TOOLCHAIN_STEERING_FOLDED =
+  /^(?:npm_config_|yarn_|pnpm_|(?:http|https|ftp|all|no)_proxy$|ssl_cert_file$|ssl_cert_dir$|curl_ca_bundle$|requests_ca_bundle$|node_extra_ca_certs$)/iu;
+
+/** Is this a name that steers a reader, a writer or the toolchain ({@link READER_STEERING_NAMES}, {@link TOOLCHAIN_STEERING_NAMES})? */
 function isReaderSteeringName(name: string): boolean {
-  return READER_STEERING_NAMES.includes(name) || READER_STEERING_SHAPE.test(name) || isGitInheritedName(name);
+  return (
+    READER_STEERING_NAMES.includes(name) ||
+    READER_STEERING_SHAPE.test(name) ||
+    isGitInheritedName(name) ||
+    TOOLCHAIN_STEERING_NAMES.includes(name) ||
+    TOOLCHAIN_STEERING_SHAPE.test(name) ||
+    TOOLCHAIN_STEERING_FOLDED.test(name)
+  );
 }
 
 /**
@@ -5296,6 +5384,12 @@ function isReaderSteeringName(name: string): boolean {
  */
 function steeringClause(name: string, program: string): string {
   if (name === "PATH") return `${name} picks which ${program} runs`;
+  if (/^(?:(?:http|https|ftp|all|no)_proxy|ssl_cert_file|ssl_cert_dir|curl_ca_bundle|requests_ca_bundle|node_extra_ca_certs)$/iu.test(name)) {
+    return `${name} redirects where ${program} and the tools it starts connect, or which certificates they trust`;
+  }
+  if (TOOLCHAIN_STEERING_NAMES.includes(name) || TOOLCHAIN_STEERING_SHAPE.test(name) || /^(?:npm_config_|yarn_|pnpm_)/iu.test(name)) {
+    return `${name} can make ${program} or the tools it starts run or fetch code from outside the workspace, or pick another toolchain binary`;
+  }
   if (/^(?:IFS|ENV|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|ZDOTDIR|CDPATH|BASH_)/u.test(name)) {
     return `${name} steers a shell ${program} may start`;
   }
@@ -5325,29 +5419,167 @@ function assignmentRemedy(name: string, program: string): string {
 }
 
 /**
- * Why the assignments in front of a reader leave the segment `unclassified`,
- * or `null` when every one is admitted (APRV-540). The mechanism is git's
- * ({@link gitAssignmentRefusal}): the first word off the admitted lists
- * decides. The detail opens as git's does (`no rule for NAME=… in front of
- * <program>`), then says why, for a steering name what it steers, and what
- * to do.
+ * The admitted list and the refusal text {@link assignmentRefusal} applies
+ * (APRV-541): parameters of the one helper, so a tool with its own admitted
+ * list (git) is not a second rule.
  */
-function readerAssignmentRefusal(prefix: readonly LexWord[], program: string): string | null {
-  const word = prefix.find((candidate) => !isHarmlessReaderAssignment(candidate));
-  if (word === undefined) return null;
-  const name = assignedName(word.text);
-  const why = isReaderSteeringName(name)
-    ? steeringClause(name, program)
-    : `${name} is not on the short list of harmless ones (locale, time zone, colour and terminal switches)`;
-  return `no rule for ${assignmentHead(word.text)}… in front of ${program}: an environment assignment in front of a command can change which program runs or what it loads, and ${why}. ${assignmentRemedy(name, program)}`;
+interface AssignmentTable {
+  /** May this word stand in front of the program? */
+  admitted: (word: LexWord) => boolean;
+  /** The refusal for the first word that may not. */
+  refusal: (word: LexWord, program: string) => string;
 }
 
 /**
- * Why a reader after a steering name the line's own shell sets is
- * `unclassified` (APRV-540, {@link ClassifierContext.readerEnvWrite}).
+ * Every classified command's table (APRV-540 for readers, APRV-541 for every
+ * class): {@link isHarmlessReaderAssignment}, and a refusal that opens as
+ * git's does (`no rule for NAME=… in front of <program>`), says why, for a
+ * steering name what it steers, and what to do.
+ */
+const COMMAND_ASSIGNMENTS: AssignmentTable = {
+  admitted: isHarmlessReaderAssignment,
+  refusal: (word, program) => {
+    const name = assignedName(word.text);
+    const why = isReaderSteeringName(name)
+      ? steeringClause(name, program)
+      : `${name} is not on the short list of harmless ones (locale, time zone, colour and terminal switches)`;
+    return `no rule for ${assignmentHead(word.text)}… in front of ${program}: an environment assignment in front of a command can change which program runs or what it loads, and ${why}. ${assignmentRemedy(name, program)}`;
+  },
+};
+
+/** Git's table (APRV-521): its own shorter admitted list and its own text, unchanged. */
+const GIT_ASSIGNMENTS: AssignmentTable = {
+  admitted: isHarmlessGitAssignment,
+  refusal: (word) =>
+    `no rule for ${assignmentHead(word.text)}… in front of git: an environment assignment can run a program, repoint the repository or its configuration, or write a file`,
+};
+
+/**
+ * THE helper (APRV-540, APRV-541): why the assignments in front of a
+ * classified command leave the segment `unclassified`, or `null` when every
+ * one is on the table's admitted list. The first word off it decides.
+ */
+function assignmentRefusal(prefix: readonly LexWord[], program: string, table: AssignmentTable = COMMAND_ASSIGNMENTS): string | null {
+  const word = prefix.find((candidate) => !table.admitted(candidate));
+  return word === undefined ? null : table.refusal(word, program);
+}
+
+/**
+ * Which commands the assignment rule covers, by the class the segment
+ * answers (APRV-541). ONE LINE picks the behaviour:
+ *
+ * - `"every-class"`: the lead's ruling for 0.4.10, committed. Every
+ *   classified command, whatever its class.
+ * - `"unasked-by-default"`: only the classes `approval init`'s policy runs
+ *   without a person ({@link ASSIGNMENT_RULE_UNASKED_CLASSES}). A class that
+ *   policy already asks about (or refuses) keeps its ask: the person sees the
+ *   whole line, assignment included. A reader is covered either way
+ *   (APRV-540 judges the verb).
+ */
+const ASSIGNMENT_RULE_SCOPE: "every-class" | "unasked-by-default" = "every-class";
+
+/**
+ * The classes `approval init`'s policy (src/cli/scaffold.ts) runs without a
+ * person: its `autonomous` and `supervised-retro` rows, and `gate.self`,
+ * which the hook drops and allows. Read only under `"unasked-by-default"`;
+ * a test pins it to the policy's rows.
+ */
+export const ASSIGNMENT_RULE_UNASKED_CLASSES: readonly string[] = [
+  "read.*",
+  "files.write.workspace",
+  "files.write.out_of_scope",
+  "calendar.write.own",
+  "communicate.email.draft",
+  GATE_SELF_CLASS,
+];
+
+/** Does the assignment rule cover a segment answering this class ({@link ASSIGNMENT_RULE_SCOPE})? */
+function assignmentRuleCovers(cls: string): boolean {
+  if ((ASSIGNMENT_RULE_SCOPE as string) === "every-class") return true;
+  return cls.startsWith("read.") || ASSIGNMENT_RULE_UNASKED_CLASSES.includes(cls);
+}
+
+/**
+ * The rules whose command, by its own definition, runs the workspace's own
+ * code (APRV-541, the lead's ruling on option (a)). A CLOSED list, by rule id
+ * and, where one rule names several binaries, by binary. In front of a
+ * command one of these decides, an UNKNOWN assignment name keeps the
+ * command's class: `NODE_ENV=test npm test` gains nothing an attacker lacks
+ * without it, since the command already runs whatever the workspace holds.
+ * A name on the steering list ({@link isReaderSteeringName}) is refused here
+ * as everywhere. SPEC.md §7 names the same list.
+ *
+ * - `npm-script` (npm, pnpm, yarn, bun `run`, `run-script`, `test`, `start`,
+ *   `build`, `lint`, `exec`): runs a `package.json` script, or a package
+ *   binary, the workspace names.
+ * - `node-script` (`node <file>`): runs a JavaScript file.
+ * - `workspace-tool`, for `npx`, `tsx`, `ts-node`, `vitest`, `jest` and
+ *   `make` only: a package binary, a TypeScript file, test files, a Makefile's
+ *   recipes. The same row's `tsc`, `oxlint` and `backlog` run no workspace
+ *   code, and `eslint` and `prettier` load a JavaScript config only when one
+ *   exists, so they are left off: an unknown name in front of them stays
+ *   refused.
+ *
+ * Left off as well: `npm-pack` and `npm-init-create` (they run code, but not
+ * as their plain purpose), the skill-script and `exec.code` rows (an
+ * assignment already declines them), harness launches, installs, and every
+ * reading, writing, network, VCS or gate rule.
+ */
+const WORKSPACE_CODE_RULES: Readonly<Record<string, readonly string[] | null>> = {
+  "npm-script": null,
+  "node-script": null,
+  "workspace-tool": ["npx", "tsx", "ts-node", "vitest", "jest", "make"],
+};
+
+/**
+ * Names kept in front of a workspace-code command although the steering list
+ * names them (the lead's ruling keeps `TMPDIR` and `NODE_ENV` before `npm
+ * test`). Two, each by name:
+ *
+ * - `TMPDIR` only says where temporary files go: it names no program, library
+ *   or configuration. It is steering in front of a reader or a plain writer
+ *   because `sort` spills there and some programs unpack helpers there; a
+ *   command that already runs the workspace's code may write anywhere in the
+ *   workspace anyway.
+ * - `NODE_ENV` is caught by the `NODE_` prefix, which is there for
+ *   `NODE_OPTIONS`, `NODE_PATH` and kin. It names a mode the project reads to
+ *   pick its own configuration, files a workspace-code command loads anyway.
+ *   In front of anything else it stays refused (steering by its prefix).
+ */
+const WORKSPACE_CODE_KEPT_NAMES: readonly string[] = ["TMPDIR", "NODE_ENV"];
+
+/** Is this answer a workspace-code rule's, for this program ({@link WORKSPACE_CODE_RULES})? */
+function runsWorkspaceCode(rule: string, program: string): boolean {
+  if (!Object.hasOwn(WORKSPACE_CODE_RULES, rule)) return false;
+  const bins = WORKSPACE_CODE_RULES[rule];
+  return bins === null || bins === undefined || bins.includes(program);
+}
+
+/**
+ * The table in front of a workspace-code command: the admitted list, and any
+ * plainly spelled name off the steering list (or on
+ * {@link WORKSPACE_CODE_KEPT_NAMES}). A value's substitution is classified
+ * before this is read, so a credential read in it is refused already.
+ */
+const WORKSPACE_CODE_ASSIGNMENTS: AssignmentTable = {
+  admitted: (word) => {
+    if (COMMAND_ASSIGNMENTS.admitted(word)) return true;
+    if (!PLAIN_ASSIGNMENT.test(word.text)) return false;
+    const name = assignedName(word.text);
+    return WORKSPACE_CODE_KEPT_NAMES.includes(name) || !isReaderSteeringName(name);
+  },
+  refusal: COMMAND_ASSIGNMENTS.refusal,
+};
+
+/**
+ * Why a covered command after a steering name the line's own shell sets is
+ * `unclassified` (APRV-540, APRV-541, {@link ClassifierContext.readerEnvWrite}).
  */
 function readerEnvWriteRefusal(name: string, program: string): string {
-  return `no rule for ${program} after ${name} is set on the same command line: an exported variable reaches ${program} and the programs it starts, and ${steeringClause(name, program)}. Run the line without setting ${name}; if ${program} needs it, a person sets ${name} in the environment the session starts from.`;
+  // A name the scan returns without its being a steering name is one the text
+  // does not settle (`declare a[$(…)]=1`, `printf -v "$n"`).
+  const why = isReaderSteeringName(name) ? steeringClause(name, program) : `the line sets ${name} in a way its text does not settle`;
+  return `no rule for ${program} after ${name} is set on the same command line: an exported variable reaches ${program} and the programs it starts, and ${why}. Run the line without setting ${name}; if ${program} needs it, a person sets ${name} in the environment the session starts from.`;
 }
 
 /** `git commit --amend` rewrites; a plain commit does not. */
@@ -15519,6 +15751,46 @@ function classifySegmentWithVerb(
     everyWriteLiterals,
   );
   const bin = words[cursor];
+  // APRV-540: the class the rule table gave the command, set by the walk.
+  let verbClass: string | null = null;
+  /**
+   * APRV-540, APRV-541: a classified command is classified by the
+   * assignments in front of it, not only by its verb. Every answer this
+   * segment gives passes here: an assignment off the admitted list
+   * ({@link assignmentRefusal}; the words before a sandbox wrapper count, as
+   * for git) leaves the segment `unclassified`, and so does a steering name
+   * the line's own shell sets ({@link ClassifierContext.readerEnvWrite}).
+   * `PATH=. cat f` runs `./cat`, `PATH=. touch x` runs `./touch`, and
+   * `GH_PAGER=./x gh pr diff 1` runs `./x`. The refusal is a deny under every
+   * policy, and every answer it replaces is an allow, an ask or a deny, so it
+   * only ever tightens. Which classes it covers is {@link
+   * assignmentRuleCovers}; a reader (its table class `read.*`) is covered
+   * whatever it answers.
+   *
+   * `cd`, spelled bare, is left to its own rules: POSIX's intrinsic utility,
+   * never looked up on PATH, it runs and loads nothing, and the two variables
+   * it reads from a prefix (`CDPATH`, `HOME`) are already modelled where it
+   * lands (APRV-508's recheck, fix M-B of the credential pass, fold 15 of the
+   * parents rule), which answer more exactly than a refusal here would.
+   */
+  const assignmentGate = (outcome: SegmentOutcome): SegmentOutcome => {
+    // Bare `cd` only: the word right after the assignments, never the command
+    // behind a sandbox wrapper, whose program the assignment steers.
+    if (!outcome.ok || bin === undefined || afterAssignments === undefined || afterAssignments === "cd") return outcome;
+    if (!((verbClass?.startsWith("read.") ?? false) || assignmentRuleCovers(outcome.class))) return outcome;
+    // The program that follows the assignments: a sandbox wrapper when one
+    // was consumed, which the assignment steers, else the command itself.
+    const program = pathSegments(afterAssignments).slice(-1)[0] ?? afterAssignments;
+    // Option (a): an unknown name keeps a workspace-code command's class; a
+    // wrapper in between decides by the wrapper, which is no such rule.
+    const table = sandbox === null && runsWorkspaceCode(outcome.rule, program) ? WORKSPACE_CODE_ASSIGNMENTS : COMMAND_ASSIGNMENTS;
+    const refusal = assignmentRefusal(segment.words.slice(0, assignments.length), program, table);
+    if (refusal !== null) return { ok: false, code: "unclassified", detail: refusal };
+    if (context.readerEnvWrite !== undefined) {
+      return { ok: false, code: "unclassified", detail: readerEnvWriteRefusal(context.readerEnvWrite, program) };
+    }
+    return outcome;
+  };
   if (redirected !== null) {
     // APRV-503 recheck (SHOULD-FIX-R1): a segment that writes a protected path
     // AND reads credential material (`cat .approval/env > APPROVAL.md`, `cat <
@@ -15543,17 +15815,17 @@ function classifySegmentWithVerb(
     const own = foldedOnly((): ProtectedBeside[] =>
       protectedBeside(commandAnswer(segment.redirects.filter((redirect) => redirect.op === "<"))),
     );
-    return {
+    return assignmentGate({
       ok: true,
       class: redirected.surface,
       rule: "redirect-protected",
       path: redirected.path,
       ...(touched === null ? {} : { also: touched }),
       ...besideProtected(redirected.surface, [redirected], "redirect-protected", own),
-    };
+    });
   }
 
-  return commandAnswer(segment.redirects);
+  return assignmentGate(commandAnswer(segment.redirects));
 
   /**
    * The segment's answer from its command and the redirections given: every
@@ -16300,36 +16572,10 @@ function classifySegmentWithVerb(
   // rather than being handed a class and left to re-read the command.
   const boundPath = refined !== null && "path" in refined ? refined.path : undefined;
 
-  // APRV-540: a reader is classified by the assignments in front of it, not
-  // only by its verb. Once the table names the command a read, an assignment
-  // off the closed admitted lists ({@link readerAssignmentRefusal}; the words
-  // before a sandbox wrapper count, as for git) leaves the segment
-  // `unclassified`, and so does a steering name the line's own shell sets
-  // ({@link ClassifierContext.readerEnvWrite}). `PATH=. cat f` runs `./cat`,
-  // and `GH_PAGER=./x gh pr diff 1` runs `./x`. Here, ahead of every
-  // protected, write and scope answer below, so no later answer softens it:
-  // the refusal is a deny under every policy, and every answer it replaces is
-  // an allow, an ask or a deny.
-  //
-  // `cd`, spelled bare, is the one reader left to its own rules: POSIX's
-  // intrinsic utility, never looked up on PATH, it runs and loads nothing, and
-  // the two variables it reads from a prefix (`CDPATH`, `HOME`) are already
-  // modelled where it lands (APRV-508's recheck, fix M-B of the credential
-  // pass, fold 15 of the parents rule), which answer more exactly than a
-  // refusal here would. Bare means the word right after the assignments, not
-  // the command behind a sandbox wrapper: there the assignment steers the
-  // wrapper (`PATH=. approval sandbox -- cd x` runs `./approval`).
-  if (cls.startsWith("read.") && afterAssignments !== "cd") {
-    const readerRefusal = readerAssignmentRefusal(segment.words.slice(0, assignments.length), basename);
-    if (readerRefusal !== null) return { ok: false, code: "unclassified", detail: readerRefusal };
-    if (context.readerEnvWrite !== undefined) {
-      return {
-        ok: false,
-        code: "unclassified",
-        detail: readerEnvWriteRefusal(context.readerEnvWrite, basename),
-      };
-    }
-  }
+  // APRV-540: the table's class, before any protected, write or scope answer
+  // replaces it; a reader's assignments are judged whatever the segment ends
+  // up answering ({@link assignmentGate}).
+  verbClass = cls;
 
   // APRV-511 refuter S1: a download's output file is a write target, whatever
   // class the fetch earned (`curl -o ~/.hermes/plugins/x/__init__.py URL` is

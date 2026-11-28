@@ -1834,12 +1834,14 @@ test("lead ruling L62013 for the parents rule: a parent takes the classes of the
     "git rm -r .",
     "tar --remove-files -czf x.tgz .",
     "tar --rem -czf x.tgz .",
-    "TAR_OPTIONS=--remove-files tar -czf x.tgz .",
     "rsync -a --remove-source-files ./ /tmp/x/",
     "rsync -a --remov ./ /tmp/x/",
   ]) {
     assert.ok(withListing(command, organ).includes("policy.core"), `${command} -> ${withListing(command, organ).join(",")}`);
   }
+  // APRV-541: the TAR_OPTIONS spelling is refused by its assignment, before
+  // any listing is read (it took policy.core here; a refusal is stricter).
+  assert.equal(classifyCommand("TAR_OPTIONS=--remove-files tar -czf x.tgz .").ok, false);
   // Nothing held: main's class.
   for (const command of ["find . -delete", "git rm -r .", "tar --remove-files -czf x.tgz ."]) {
     assert.ok(!withListing(command, { "/w": ["src", "dist"] }).includes("policy.core"), command);
@@ -2276,9 +2278,12 @@ test("lead ruling L62435 (S7): a find a name test narrows, and an ordinary varia
 });
 
 test("lead ruling L62435 (S7): a variable the line itself sets is read as what it sets", () => {
-  for (const command of ["X=. ; rm -rf $X", 'X=.; rm -rf "$X"', "X=.. rm -rf $X", "X=$(pwd); rm -rf $X", "X=.; rm -rf ${X:-dist}"]) {
+  for (const command of ["X=. ; rm -rf $X", 'X=.; rm -rf "$X"', "X=$(pwd); rm -rf $X", "X=.; rm -rf ${X:-dist}"]) {
     assert.ok(classesOf(command).includes("policy.core"), command);
   }
+  // APRV-541: the prefix spelling is refused by its assignment (it took
+  // policy.core here; a refusal is stricter).
+  assert.equal(classifyCommand("X=.. rm -rf $X").ok, false);
   // Security review of the fold, 22: chained assignments to a fixpoint; a
   // self-reference or a cycle never settles: strict.
   for (const command of ["A=..; B=$A; rm -rf $B", 'A=..; B="$A/"; rm -rf $B', "A=..; B=${A}; rm -rf $B", "A=..; B=$A; C=$B; rm -rf $C", "A=$A/..; rm -rf $A", "A=$B; B=$A; rm -rf $A"]) {

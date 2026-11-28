@@ -2477,8 +2477,15 @@ const commandClassVectors = [
   },
   {
     id: "harness-launch-env-prefixed",
-    description: "a VAR=value prefix is not the command, so the harness behind it is still found",
+    description:
+      "a VAR=value prefix off the admitted list changes what runs, so the launch behind it is unclassified (APRV-541; 3.0.0 moved this expectation from harness.launch.grok)",
     input: { command: "FOO=1 grok run" },
+    control: true,
+  },
+  {
+    id: "harness-launch-admitted-prefix",
+    description: "an admitted prefix is not the command, so the harness behind it is still found",
+    input: { command: "NO_COLOR=1 grok run" },
   },
   {
     id: "harness-launch-package-runner",
@@ -4838,6 +4845,97 @@ const commandClassVectors = [
     description: "the companion: a bare name off the steering list earlier on the line leaves the reader alone",
     input: { command: "f=README.md; cat \"$f\"" },
   },
+  // --- environment assignments in front of any classified command (APRV-541) ---
+  // The same table in front of every class: the program that runs is not the
+  // one classified.
+  {
+    id: "writer-path-assignment-unclassified",
+    description: "PATH in front of touch picks which touch runs: unclassified",
+    input: { command: "PATH=. touch x" },
+    control: true,
+  },
+  {
+    id: "writer-ld-preload-unclassified",
+    description: "LD_PRELOAD loads a library into cp: unclassified",
+    input: { command: "LD_PRELOAD=./x.so cp a b" },
+    control: true,
+  },
+  {
+    id: "project-script-node-options-unclassified",
+    description: "NODE_OPTIONS hands node code: unclassified, whatever the script's own class",
+    input: { command: "NODE_OPTIONS=--require=./x node --version" },
+    control: true,
+  },
+  {
+    id: "project-script-unknown-assignment-keeps-class",
+    description:
+      "a name off the steering list in front of a command that runs the workspace's own code keeps its class (the lead's option (a); npm-script is on the closed list)",
+    input: { command: "NODE_ENV=test npm test" },
+  },
+  {
+    id: "project-script-steering-unclassified",
+    description: "a steering name in front of npm test is refused, as everywhere",
+    input: { command: "NODE_OPTIONS=--require=./x npm test" },
+    control: true,
+  },
+  {
+    id: "project-script-behind-wrapper-unclassified",
+    description: "behind a sandbox wrapper the word after the assignments decides: approval is no workspace-code rule",
+    input: { command: "FOO=1 approval sandbox -- npm test" },
+    control: true,
+  },
+  {
+    id: "project-script-registry-unclassified",
+    description: "npm reads npm_config_* in any case, and a registry fetches code from outside the workspace: unclassified",
+    input: { command: "Npm_Config_Registry=https://example.com npm test" },
+    control: true,
+  },
+  {
+    id: "project-script-proxy-unclassified",
+    description: "a proxy redirects where the toolchain fetches code from: unclassified, lower case too",
+    input: { command: "https_proxy=http://h:1 npm test" },
+    control: true,
+  },
+  {
+    id: "project-script-make-program-unclassified",
+    description: "make's built-in rules run RM's value as a command, so a short common name steers make: unclassified",
+    input: { command: "RM='sh -c x' make clean" },
+    control: true,
+  },
+  {
+    id: "writer-unknown-assignment-unclassified",
+    description: "an unknown name in front of a plain writer stays refused",
+    input: { command: "FOO=1 touch x" },
+    control: true,
+  },
+  {
+    id: "gate-self-path-assignment-unclassified",
+    description: "PATH in front of the approval CLI picks which approval runs: unclassified",
+    input: { command: "PATH=. approval status" },
+    control: true,
+  },
+  {
+    id: "deps-add-path-assignment-unclassified",
+    description: "an asked class too: PATH in front of npm install is unclassified",
+    input: { command: "PATH=. npm install left-pad" },
+    control: true,
+  },
+  {
+    id: "writer-after-bare-steering-unclassified",
+    description: "a bare steering assignment earlier on the line reaches the writer when exported: unclassified",
+    input: { command: "GH_PAGER=./x; npm test" },
+    control: true,
+  },
+  {
+    id: "project-script-ci-switch-stays",
+    description: "the companion: CI is admitted, so npm test keeps its class",
+    input: { command: "CI=1 npm test" },
+  },
+  {
+    id: "writer-locale-stays",
+    description: "the companion: a plain locale in front of make keeps its class",
+    input: { command: "LC_ALL=C make" },
+  },
 ];
 
 const gateVectors = [
@@ -6282,7 +6380,24 @@ const SUITES = [
     // bare steering assignment earlier on the line); four companions keep
     // their read. Regenerating over 2.1.0 leaves all 456 byte-identical. If
     // another lane's number merges first, the collision rule applies.
-    vectors_version: "2.2.0",
+    // 3.0.0 (APRV-541, lane:claude-build-2@edge2): a MAJOR bump, because one
+    // expectation moved: `harness-launch-env-prefixed` (`FOO=1 grok run`) was
+    // harness.launch.grok and is now `unclassified` (a control), the lead's
+    // ruling that an assignment off the admitted list is judged in front of
+    // every classified command. Ten new vectors: `harness-launch-admitted-prefix`
+    // keeps the launch, seven assignments in front of a writer, a project
+    // script, the approval CLI, an asked class and after a bare steering
+    // assignment refuse, and two admitted companions keep their class. The
+    // other 471 vectors of 2.2.0 are byte-identical.
+    // Still 3.0.0 after the lead's option (a) (APRV-541): 3.0.0 has not left
+    // this branch, so its own new vector `project-script-unknown-assignment-
+    // unclassified` is replaced in place by `…-keeps-class` (NODE_ENV=test npm
+    // test keeps npm-script), and three more are added (a steering name in
+    // front of npm test, the wrapper form, an unknown name in front of touch).
+    // Against 2.2.0 the only moved expectation is still harness-launch-env-
+    // prefixed; fifteen vectors are new (two more for the toolchain's
+    // steering names: npm_config_* in any case, and a lower-case proxy).
+    vectors_version: "3.0.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:

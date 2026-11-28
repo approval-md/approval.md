@@ -371,12 +371,13 @@ test("the line scan reads every spelling of a write to a git-read variable", () 
 
 test("the plain spelling of an ordinary variable is unchanged", () => {
   assert.equal(answer("n=5; git log -n 5"), "read.shell/assignment read.shell/git-read");
-  // APRV-540: in front of a reader, an assignment off the admitted list is
-  // refused, as in front of git; in front of a writer the plain spelling is
-  // still read past as an assignment.
+  // APRV-540, APRV-541: in front of any classified command, an assignment
+  // off the admitted list is refused, as in front of git; an admitted one is
+  // read past as an assignment.
   assert.equal(answer("n=5 cat README.md"), "refused/unclassified");
   assert.equal(answer("NO_COLOR=1 cat README.md"), "read.shell/read-shell");
-  assert.equal(answer("n=5 touch x"), "files.write.workspace/workspace-write");
+  assert.equal(answer("n=5 touch x"), "refused/unclassified");
+  assert.equal(answer("NO_COLOR=1 touch x"), "files.write.workspace/workspace-write");
   // A word that only contains `+` or `[` after a non-name is an ordinary argument.
   assert.equal(answer("echo a+=b x[0]=y"), "read.shell/read-shell");
   assert.equal(answer("git log --grep=a+=b"), "read.shell/git-read");
@@ -521,18 +522,14 @@ test("a line-scoped write names the variable when nothing else refuses first", (
 });
 
 test("an assignment that does not reach the line's shell, or a variable git does not read, leaves git alone", () => {
-  // A prefix assignment belongs to its own (non-special) command. In front of
-  // a reader it now refuses that reader (APRV-540: `GIT_PAGER=evil echo hi`
-  // is `unclassified`), so a writer carries it here.
-  assert.deepEqual(classifyCommand("GIT_PAGER=evil touch x; git log").ok && classifyCommand("GIT_PAGER=evil touch x; git log"), {
-    ok: true,
-    segments: [
-      { text: "GIT_PAGER=evil touch x", class: "files.write.workspace", rule: "workspace-write" },
-      { text: "git log", class: "read.shell", rule: "git-read" },
-    ],
-    classes: ["files.write.workspace", "read.shell"],
-  });
-  assert.equal(answer("GIT_PAGER=evil echo hi; git log"), "refused/unclassified");
+  // A prefix assignment belongs to its own (non-special) command. Since
+  // APRV-540/541 it refuses that command (any class), and the refusal names
+  // that command, not git: the line scan does not count it as the line's own.
+  for (const command of ["GIT_PAGER=evil echo hi; git log", "GIT_PAGER=evil touch x; git log"]) {
+    const refused = failure(command);
+    assert.equal(refused.code, "unclassified", command);
+    assert.match(refused.detail, /^no rule for GIT_PAGER=… in front of (?:echo|touch):/u, command);
+  }
   // An ordinary script variable is not one git reads.
   const ordinary = classifyCommand("n=5; git log -n 5");
   assert.equal(ordinary.ok, true, JSON.stringify(ordinary));
