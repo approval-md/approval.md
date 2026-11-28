@@ -2477,8 +2477,15 @@ const commandClassVectors = [
   },
   {
     id: "harness-launch-env-prefixed",
-    description: "a VAR=value prefix is not the command, so the harness behind it is still found",
+    description:
+      "a VAR=value prefix off the admitted list changes what runs, so the launch behind it is unclassified (APRV-541; 3.0.0 moved this expectation from harness.launch.grok)",
     input: { command: "FOO=1 grok run" },
+    control: true,
+  },
+  {
+    id: "harness-launch-admitted-prefix",
+    description: "an admitted prefix is not the command, so the harness behind it is still found",
+    input: { command: "NO_COLOR=1 grok run" },
   },
   {
     id: "harness-launch-package-runner",
@@ -4838,6 +4845,61 @@ const commandClassVectors = [
     description: "the companion: a bare name off the steering list earlier on the line leaves the reader alone",
     input: { command: "f=README.md; cat \"$f\"" },
   },
+  // --- environment assignments in front of any classified command (APRV-541) ---
+  // The same table in front of every class: the program that runs is not the
+  // one classified.
+  {
+    id: "writer-path-assignment-unclassified",
+    description: "PATH in front of touch picks which touch runs: unclassified",
+    input: { command: "PATH=. touch x" },
+    control: true,
+  },
+  {
+    id: "writer-ld-preload-unclassified",
+    description: "LD_PRELOAD loads a library into cp: unclassified",
+    input: { command: "LD_PRELOAD=./x.so cp a b" },
+    control: true,
+  },
+  {
+    id: "project-script-node-options-unclassified",
+    description: "NODE_OPTIONS hands node code: unclassified, whatever the script's own class",
+    input: { command: "NODE_OPTIONS=--require=./x node --version" },
+    control: true,
+  },
+  {
+    id: "project-script-unknown-assignment-unclassified",
+    description: "a name on neither list in front of npm test: unclassified",
+    input: { command: "NODE_ENV=test npm test" },
+    control: true,
+  },
+  {
+    id: "gate-self-path-assignment-unclassified",
+    description: "PATH in front of the approval CLI picks which approval runs: unclassified",
+    input: { command: "PATH=. approval status" },
+    control: true,
+  },
+  {
+    id: "deps-add-path-assignment-unclassified",
+    description: "an asked class too: PATH in front of npm install is unclassified",
+    input: { command: "PATH=. npm install left-pad" },
+    control: true,
+  },
+  {
+    id: "writer-after-bare-steering-unclassified",
+    description: "a bare steering assignment earlier on the line reaches the writer when exported: unclassified",
+    input: { command: "GH_PAGER=./x; npm test" },
+    control: true,
+  },
+  {
+    id: "project-script-ci-switch-stays",
+    description: "the companion: CI is admitted, so npm test keeps its class",
+    input: { command: "CI=1 npm test" },
+  },
+  {
+    id: "writer-locale-stays",
+    description: "the companion: a plain locale in front of make keeps its class",
+    input: { command: "LC_ALL=C make" },
+  },
 ];
 
 const gateVectors = [
@@ -6282,7 +6344,16 @@ const SUITES = [
     // bare steering assignment earlier on the line); four companions keep
     // their read. Regenerating over 2.1.0 leaves all 456 byte-identical. If
     // another lane's number merges first, the collision rule applies.
-    vectors_version: "2.2.0",
+    // 3.0.0 (APRV-541, lane:claude-build-2@edge2): a MAJOR bump, because one
+    // expectation moved: `harness-launch-env-prefixed` (`FOO=1 grok run`) was
+    // harness.launch.grok and is now `unclassified` (a control), the lead's
+    // ruling that an assignment off the admitted list is judged in front of
+    // every classified command. Ten new vectors: `harness-launch-admitted-prefix`
+    // keeps the launch, seven assignments in front of a writer, a project
+    // script, the approval CLI, an asked class and after a bare steering
+    // assignment refuse, and two admitted companions keep their class. The
+    // other 471 vectors of 2.2.0 are byte-identical.
+    vectors_version: "3.0.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:
