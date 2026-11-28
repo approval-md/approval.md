@@ -15149,7 +15149,32 @@ function classifySegmentWithVerb(
         : (foldedOnly(() => {
             const innerArgs = args.slice(peeled.at + 1);
             const innerFlags = argFlags.slice(peeled.at + 1);
-            const read = credentialWrites(peeled.basename, innerArgs, innerFlags, peeledPlan, () => copyArgvUnknown(innerArgs, innerFlags));
+            let innerUnknownMemo: { value: string | null } | undefined;
+            const innerUnknown = (): string | null => (innerUnknownMemo ??= { value: copyArgvUnknown(innerArgs, innerFlags) }).value;
+            // Cost (review-b's N1 on #714): where the table cannot read the
+            // argv, {@link credentialWrites} reads EVERY word for a credential
+            // path (`possible`), and behind a wrapper only the last slot's is
+            // kept (below). So here only the last slot is read: the same
+            // answer, without a spliced reading of every other word (`command
+            // cp .approval/env -t $A1-$B1 …` read each `$Ai-$Bi` here and
+            // again in the side scan, and past the spliced memo's size each
+            // second read was made from nothing).
+            const innerPlan = peeledPlan();
+            if (innerPlan === null || innerPlan.unknown !== null || innerUnknown() !== null) {
+              const innerOperands = innerArgs.filter((arg) => !isFlag(arg));
+              const innerLast = innerOperands.length < 2 ? undefined : innerOperands[innerOperands.length - 1];
+              const kept =
+                innerLast === undefined
+                  ? []
+                  : innerArgs.flatMap((arg) => {
+                      const equals = arg.indexOf("=");
+                      return [arg, ...(equals === -1 ? [] : [arg.slice(equals + 1)])].filter((word) => word === innerLast);
+                    });
+              return [
+                kept.length > 0 && isCredentialPathAsRead(innerLast as string) ? { words: new Set<string>(), landings: [], possible: kept } : NO_CREDENTIAL_WRITES,
+              ];
+            }
+            const read = credentialWrites(peeled.basename, innerArgs, innerFlags, peeledPlan, innerUnknown);
             // The paths the table reads as WRITTEN (a destination word, a
             // landing). Where it cannot read the argv (`possible`: an option
             // it does not know, a word that may become one), only a credential

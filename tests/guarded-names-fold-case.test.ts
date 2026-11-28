@@ -2789,3 +2789,27 @@ test("behind a wrapper: a program path, install -t, an unreadable argv's -t valu
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
   }
 });
+
+// review-b's N1 on #714: behind a wrapper, an argv the copy table cannot read
+// had every word read for a credential path twice (the copy's unreadable-argv
+// pass, whose answer only the last slot keeps, and the side scan). Past the
+// spliced memo's size (more distinct built words than it holds) each second
+// read was made from nothing: the line's cost jumped. Only the last slot is
+// read in the first pass now. CPU time against the same words handed to a
+// reader behind a wrapper (one read each), as a ratio: no fixed bound.
+test("behind a wrapper, many built -t values cost about one credential read each (review-b's N1 on #714)", () => {
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  const least = (run: () => void): number => Math.min(cpu(run), cpu(run));
+  // 4,500 distinct words: more than the spliced memo holds.
+  const words = Array.from({ length: 4500 }, (_, at) => `$A${at}-$B${at}`);
+  const line = `command cp .approval/env ${words.map((word) => `-t ${word}`).join(" ")}`;
+  const control = least(() => classifyCommand(`nice cat .approval/env ${words.join(" ")}`, TWO_ROUTES));
+  const spent = least(() => classifyCommand(line, TWO_ROUTES));
+  assert.ok(spent <= 3.5 * control, `${spent.toFixed(3)} s against ${control.toFixed(3)} s (the reader's line)`);
+  assert.deepEqual(pure(line, TWO_ROUTES), [CRED, UNKNOWN, "log.mutate protected-path"]);
+});
