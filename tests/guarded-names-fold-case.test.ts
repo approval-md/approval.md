@@ -2740,3 +2740,27 @@ test("behind a wrapper, an argv the copy table cannot read keeps its -t values a
   assert.deepEqual(pure("command cp --frob .approval/env $A-$B", TWO_ROUTES), [CRED, UNKNOWN, "log.mutate protected-path"]);
   assert.deepEqual(pure("command cp --frob .approval/env $A-$B notes.txt", TWO_ROUTES), [CRED, UNKNOWN]);
 });
+
+// review-b's S2 on #714: four behaviours this branch adds behind a wrapper,
+// each pinned in the pure classifier (no checkout, no HOME: a red here never
+// comes from the machine), so that undoing one fails a test.
+test("behind a wrapper: a program path, install -t, an unreadable argv's -t value and mv's built source each keep the write's class (review-b's S2 on #714)", () => {
+  for (const [line, want] of [
+    // The copy program named by a path: its last component is the program.
+    ["nice /bin/cp README.md .approval/env", ["policy.core protected-path", CRED]],
+    ["nice -n 5 /bin/cp README.md ~/.hermes/auth.json", ["policy.core protected-path", CRED]],
+    ["nice ./cp README.md .approval/env", ["policy.core protected-path", CRED]],
+    // `install` is read by its own table: its `-t` value is the destination.
+    ["nice install -t $A-$B .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["nice install .approval/env -t ${X:-.approval/log}", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    // ... and with a `-t` destination its last operand is a source, the read.
+    ["nice install -t backup/ .approval/env ${X:-.github/workflows/ci.yml}", [CRED, UNKNOWN]],
+    // An option the table does not know: the `-t` value is still written.
+    ["nice cp --frob -t ${X:-.approval/log} .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    // `mv` writes every path it names, its built sources too.
+    ["nice mv $A-$B .approval/env backup/", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["command mv $A-$B .claude/x .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+});

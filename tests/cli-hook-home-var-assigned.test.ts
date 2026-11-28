@@ -262,3 +262,14 @@ test("the two-step form: a steering name set again, each time bare and unconditi
   const deep = classesOf(hook(steps(400)), "400 steps");
   assert.ok(deep.includes(GUARDED) && !deep.includes("log.mutate"), JSON.stringify(deep));
 });
+
+test("the default form ${HERMES_HOME:-d} of an assigned home is an unread part too, in the pure classifier (review-b's S2 on #714)", () => {
+  // No checkout and no HOME in these rows: the spliced reading alone.
+  for (const [line, twin] of [
+    ["HERMES_HOME=.claude; echo x > ${HERMES_HOME:-x}/settings.json", "D=.claude; echo x > ${D:-x}/settings.json"],
+    ["HERMES_HOME=$(pwd); echo x > ${HERMES_HOME:-x}/settings.json", "D=$(pwd); echo x > ${D:-x}/settings.json"],
+  ] as const) {
+    covers(line, twin, pure, "pure");
+    assert.ok(classesOf(pure(line), line).includes("policy.core"), line);
+  }
+});
