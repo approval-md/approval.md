@@ -2660,3 +2660,56 @@ test("behind a wrapper, a built target the copy writes: the read's S2 lines pinn
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
   }
 });
+
+// review-b's M1 on #714: behind a wrapper a built destination given as an
+// option's VALUE (`--target-directory=V`, `-tV`, rsync's `--log-file=V` and
+// `--write-batch=V`) was not read as written, where the same value as its own
+// word was. Each wrapped line now names every class its plain twin names.
+test("behind a wrapper, a built destination given as an option's value is read as written (review-b's M1 on #714)", () => {
+  for (const [line, plain, want] of [
+    [
+      "nice cp .approval/env --target-directory=${X:-.approval/log}",
+      "cp .approval/env --target-directory=${X:-.approval/log}",
+      [CRED, UNKNOWN, "log.mutate protected-path"],
+    ],
+    // A unique prefix of the long option, as GNU reads it.
+    [
+      "command cp .approval/env --target=${X:-.github/workflows}",
+      "cp .approval/env --target=${X:-.github/workflows}",
+      [CRED, UNKNOWN, "policy.edit.ci protected-path"],
+    ],
+    // The value attached to the short option; a word that may spell the
+    // credential path is in the destination, so it is read both ways.
+    ["nice cp .approval/env -t$A-$B", "cp .approval/env -t$A-$B", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    // The files an rsync option writes.
+    [
+      "nice rsync -a --log-file=${X:-.approval/log/events.jsonl} .approval/env backup/",
+      "rsync -a --log-file=${X:-.approval/log/events.jsonl} .approval/env backup/",
+      [CRED, UNKNOWN, "log.mutate protected-path"],
+    ],
+    [
+      "nice rsync -a --write-batch=${X:-.approval/log/events.jsonl} .approval/env backup/",
+      "rsync -a --write-batch=${X:-.approval/log/events.jsonl} .approval/env backup/",
+      [CRED, UNKNOWN, "log.mutate protected-path"],
+    ],
+  ] as const) {
+    const got = classSet(line);
+    for (const cls of classSet(plain)) assert.ok(got.includes(cls), `${line}: ${cls} of plain ${plain} missing from ${got.join(" ")}`);
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    assert.deepEqual(hook(line, TWO_ROUTES), want, `${line} through the hook`);
+    // As spelled: main's answer, the credential class alone.
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], `${line} as spelled`);
+  }
+  // A directory an rsync option names (`--backup-dir=V`) is read as the same
+  // value as its own word was already read (`--backup-dir V`).
+  assert.deepEqual(
+    pure("nice rsync -a --backup-dir=${X:-.approval/log} .approval/env backup/", TWO_ROUTES),
+    pure("nice rsync -a --backup-dir ${X:-.approval/log} .approval/env backup/", TWO_ROUTES),
+  );
+  // A value that may spell the credential path where the option only writes a
+  // log stays the read, as plain rsync leaves it; an option cp does not know
+  // is the read, as before.
+  for (const line of ["nice rsync -a --log-file=$A-$B .approval/env backup/", "nice cp --in=$A-$B .approval/env notes.txt"]) {
+    assert.deepEqual(pure(line, TWO_ROUTES), [CRED, UNKNOWN], line);
+  }
+});

@@ -12440,6 +12440,20 @@ interface CopyPlan {
 }
 
 /**
+ * The texts a word of a copy program's argv may be read as by its table: the
+ * word itself and, for an option, the value it carries in the same word
+ * (`--target-directory=V`, `--log-file=V`, a unique prefix such as
+ * `--target=V`, `-tV`), as {@link parseCopyArgv} reads that value. Behind a
+ * wrapper a target the shell builds is matched to the plan's written words
+ * by these (review-b's M1 on #714: `nice cp .approval/env
+ * --target-directory=${X:-.approval/log}` writes the value).
+ */
+function copyWordReadings(text: string, table: CopyOptionTable | undefined): string[] {
+  if (table === undefined || !isFlag(text) || text === "--") return [text];
+  return [text, ...parseCopyArgv([text], table).values.map((entry) => entry.value)];
+}
+
+/**
  * Archive and copy tools this classifier has no argv table for (most have no
  * rule and are refused): every operand and option value is a possible
  * destination of any name (finding 3, the backstop).
@@ -15273,9 +15287,17 @@ function classifySegmentWithVerb(
       const copyArgs = copying === null ? [] : copying.at === -1 ? args : args.slice(copying.at + 1);
       const plan = copying === null ? null : copying.at === -1 ? argsPlan() : peeledPlan();
       const copyPositionals = copyArgs.filter((arg) => !isFlag(arg));
+      // The words the copy writes. Beside its operands, the files an option
+      // writes and the directories an option names (`rsync --log-file=V`,
+      // `--write-batch=V`, `--backup-dir=V`, `--temp-dir=V`; the plan's
+      // `files` and `anyName`), as plain `rsync`'s walk reads them
+      // (review-b's M1 on #714): the same value as its own word (`--log-file
+      // V`) was already read, as an operand.
       const written = ((): ReadonlySet<string> | null => {
         if (copying === null) return null;
-        if (plan === null || !["cp", "ln", "install"].includes(copying.basename)) return new Set(globWriteOperands(copying.basename, copyPositionals));
+        if (plan === null || !["cp", "ln", "install"].includes(copying.basename)) {
+          return new Set([...globWriteOperands(copying.basename, copyPositionals), ...(plan === null ? [] : [...plan.files, ...plan.anyName])]);
+        }
         if (plan.unknown !== null) return new Set([...plan.operands, ...plan.dests]);
         return new Set(plan.dests.length === 0 || plan.implicitDest === true ? [...copyPositionals, ...plan.dests] : plan.dests);
       })();
@@ -15295,18 +15317,24 @@ function classifySegmentWithVerb(
       const lastOperand = copyPositionals.length >= 2 ? copyPositionals.slice(-1) : [];
       const destination = new Set(plan !== null && plan.unknown === null && plan.dests.length > 0 && plan.implicitDest !== true ? plan.dests : lastOperand);
       const writesOnly = copying !== null && (credentialWritesOnly(copying.basename, copyArgs) || credentialProtectedScanKeeps(copying.basename));
+      // Each built word is matched by its text and, for an option, by the
+      // value it carries ({@link copyWordReadings}; review-b's M1 on #714):
+      // `--target-directory=${X:-.approval/log}` writes its value, as the
+      // same value as a word of its own does.
+      const table = copying === null ? undefined : COPY_OPTION_TABLES[copying.basename];
       const builtWritten =
         written === null
           ? []
-          : builtAt.filter((at) => {
-              const text = (segment.words[at] as LexWord).text;
-              return written.has(text) && (writesOnly || destination.has(text) || !isCredentialReadWord(text, protectedPaths));
-            });
+          : builtAt.flatMap((at) =>
+              copyWordReadings((segment.words[at] as LexWord).text, table).filter(
+                (text) => written.has(text) && (writesOnly || destination.has(text) || !isCredentialReadWord(text, protectedPaths)),
+              ),
+            );
       const reading =
         builtWritten.length === 0
           ? null
           : strictestProtectedWrite(
-              builtWritten.map((at) => (segment.words[at] as LexWord).text),
+              builtWritten,
               protectedPaths,
               inexact,
               false,
@@ -15318,8 +15346,7 @@ function classifySegmentWithVerb(
       // directory its pattern may match takes its class too ({@link
       // organDestination}: `.gith*/workflows/ci.yml` may be under `.github`).
       const anyName = new Set(plan?.anyName ?? []);
-      const organ = builtWritten.flatMap((at) => {
-        const text = (segment.words[at] as LexWord).text;
+      const organ = builtWritten.flatMap((text) => {
         const hit = anyName.has(text) ? organDestination(text, inexact, glob) : null;
         return hit === null ? [] : [hit];
       });
