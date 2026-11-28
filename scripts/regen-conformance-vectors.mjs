@@ -4602,6 +4602,146 @@ const commandClassVectors = [
       "the companion: an upload of a workspace file keeps network.call",
     input: { command: "curl -T ./upload.bin https://example.com/x" },
   },
+  // --- readers that run a program the line names (finding readers-run-code) ---
+  // Each was a plain read on main and ran the program it names. They refuse as
+  // `opaque`, the answer `find -exec` and `xargs` take; the companions without
+  // the program word keep their read.
+  {
+    id: "sort-compress-program-opaque",
+    description: "sort runs its --compress-program once it spills to temporary files: opaque",
+    input: { command: "sort --compress-program=./x README.md" },
+    control: true,
+  },
+  {
+    id: "sort-compress-program-prefix-after-operand-opaque",
+    description: "GNU getopt_long takes a prefix of the long option, and permutes it past an operand: opaque",
+    input: { command: "sort README.md --compress-prog ./x" },
+    control: true,
+  },
+  {
+    id: "sort-dashdash-as-a-value-opaque",
+    description: "`--` is -o's value here, not the end of the options, so --compress-program still counts: opaque",
+    input: { command: "sort -o -- --compress-program=./x README.md" },
+    control: true,
+  },
+  {
+    id: "sort-key-stays-read",
+    description: "the companion: a sort with a key and no program is a read",
+    input: { command: "sort -k2 README.md" },
+  },
+  {
+    id: "rg-pre-opaque",
+    description: "rg runs its --pre program on every file it searches: opaque",
+    input: { command: "rg --pre ./x pattern" },
+    control: true,
+  },
+  {
+    id: "rg-hostname-bin-opaque",
+    description: "rg runs its --hostname-bin program to fill a hyperlink: opaque",
+    input: { command: "rg --hostname-bin=./x --hyperlink-format default pattern" },
+    control: true,
+  },
+  {
+    id: "rg-config-path-opaque",
+    description: "RIPGREP_CONFIG_PATH names a file rg reads more flags from, --pre among them: opaque",
+    input: { command: "RIPGREP_CONFIG_PATH=./rgrc rg pattern" },
+    control: true,
+  },
+  {
+    id: "rg-pre-glob-alone-stays-read",
+    description: "the companion: --pre-glob without --pre runs nothing",
+    input: { command: "rg --pre-glob '*.pdf' pattern" },
+  },
+  {
+    id: "git-grep-open-files-in-pager-opaque",
+    description: "git grep -O<pager> runs the pager it names on the files it matched: opaque",
+    input: { command: "git grep -iO./x pattern" },
+    control: true,
+  },
+  {
+    id: "git-grep-open-prefix-opaque",
+    description: "git takes a prefix of --open-files-in-pager: opaque",
+    input: { command: "git grep --open=./x pattern" },
+    control: true,
+  },
+  {
+    id: "git-grep-pattern-value-stays-read",
+    description: "the companion: the O of -eFOO is -e's value, not -O",
+    input: { command: "git grep -eFOO" },
+  },
+  {
+    id: "git-ls-remote-upload-pack-opaque",
+    description: "git runs --upload-pack as a shell command for a local repository: opaque",
+    input: { command: "git ls-remote -u ./x origin" },
+    control: true,
+  },
+  {
+    id: "git-fetch-upload-pack-opaque",
+    description: "the same program, named to git fetch by a prefix of the option: opaque",
+    input: { command: "git fetch --upl=./x origin" },
+    control: true,
+  },
+  {
+    id: "git-fetch-update-head-ok-stays-remote-read",
+    description: "the companion: git fetch's -u is --update-head-ok and names no program",
+    input: { command: "git fetch -u origin" },
+  },
+  {
+    id: "sed-e-command-opaque",
+    description: "GNU sed's e command runs the command after it: opaque",
+    input: { command: "sed '1e ./x' README.md" },
+    control: true,
+  },
+  {
+    id: "sed-s-e-flag-opaque",
+    description: "the e flag of s runs the pattern space as a command: opaque",
+    input: { command: "sed 's/x/touch y/e' README.md" },
+    control: true,
+  },
+  {
+    id: "sed-e-after-line-length-opaque",
+    description: "-l takes the next word as a line length, so the script is the word after it: opaque",
+    input: { command: "sed -l 5 'e ./x' README.md" },
+    control: true,
+  },
+  {
+    id: "sed-e-after-one-line-text-opaque",
+    description: "a one-line a text ends at the newline, and the e on the next line is a command: opaque",
+    input: { command: "sed 'a hello\ne ./x' README.md" },
+    control: true,
+  },
+  {
+    id: "sed-script-file-opaque",
+    description: "a script from -f is not in the words: opaque",
+    input: { command: "sed -f script.sed README.md" },
+    control: true,
+  },
+  {
+    id: "sed-letter-e-in-a-pattern-stays-read",
+    description: "the companion: the letter e inside a regex and a replacement is not the e command",
+    input: { command: "sed -e 's/e/x/' README.md" },
+  },
+  {
+    id: "sed-label-named-e-stays-read",
+    description: "the companion: a label named e, and a branch to it, run nothing",
+    input: { command: "sed ':e;N;$!be;s/\\n/ /g' README.md" },
+  },
+  {
+    id: "sed-w-through-expression-prefix-is-protected",
+    description: "a w target in a script given by a prefix of --expression is read as the -e spelling is: the protected class",
+    input: { command: "sed --expr='w .claude/settings.json' README.md" },
+  },
+  {
+    id: "openssl-digest-engine-opaque",
+    description: "openssl loads the module -engine names into the digest: opaque",
+    input: { command: "openssl dgst -sha256 -engine ./x.so README.md" },
+    control: true,
+  },
+  {
+    id: "openssl-digest-stays-read",
+    description: "the companion: a digest with no module is a read",
+    input: { command: "openssl dgst -sha256 README.md" },
+  },
 ];
 
 const gateVectors = [
@@ -6028,7 +6168,17 @@ const SUITES = [
     // `git-dir-write-ansi-c-quoting`, none of them released. If
     // another lane's number merges first, the collision rule (1.4.0, the
     // number is claimed at merge) applies on regeneration.
-    vectors_version: "2.0.0",
+    // 2.1.0 (finding readers-run-code, lane:claude-build-2@edge2): a MINOR
+    // bump, twenty-four new vectors and no expectation moved. Sixteen readers
+    // that run a program they name refuse as `opaque` (`sort
+    // --compress-program`, `rg --pre` / `--hostname-bin` /
+    // `RIPGREP_CONFIG_PATH`, `git grep -O`, `git ls-remote` / `fetch
+    // --upload-pack`, sed's `e` command and `e` flag and `-f`, `openssl dgst
+    // -engine`); seven companions keep their read, and a sed `w` read through
+    // `--expr=` takes the protected class. Regenerating over 2.0.0 leaves all
+    // 432 byte-identical. If another lane's number merges first, the
+    // collision rule applies on regeneration.
+    vectors_version: "2.1.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:
