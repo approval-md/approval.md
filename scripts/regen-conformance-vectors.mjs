@@ -4867,9 +4867,27 @@ const commandClassVectors = [
     control: true,
   },
   {
-    id: "project-script-unknown-assignment-unclassified",
-    description: "a name on neither list in front of npm test: unclassified",
+    id: "project-script-unknown-assignment-keeps-class",
+    description:
+      "a name off the steering list in front of a command that runs the workspace's own code keeps its class (the lead's option (a); npm-script is on the closed list)",
     input: { command: "NODE_ENV=test npm test" },
+  },
+  {
+    id: "project-script-steering-unclassified",
+    description: "a steering name in front of npm test is refused, as everywhere",
+    input: { command: "NODE_OPTIONS=--require=./x npm test" },
+    control: true,
+  },
+  {
+    id: "project-script-behind-wrapper-unclassified",
+    description: "behind a sandbox wrapper the word after the assignments decides: approval is no workspace-code rule",
+    input: { command: "FOO=1 approval sandbox -- npm test" },
+    control: true,
+  },
+  {
+    id: "writer-unknown-assignment-unclassified",
+    description: "an unknown name in front of a plain writer stays refused",
+    input: { command: "FOO=1 touch x" },
     control: true,
   },
   {
@@ -6353,6 +6371,13 @@ const SUITES = [
     // script, the approval CLI, an asked class and after a bare steering
     // assignment refuse, and two admitted companions keep their class. The
     // other 471 vectors of 2.2.0 are byte-identical.
+    // Still 3.0.0 after the lead's option (a) (APRV-541): 3.0.0 has not left
+    // this branch, so its own new vector `project-script-unknown-assignment-
+    // unclassified` is replaced in place by `…-keeps-class` (NODE_ENV=test npm
+    // test keeps npm-script), and three more are added (a steering name in
+    // front of npm test, the wrapper form, an unknown name in front of touch).
+    // Against 2.2.0 the only moved expectation is still harness-launch-env-
+    // prefixed; thirteen vectors are new.
     vectors_version: "3.0.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
