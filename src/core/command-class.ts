@@ -12455,6 +12455,26 @@ interface CopyPlan {
   files: string[];
   unknown: string | null;
   operands: string[];
+  /**
+   * Where `unknown` is set, the `-t`/`--target-directory` values (they are
+   * also among `dests`, with every operand): the destinations the argv names
+   * as such (review-b's M2 on #714).
+   */
+  targets?: string[];
+}
+
+/**
+ * The texts a word of a copy program's argv may be read as by its table: the
+ * word itself and, for an option, the value it carries in the same word
+ * (`--target-directory=V`, `--log-file=V`, a unique prefix such as
+ * `--target=V`, `-tV`), as {@link parseCopyArgv} reads that value. Behind a
+ * wrapper a target the shell builds is matched to the plan's written words
+ * by these (review-b's M1 on #714: `nice cp .approval/env
+ * --target-directory=${X:-.approval/log}` writes the value).
+ */
+function copyWordReadings(text: string, table: CopyOptionTable | undefined): string[] {
+  if (table === undefined || !isFlag(text) || text === "--") return [text];
+  return [text, ...parseCopyArgv([text], table).values.map((entry) => entry.value)];
 }
 
 /**
@@ -12495,7 +12515,7 @@ function copyPlan(basename: string, args: readonly string[]): CopyPlan | null {
   const targets = parsed.values.filter((entry) => entry.name === "t" || entry.name === "target-directory").map((entry) => entry.value);
   if (parsed.unknown !== null) {
     const all = local([...operands, ...targets]);
-    return { dests: all, sources: [...operands], anyName: [...all], files: [], unknown: parsed.unknown, operands };
+    return { dests: all, sources: [...operands], anyName: [...all], files: [], unknown: parsed.unknown, operands, targets: local(targets) };
   }
   // rsync with one operand lists it; every tool needs a source and a destination.
   // Review of e6b7bf97 (1): `ln TARGET` links into the working directory,
@@ -15147,7 +15167,32 @@ function classifySegmentWithVerb(
         : (foldedOnly(() => {
             const innerArgs = args.slice(peeled.at + 1);
             const innerFlags = argFlags.slice(peeled.at + 1);
-            const read = credentialWrites(peeled.basename, innerArgs, innerFlags, peeledPlan, () => copyArgvUnknown(innerArgs, innerFlags));
+            let innerUnknownMemo: { value: string | null } | undefined;
+            const innerUnknown = (): string | null => (innerUnknownMemo ??= { value: copyArgvUnknown(innerArgs, innerFlags) }).value;
+            // Cost (review-b's N1 on #714): where the table cannot read the
+            // argv, {@link credentialWrites} reads EVERY word for a credential
+            // path (`possible`), and behind a wrapper only the last slot's is
+            // kept (below). So here only the last slot is read: the same
+            // answer, without a spliced reading of every other word (`command
+            // cp .approval/env -t $A1-$B1 …` read each `$Ai-$Bi` here and
+            // again in the side scan, and past the spliced memo's size each
+            // second read was made from nothing).
+            const innerPlan = peeledPlan();
+            if (innerPlan === null || innerPlan.unknown !== null || innerUnknown() !== null) {
+              const innerOperands = innerArgs.filter((arg) => !isFlag(arg));
+              const innerLast = innerOperands.length < 2 ? undefined : innerOperands[innerOperands.length - 1];
+              const kept =
+                innerLast === undefined
+                  ? []
+                  : innerArgs.flatMap((arg) => {
+                      const equals = arg.indexOf("=");
+                      return [arg, ...(equals === -1 ? [] : [arg.slice(equals + 1)])].filter((word) => word === innerLast);
+                    });
+              return [
+                kept.length > 0 && isCredentialPathAsRead(innerLast as string) ? { words: new Set<string>(), landings: [], possible: kept } : NO_CREDENTIAL_WRITES,
+              ];
+            }
+            const read = credentialWrites(peeled.basename, innerArgs, innerFlags, peeledPlan, innerUnknown);
             // The paths the table reads as WRITTEN (a destination word, a
             // landing). Where it cannot read the argv (`possible`: an option
             // it does not know, a word that may become one), only a credential
@@ -15291,9 +15336,17 @@ function classifySegmentWithVerb(
       const copyArgs = copying === null ? [] : copying.at === -1 ? args : args.slice(copying.at + 1);
       const plan = copying === null ? null : copying.at === -1 ? argsPlan() : peeledPlan();
       const copyPositionals = copyArgs.filter((arg) => !isFlag(arg));
+      // The words the copy writes. Beside its operands, the files an option
+      // writes and the directories an option names (`rsync --log-file=V`,
+      // `--write-batch=V`, `--backup-dir=V`, `--temp-dir=V`; the plan's
+      // `files` and `anyName`), as plain `rsync`'s walk reads them
+      // (review-b's M1 on #714): the same value as its own word (`--log-file
+      // V`) was already read, as an operand.
       const written = ((): ReadonlySet<string> | null => {
         if (copying === null) return null;
-        if (plan === null || !["cp", "ln", "install"].includes(copying.basename)) return new Set(globWriteOperands(copying.basename, copyPositionals));
+        if (plan === null || !["cp", "ln", "install"].includes(copying.basename)) {
+          return new Set([...globWriteOperands(copying.basename, copyPositionals), ...(plan === null ? [] : [...plan.files, ...plan.anyName])]);
+        }
         if (plan.unknown !== null) return new Set([...plan.operands, ...plan.dests]);
         return new Set(plan.dests.length === 0 || plan.implicitDest === true ? [...copyPositionals, ...plan.dests] : plan.dests);
       })();
@@ -15304,27 +15357,39 @@ function classifySegmentWithVerb(
       // automated security review of #714: a union, never one reading in
       // place of the other). The destination is the plan's when its argv
       // reads (`-t` included), else the last operand, as an unreadable argv's
-      // credential path is read (S1 of #706). Elsewhere (an `rsync` or `scp`
+      // credential path is read (S1 of #706), with the `-t` values such an
+      // argv still names as destinations (review-b's M2 on #714: `nice cp
+      // --frob -t $A-$B .approval/env`). Elsewhere (an `rsync` or `scp`
       // source, which `writtenOperands` counts as written) it stays the read,
       // as plain `cp`'s scans leave it, so a read through a wrapper takes no
       // write class (the read-only bar). A program that writes every path it
       // names keeps them all, as plain `mv` does ({@link credentialSideScan}'s
       // rule).
       const lastOperand = copyPositionals.length >= 2 ? copyPositionals.slice(-1) : [];
-      const destination = new Set(plan !== null && plan.unknown === null && plan.dests.length > 0 && plan.implicitDest !== true ? plan.dests : lastOperand);
+      const destination = new Set(
+        plan !== null && plan.unknown === null && plan.dests.length > 0 && plan.implicitDest !== true
+          ? plan.dests
+          : [...lastOperand, ...(plan !== null && plan.unknown !== null ? (plan.targets ?? []) : [])],
+      );
       const writesOnly = copying !== null && (credentialWritesOnly(copying.basename, copyArgs) || credentialProtectedScanKeeps(copying.basename));
+      // Each built word is matched by its text and, for an option, by the
+      // value it carries ({@link copyWordReadings}; review-b's M1 on #714):
+      // `--target-directory=${X:-.approval/log}` writes its value, as the
+      // same value as a word of its own does.
+      const table = copying === null ? undefined : COPY_OPTION_TABLES[copying.basename];
       const builtWritten =
         written === null
           ? []
-          : builtAt.filter((at) => {
-              const text = (segment.words[at] as LexWord).text;
-              return written.has(text) && (writesOnly || destination.has(text) || !isCredentialReadWord(text, protectedPaths));
-            });
+          : builtAt.flatMap((at) =>
+              copyWordReadings((segment.words[at] as LexWord).text, table).filter(
+                (text) => written.has(text) && (writesOnly || destination.has(text) || !isCredentialReadWord(text, protectedPaths)),
+              ),
+            );
       const reading =
         builtWritten.length === 0
           ? null
           : strictestProtectedWrite(
-              builtWritten.map((at) => (segment.words[at] as LexWord).text),
+              builtWritten,
               protectedPaths,
               inexact,
               false,
@@ -15336,8 +15401,7 @@ function classifySegmentWithVerb(
       // directory its pattern may match takes its class too ({@link
       // organDestination}: `.gith*/workflows/ci.yml` may be under `.github`).
       const anyName = new Set(plan?.anyName ?? []);
-      const organ = builtWritten.flatMap((at) => {
-        const text = (segment.words[at] as LexWord).text;
+      const organ = builtWritten.flatMap((text) => {
         const hit = anyName.has(text) ? organDestination(text, inexact, glob) : null;
         return hit === null ? [] : [hit];
       });

@@ -48,7 +48,11 @@ delete process.env["HERMES_HOME"];
 delete process.env["APPROVAL_HERMES_HOME"];
 delete process.env["CLAUDE_CONFIG_DIR"];
 delete process.env["CLAUDE_PROJECT_DIR"];
-const ws = join(base, "ws");
+// The checkout sits under the fixture HOME (review-b's N7 on #714): wherever
+// the temp folder is (a TMPDIR under /Users/<name>, outside this HOME, is
+// another user's home to the hook, which then guards every write in it), a
+// write in the checkout is the user's own.
+const ws = join(base, "home", "ws");
 mkdirSync(ws, { recursive: true });
 spawnSync("git", ["init", "-q"], { cwd: ws });
 for (const path of ["APPROVAL.md", "notes.txt", "a.yml", ".approval/env", ".approval/log/events.jsonl", ".claude/settings.json", ".github/workflows/ci.yml"]) {
@@ -261,4 +265,15 @@ test("the two-step form: a steering name set again, each time bare and unconditi
   assert.ok(classesOf(hook(steps(6)), "6 steps").includes("log.mutate"));
   const deep = classesOf(hook(steps(400)), "400 steps");
   assert.ok(deep.includes(GUARDED) && !deep.includes("log.mutate"), JSON.stringify(deep));
+});
+
+test("the default form ${HERMES_HOME:-d} of an assigned home is an unread part too, in the pure classifier (review-b's S2 on #714)", () => {
+  // No checkout and no HOME in these rows: the spliced reading alone.
+  for (const [line, twin] of [
+    ["HERMES_HOME=.claude; echo x > ${HERMES_HOME:-x}/settings.json", "D=.claude; echo x > ${D:-x}/settings.json"],
+    ["HERMES_HOME=$(pwd); echo x > ${HERMES_HOME:-x}/settings.json", "D=$(pwd); echo x > ${D:-x}/settings.json"],
+  ] as const) {
+    covers(line, twin, pure, "pure");
+    assert.ok(classesOf(pure(line), line).includes("policy.core"), line);
+  }
 });

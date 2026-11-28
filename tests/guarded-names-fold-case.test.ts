@@ -108,6 +108,31 @@ function hook(command: string, extra: readonly ProtectedPathEntry[] = []): strin
   return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [`refused ${result.code}`];
 }
 
+/**
+ * A checkout under the fixture HOME, made once (review-b's N7 on #714). The
+ * rows that pin a wrapped copy's whole answer through the hook read it here:
+ * wherever the temp folder is (a TMPDIR under /Users/<name>, outside this
+ * HOME, is another user's home to the hook, which then adds
+ * `files.write.guarded` to every write in it), a write in this checkout is
+ * the user's own.
+ */
+let homeCheckout: string | null = null;
+function homeRepo(): string {
+  if (homeCheckout !== null) return homeCheckout;
+  const dir = join(HOME, "ws");
+  mkdirSync(dir, { recursive: true });
+  const ran = spawnSync("git", ["init", "-q"], { cwd: dir, encoding: "utf8", env: process.env });
+  assert.equal(ran.status, 0, ran.stderr);
+  homeCheckout = dir;
+  return dir;
+}
+
+/** {@link hook} in the checkout under the fixture HOME ({@link homeRepo}). */
+function homeHook(command: string, extra: readonly ProtectedPathEntry[] = []): string[] {
+  const { result } = classifyForHook(command, extra, homeRepo());
+  return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [`refused ${result.code}`];
+}
+
 /** {@link pure} in the as-spelled reading: how main 21fc5fdc read the line. */
 function spelledPure(command: string, extra: readonly ProtectedPathEntry[] = []): string[] {
   return withNamesAsSpelled(() => pure(command, extra));
@@ -2471,8 +2496,8 @@ test("a copy into a credential path behind a wrapper takes the write's class pla
   }
   assert.deepEqual(pure("nice cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
   assert.deepEqual(pure("command cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
-  assert.deepEqual(hook("nice cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
-  assert.deepEqual(hook("command cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
+  assert.deepEqual(homeHook("nice cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
+  assert.deepEqual(homeHook("command cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
 });
 
 test("behind a wrapper, only a copy program's table is read: a read, an unknown program and an opaque wrapper answer as on main (build-1's S1 on #706)", () => {
@@ -2559,8 +2584,8 @@ test("a copy into a credential path behind a wrapper: the forms of the read's S1
     const got = pure(line, TWO_ROUTES);
     assert.deepEqual(got, want, line);
     for (const entry of main) assert.ok(got.includes(entry), `${line}: ${entry} lost`);
-    // Through the hook, in the fixture checkout: the same.
-    assert.deepEqual(hook(line, TWO_ROUTES), want, `${line} through the hook`);
+    // Through the hook, in the checkout under the fixture HOME: the same.
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
   }
 });
 
@@ -2598,7 +2623,7 @@ test("behind a wrapper, a built target the copy writes: the read's S2 lines pinn
     ["command cp -t ${X:-.github/workflows} .approval/env", [CRED, UNKNOWN, "policy.edit.ci protected-path"]],
   ] as const) {
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
-    assert.deepEqual(hook(line, TWO_ROUTES), want, `${line} through the hook`);
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
     // As spelled: main's answer, the credential class alone.
     assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], `${line} as spelled`);
   }
@@ -2638,7 +2663,7 @@ test("behind a wrapper, a built target the copy writes: the read's S2 lines pinn
     ["command cp --frob .approval/env $A-$B notes.txt", [CRED, UNKNOWN]],
   ] as const) {
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
-    assert.deepEqual(hook(line, TWO_ROUTES), want, `${line} through the hook`);
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
   }
   // The two lines of the review: what plain `cp` names, the wrapped line names.
   for (const target of ["$A-$B", "${X:-.approval/env}", "$'~/.hermes/.env'"]) {
@@ -2659,4 +2684,132 @@ test("behind a wrapper, a built target the copy writes: the read's S2 lines pinn
   ] as const) {
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
   }
+});
+
+// review-b's M1 on #714: behind a wrapper a built destination given as an
+// option's VALUE (`--target-directory=V`, `-tV`, rsync's `--log-file=V` and
+// `--write-batch=V`) was not read as written, where the same value as its own
+// word was. Each wrapped line now names every class its plain twin names.
+test("behind a wrapper, a built destination given as an option's value is read as written (review-b's M1 on #714)", () => {
+  for (const [line, plain, want] of [
+    [
+      "nice cp .approval/env --target-directory=${X:-.approval/log}",
+      "cp .approval/env --target-directory=${X:-.approval/log}",
+      [CRED, UNKNOWN, "log.mutate protected-path"],
+    ],
+    // A unique prefix of the long option, as GNU reads it.
+    [
+      "command cp .approval/env --target=${X:-.github/workflows}",
+      "cp .approval/env --target=${X:-.github/workflows}",
+      [CRED, UNKNOWN, "policy.edit.ci protected-path"],
+    ],
+    // The value attached to the short option; a word that may spell the
+    // credential path is in the destination, so it is read both ways.
+    ["nice cp .approval/env -t$A-$B", "cp .approval/env -t$A-$B", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    // The files an rsync option writes.
+    [
+      "nice rsync -a --log-file=${X:-.approval/log/events.jsonl} .approval/env backup/",
+      "rsync -a --log-file=${X:-.approval/log/events.jsonl} .approval/env backup/",
+      [CRED, UNKNOWN, "log.mutate protected-path"],
+    ],
+    [
+      "nice rsync -a --write-batch=${X:-.approval/log/events.jsonl} .approval/env backup/",
+      "rsync -a --write-batch=${X:-.approval/log/events.jsonl} .approval/env backup/",
+      [CRED, UNKNOWN, "log.mutate protected-path"],
+    ],
+  ] as const) {
+    const got = classSet(line);
+    for (const cls of classSet(plain)) assert.ok(got.includes(cls), `${line}: ${cls} of plain ${plain} missing from ${got.join(" ")}`);
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
+    // As spelled: main's answer, the credential class alone.
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], `${line} as spelled`);
+  }
+  // A directory an rsync option names (`--backup-dir=V`) is read as the same
+  // value as its own word was already read (`--backup-dir V`).
+  assert.deepEqual(
+    pure("nice rsync -a --backup-dir=${X:-.approval/log} .approval/env backup/", TWO_ROUTES),
+    pure("nice rsync -a --backup-dir ${X:-.approval/log} .approval/env backup/", TWO_ROUTES),
+  );
+  // A value that may spell the credential path where the option only writes a
+  // log stays the read, as plain rsync leaves it; an option cp does not know
+  // is the read, as before.
+  for (const line of ["nice rsync -a --log-file=$A-$B .approval/env backup/", "nice cp --in=$A-$B .approval/env notes.txt"]) {
+    assert.deepEqual(pure(line, TWO_ROUTES), [CRED, UNKNOWN], line);
+  }
+});
+
+// review-b's M2 on #714: with an option the copy table does not know, the
+// destination fell back to the last operand alone while the `-t` values were
+// among the written words, so a `-t` value that may spell the credential path
+// was left out as the read. It is a destination the argv names as such.
+test("behind a wrapper, an argv the copy table cannot read keeps its -t values as destinations (review-b's M2 on #714)", () => {
+  for (const [line, plain, want] of [
+    ["nice cp --frob -t $A-$B .approval/env", "cp --frob -t $A-$B .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["nice cp --frob -t ~/.hermes/$X .approval/env", "cp --frob -t ~/.hermes/$X .approval/env", [CRED, UNKNOWN, "cron.manage protected-path"]],
+    // The same value given to the long option (M1's reading of it).
+    [
+      "nice cp --frob --target-directory=$A-$B .approval/env",
+      "cp --frob --target-directory=$A-$B .approval/env",
+      [CRED, UNKNOWN, "log.mutate protected-path"],
+    ],
+  ] as const) {
+    const got = classSet(line);
+    for (const cls of classSet(plain)) assert.ok(got.includes(cls), `${line}: ${cls} of plain ${plain} missing from ${got.join(" ")}`);
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], `${line} as spelled`);
+  }
+  // The last-operand fallback stays (e8ef8c76's rows): a word before the last
+  // operand that no -t names stays the read.
+  assert.deepEqual(pure("command cp --frob .approval/env $A-$B", TWO_ROUTES), [CRED, UNKNOWN, "log.mutate protected-path"]);
+  assert.deepEqual(pure("command cp --frob .approval/env $A-$B notes.txt", TWO_ROUTES), [CRED, UNKNOWN]);
+});
+
+// review-b's S2 on #714: four behaviours this branch adds behind a wrapper,
+// each pinned in the pure classifier (no checkout, no HOME: a red here never
+// comes from the machine), so that undoing one fails a test.
+test("behind a wrapper: a program path, install -t, an unreadable argv's -t value and mv's built source each keep the write's class (review-b's S2 on #714)", () => {
+  for (const [line, want] of [
+    // The copy program named by a path: its last component is the program.
+    ["nice /bin/cp README.md .approval/env", ["policy.core protected-path", CRED]],
+    ["nice -n 5 /bin/cp README.md ~/.hermes/auth.json", ["policy.core protected-path", CRED]],
+    ["nice ./cp README.md .approval/env", ["policy.core protected-path", CRED]],
+    // `install` is read by its own table: its `-t` value is the destination.
+    ["nice install -t $A-$B .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["nice install .approval/env -t ${X:-.approval/log}", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    // ... and with a `-t` destination its last operand is a source, the read.
+    ["nice install -t backup/ .approval/env ${X:-.github/workflows/ci.yml}", [CRED, UNKNOWN]],
+    // An option the table does not know: the `-t` value is still written.
+    ["nice cp --frob -t ${X:-.approval/log} .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    // `mv` writes every path it names, its built sources too.
+    ["nice mv $A-$B .approval/env backup/", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["command mv $A-$B .claude/x .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+});
+
+// review-b's N1 on #714: behind a wrapper, an argv the copy table cannot read
+// had every word read for a credential path twice (the copy's unreadable-argv
+// pass, whose answer only the last slot keeps, and the side scan). Past the
+// spliced memo's size (more distinct built words than it holds) each second
+// read was made from nothing: the line's cost jumped. Only the last slot is
+// read in the first pass now. CPU time against the same words handed to a
+// reader behind a wrapper (one read each), as a ratio: no fixed bound.
+test("behind a wrapper, many built -t values cost about one credential read each (review-b's N1 on #714)", () => {
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  const least = (run: () => void): number => Math.min(cpu(run), cpu(run));
+  // 4,500 distinct words: more than the spliced memo holds.
+  const words = Array.from({ length: 4500 }, (_, at) => `$A${at}-$B${at}`);
+  const line = `command cp .approval/env ${words.map((word) => `-t ${word}`).join(" ")}`;
+  const control = least(() => classifyCommand(`nice cat .approval/env ${words.join(" ")}`, TWO_ROUTES));
+  const spent = least(() => classifyCommand(line, TWO_ROUTES));
+  assert.ok(spent <= 3.5 * control, `${spent.toFixed(3)} s against ${control.toFixed(3)} s (the reader's line)`);
+  assert.deepEqual(pure(line, TWO_ROUTES), [CRED, UNKNOWN, "log.mutate protected-path"]);
 });
