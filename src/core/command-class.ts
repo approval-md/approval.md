@@ -15608,7 +15608,9 @@ function classifySegmentWithVerb(
    * parents rule), which answer more exactly than a refusal here would.
    */
   const assignmentGate = (outcome: SegmentOutcome): SegmentOutcome => {
-    if (!outcome.ok || bin === undefined || bin === "cd") return outcome;
+    // Bare `cd` only: the word right after the assignments, never the command
+    // behind a sandbox wrapper, whose program the assignment steers.
+    if (!outcome.ok || bin === undefined || afterAssignments === "cd") return outcome;
     if (!((verbClass?.startsWith("read.") ?? false) || assignmentRuleCovers(outcome.class))) return outcome;
     const program = pathSegments(bin).slice(-1)[0] ?? bin;
     const refusal = assignmentRefusal(segment.words.slice(0, assignments.length), program);
