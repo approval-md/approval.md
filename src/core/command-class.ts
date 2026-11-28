@@ -2585,6 +2585,13 @@ interface LexSegment {
    * segments that run after it.
    */
   listOp: "&&" | "||" | "|" | null;
+  /**
+   * Which outermost `( … )` this segment is inside, counted from 1 in line
+   * order, or 0 outside every one: `(a) && (b)` puts `a` and `b` in groups 1
+   * and 2, `((a) && b)` puts both in group 1. Read only by the hook's write
+   * pass, which ends a subshell's cds where its group ends (review-b's S3).
+   */
+  subshellGroup: number;
 }
 
 type LexResult =
@@ -2661,6 +2668,7 @@ function lex(command: string, bodiesCut = false): LexResult {
   let index = 0;
   let conditional = false;
   let listOp: "&&" | "||" | "|" | null = null;
+  let subshellGroup = 0;
   // Where the last descriptor dup's word ended (`2>&1`): zsh refuses a
   // redirect operator joined to it (`2>&1>!x` writes nothing).
   let dupEnd = -1;
@@ -2679,6 +2687,7 @@ function lex(command: string, bodiesCut = false): LexResult {
         subshell: depth !== 0,
         conditional,
         listOp,
+        subshellGroup: depth !== 0 ? subshellGroup : 0,
       });
       conditional = false;
       listOp = null;
@@ -3126,6 +3135,7 @@ function lex(command: string, bodiesCut = false): LexResult {
       if (pipe) listOp = "|";
       else if (!(ch === "(" || (ch === "&" && command[boundary - 1] === "|" && listOp === "|"))) listOp = andOr;
       // APRV-510 (refuter rS2): the subshell depth, read by the next flush.
+      if (ch === "(" && depth === 0) subshellGroup += 1;
       if (ch === "(") depth += 1;
       if (ch === ")") depth -= 1;
       if (pipe) stdinFed = true;
@@ -16733,6 +16743,8 @@ export interface CommandSegmentShape {
   subshell: boolean;
   /** The and-or operator this segment follows, or `|` in a pipeline ({@link LexSegment.listOp}; cd-guarded-write). */
   listOp: "&&" | "||" | "|" | null;
+  /** Which outermost subshell group this segment is in, 0 for none ({@link LexSegment.subshellGroup}; review-b's S3). */
+  subshellGroup: number;
   /**
    * The inner text of every `$(…)` this segment expands: in its words, its
    * redirection targets and an unquoted heredoc's body (APRV-522), so the
@@ -16818,6 +16830,7 @@ function shapesOf(lexed: LexResult): CommandSegmentShape[] | null {
       conditional: segment.conditional || segment.subshell,
       subshell: segment.subshell,
       listOp: segment.listOp,
+      subshellGroup: segment.subshellGroup,
       substitutions: [
         ...segment.words.flatMap((word) => word.substitutions),
         ...segment.redirects.flatMap((redirect) => redirect.target.substitutions),

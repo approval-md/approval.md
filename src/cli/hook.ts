@@ -5990,7 +5990,7 @@ export function refineWriteLandings(
     }
   };
   /** The state as a subshell opened, restored at its end. */
-  let subshellFrame: { standing: Standing; skippedFailed: Standing; skippedSucceeded: Standing } | null = null;
+  let subshellFrame: { standing: Standing; skippedFailed: Standing; skippedSucceeded: Standing; group: number } | null = null;
   /** The state as a `$(…)` opened, restored at the segment that expands it. */
   let substitutionFrame: { standing: Standing; skippedFailed: Standing; skippedSucceeded: Standing } | null = null;
   let lastHost = -1;
@@ -5998,8 +5998,9 @@ export function refineWriteLandings(
   const enterSegment = (index: number): void => {
     const unit = units[index] as Unit;
     const substitution = unit.shape !== unit.host;
-    if (unit.host.subshell !== true && subshellFrame !== null) {
-      // The subshell leaves the shell where it was, whatever it ran.
+    if (subshellFrame !== null && (unit.host.subshell !== true || unit.host.subshellGroup !== subshellFrame.group)) {
+      // The subshell leaves the shell where it was, whatever it ran; so does
+      // each of two back-to-back ones (`(cd d) && (w)`, review-b's S3).
       ({ standing, skippedFailed, skippedSucceeded } = subshellFrame);
       outcome = null;
       subshellFrame = null;
@@ -6043,7 +6044,7 @@ export function refineWriteLandings(
       skippedFailed = [];
       skippedSucceeded = [];
     }
-    if (unit.host.subshell === true && subshellFrame === null) subshellFrame = { standing, skippedFailed, skippedSucceeded };
+    if (unit.host.subshell === true && subshellFrame === null) subshellFrame = { standing, skippedFailed, skippedSucceeded, group: unit.host.subshellGroup };
     if (entering) substitutionFrame = { standing, skippedFailed, skippedSucceeded };
   };
   /** Where a `cd`, `chdir` or `pushd` at `index` lands from `from`, or `null` where it cannot be named. */

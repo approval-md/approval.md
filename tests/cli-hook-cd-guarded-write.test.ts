@@ -405,3 +405,17 @@ test("only a plain cd, with nothing but plain cds before it, is sure (S1, on its
     assert.deepEqual(hook(line), ALLOWED, line);
   }
 });
+
+test("two subshells back to back: each one's cd ends with it (review-b's S3 on #715)", () => {
+  // The second subshell stands where the line did, not where the first one's cd went.
+  for (const line of ["(cd .claude) && (echo x > settings.json)", "(cd .claude); (echo x > settings.json)"]) {
+    const got = hook(line);
+    assert.ok(typeof got !== "string" && !got.includes("policy.core"), `${line}: ${JSON.stringify(got)}`);
+  }
+  // Nor does a cd in the first leave the second where it went: `(cd ..)` ends, the shell stays in .claude.
+  holds("cd .claude && (cd ..) && (echo x > settings.json)", "policy.core");
+  // A cd inside a subshell still reaches the segments inside it, and a nested subshell stays inside its group.
+  holds("(cd .claude && echo x > settings.json)", "policy.core");
+  holds("(cd docs) && (cd .claude && echo x > settings.json)", "policy.core");
+  holds("((cd .claude); echo x > settings.json)", "policy.core");
+});
