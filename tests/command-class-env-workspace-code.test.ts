@@ -69,6 +69,104 @@ for (const name of [...STEERING_EXACT, ...STEERING_SHAPED]) {
   });
 }
 
+/**
+ * Names that make a workspace-code command do MORE than run the workspace's
+ * own code: fetch or load code from outside it, pick another toolchain
+ * binary, or redirect its network trust. Each is refused in front of the
+ * runner it reaches (a package script can call any tool, so every family is
+ * reachable through `npm test` and `make`).
+ */
+const TOOLCHAIN_STEERING: readonly (readonly [string, string])[] = [
+  // npm, case-insensitively (npm reads npm_config_* in any case)
+  ["npm_config_registry", "npm test"],
+  ["NPM_CONFIG_REGISTRY", "npm test"],
+  ["Npm_Config_Script_Shell", "npm test"],
+  ["npm_config_node_options", "npm test"],
+  ["NPM_CONFIG_PREFIX", "npx vitest"],
+  ["npm_config_userconfig", "npm test"],
+  ["NPM_CONFIG_GLOBALCONFIG", "npm test"],
+  // yarn, pnpm, corepack
+  ["YARN_YARN_PATH", "yarn test"],
+  ["YARN_NPM_REGISTRY_SERVER", "yarn test"],
+  ["yarn_rc_filename", "yarn test"],
+  ["PNPM_HOME", "pnpm test"],
+  ["pnpm_config_registry", "pnpm test"],
+  ["COREPACK_NPM_REGISTRY", "pnpm test"],
+  ["COREPACK_ENABLE_STRICT", "yarn test"],
+  // bun, deno
+  ["BUN_INSTALL", "bun test"],
+  ["BUN_CONFIG_REGISTRY", "bun test"],
+  ["DENO_DIR", "npm test"],
+  // make
+  ["MAKEFILES", "make"],
+  ["MAKEFLAGS", "make"],
+  ["MFLAGS", "make"],
+  ["GNUMAKEFLAGS", "make"],
+  ["SHELL", "make"],
+  ["SHELL", "npm test"],
+  // node, TypeScript runners
+  ["ESBUILD_BINARY_PATH", "tsx x.ts"],
+  ["TS_NODE_COMPILER", "ts-node x.ts"],
+  ["TSX_TSCONFIG_PATH", "tsx x.ts"],
+  ["NODE_PATH", "node script.js"],
+  ["NODE_EXTRA_CA_CERTS", "npm test"],
+  ["NODE_REPL_EXTERNAL_MODULE", "node script.js"],
+  // Python, reached through a package script or a Makefile
+  ["PIP_INDEX_URL", "npm test"],
+  ["PIP_CONFIG_FILE", "make"],
+  ["UV_INDEX_URL", "npm test"],
+  ["POETRY_REPOSITORIES_X_URL", "make"],
+  ["PYTEST_ADDOPTS", "npm test"],
+  ["PYTEST_PLUGINS", "make"],
+  // Rust, Go
+  ["CARGO_HOME", "make"],
+  ["CARGO_BUILD_RUSTC_WRAPPER", "make"],
+  ["RUSTC", "make"],
+  ["RUSTC_WRAPPER", "make"],
+  ["RUSTFLAGS", "make"],
+  ["RUSTUP_TOOLCHAIN", "make"],
+  ["GOFLAGS", "make"],
+  ["GOPROXY", "make"],
+  ["GOPATH", "make"],
+  ["GOROOT", "make"],
+  ["GOTOOLCHAIN", "make"],
+  // C toolchain
+  ["CC", "make"],
+  ["CXX", "make"],
+  ["LD", "make"],
+  ["AR", "make"],
+  ["CFLAGS", "make"],
+  ["LDFLAGS", "make"],
+  ["PKG_CONFIG_PATH", "make"],
+  // JVM, Ruby
+  ["JAVA_HOME", "make"],
+  ["MAVEN_OPTS", "make"],
+  ["GRADLE_OPTS", "make"],
+  ["RUBYLIB", "make"],
+  ["BUNDLE_GEMFILE", "make"],
+  ["GEM_HOME", "make"],
+  // proxies and TLS trust, in both cases
+  ["http_proxy", "npm test"],
+  ["HTTP_PROXY", "npm test"],
+  ["https_proxy", "npm test"],
+  ["HTTPS_PROXY", "npm test"],
+  ["ALL_PROXY", "npm test"],
+  ["all_proxy", "npm test"],
+  ["NO_PROXY", "npm test"],
+  ["no_proxy", "npm test"],
+  ["SSL_CERT_FILE", "npm test"],
+  ["SSL_CERT_DIR", "npm test"],
+  ["CURL_CA_BUNDLE", "npm test"],
+  ["REQUESTS_CA_BUNDLE", "npm test"],
+  ["ssl_cert_file", "npm test"],
+];
+
+for (const [name, runner] of TOOLCHAIN_STEERING) {
+  test(`a toolchain steering name is refused in front of ${runner}: ${name}`, () => {
+    assert.equal(answer(`${name}=./x ${runner}`), "refused unclassified", `${name} ${runner}`);
+  });
+}
+
 /** Unknown names (and TMPDIR) in front of a workspace-code command keep its answer. */
 const KEPT_NAMES: readonly string[] = ["NODE_ENV=test", "PORT=3000", "DEBUG=x", "TMPDIR=/private/tmp", "FOO=1"];
 const WORKSPACE_CODE: readonly string[] = [
