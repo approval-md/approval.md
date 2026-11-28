@@ -439,6 +439,10 @@ test("a line whose parentheses do not pair for sure restores no subshell frame a
     const got = hook(line);
     assert.ok(typeof got !== "string" && !got.includes("files.write.guarded"), `${line}: ${JSON.stringify(got)}`);
   }
+  // A `)` with no `(` that a later `(` brings back to depth 0 is still not sure (the depth went below 0).
+  holds("cd .claude; true ); (echo x > settings.json", "files.write.guarded");
+  // On such a line a subshell's end joins where it went with where the shell stood: its cd still reaches after it.
+  holds("cd docs && ((cd ../.claude; true)); echo x > settings.json", "policy.core");
   // A quoted parenthesis is no paren to the lexer.
   holds("cd .claude && echo ')' && (cd ..) && (echo x > settings.json)", "policy.core");
 });
