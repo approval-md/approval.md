@@ -31,7 +31,7 @@ import {
   commandSegmentShapes,
   SUBSTITUTION_SENTINEL,
 } from "../src/core/command-class.js";
-import { cpuSeconds, runner, scaledBound } from "./cost-runner.js";
+import { besidePlain, cpuSeconds, runner, scaledBound } from "./cost-runner.js";
 
 function classesOf(command: string): string[] {
   const result = classifyCommand(command, []);
@@ -476,6 +476,8 @@ test("review of b58db9ec (M3): repeated unread quotes in one word are linear, as
     console.log(
       `# cost-line: DQ-M3 ${label}: ${seconds.toFixed(3)} CPU s (bound ${bound.toFixed(2)}; control ${control.toFixed(3)}, relative bound ${Math.max(0.2, 8 * control).toFixed(3)}; ${runner().line})`,
     );
+    // Measuring only (#720's list, step 3): beside a plain word of its length.
+    if (seconds * 6 >= bound) console.log(`${besidePlain("DQ-M3R", label, seconds, command, (text) => classifyCommand(text, []))}; bound ${bound.toFixed(2)}; ${runner().line}`);
     assert.ok(seconds < bound, `${label}: ${seconds.toFixed(3)} CPU s, bound ${bound.toFixed(2)}, control ${control.toFixed(3)} (${runner().line})`);
     assert.ok(seconds < Math.max(0.2, 8 * control), `${label}: ${seconds.toFixed(3)} CPU s against a control of ${control.toFixed(3)}`);
   }
@@ -502,6 +504,8 @@ test("cost: 100 KB of dollar quotes is read in time; past the bound the rest of 
       });
       // Measuring only (#720's list): the reading, printed before it is judged.
       console.log(`# cost-line: DQ-100KB ${label}: ${seconds.toFixed(3)} CPU s (bound ${bound.toFixed(2)}; ${runner().line})`);
+      // Measuring only (#720's list, step 3): beside a plain word of its length.
+      if (seconds * 6 >= bound) console.log(`${besidePlain("DQ-100KBR", label, seconds, command, (text) => classifyForHook(text, [], cwd))}; bound ${bound.toFixed(2)}; ${runner().line}`);
       assert.ok(seconds < bound, `${label}: ${seconds.toFixed(3)} CPU s, bound ${bound.toFixed(2)} (${runner().line})`);
       assert.ok(classes.length > 0, label);
     }

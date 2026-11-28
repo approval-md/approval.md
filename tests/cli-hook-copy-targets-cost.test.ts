@@ -70,7 +70,7 @@ function classesOf(command: string): string[] {
   return result.ok ? result.classes : [`refused ${result.code}`];
 }
 
-function pinned(name: string, command: string, written: number, control: string): string[] {
+function pinned(name: string, command: string, written: number, control: string, smaller: readonly string[] = []): string[] {
   assert.ok(Buffer.byteLength(command) <= 8192 && Buffer.byteLength(command) > 8000);
   const bound = scaledBound(written);
   let classes: string[] = [];
@@ -93,19 +93,27 @@ function pinned(name: string, command: string, written: number, control: string)
     `# cost-measure: COST695R ${name}: first ${seconds.toFixed(2)}, calls ${lines.map((x) => x.toFixed(2)).join(" ")}, least ${least.toFixed(2)} CPU s; ` +
       `an eighth (${String(Buffer.byteLength(control))} bytes) ${controls.map((x) => x.toFixed(3)).join(" ")}, least ${leastControl.toFixed(3)}; ratio ${(least / leastControl).toFixed(2)}; ${runner().line}`,
   );
+  // Measuring only (#720's list, step 3): the same line at a sixteenth and a
+  // thirty-second of its bytes, three readings each, the least printed: a
+  // smaller control parts the fixed line from the walk #695 removed further.
+  for (const each of smaller) {
+    const readings = [1, 2, 3].map(() => cpuSeconds(() => classesOf(each)));
+    const leastEach = Math.min(...readings);
+    console.log(`# cost-measure: COST695S ${name}: ${String(Buffer.byteLength(each))} bytes ${readings.map((x) => x.toFixed(3)).join(" ")}, least ${leastEach.toFixed(3)}; ratio of the line's least ${(least / leastEach).toFixed(2)}`);
+  }
   assert.ok(seconds < bound, `${name}: ${seconds.toFixed(2)} CPU s, bound ${bound.toFixed(2)} (${runner().line})`);
   return classes;
 }
 
 test("cost: `cp notes.txt -t d0 s0/x -t d1 s1/x …` at 8 KB is judged within the bound, and guarded", () => {
   const unit = (i: number): string => ` -t d${String(i)} s${String(i)}/x`;
-  const classes = pinned("many_targets_plain", filled("cp notes.txt", unit, 8192), BOUND_PLAIN_S, filled("cp notes.txt", unit, 8192 / 8));
+  const classes = pinned("many_targets_plain", filled("cp notes.txt", unit, 8192), BOUND_PLAIN_S, filled("cp notes.txt", unit, 8192 / 8), [filled("cp notes.txt", unit, 8192 / 16), filled("cp notes.txt", unit, 8192 / 32)]);
   assert.ok(classes.includes("files.write.workspace") && classes.includes(GUARDED), classes.join(","));
 });
 
 test("cost: `cp ~/.hermes/.env -t .approval/keys0 s0/env …` at 8 KB is judged within the bound", () => {
   const unit = (i: number): string => ` -t .approval/keys${String(i)} s${String(i)}/env`;
-  const classes = pinned("many_targets_credential", filled("cp ~/.hermes/.env", unit, 8192), BOUND_CREDENTIAL_S, filled("cp ~/.hermes/.env", unit, 8192 / 8));
+  const classes = pinned("many_targets_credential", filled("cp ~/.hermes/.env", unit, 8192), BOUND_CREDENTIAL_S, filled("cp ~/.hermes/.env", unit, 8192 / 8), [filled("cp ~/.hermes/.env", unit, 8192 / 16), filled("cp ~/.hermes/.env", unit, 8192 / 32)]);
   assert.ok(classes.includes("policy.core") && classes.includes("account.credential") && classes.includes(GUARDED), classes.join(","));
 });
 

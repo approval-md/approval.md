@@ -31,7 +31,7 @@ import { test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand, classifyCommandWithDollarQuotesKept, classifyCommandWithMainRules, splicedCredentialMemoHeld } from "../src/core/command-class.js";
-import { cpuSeconds, runner, scaledBound } from "./cost-runner.js";
+import { besidePlain, cpuSeconds, runner, scaledBound } from "./cost-runner.js";
 
 const ROUTES = [
   { path: ".github/workflows/", class: "policy.edit.ci" },
@@ -513,6 +513,8 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
     });
     // Measuring only (#720's list): the reading, printed before it is judged.
     console.log(`# cost-line: SPLICE backslashes beside a parameter: ${seconds.toFixed(3)} CPU s (bound ${scaledBound(0.4).toFixed(2)}; ${runner().line})`);
+    // Measuring only (#720's list, step 3): beside a plain word of its length.
+    if (seconds * 6 >= scaledBound(0.4)) console.log(`${besidePlain("SPLICER", "backslashes beside a parameter", seconds, command, (text) => classifyCommand(text, []))}; bound ${scaledBound(0.4).toFixed(2)}; ${runner().line}`);
     assert.ok(seconds < scaledBound(0.4), `backslashes beside a parameter: ${seconds.toFixed(3)} CPU s (${runner().line})`);
     assert.ok(classes.includes("log.mutate"), classes.join(","));
     assert.deepEqual(classesOf(`tee $a'${"a\\q".repeat(30)}'`), mainClasses(`tee $a'${"a\\q".repeat(30)}'`));

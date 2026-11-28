@@ -40,7 +40,7 @@ import {
   isGateOrganPath,
   protectedPathClass,
 } from "../src/core/command-class.js";
-import { runner, scaledBound } from "./cost-runner.js";
+import { besidePlain, cpuSeconds, runner, scaledBound } from "./cost-runner.js";
 
 function classesOf(command: string): string[] {
   const result = classifyCommand(command);
@@ -550,6 +550,21 @@ test("recheck S(new): the brace expander is bounded and fails to the stricter cl
   const bound = scaledBound(10) * 1000;
   // Measuring only (#720's list): the reading, printed before it is judged.
   console.log(`# cost-line: HHO brace expander block: ${ms.toFixed(1)} CPU ms (bound ${bound.toFixed(0)}; ${runner().line})`);
+  // Measuring only (#720's list, step 3): each of the block's six lines read
+  // on its own beside a plain word of its length, the least of each printed.
+  if (ms * 6 >= bound) {
+    for (const command of [
+      `echo x > out${"{a,b}".repeat(20000)}.txt`,
+      `echo x > out${"{a,b}".repeat(2000)}.txt`,
+      `echo x > out${"{s..s}".repeat(5000)}.txt`,
+      `echo x > ${"{a,".repeat(5000)}b${"}".repeat(5000)}`,
+      `echo x > ${"{".repeat(20000)}a${"}".repeat(20000)}`,
+      `echo x > ${"{".repeat(60000)}`,
+    ]) {
+      const first = cpuSeconds(() => void classifyCommand(command));
+      console.log(`${besidePlain("HHOR", `brace block line ${command.slice(9, 25)} (${String(command.length)} characters)`, first, command, (text) => classifyCommand(text))}; ${runner().line}`);
+    }
+  }
   assert.ok(ms < bound, `took ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (10 s x ${runner().line})`);
 });
 
@@ -567,6 +582,8 @@ test("cost: nested literal braces are read in one pass, not one scan per brace",
     const bound = scaledBound(2) * 1000;
     // Measuring only (#720's list): the reading, printed before it is judged.
     console.log(`# cost-line: HHO nested literal braces n=${String(n)}: ${ms.toFixed(1)} CPU ms (bound ${bound.toFixed(0)}; ${runner().line})`);
+    // Measuring only (#720's list, step 3): beside a plain word of its length.
+    if (ms * 6 >= bound) console.log(`${besidePlain("HHOR", `nested literal braces n=${String(n)}`, ms / 1000, line, (text) => classifyCommand(text))}; ${runner().line}`);
     assert.ok(ms < bound, `n=${String(n)}: ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (2 s x ${runner().line})`);
   }
 });

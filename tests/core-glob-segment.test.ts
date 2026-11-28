@@ -306,5 +306,22 @@ test("cost: a class of many members is matched in bounded CPU time", () => {
   // (#680's walk); the bound is 20x.
   // Measuring only (#720's list): the reading, printed before it is judged.
   console.log(`# cost-line: CGS class of many members: ${ms.toFixed(1)} CPU ms (bound 150, not stretched; node ${process.version})`);
+  // Measuring only (#720's list, step 3): the block read twice more beside
+  // three readings of plain patterns of the same lengths, the least printed.
+  if (ms * 6 >= 150) {
+    const block = (pattern: (members: number) => string): void => {
+      for (const members of [5_000, 50_000]) for (const name of names) globSegmentMatches(pattern(members), name);
+    };
+    const classOf = (members: number): string => `*[${"z".repeat(members)}]X`;
+    const plainOf = (members: number): string => "z".repeat(members + 4);
+    const calls = [ms];
+    const plains: number[] = [];
+    for (let round = 0; round < 2; round += 1) {
+      plains.push(cpuMs(() => block(plainOf)));
+      calls.push(cpuMs(() => block(classOf)));
+    }
+    plains.push(cpuMs(() => block(plainOf)));
+    console.log(`# cost-measure: CGSR class of many members: calls ${calls.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...calls).toFixed(1)} CPU ms; plain ${plains.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...plains).toFixed(1)}; ratio ${(Math.min(...calls) / Math.max(Math.min(...plains), 0.001)).toFixed(2)}`);
+  }
   assert.ok(ms < 150, `${ms.toFixed(1)} CPU ms, bound 150`);
 });

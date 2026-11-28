@@ -102,6 +102,34 @@ export function runner(): Runner {
   return measured;
 }
 
+/**
+ * Measuring only (#720's list, step 3): `command`, first read at `first` CPU
+ * seconds, read twice more beside three readings of the same line with its
+ * costly part spelled as a plain word of the same length (`run(plain)`: the
+ * line's head, through its first `> ` when that comes early, else its first
+ * word, then `a` to the line's length; the control candidate for a line under
+ * five times its bound), and one line that says the least of each and their
+ * ratio. Asserts nothing.
+ */
+export function besidePlain(id: string, label: string, first: number, command: string, run: (text: string) => unknown): string {
+  const redirect = command.indexOf("> ");
+  const head = redirect >= 0 && redirect < 60 ? command.slice(0, redirect + 2) : command.slice(0, command.indexOf(" ") + 1);
+  const plain = `${head}${"a".repeat(Math.max(1, command.length - head.length))}`;
+  const calls = [first];
+  const plains: number[] = [];
+  for (let round = 0; round < 2; round += 1) {
+    plains.push(cpuSeconds(() => void run(plain)));
+    calls.push(cpuSeconds(() => void run(command)));
+  }
+  plains.push(cpuSeconds(() => void run(plain)));
+  const least = Math.min(...calls);
+  const leastPlain = Math.min(...plains);
+  return (
+    `# cost-measure: ${id} ${label}: calls ${calls.map((x) => x.toFixed(3)).join(" ")}, least ${least.toFixed(3)} CPU s; ` +
+    `plain ${String(command.length)} ${plains.map((x) => x.toFixed(3)).join(" ")}, least ${leastPlain.toFixed(3)}; ratio ${(least / Math.max(leastPlain, 1e-6)).toFixed(2)}`
+  );
+}
+
 /** `bound` CPU seconds as written, stretched by this runner's factor. */
 export function scaledBound(bound: number): number {
   return bound * runner().factor;

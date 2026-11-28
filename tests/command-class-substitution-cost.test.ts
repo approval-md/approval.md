@@ -31,7 +31,7 @@ import { after, test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand, globSegmentMatches } from "../src/core/command-class.js";
-import { cpuSeconds, MOST, runner, scaledBound } from "./cost-runner.js";
+import { besidePlain, cpuSeconds, MOST, runner, scaledBound } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-subst-cost-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -121,8 +121,15 @@ function bounded(command: string, label: string, own?: number): string[] {
     answer = pure(command);
   });
   if (own !== undefined) console.log(`# cost-line: ${label}: ${seconds.toFixed(2)} CPU s (bound ${own.toFixed(2)}; node ${process.version})`);
+  if (own === undefined) measuredBesidePlain("SUBR", label, seconds, scaledBound(BOUND), (text) => pure(text), command);
   withinBound(seconds, label, own);
   return answer;
+}
+
+/** Measuring only (#720's list, step 3): a line within six times its bound is read beside a plain word of its length ({@link besidePlain}). */
+function measuredBesidePlain(id: string, label: string, first: number, bound: number, run: (text: string) => unknown, command: string): void {
+  if (first * 6 < bound) return;
+  console.log(`${besidePlain(id, label, first, command, run)}; bound ${bound.toFixed(2)}; ${runner().line}`);
 }
 
 test("cost: this runner is measured before any bound is used, and the measurement is logged", (t) => {
@@ -310,6 +317,14 @@ test("cost: review-b's shapes on b085cd91 (nested defaults, printf and echo bodi
       `# cost-measure: SUB400K many command words, n=400000: calls ${lines.map((x) => x.toFixed(2)).join(" ")}, least ${least.toFixed(2)} CPU s; ` +
         `n=50000 ${controls.map((x) => x.toFixed(3)).join(" ")}, least ${leastControl.toFixed(3)}; ratio ${(least / leastControl).toFixed(2)}; ${runner().line}`,
     );
+    // Measuring only (#720's list, step 3): a plain word of the line's length,
+    // the other control candidate (the walk ef0531c0 removed, shifts, read
+    // only 5.3 to 31 times the eighth-of-the-words control on this Mac).
+    const plain = "a".repeat(line.length);
+    const plains = [1, 2, 3].map(() => cpuSeconds(() => pure(plain)));
+    console.log(
+      `# cost-measure: SUB400KP many command words, n=400000: plain ${String(line.length)} ${plains.map((x) => x.toFixed(3)).join(" ")}, least ${Math.min(...plains).toFixed(3)}; ratio of the line's least ${(least / Math.min(...plains)).toFixed(2)}`,
+    );
   }
 });
 
@@ -441,6 +456,7 @@ test("cost: through the hook, in a checkout, the same lines are bounded", { skip
     const seconds = cpuSeconds(() => {
       classifyForHook(command, [], repo);
     });
+    measuredBesidePlain("SUBR", `hook, ${label}`, seconds, scaledBound(BOUND), (text) => classifyForHook(text, [], repo), command);
     withinBound(seconds, `hook, ${label}`);
   }
 });

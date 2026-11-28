@@ -306,6 +306,25 @@ test("cost: a run of unclosed `[` compiles in one pass", () => {
   // about 9 CPU ms here, 35 on bfa73710; the bound is 10x.
   // Measuring only (#720's list): the reading, printed before it is judged.
   console.log(`# cost-line: HGM unclosed bracket run: ${ms.toFixed(1)} CPU ms (bound 100, not stretched; node ${process.version})`);
+  // Measuring only (#720's list, step 3): the block read twice more beside
+  // three readings of plain patterns of the same lengths, the least printed.
+  // globPattern keeps what it compiled, so each reading adds `round` to each
+  // length: a pattern never compiled before, as the first reading had.
+  if (ms * 6 >= 100) {
+    let round = 0;
+    const block = (unit: string): void => {
+      round += 1;
+      for (const length of [2_000, 20_000, 200_000]) globPattern(unit.repeat(length + round)).test(".git");
+    };
+    const calls = [ms];
+    const plains: number[] = [];
+    for (let again = 0; again < 2; again += 1) {
+      plains.push(cpuMs(() => block("a")));
+      calls.push(cpuMs(() => block("[")));
+    }
+    plains.push(cpuMs(() => block("a")));
+    console.log(`# cost-measure: HGMR unclosed bracket run: calls ${calls.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...calls).toFixed(1)} CPU ms; plain ${plains.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...plains).toFixed(1)}; ratio ${(Math.min(...calls) / Math.max(Math.min(...plains), 0.001)).toFixed(2)}`);
+  }
   assert.ok(ms < 100, `${ms.toFixed(1)} CPU ms, bound 100`);
 });
 

@@ -27,6 +27,7 @@ import { after, test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand, collapseBracedVariables } from "../src/core/command-class.js";
+import { besidePlain } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-braced-cost-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -65,12 +66,18 @@ function pure(command: string): string[] {
 /** Set once a line has passed {@link BOUND}; the lines after it fail at once. */
 let overBound: string | null = null;
 
-/** Run `run`, and fail if it took {@link BOUND} CPU seconds or an earlier line already did. */
-function bounded(run: () => void, label: string): void {
+/** Classify `command` through `via`, and fail if it took {@link BOUND} CPU seconds or an earlier line already did. */
+function boundedLine(command: string, label: string, via: (text: string) => unknown): void {
   assert.equal(overBound, null, `${label}: not timed, an earlier line passed the bound (${String(overBound)})`);
-  const seconds = cpuSeconds(run);
+  const seconds = cpuSeconds(() => {
+    via(command);
+  });
   // Measuring only (#720's list): this line's reading, printed before it is judged.
   console.log(`# cost-line: BRACED ${label}: ${seconds.toFixed(3)} CPU s (bound ${String(BOUND)}, not stretched; node ${process.version})`);
+  // Measuring only (#720's list, step 3): a line within six times its bound
+  // is read twice more beside three readings of a plain word of its length,
+  // the least of each printed. Nothing here is asserted.
+  if (seconds * 6 >= BOUND) console.log(`${besidePlain("BRACEDR", label, seconds, command, via)}; bound ${String(BOUND)}; node ${process.version}`);
   if (seconds >= BOUND) overBound = label;
   assert.ok(seconds < BOUND, `${label}: ${seconds.toFixed(2)} CPU s, bound ${String(BOUND)}`);
 }
@@ -87,23 +94,23 @@ const PUSH = "git push --force\n";
 test("cost: a word of unclosed ${ is bounded as a write target (review-b's N6)", () => {
   // 500 KB: 17 to 27 CPU s with the whole-text read.
   for (const n of [10000, 100000]) {
-    bounded(() => pure(`${PUSH}echo x > ${"${a:-".repeat(n)}x`), `unclosed \${a:- run as a target, n=${String(n)}`);
-    bounded(() => pure(`${PUSH}echo x > "${"${a:-".repeat(n)}x"`), `the same in double quotes, n=${String(n)}`);
-    bounded(() => pure(`${PUSH}echo x > ${"${a".repeat(n)}`), `unclosed \${a run as a target, n=${String(n)}`);
-    bounded(() => pure(`${PUSH}cat ${"${a:-".repeat(n)}x`), `unclosed \${a:- run as a read, n=${String(n)}`);
+    boundedLine(`${PUSH}echo x > ${"${a:-".repeat(n)}x`, `unclosed \${a:- run as a target, n=${String(n)}`, pure);
+    boundedLine(`${PUSH}echo x > "${"${a:-".repeat(n)}x"`, `the same in double quotes, n=${String(n)}`, pure);
+    boundedLine(`${PUSH}echo x > ${"${a".repeat(n)}`, `unclosed \${a run as a target, n=${String(n)}`, pure);
+    boundedLine(`${PUSH}cat ${"${a:-".repeat(n)}x`, `unclosed \${a:- run as a read, n=${String(n)}`, pure);
     // Closed once at the very end: the first `${a` takes the whole word.
-    bounded(() => pure(`${PUSH}echo x > ${"${a:-".repeat(n)}x}`), `the run closed once at its end, n=${String(n)}`);
+    boundedLine(`${PUSH}echo x > ${"${a:-".repeat(n)}x}`, `the run closed once at its end, n=${String(n)}`, pure);
     // Many closed forms, then the run: both halves in one word.
-    bounded(() => pure(`${PUSH}echo x > ${"${a:-b}".repeat(n)}${"${a:-".repeat(n)}`), `closed forms then the run, n=${String(n)}`);
+    boundedLine(`${PUSH}echo x > ${"${a:-b}".repeat(n)}${"${a:-".repeat(n)}`, `closed forms then the run, n=${String(n)}`, pure);
   }
 });
 
 test("cost: curl's %output{ reader is bounded", () => {
   // 1.2 MB: about 28 CPU s when each `%output{` looked ahead for its `}`.
   for (const n of [15000, 150000]) {
-    bounded(() => pure(`${PUSH}curl -w '${"%output{".repeat(n)}}' https://example.invalid`), `%output{ run closed once, n=${String(n)}`);
-    bounded(() => pure(`${PUSH}curl -w '${"%output{".repeat(n)}' https://example.invalid`), `%output{ run never closed, n=${String(n)}`);
-    bounded(() => pure(`${PUSH}curl -w '${"%output{a}".repeat(n)}%output{' https://example.invalid`), `closed forms then one open, n=${String(n)}`);
+    boundedLine(`${PUSH}curl -w '${"%output{".repeat(n)}}' https://example.invalid`, `%output{ run closed once, n=${String(n)}`, pure);
+    boundedLine(`${PUSH}curl -w '${"%output{".repeat(n)}' https://example.invalid`, `%output{ run never closed, n=${String(n)}`, pure);
+    boundedLine(`${PUSH}curl -w '${"%output{a}".repeat(n)}%output{' https://example.invalid`, `closed forms then one open, n=${String(n)}`, pure);
   }
 });
 
@@ -120,7 +127,7 @@ test("cost: through the hook, in a checkout, the same words are bounded", { skip
     ["unclosed ${a:- run as a target", `${PUSH}echo x > ${"${a:-".repeat(100000)}x`],
     ["%output{ run closed once", `${PUSH}curl -w '${"%output{".repeat(150000)}}' https://example.invalid`],
   ] as const) {
-    bounded(() => classifyForHook(command, [], repo), `hook, ${label}`);
+    boundedLine(command, `hook, ${label}`, (text) => classifyForHook(text, [], repo));
   }
 });
 

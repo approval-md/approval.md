@@ -297,6 +297,19 @@ test("a megabyte of path costs what a megabyte costs: the walks are linear", { s
   // before the same assertion judges it, in the same order as before.
   const canonicalSeconds = cpu(() => canonicalPath(join(root, megabyte)));
   console.log(`# cost-line: DEADLINE canonicalPath, a megabyte: ${canonicalSeconds.toFixed(3)} CPU s (bound 10, not stretched; node ${process.version})`);
+  // Measuring only (#720's list, step 3): the megabyte read twice more beside
+  // three readings of the same path at an eighth of its length, the least printed.
+  if (canonicalSeconds * 6 >= 10) {
+    const eighth = deep(128 * 1024, "b/");
+    const calls = [canonicalSeconds];
+    const eighths: number[] = [];
+    for (let round = 0; round < 2; round += 1) {
+      eighths.push(cpu(() => canonicalPath(join(root, eighth))));
+      calls.push(cpu(() => canonicalPath(join(root, megabyte))));
+    }
+    eighths.push(cpu(() => canonicalPath(join(root, eighth))));
+    console.log(`# cost-measure: DEADLINER canonicalPath, a megabyte: calls ${calls.map((x) => x.toFixed(3)).join(" ")}, least ${Math.min(...calls).toFixed(3)} CPU s; an eighth ${eighths.map((x) => x.toFixed(3)).join(" ")}, least ${Math.min(...eighths).toFixed(3)}; ratio ${(Math.min(...calls) / Math.max(Math.min(...eighths), 1e-6)).toFixed(2)}`);
+  }
   assert.ok(canonicalSeconds < 10);
   const landingSeconds = cpu(() => physicalLanding(root, megabyte));
   console.log(`# cost-line: DEADLINE physicalLanding, a megabyte: ${landingSeconds.toFixed(3)} CPU s (bound 10, not stretched; node ${process.version})`);
