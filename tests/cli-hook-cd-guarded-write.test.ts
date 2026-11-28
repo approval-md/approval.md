@@ -364,6 +364,21 @@ test("a sure cd has no redirection of any kind, and only a cd or a quiet builtin
   ]) {
     holds(line, "log.mutate");
   }
-  // The closed list (true, :, echo, printf, pwd, test, [) with no redirection keeps the cd sure.
+  // An earlier unit that may assign a variable a later cd reads (CDPATH, HOME, OLDPWD) is not quiet either.
+  for (const before of [
+    "printf -v CDPATH '%s' /tmp",
+    ": ${CDPATH:=/tmp}",
+    "echo ${HOME:=/x}",
+    "CDPATH=/tmp :",
+    "CDPATH=/tmp",
+    "read CDPATH",
+    "export CDPATH=/tmp",
+    "declare CDPATH=/tmp",
+  ]) {
+    const line = `cd .approval/log; ${before}; cd ..; echo x >> events.jsonl`;
+    const got = hook(line);
+    assert.ok(typeof got === "string" || got.includes("log.mutate"), `${line}: ${JSON.stringify(got)}`);
+  }
+  // The closed list (true, :, echo, pwd, test, [) with no redirection, assignment or expansion keeps the cd sure.
   assert.deepEqual(hook("cd .approval; pwd; echo hi; cd ..; echo x > notes.md"), ALLOWED);
 });

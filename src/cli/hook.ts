@@ -5970,8 +5970,9 @@ export function refineWriteLandings(
    * exists now may be gone, renamed or unsearchable when a later cd runs if an
    * earlier unit writes, deletes, moves, links or changes modes anywhere
    * (`rmdir d; cd d`, `mv d e; cd d`, `chmod 000 d; cd d`, `npm test; cd d`).
-   * Only a cd and {@link CANNOT_CHANGE_DISK}'s builtins with no redirection
-   * leave it false: a reader can run code (`sort --compress-program`, `rg
+   * Only a cd and {@link CANNOT_CHANGE_DISK}'s builtins with no redirection,
+   * assignment or expansion leave it false (an assignment may move where a
+   * later cd lands: `printf -v CDPATH`, `: ${CDPATH:=/tmp}`, `read CDPATH`): a reader can run code (`sort --compress-program`, `rg
    * --pre`, sed's `e`), so a `read.*` class is no proof.
    */
   let earlierMayChange = false;
@@ -6302,9 +6303,12 @@ export function refineWriteLandings(
         unit.unreadable === null &&
         bin !== null &&
         CANNOT_CHANGE_DISK.has(bin) &&
+        shape.assignments.length === 0 &&
         shape.writes.length === 0 &&
         (shape.clobberBashWrites?.length ?? 0) === 0 &&
-        !/[<>]/u.test(shape.text);
+        // Nor a `$` or a backtick: an expansion may assign where a later cd
+        // lands (`: ${CDPATH:=/tmp}`, `echo ${HOME:=/x}`). Blunt on purpose.
+        !/[<>$`]/u.test(shape.text);
       if (!quiet) earlierMayChange = true;
     }
     if (unit.unreadable !== null) {
@@ -6555,11 +6559,13 @@ export function refineWriteLandings(
 const MAX_LANDING_BYTES = 4096;
 
 /**
- * Builtins that change nothing on the disk when they have no redirection
- * (review-b's S1 on #715, tightened on its security review): only these, and
- * a cd, leave a later cd into an existing folder sure to succeed.
+ * Builtins that change nothing on the disk, and set no variable, when they
+ * have no redirection, no assignment prefix and no `$` or backtick (review-b's
+ * S1 on #715, tightened on its security reviews; `printf -v` assigns, so
+ * printf is not here): only these, and a cd, leave a later cd into an existing
+ * folder sure to succeed.
  */
-const CANNOT_CHANGE_DISK: ReadonlySet<string> = new Set(["true", ":", "echo", "printf", "pwd", "test", "["]);
+const CANNOT_CHANGE_DISK: ReadonlySet<string> = new Set(["true", ":", "echo", "pwd", "test", "["]);
 
 /**
  * The most `<dir>/<source name>` landings one copy, move or link segment is
