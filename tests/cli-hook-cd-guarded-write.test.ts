@@ -39,7 +39,10 @@ delete process.env["HERMES_HOME"];
 delete process.env["APPROVAL_HERMES_HOME"];
 delete process.env["CLAUDE_CONFIG_DIR"];
 delete process.env["CLAUDE_PROJECT_DIR"];
-const ws = join(base, "ws");
+// The checkout sits under the fixture HOME: a temp folder under another user's
+// home (TMPDIR below /Users/<name>) would otherwise be judged as that home
+// (review-b's N7 on #714).
+const ws = join(base, "home", "ws");
 mkdirSync(ws, { recursive: true });
 spawnSync("git", ["init", "-q"], { cwd: ws });
 for (const path of [
