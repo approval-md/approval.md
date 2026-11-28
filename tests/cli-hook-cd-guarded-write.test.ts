@@ -285,3 +285,37 @@ test("a delete or a move's source after a cd this hook cannot follow is guarded,
   assert.deepEqual(hook("rm -f notes.md"), ["files.write.workspace"]);
   assert.deepEqual(hook("cd docs && rm -f notes.md"), ALLOWED);
 });
+
+// The faults no row pinned (review-b's read of #715): each test below fails
+// with one of its planted faults (R2, R4, R5, R6, C16) and passes here.
+
+test("a write word through a variable the line sets is spelled again where the cd lands it", () => {
+  holds("F=settings.json; cd .claude && echo x > $F", "policy.core");
+  holds('F=env; cd .approval && cp /dev/null "$F"', "account.credential");
+});
+
+test("a program's `--opt=value` write word is read by its value where the cd lands it", () => {
+  holds("cd .claude && sort --output=settings.json ../x", "policy.core");
+  holds("cd .claude && curl --output=settings.json https://example.invalid/x", "policy.core");
+  holds("cd .approval/log && cp --target-directory=. /dev/null", "log.mutate");
+});
+
+test("an argv word with two landings is read at each, not only the first", () => {
+  // .approval/new does not exist, so that cd may fail and the second cd may run.
+  holds("cd .approval/new || cd .github/workflows; cp /dev/null ci.yml", "policy.core");
+  holds("cd .approval/new || cd .github/workflows; cp /dev/null ci.yml", "policy.edit");
+});
+
+test("a subshell's frame is taken as it opens: its cd does not reach the segment after it", () => {
+  assert.deepEqual(hook("(cd .approval && ls); echo x > notes.md"), ALLOWED);
+  const after = hook("(cd .claude && ls); echo x > settings.json");
+  assert.ok(typeof after !== "string" && !after.includes("policy.core"), JSON.stringify(after));
+});
+
+test("a spelling that names nothing guarded moves nothing: a delete after a cd into the home or the root", () => {
+  // The mutant that made every spelling guarded (C16) added files.delete.out_of_scope here.
+  for (const line of ["cd ~ && rm -rf work", "cd / && rm -rf tmp"]) {
+    const got = hook(line);
+    assert.ok(typeof got !== "string" && !got.includes("files.delete.out_of_scope"), `${line}: ${JSON.stringify(got)}`);
+  }
+});
