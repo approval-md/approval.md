@@ -40,7 +40,7 @@ import { fileURLToPath } from "node:url";
 
 import { readPathEntry } from "../src/cli/git-dir-writes.js";
 import { listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
-import { chmodPlainArgv, chmodRelaxedShape, classifyForHook, hookSettingsReads, HOOK_SETTINGS_MAX_BYTES, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, memoDiskReads, writeLandingJudgements, writeLandingMemo, type WriteScopeContext } from "../src/cli/hook.js";
+import { chmodPlainArgv, chmodRelaxedShape, classifyForHook, hookSettingsReads, HOOK_SETTINGS_MAX_BYTES, judgeWriteLanding, readTar, refineWriteLandings, resolveWriteScope, WRITE_SCOPE_OFF, memoDiskReads, writeLandingJudgements, writeLandingMemo, type WriteScopeContext } from "../src/cli/hook.js";
 import { classifyCommandInThisReading } from "../src/core/command-class.js";
 import { withNamesAsSpelled } from "../src/core/name-fold.js";
 import { commandGate } from "../src/cli/gate-window.js";
@@ -1456,6 +1456,30 @@ const S2_SETTINGS = JSON.stringify({
   statusLine: { type: "command", command: "~/.config/iterm2/cc-status" },
   apiKeyHelper: "~/keys/helper.sh",
   permissions: { allow: ["Bash(~/not-a-hook/x.sh)"] },
+});
+
+test("an existing canonical landing retains hook guards, tree mode and scope; process handles stay unreadable", () => {
+  const dir = join(base, "canonical-landing");
+  mkdirSync(dir);
+  const script = join(dir, "guard.sh");
+  const plain = join(dir, "plain");
+  writeFileSync(script, "# synthetic hook\n");
+  writeFileSync(plain, "x\n");
+  symlinkSync(dir, join(base, "canonical-alias"));
+  const guard = { homes: [], configDirs: [], hookScripts: () => new Set([script.toLowerCase()]) };
+  assert.equal(judgeWriteLanding(dir, WRITE_SCOPE_OFF, guard).kind, "in");
+  assert.equal(judgeWriteLanding(dir, WRITE_SCOPE_OFF, guard, true).kind, "guarded");
+  assert.equal(judgeWriteLanding(script, WRITE_SCOPE_OFF, guard).kind, "guarded");
+  assert.equal(judgeWriteLanding(join(base, "canonical-alias", "guard.sh"), WRITE_SCOPE_OFF, guard).kind, "guarded");
+  assert.deepEqual(judgeWriteLanding(plain, { ...WRITE_SCOPE_OFF, optedIn: true, roots: [] }, guard), { kind: "out", path: plain });
+  // Even a realpath implementation returning the spelling cannot vouch for
+  // another process's cwd/fd/root. The kernel reader owns that refusal.
+  const disk = { ...memoDiskReads(), realpath: (path: string): string => path };
+  for (const path of ["/proc/self", "/proc/self/cwd", "/proc/thread-self/fd/0", "/proc/123/task/1"]) {
+    const landing = judgeWriteLanding(path, WRITE_SCOPE_OFF, guard, false, disk);
+    assert.equal(landing.kind, "guarded", path);
+    assert.ok(landing.kind === "guarded" && landing.rule === "write-unreadable", path);
+  }
 });
 
 test("each spelling answers by its own landing forms: a folder landed from a second run directory keeps its guard (PRIORITIES:331, review-a S1 on 6390d987)", () => {

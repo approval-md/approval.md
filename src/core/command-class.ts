@@ -422,6 +422,7 @@ const BRACE_EXPANSION_STEPS = 1024;
  * Every caller reads `null` as the stricter class.
  */
 export function braceExpansions(word: string): string[] | null {
+  if (!word.includes("{")) return [word];
   const results: string[] = [];
   const pending: string[] = [word];
   let steps = 0;
@@ -459,6 +460,9 @@ export function braceExpansions(word: string): string[] | null {
  * group is a sequence or list of plain numbers ({@link numericRepresentative}).
  */
 export function braceCandidates(word: string): string[] | null {
+  // With neither brace there is no expansion or stray brace to remove. Most
+  // expanded argv names are in this case: do not hash and rescan each one.
+  if (!word.includes("{") && !word.includes("}")) return [word];
   // Remembered for one classification call ({@link withClassifyCall}): the
   // same word is expanded by every pass over a line (the spliced reading, the
   // line's main pass at the seam, each name reading), and a 1 MB word of
@@ -2640,6 +2644,12 @@ interface PendingHeredoc {
  * edit that loses the property fails there rather than in someone's notes.
  */
 function lex(command: string, bodiesCut = false): LexResult {
+  // A maximal unquoted run: quotes, escapes, substitutions and operators
+  // still go through their own readers below. Reading a long path or glob
+  // as one slice avoids building and rescanning one character at a time.
+  // No Unicode flag: an escape can leave index inside a surrogate pair, and
+  // the old reader resumes at that code unit, without rewinding the pair.
+  const unquotedRun = /[^ \t\n&|;()<>'"\\`$]+/y;
   const segments: LexSegment[] = [];
   let words: LexWord[] = [];
   let redirects: LexRedirect[] = [];
@@ -2850,6 +2860,19 @@ function lex(command: string, bodiesCut = false): LexResult {
         continue;
       }
 
+      if (ch !== "$") {
+        unquotedRun.lastIndex = index;
+        const run = unquotedRun.exec(command)?.[0];
+        if (run !== undefined) {
+          const end = unquotedRun.lastIndex;
+          if (/[{*?[]/u.test(run)) expands = true;
+          if (/[#^~]/u.test(run)) zshGlob = true;
+          if (/[{*?[~]/u.test(run)) exact = false;
+          text += run;
+          index = end - 1;
+          continue;
+        }
+      }
       if (ch === "$" && dollarQuotesKept && (command[index + 1] === "'" || command[index + 1] === '"')) literalDollars.push(text.length);
       if (ch === "$") splits = true;
       else if (ch === "{" || ch === "*" || ch === "?" || ch === "[") expands = true;

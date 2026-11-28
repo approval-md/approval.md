@@ -32,9 +32,26 @@ import { test } from "node:test";
 
 import {
   classifyCommand,
+  commandSegmentShapes,
   commandSegmentWords,
   type ProtectedPathEntry,
 } from "../src/core/command-class.js";
+
+test("an escape ending inside a surrogate pair preserves each code unit once", () => {
+  // A backslash consumes the high surrogate; the following unquoted run
+  // starts on the low one. A Unicode sticky expression can rewind to the
+  // high one and duplicate it, changing argv bytes and literal-dollar offsets.
+  for (const prefix of ["", "a", "'$'", '"x"']) {
+    for (const pair of ["\ud800\udc00", "\udbff\udfff", "\ud800", "\udc00"]) {
+      const raw = `${prefix}\\${pair}tail`;
+      const expected = `${prefix === "'$'" ? "$" : prefix === '"x"' ? "x" : prefix}${pair}tail`;
+      assert.deepEqual(commandSegmentWords(`echo ${raw}`)?.[0]?.args, [expected]);
+      assert.deepEqual(commandSegmentShapes(`cp ${raw} out`)?.[0]?.argFlags, [
+        { splits: false, expands: false }, { splits: false, expands: false },
+      ]);
+    }
+  }
+});
 
 /** The note text from the incident: every construct that was misread, at once. */
 const INCIDENT_NOTE =

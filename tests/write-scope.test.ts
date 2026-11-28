@@ -44,6 +44,20 @@ after(() => {
 const HOME = "/Users/tester";
 const HOMES = [HOME, "/private/var/tester-real"];
 
+test("a tree's home prefix keeps ancestor, folded suffix and near-miss boundaries", () => {
+  const homes = ["/lab/straße/person"];
+  for (const [path, entry] of [
+    ["/lab", "~/.ssh"],
+    ["/lab/STRASSE/person", "~/.ssh"],
+    ["/lab/strasse/person/.config", "~/.config/fish"],
+    ["/lab/straße/person/Library", "~/Library/LaunchAgents"],
+    ["/lab/strasse/person/.config/fish", null],
+    ["/lab/strasse/person/.config/fis", null],
+    ["/lab/strasse/person2", null],
+    ["/lab/straße/person/../x", null],
+  ] as const) assert.equal(guardedEntryBelow(path, homes), entry, path);
+});
+
 // ---------------------------------------------------------------------------
 // The guarded list
 // ---------------------------------------------------------------------------
