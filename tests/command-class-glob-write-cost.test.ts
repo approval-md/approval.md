@@ -29,7 +29,7 @@ import { after, test } from "node:test";
 
 import { listGlobWriteDirsFor } from "../src/cli/glob-listing.js";
 import { classifyForHook, WRITE_SCOPE_OFF } from "../src/cli/hook.js";
-import { cpuSeconds } from "./cost-runner.js";
+import { cpuSeconds, runner } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-glob-write-cost-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -96,6 +96,36 @@ async function pinned(name: string, command: string, bound: number): Promise<str
   assert.ok(seconds < bound, `${name}: ${seconds.toFixed(2)} CPU s, bound ${bound.toFixed(2)} (this line's own bound, not stretched)`);
   return classes;
 }
+
+/**
+ * MEASUREMENT ONLY (this commit asserts nothing new): each line again at a
+ * half, a quarter and an eighth of its bytes, and a twin with no pattern, with
+ * user and system CPU apart and the runner's factor, so the ratio rule's
+ * numbers are set from CI's own readings on more than one runner.
+ */
+async function measured(name: string, command: string): Promise<void> {
+  const start = process.cpuUsage();
+  const listings = await listGlobWriteDirsFor(command, [PROJECT]);
+  classifyForHook(command, [], PROJECT, [], false, [], false, WRITE_SCOPE_OFF, listings);
+  const used = process.cpuUsage(start);
+  console.log(`# cost-measure: COST686M ${name}: ${((used.user + used.system) / 1e6).toFixed(3)} CPU s (user ${(used.user / 1e6).toFixed(3)}, system ${(used.system / 1e6).toFixed(3)}; ${Buffer.byteLength(command)} bytes; node ${process.version})`);
+}
+
+test("measure: the three lines at smaller sizes and without patterns (printed, not asserted)", async () => {
+  console.log(`# cost-measure: COST686M ${runner().line}`);
+  const repeat = (unit: string, bytes: number): string => unit.repeat(Math.floor(bytes / unit.length));
+  const shapes: Array<[string, number, (bytes: number) => string, (bytes: number) => string]> = [
+    ["glob_sources", 10_000, (bytes) => distinct("cp", (index) => ` .c${index}*/x.json`, bytes), (bytes) => distinct("cp", (index) => ` .c${index}_/x.json`, bytes)],
+    ["rsync_relative", 7000, (bytes) => distinct("rsync -aR", (index) => ` s${index}/*/./a*`, bytes), (bytes) => distinct("rsync -aR", (index) => ` s${index}/_/./a_`, bytes)],
+    ["rm_dot_names", 10_000, (bytes) => repeat("rm -rf ./*; ", bytes), (bytes) => repeat("rm -rf ./_; ", bytes)],
+  ];
+  for (let round = 1; round <= 3; round += 1) {
+    for (const [name, bytes, pattern, plain] of shapes) {
+      for (const [label, divisor] of [["full", 1], ["half", 2], ["quarter", 4], ["eighth", 8]] as const) await measured(`${name} ${label} round ${round}`, pattern(Math.floor(bytes / divisor)));
+      await measured(`${name} plain round ${round}`, plain(bytes));
+    }
+  }
+});
 
 test("cost (L62051): distinct glob sources, `cp .c0*/x.json .c1*/x.json …` at 10 KB", async () => {
   const command = distinct("cp", (index) => ` .c${index}*/x.json`, 10_000);
