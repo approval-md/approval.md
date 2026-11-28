@@ -243,6 +243,8 @@ test("cost: wide and long patterns are bounded and fail to the stricter class", 
   classesOf(`echo x > out/${"[".repeat(1000)}x`);
   classesOf(`echo x > out/[${"]".repeat(1000)}`);
   const spent = process.cpuUsage(started);
+  // Measuring only (#720's list): the reading, printed before it is judged.
+  console.log(`# cost-line: GW wide and long patterns: ${((spent.user + spent.system) / 1e6).toFixed(3)} CPU s (bound 10, not stretched; node ${process.version})`);
   assert.ok((spent.user + spent.system) / 1e6 < 10, `took ${String((spent.user + spent.system) / 1e6)} s`);
 });
 
@@ -323,6 +325,8 @@ test("review 4: the matcher's work is bounded; exhausted, the word is log.mutate
   classesOf(`echo x > ${Array.from({ length: 32 }, () => "[".repeat(200) + "]".repeat(200)).join("/")}`);
   classesOf(`echo x > ${Array.from({ length: 8 }, () => "${X:-" + "[".repeat(300) + "]".repeat(300) + "}").join("")}`);
   const spent = process.cpuUsage(started);
+  // Measuring only (#720's list): the reading, printed before it is judged.
+  console.log(`# cost-line: GW review 4 matcher budget: ${((spent.user + spent.system) / 1e6).toFixed(3)} CPU s (bound 10, not stretched; node ${process.version})`);
   assert.ok((spent.user + spent.system) / 1e6 < 10, `took ${String((spent.user + spent.system) / 1e6)} s`);
 });
 
@@ -675,6 +679,8 @@ test("review-b M1: one matcher budget for the whole line; exhausted is strict, a
   const result = classifyCommand(line);
   const spent = process.cpuUsage(started);
   const seconds = (spent.user + spent.system) / 1e6;
+  // Measuring only (#720's list): the reading, printed before it is judged.
+  console.log(`# cost-line: GW review-b M1 one budget: ${seconds.toFixed(3)} CPU s (bound 5, not stretched; node ${process.version})`);
   assert.ok(result.ok);
   assert.ok(result.classes.includes("log.mutate"), result.classes.join(","));
   assert.ok(seconds < 5, `took ${String(seconds)} CPU s`);
@@ -1165,6 +1171,8 @@ test("review A686-FOLD2 (M1, M2): a copy's destinations and sources are judged o
     const seconds = cpuSeconds(() => {
       classes = classesOf(line);
     });
+    // Measuring only (#720's list): a relative cell with a constant of 1 CPU s, printed before it is judged.
+    console.log(`# cost-line: GW A686-FOLD2 ${label}: ${seconds.toFixed(3)} CPU s (control ${base.toFixed(3)}; relative bound ${(FACTOR * base + 1).toFixed(3)}; node ${process.version})`);
     // The class is unchanged: the step budget, then the guarded destination, answers.
     assert.ok(classes.some((cls) => HUMAN_ONLY.has(cls)), `${label} -> ${classes.join(",")}`);
     assert.ok(seconds < FACTOR * base + 1, `${label}: ${seconds.toFixed(2)} CPU s, the control ${base.toFixed(2)}, factor ${String(FACTOR)}`);

@@ -989,6 +989,8 @@ test("a long path of Hermes homes costs about what a same-length ordinary path c
     for (const end of [".env", "../.env"]) {
       const word = `${fill(unit)}${end}`;
       const spent = cpu(() => judge(word));
+      // Measuring only (#720's list): a relative cell with a constant of 1 CPU s.
+      console.log(`# cost-line: FOLD hermes homes ${unit}…${end}: ${spent.toFixed(3)} CPU s (control ${control.toFixed(3)}; relative bound ${(8 * control + 1).toFixed(3)}; node ${process.version})`);
       assert.ok(spent <= 8 * control + 1, `${unit}…${end}: ${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
     }
   }
@@ -1703,6 +1705,8 @@ test("a long attached option word behind a wrapper costs about what the same wor
   const least = (run: () => void): number => Math.min(cpu(run), cpu(run), cpu(run));
   const control = least(() => classifyCommand(`frobnicate .approval/env o${fill}`, TWO_ROUTES));
   const spent = least(() => classifyCommand(`frobnicate .approval/env -o${fill}`, TWO_ROUTES));
+  // Measuring only (#720's list): the reading, its relative bound and its fixed 1 CPU s, printed before they are judged.
+  console.log(`# cost-line: FOLD attached option word: ${spent.toFixed(3)} CPU s (bound 1, not stretched; control ${control.toFixed(3)}, relative bound ${(2 * control + 0.05).toFixed(3)}; node ${process.version})`);
   assert.ok(spent <= 2 * control + 0.05, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
   assert.ok(spent < 1, `${spent.toFixed(3)} s`);
 });
@@ -2171,6 +2175,8 @@ test("a line of many folded segments costs about what the same line spelled cano
   };
   const control = cpu(() => classifyCommand(fill("echo x > .cursor/hooks.json; ")));
   const spent = cpu(() => classifyCommand(fill(`echo x > .Cursor/hoo${KELVIN}s.json; `)));
+  // Measuring only (#720's list): a relative cell with a constant of 1 CPU s.
+  console.log(`# cost-line: FOLD many folded segments: ${spent.toFixed(3)} CPU s (control ${control.toFixed(3)}; relative bound ${(8 * control + 1).toFixed(3)}; node ${process.version})`);
   assert.ok(spent <= 8 * control + 1, `${spent.toFixed(3)} s against a control of ${control.toFixed(3)} s`);
 });
 
@@ -2282,6 +2288,8 @@ test("a copy into a credential path with many -t targets or many sources costs a
     const line = fill("cp ~/.hermes/.env", unit);
     const control = least(() => classifyCommand(fill("cp notes.txt", unit), TWO_ROUTES));
     const spent = least(() => classifyCommand(line, TWO_ROUTES));
+    // Measuring only (#720's list): a relative cell with a constant of 0.1 CPU s.
+    console.log(`# cost-line: FOLD many -t ${line.slice(18, 40)}: ${spent.toFixed(3)} CPU s (control ${control.toFixed(3)}; relative bound ${(2 * control + 0.1).toFixed(3)}; node ${process.version})`);
     assert.ok(spent <= 2 * control + 0.1, `${line.slice(0, 60)}: ${spent.toFixed(3)} s against ${control.toFixed(3)} s`);
   }
 });

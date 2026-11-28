@@ -31,7 +31,7 @@ import { test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand, classifyCommandWithDollarQuotesKept, classifyCommandWithMainRules, splicedCredentialMemoHeld } from "../src/core/command-class.js";
-import { cpuSeconds, runner, scaledBound } from "./cost-runner.js";
+import { cpuSeconds, heldLine, pairReading, type RatioRule, runner, scaledBound } from "./cost-runner.js";
 
 const ROUTES = [
   { path: ".github/workflows/", class: "policy.edit.ci" },
@@ -393,12 +393,14 @@ test("through the hook: a spliced write is not allowed alone, and a spliced cred
  * the walked-once cases in guarded-names-fold-case time theirs): the median
  * of the pairs' ratios, and the line's median call in CPU seconds.
  */
-function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number): { ratio: number; spent: number } {
+function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number): { ratio: number; spent: number; control: number } {
   // Once each, untimed: the first call pays for the compiler.
   controlRun();
   spentRun();
   const ratios: number[] = [];
   const spents: number[] = [];
+  // Measuring only (#720's list): the control's median call is printed too.
+  const controls: number[] = [];
   for (let round = 0; round < rounds; round += 1) {
     let control: number;
     let spent: number;
@@ -411,14 +413,54 @@ function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number
     }
     ratios.push(spent / Math.max(control, 1e-6));
     spents.push(spent);
+    controls.push(control);
   }
   const median = (values: number[]): number => {
     values.sort((left, right) => left - right);
     const middle = values.length >> 1;
     return values.length % 2 === 1 ? values[middle]! : (values[middle - 1]! + values[middle]!) / 2;
   };
-  return { ratio: median(ratios), spent: median(spents) };
+  return { ratio: median(ratios), spent: median(spents), control: median(controls) };
 }
+
+/**
+ * Each paired control's largest median on CI, CPU s (#720's list; run
+ * 46140003817, attempts 1 and 2, node 22: the parameter line's control 0.014
+ * beside a median of 0.043, attempt 1; the escapes line's 0.094, attempt 2).
+ */
+const PAIRED_CONTROL_CI_S: Readonly<Record<"parameter" | "escapes", number>> = { parameter: 0.014, escapes: 0.094 };
+
+/**
+ * The most a paired control may read of its CI figure, before the runner's
+ * factor. Three, as #719 holds its controls: each figure is one node 22 run's,
+ * and the node 20 floor has not read these controls yet.
+ */
+const PAIRED_CONTROL_MOST = 3;
+
+/**
+ * The backslash line's RATIO rule (#720's list): R three times the largest
+ * ratio CI read, 5.03 (run 46145131980, attempts 1 and 2, node 22); the
+ * control's figure its largest least reading there, CPU s. The walk (before the segments bound) took 0.8
+ * CPU s, about a hundred times this control.
+ */
+const BACKSLASH_RULE: RatioRule = { ratioBound: 16, controlCi: 0.013, most: 3 };
+
+/** A paired control against its own bound (`runnerFactor` passed in so the rule can be tested with figures). */
+function pairedControlJudged(controlSeconds: number, ciSeconds: number, runnerFactor: number): { controlBound: number; controlOver: boolean } {
+  const controlBound = PAIRED_CONTROL_MOST * ciSeconds * runnerFactor;
+  return { controlBound, controlOver: !(controlSeconds < controlBound) };
+}
+
+test("cost: a paired control is held by its own bound, stretched by the runner's factor and by nothing else (#720's list)", () => {
+  for (const ci of Object.values(PAIRED_CONTROL_CI_S)) {
+    assert.ok(ci > 0);
+    assert.deepEqual(pairedControlJudged(ci, ci, 1), { controlBound: PAIRED_CONTROL_MOST * ci, controlOver: false });
+    // A change that slows the control (and its line with it) to three times its figure reds.
+    assert.equal(pairedControlJudged(PAIRED_CONTROL_MOST * ci, ci, 1).controlOver, true);
+    assert.equal(pairedControlJudged(PAIRED_CONTROL_MOST * ci, ci, 1.5).controlOver, false);
+  }
+  assert.equal(PAIRED_CONTROL_MOST, 3);
+});
 
 test("cost: a word of 3,000 unread parts is bounded, and past the bound could be any path", (t) => {
   const bound = scaledBound(1);
@@ -432,6 +474,8 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
     const seconds = cpuSeconds(() => {
       classes = classesOf(command);
     });
+    // Measuring only (#720's list): the reading, printed before it is judged.
+    console.log(`# cost-line: SPLICE ${label}: ${seconds.toFixed(3)} CPU s (bound ${bound.toFixed(2)}; ${runner().line})`);
     assert.ok(seconds < bound, `${label}: ${seconds.toFixed(3)} CPU s, bound ${bound.toFixed(2)} (${runner().line})`);
     if (strict) assert.ok(classes.some((cls) => GUARDED.has(cls)), `${label}: ${classes.join(",")}`);
     else assert.deepEqual(classes, mainClasses(command), label);
@@ -445,15 +489,27 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
   // ratio to the control is bounded too. Measured on a laptop: the escapes
   // line 1.11 (node 26) and 1.40 (node 20) of the same line with `\n`; the
   // parameter line 2.8 to 3.5 of the line without it.
-  for (const [command, control, most] of [
-    [`echo x > a$E${"b".repeat(99_000)}`, `echo x > ab${"b".repeat(99_000)}`, 8],
-    [`cp a $'${"a\\q".repeat(33_000)}'`, `cp a $'${"a\\n".repeat(33_000)}'`, 3],
+  //
+  // Since #720 the median call's 0.4 is printed, not asserted (CI read 0.158
+  // of it with the code unchanged), and the control holds a bound of its own
+  // in its place ({@link PAIRED_CONTROL_CI_S}), so a change that slows the
+  // line and its control together still reds.
+  for (const [name, command, control, most] of [
+    ["parameter", `echo x > a$E${"b".repeat(99_000)}`, `echo x > ab${"b".repeat(99_000)}`, 8],
+    ["escapes", `cp a $'${"a\\q".repeat(33_000)}'`, `cp a $'${"a\\n".repeat(33_000)}'`, 3],
   ] as const) {
-    const { ratio, spent } = pairedCost(() => classifyCommand(control, []), () => classifyCommand(command, []), 21);
+    const { ratio, spent, control: controlSeconds } = pairedCost(() => classifyCommand(control, []), () => classifyCommand(command, []), 21);
+    const { controlBound, controlOver } = pairedControlJudged(controlSeconds, PAIRED_CONTROL_CI_S[name], runner().factor);
     const label = `${command.slice(0, 20)}: median ${spent.toFixed(3)} CPU s, ${ratio.toFixed(2)} of its control (${runner().line})`;
-    t.diagnostic(`${label}; bounds ${scaledBound(0.4).toFixed(2)} CPU s and ${String(most)}`);
-    assert.ok(spent < scaledBound(0.4), label);
+    t.diagnostic(`${label}; bound ${String(most)}`);
+    console.log(
+      `# cost-line: SPLICE paired ${command.slice(0, 20)}: median ${spent.toFixed(3)} CPU s (the fixed ${scaledBound(0.4).toFixed(2)} is printed, not asserted; control median ${controlSeconds.toFixed(3)}, ratio ${ratio.toFixed(2)} of ${String(most)}; the control's own bound ${controlBound.toFixed(3)}; ${runner().line})`,
+    );
     assert.ok(ratio <= most, label);
+    assert.ok(
+      !controlOver,
+      `${name}'s control: median ${controlSeconds.toFixed(3)} CPU s, its own bound ${controlBound.toFixed(3)} (${String(PAIRED_CONTROL_MOST)} times CI's ${String(PAIRED_CONTROL_CI_S[name])}, by the runner's factor); ${runner().line}`,
+    );
   }
   // The judge reads a `\\` as a separator: past the segments bound a word
   // with a real parameter in it could be any path, and costs a scan.
@@ -463,7 +519,13 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
     const seconds = cpuSeconds(() => {
       classes = classesOf(command);
     });
-    assert.ok(seconds < scaledBound(0.4), `backslashes beside a parameter: ${seconds.toFixed(3)} CPU s (${runner().line})`);
+    // Held by the RATIO rule (#720's list: CI read 0.217 of its 0.4 with the
+    // code unchanged): read three times beside a plain word of its length,
+    // the least of each judged; the 0.4 is printed. One word, longer than the
+    // spliced memo keeps, so no reading is served from it.
+    const { text, over } = heldLine("SPLICE", "backslashes beside a parameter", pairReading(seconds, command, (each) => classifyCommand(each, [])), BACKSLASH_RULE, `${scaledBound(0.4).toFixed(2)} CPU s`);
+    console.log(text);
+    assert.deepEqual(over, [], over.join("; "));
     assert.ok(classes.includes("log.mutate"), classes.join(","));
     assert.deepEqual(classesOf(`tee $a'${"a\\q".repeat(30)}'`), mainClasses(`tee $a'${"a\\q".repeat(30)}'`));
     // A `\\` counts toward that bound only past 1,024 of them: a pattern's

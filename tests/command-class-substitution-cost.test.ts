@@ -31,7 +31,7 @@ import { after, test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand, globSegmentMatches } from "../src/core/command-class.js";
-import { cpuSeconds, MOST, runner, scaledBound } from "./cost-runner.js";
+import { cpuSeconds, heldLine, leastOfThree, MOST, pairReading, type RatioRule, runner, scaledBound } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-subst-cost-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -95,11 +95,41 @@ function notAlreadyOver(label: string): void {
 const MANY_COMMAND_WORDS_BOUND = 1.5 * 7.35;
 
 /**
+ * The line's RATIO rule (#720's list), or null where no control qualified
+ * and the line keeps {@link MANY_COMMAND_WORDS_BOUND}. The control is a plain
+ * word of the line's length (the seat's ruling: the eighth of the words does
+ * not qualify). CI read the line at 3.72 times it at most (run 46145131980,
+ * attempts 1 and 2, node 22), so R is 12; the control's figure is 1.09 CPU s
+ * there. The walk ef0531c0
+ * removed (shifts, at b085cd91) read 10.5 CPU s under node 24 here, 48.7
+ * times this code's plain word (90 times b085cd91's own): half is 24.4, over
+ * 12. Against the eighth it read 36.7, under the 26 that eighth would need.
+ */
+const MANY_COMMAND_WORDS_RULE: RatioRule | null = { ratioBound: 12, controlCi: 1.09, most: 3 };
+
+/**
+ * `line` held by its ratio to a plain word of its length: read three times
+ * beside three readings of the plain word, the least of each judged; the
+ * fixed bound is printed. One word, longer than any memo keeps.
+ */
+function manyCommandWordsHeld(line: string, label: string, rule: RatioRule): void {
+  notAlreadyOver(label);
+  const first = cpuSeconds(() => void pure(line));
+  const { text, over } = heldLine("SUB", label, pairReading(first, line, (text) => pure(text), "a".repeat(line.length)), rule, `${MANY_COMMAND_WORDS_BOUND.toFixed(2)} CPU s, not stretched`);
+  console.log(text);
+  if (over.length > 0) overBound = label;
+  assert.deepEqual(over, [], `${label}: ${over.join("; ")}`);
+}
+
+/**
  * Fail if `seconds` is over the bound, and remember it. The bound is
  * {@link BOUND} as this runner stretches it, or `own` as written.
  */
 function withinBound(seconds: number, label: string, own?: number): void {
   const bound = own ?? scaledBound(BOUND);
+  // Measuring only (#720's list): every line held to the general bound prints
+  // its reading before it is judged (a line with its own bound already does).
+  if (own === undefined) console.log(`# cost-line: SUB ${label}: ${seconds.toFixed(3)} CPU s (bound ${bound.toFixed(2)}; ${runner().line})`);
   if (seconds >= bound) overBound = label;
   const how = own === undefined ? `${String(BOUND)} x ${runner().line}` : "this line's own bound, set from main's figure on CI and not stretched";
   assert.ok(seconds < bound, `${label}: ${seconds.toFixed(2)} CPU s, bound ${bound.toFixed(2)} (${how})`);
@@ -111,15 +141,87 @@ function withinBound(seconds: number, label: string, own?: number): void {
  * with its own bound logs what it took, so the figure the bound came from can
  * be read again in any run.
  */
-function bounded(command: string, label: string, own?: number): string[] {
+function bounded(command: string, label: string, own?: number, variant?: (k: number) => string): string[] {
   notAlreadyOver(label);
   let answer: string[] = [];
   const seconds = cpuSeconds(() => {
     answer = pure(command);
   });
   if (own !== undefined) console.log(`# cost-line: ${label}: ${seconds.toFixed(2)} CPU s (bound ${own.toFixed(2)}; node ${process.version})`);
+  if (own === undefined && SUB_HELD[label] !== undefined) {
+    heldSub(label, seconds, command, (text) => pure(text));
+    return answer;
+  }
+  if (own === undefined && SUB_LEAST_OF_THREE.has(label)) {
+    leastOfThreeSub(label, seconds, (k) => cpuSeconds(() => void pure(variant === undefined ? command : variant(k))));
+    return answer;
+  }
   withinBound(seconds, label, own);
   return answer;
+}
+
+/**
+ * The lines CI read under five times {@link BOUND} with the code unchanged,
+ * each held by the RATIO rule (#720's list) and not by the bound, which is
+ * printed beside it: the line read three times beside three readings of the
+ * same line with its costly part spelled as a plain word of the same length
+ * (`plainLike` in cost-runner.ts), the least of each judged ({@link heldLine}). R is three
+ * times the largest ratio CI read (run 46145131980, attempts 1 and 2, node
+ * 22; printf %s printed its reading in attempt 2 only); each control figure
+ * is its largest least reading there, CPU s. The walks, at b085cd91 on a
+ * laptop under node 24 against the larger of its control and this code's:
+ * nested defaults 98 CPU s (3,700 times; through the hook the same walk and
+ * more), `echo` of unclosed ${ 97 (1,060), printf %.0s 106 (1,750), printf
+ * %s 15.2 (437), echo's flags 14.4 (305). Each R is under half of its walk.
+ * Lines CI read under five times the bound that keep it, with no control
+ * that can tell their walk at this size (#720's list, section E): brace
+ * groups and one-alternative ranges beside outputs, pure and through the
+ * hook (R 728 and 282, 1,950 and 823; walks 645 and 296, 600 and 310 times),
+ * nested defaults at n=2000 (R 543; walk 384), nested expansions (R 54; walk
+ * 35) and many printf -v segments (no walk was measured).
+ */
+const SUB_HELD: Readonly<Record<string, RatioRule>> = {
+  "nested defaults with outputs, n=20000": { ratioBound: 313, controlCi: 0.032, most: 3 },
+  "hook, nested defaults with outputs": { ratioBound: 108, controlCi: 0.16, most: 3 },
+  "hook, echo of unclosed ${": { ratioBound: 55, controlCi: 0.274, most: 3 },
+  "printf %.0s of many words, n=400000": { ratioBound: 33, controlCi: 0.225, most: 3 },
+  "printf %s of many words, n=400000": { ratioBound: 40, controlCi: 0.129, most: 3 },
+  "echo of many flags, n=400000": { ratioBound: 26, controlCi: 0.204, most: 3 },
+};
+
+/**
+ * The lines kept on {@link BOUND} above with under five times headroom on CI.
+ * The bound is unchanged; since #720 the reading is the least of three calls,
+ * because one cold call read up to three times a warm one and reddened
+ * unchanged code on slow runners. Each is one word past every memo the
+ * classifier keeps between calls, but for the printf -v segments, which name
+ * a short `$d`: there each further call names another variable.
+ */
+const SUB_LEAST_OF_THREE: ReadonlySet<string> = new Set([
+  "brace groups and outputs, one word, 100 KB",
+  "one-alternative ranges beside outputs, n=2000",
+  "nested defaults with outputs, n=2000",
+  "nested expansions, n=60000",
+  "many printf -v segments, n=20000",
+  "hook, one-alternative ranges beside outputs",
+  "hook, brace groups and outputs, 100 KB",
+]);
+
+/** A line in {@link SUB_LEAST_OF_THREE}, first read at `first`: the least of three readings, judged by the stretched {@link BOUND}. */
+function leastOfThreeSub(label: string, first: number, again: (k: number) => number): void {
+  const bound = scaledBound(BOUND);
+  const { calls, least } = leastOfThree(first, again);
+  console.log(`# cost-line: SUB ${label}: ${least.toFixed(3)} CPU s (least of 3, calls ${calls.map((x) => x.toFixed(3)).join(" ")}; bound ${bound.toFixed(2)}; ${runner().line})`);
+  if (least >= bound) overBound = label;
+  assert.ok(least < bound, `${label}: the least of 3 calls ${least.toFixed(2)} CPU s, bound ${bound.toFixed(2)} (${String(BOUND)} x ${runner().line})`);
+}
+
+/** `command`, first read at `seconds`, held by its rule in {@link SUB_HELD}. */
+function heldSub(label: string, seconds: number, command: string, run: (text: string) => unknown): void {
+  const { text, over } = heldLine("SUB", label, pairReading(seconds, command, run), SUB_HELD[label]!, `${scaledBound(BOUND).toFixed(2)} CPU s`);
+  console.log(text);
+  if (over.length > 0) overBound = label;
+  assert.deepEqual(over, [], `${label}: ${over.join("; ")}`);
 }
 
 test("cost: this runner is measured before any bound is used, and the measurement is logged", (t) => {
@@ -287,7 +389,9 @@ test("cost: review-b's shapes on b085cd91 (nested defaults, printf and echo bodi
     bounded(`${P}echo x > "$(printf '%.0s'${" a".repeat(n)})"`, `printf %.0s of many words, n=${String(n)}`);
     bounded(`${P}echo x > "$(printf '%s'${" a".repeat(n)})"`, `printf %s of many words, n=${String(n)}`);
     bounded(`${P}echo x > "$(echo${" -n".repeat(n)} a)"`, `echo of many flags, n=${String(n)}`);
-    bounded(`${P}echo x > "$(${"command ".repeat(n)}printf a)"`, `many command words, n=${String(n)}`, n === 400000 ? MANY_COMMAND_WORDS_BOUND : undefined);
+    const words = `${P}echo x > "$(${"command ".repeat(n)}printf a)"`;
+    if (n === 400000 && MANY_COMMAND_WORDS_RULE !== null) manyCommandWordsHeld(words, `many command words, n=${String(n)}`, MANY_COMMAND_WORDS_RULE);
+    else bounded(words, `many command words, n=${String(n)}`, n === 400000 ? MANY_COMMAND_WORDS_BOUND : undefined);
   }
 });
 
@@ -308,6 +412,10 @@ function nearControl(line: string, control: string, label: string): void {
     pure(line);
   });
   const ok = seconds < CONTROL_FACTOR * base + scaledBound(1);
+  // Measuring only (#720's list): a relative cell with a constant of 1 CPU s (stretched), printed before it is judged.
+  console.log(
+    `# cost-line: SUB-NEAR ${label}: ${seconds.toFixed(3)} CPU s (control ${base.toFixed(3)}; relative bound ${(CONTROL_FACTOR * base + scaledBound(1)).toFixed(3)}; ${runner().line})`,
+  );
   if (!ok) overBound = label;
   assert.ok(ok, `${label}: ${seconds.toFixed(2)} CPU s, the control ${base.toFixed(2)}, factor ${String(CONTROL_FACTOR)}`);
 }
@@ -415,7 +523,9 @@ test("cost: through the hook, in a checkout, the same lines are bounded", { skip
     const seconds = cpuSeconds(() => {
       classifyForHook(command, [], repo);
     });
-    withinBound(seconds, `hook, ${label}`);
+    if (SUB_HELD[`hook, ${label}`] !== undefined) heldSub(`hook, ${label}`, seconds, command, (text) => classifyForHook(text, [], repo));
+    else if (SUB_LEAST_OF_THREE.has(`hook, ${label}`)) leastOfThreeSub(`hook, ${label}`, seconds, () => cpuSeconds(() => void classifyForHook(command, [], repo)));
+    else withinBound(seconds, `hook, ${label}`);
   }
 });
 
@@ -436,7 +546,8 @@ test("cost: the gate follow-up's readers (zsh forms, printf modifiers and words)
     bounded(`${P}echo x > "$(printf '${"%%".repeat(n * 10)}%')"`, `many %% then a stray %, n=${String(n)}`);
     bounded(`${P}echo x > "$(printf %b${" '\\cX'".repeat(n)})"`, `many words with \\c, n=${String(n)}`);
     // review-b's read of #683: many `printf -v` segments, and printers by other paths.
-    bounded(`${P}${"printf -v d %s x; ".repeat(n)}echo x > "$d"`, `many printf -v segments, n=${String(n)}`);
+    const segments = (name: string): string => `${P}${`printf -v ${name} %s x; `.repeat(n)}echo x > "$${name}"`;
+    bounded(segments("d"), `many printf -v segments, n=${String(n)}`, undefined, (k) => segments(k === 1 ? "e" : "f"));
     bounded(`${P}echo x > "$(${"/usr/bin//printf x; ".repeat(n)}printf it)"`, `many printers by other paths, n=${String(n)}`);
   }
   assert.deepEqual(pure(`echo x > "$(printf %.4${"l".repeat(1000)}s .gitfoo)/config"`), [DIR_WRITE]);
@@ -496,6 +607,8 @@ test("cost: a command with a line continuation is classified once, not again as 
     time(words("")); // warm the compiled readers once
     const plain = time(words(""));
     const continued = time(words("\\\n"));
+    // Measuring only (#720's list): a relative cell with a constant of 0.5 CPU s.
+    console.log(`# cost-line: SUB-REL hook, 4,000 continued words: ${continued.toFixed(3)} CPU s (plain ${plain.toFixed(3)}; relative bound ${(plain * 1.5 + 0.5).toFixed(3)}; ${runner().line})`);
     withinBound(continued, "hook, 4,000 continued words");
     assert.ok(continued < plain * 1.5 + 0.5, `continued ${continued.toFixed(2)} s against plain ${plain.toFixed(2)} s`);
   } finally {
@@ -522,6 +635,8 @@ test("cost: a word the zsh option reading changes, repeated, is landed on the di
   for (const word of ["^import", "~/.hermes/(#a1)auth.json", "~/^zz/auth.json", "~/.hermes/{a-z}uth.json", "~/.hermes/au#th.json"]) {
     notAlreadyOver(word);
     const seconds = hook(words(word));
+    // Measuring only (#720's list): a relative cell with a constant of 0.5 CPU s.
+    console.log(`# cost-line: SUB-REL ${word} x n, 40 KB: ${seconds.toFixed(3)} CPU s (plain ${plain.toFixed(3)}; relative bound ${(plain * 1.5 + 0.5).toFixed(3)}; ${runner().line})`);
     withinBound(seconds, `${word} x n, 40 KB`);
     assert.ok(seconds < plain * 1.5 + 0.5, `${word}: ${seconds.toFixed(2)} s against the plain word's ${plain.toFixed(2)} s`);
   }

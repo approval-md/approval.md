@@ -18,6 +18,7 @@ import { test } from "node:test";
 
 import { globSegmentMatches, mayNameGitDirectory } from "../src/core/command-class.js";
 import { foldNameLower } from "../src/core/name-fold.js";
+import { leastOfThree } from "./cost-runner.js";
 
 /** The matcher this replaced, from src/core/command-class.ts at a521a91d: the oracle. */
 function oracleSegmentMatches(pattern: string, name: string): boolean {
@@ -269,6 +270,8 @@ test("cost: a long `*` run is matched in bounded CPU time", () => {
       mayNameGitDirectory(`x/${pattern}/y`);
     }
   });
+  // Measuring only (#720's list): the reading, printed before it is judged.
+  console.log(`# cost-line: CGS long star run: ${ms.toFixed(1)} CPU ms (bound 500, not stretched; node ${process.version})`);
   assert.ok(ms < 500, `${ms.toFixed(1)} CPU ms, bound 500`);
 });
 
@@ -287,18 +290,30 @@ test("cost: a run of unclosed `[` is scanned once, not once per `[` (codex S1 on
       }
     }
   });
+  // Measuring only (#720's list): the reading, printed before it is judged.
+  console.log(`# cost-line: CGS unclosed bracket runs: ${ms.toFixed(1)} CPU ms (bound 500, not stretched; node ${process.version})`);
   assert.ok(ms < 500, `${ms.toFixed(1)} CPU ms, bound 500`);
 });
 
 test("cost: a class of many members is matched in bounded CPU time", () => {
   const names = Array.from({ length: 20 }, (_, index) => `${"a".repeat(5_000)}Y${String(index)}`);
-  const ms = cpuMs(() => {
+  const block = (): void => {
     for (const members of [5_000, 50_000]) {
       for (const name of names) assert.equal(globSegmentMatches(`*[${"z".repeat(members)}]X`, name), false);
     }
-  });
+  };
   // A guard: the `.git` reader tests each character with one cached
   // one-character expression, so this was never P x N. About 7 CPU ms here
   // (#680's walk); the bound is 20x.
-  assert.ok(ms < 150, `${ms.toFixed(1)} CPU ms, bound 150`);
+  // It keeps its fixed bound (#720's list, section E): CI read it at 1.46
+  // times plain patterns of the same lengths, but no walk of it was ever
+  // measured (it was never P x N), so no ratio can be shown to sit under
+  // half of one. The bound is unchanged; since #720 the reading is the least
+  // of three readings of the block, because one cold call read up to three
+  // times a warm one and reddened unchanged code on slow runners. The
+  // matcher keeps only the last pattern it read (`globElements`), and the
+  // block reads its two patterns in turn, so each reading reads them afresh.
+  const { calls, least } = leastOfThree(cpuMs(block), () => cpuMs(block));
+  console.log(`# cost-line: CGS class of many members: ${least.toFixed(1)} CPU ms (least of 3, calls ${calls.map((x) => x.toFixed(1)).join(" ")}; bound 150, not stretched; node ${process.version})`);
+  assert.ok(least < 150, `the least of 3 readings ${least.toFixed(1)} CPU ms, bound 150`);
 });

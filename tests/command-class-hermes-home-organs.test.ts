@@ -40,7 +40,7 @@ import {
   isGateOrganPath,
   protectedPathClass,
 } from "../src/core/command-class.js";
-import { runner, scaledBound } from "./cost-runner.js";
+import { heldLine, leastOfThree, pairReading, type RatioRule, runner, scaledBound } from "./cost-runner.js";
 
 function classesOf(command: string): string[] {
   const result = classifyCommand(command);
@@ -515,6 +515,18 @@ test("recheck M(new): a brace sequence that collapses to one word is judged as t
   assert.deepEqual(classesOf("echo x > notes{1..1}.md"), ["files.write.workspace"]);
 });
 
+/**
+ * The brace lines CI read under five times their bound with the code
+ * unchanged, each held by the RATIO rule (#720's list): R three times the
+ * largest ratio CI read (run 46145131980, attempts 1 and 2, node 22), the
+ * control figure its largest least
+ * reading there, CPU s. The walk, a scan from every `{` to its close, took
+ * 3.7 CPU s at 40,000: about a thousand times this control.
+ */
+const HHO_HELD: Readonly<Record<string, RatioRule>> = {
+  "nested literal braces n=160000": { ratioBound: 43, controlCi: 0.056, most: 3 },
+};
+
 /** CPU milliseconds (user and system) spent in `run`: a shared runner's wall clock is no bound. */
 function cpuMs(run: () => void): number {
   const start = process.cpuUsage();
@@ -524,31 +536,41 @@ function cpuMs(run: () => void): number {
 }
 
 test("recheck S(new): the brace expander is bounded and fails to the stricter class, never throws", () => {
-  const start = process.cpuUsage();
-  for (const word of [
-    `out${"{a,b}".repeat(20000)}.txt`,
-    `out${"{a,b}".repeat(2000)}.txt`,
-    `out${"{s..s}".repeat(5000)}.txt`,
-    `${"{a,".repeat(5000)}b${"}".repeat(5000)}`,
-  ]) {
-    const command = `echo x > ${word}`;
-    let classes: string[] = [];
-    assert.doesNotThrow(() => {
-      classes = classesOf(command);
-    }, command.slice(0, 40));
-    assert.deepEqual(classes, ["policy.core"], command.slice(0, 40));
-    assert.equal(protectedPathClass(word), "policy.core", word.slice(0, 40));
-    assert.equal(isCredentialPath(word), true, word.slice(0, 40));
-  }
-  // Deep unmatched or literal braces are linear, and literal.
-  assert.deepEqual(classesOf(`echo x > ${"{".repeat(20000)}a${"}".repeat(20000)}`), ["files.write.workspace"]);
-  assert.deepEqual(classesOf(`echo x > ${"{".repeat(60000)}`), ["files.write.workspace"]);
+  // The block, read as a whole: its bound is on the block.
+  const block = (): void => {
+    for (const word of [
+      `out${"{a,b}".repeat(20000)}.txt`,
+      `out${"{a,b}".repeat(2000)}.txt`,
+      `out${"{s..s}".repeat(5000)}.txt`,
+      `${"{a,".repeat(5000)}b${"}".repeat(5000)}`,
+    ]) {
+      const command = `echo x > ${word}`;
+      let classes: string[] = [];
+      assert.doesNotThrow(() => {
+        classes = classesOf(command);
+      }, command.slice(0, 40));
+      assert.deepEqual(classes, ["policy.core"], command.slice(0, 40));
+      assert.equal(protectedPathClass(word), "policy.core", word.slice(0, 40));
+      assert.equal(isCredentialPath(word), true, word.slice(0, 40));
+    }
+    // Deep unmatched or literal braces are linear, and literal.
+    assert.deepEqual(classesOf(`echo x > ${"{".repeat(20000)}a${"}".repeat(20000)}`), ["files.write.workspace"]);
+    assert.deepEqual(classesOf(`echo x > ${"{".repeat(60000)}`), ["files.write.workspace"]);
+  };
   // CPU time, not wall-clock (the wall clock failed twice on a busy runner at
   // 10.3 s and 10.4 s). About 2 CPU s on a laptop; the bound is the old one.
-  const used = process.cpuUsage(start);
-  const ms = (used.user + used.system) / 1000;
+  // The block keeps its fixed bound: CI read it at 8.0 of 10.6 CPU s, but one
+  // of its lines (`{s..s}` x 5,000) has no control the RATIO rule can use: at
+  // this size the walk it guards against costs what the line costs now (see
+  // #720's list, section E). The bound is unchanged; since #720 the reading
+  // is the least of three readings of the whole block, because one cold call
+  // read up to three times a warm one and reddened unchanged code on slow
+  // runners. No word has a glob character or a `$`, and the brace memo is
+  // cleared on each call, so each reading reads the same words afresh.
+  const { calls, least } = leastOfThree(cpuMs(block), () => cpuMs(block));
   const bound = scaledBound(10) * 1000;
-  assert.ok(ms < bound, `took ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (10 s x ${runner().line})`);
+  console.log(`# cost-line: HHO brace expander block: ${least.toFixed(1)} CPU ms (least of 3, calls ${calls.map((x) => x.toFixed(1)).join(" ")}; bound ${bound.toFixed(0)}; ${runner().line})`);
+  assert.ok(least < bound, `the least of 3 readings of the block took ${least.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (10 s x ${runner().line})`);
 });
 
 test("cost: nested literal braces are read in one pass, not one scan per brace", () => {
@@ -563,7 +585,18 @@ test("cost: nested literal braces are read in one pass, not one scan per brace",
     });
     assert.deepEqual(classes, ["files.write.workspace"], `n=${String(n)}`);
     const bound = scaledBound(2) * 1000;
-    assert.ok(ms < bound, `n=${String(n)}: ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (2 s x ${runner().line})`);
+    // Measuring only (#720's list): the reading, printed before it is judged.
+    console.log(`# cost-line: HHO nested literal braces n=${String(n)}: ${ms.toFixed(1)} CPU ms (bound ${bound.toFixed(0)}; ${runner().line})`);
+    const rule = HHO_HELD[`nested literal braces n=${String(n)}`];
+    if (rule !== undefined) {
+      // Held by the RATIO rule (#720's list): read three times beside a plain
+      // word of its length, the least of each judged; the 2 s is printed.
+      const { text, over } = heldLine("HHO", `nested literal braces n=${String(n)}`, pairReading(ms / 1000, line, (text) => classifyCommand(text)), rule, `${(bound / 1000).toFixed(2)} CPU s`);
+      console.log(text);
+      assert.deepEqual(over, [], over.join("; "));
+    } else {
+      assert.ok(ms < bound, `n=${String(n)}: ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (2 s x ${runner().line})`);
+    }
   }
 });
 
