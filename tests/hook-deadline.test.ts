@@ -47,6 +47,7 @@ import { commandGate } from "../src/cli/gate-window.js";
 import type { Prompter, SecretRead } from "../src/cli/prompt.js";
 import { readVerifiedRecords } from "../src/core/state.js";
 import { runUnderDeadline } from "../src/core/deadline.js";
+import { leastOfThree } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-deadline-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -295,13 +296,18 @@ test("a megabyte of path costs what a megabyte costs: the walks are linear", { s
   const megabyte = deep(1024 * 1024, "b/");
   // Measuring only (#720's list): each reading is held in a name and printed
   // before the same assertion judges it, in the same order as before.
-  const canonicalSeconds = cpu(() => canonicalPath(join(root, megabyte)));
-  console.log(`# cost-line: DEADLINE canonicalPath, a megabyte: ${canonicalSeconds.toFixed(3)} CPU s (bound 10, not stretched; node ${process.version})`);
   // It keeps its fixed 10 (#720's list, section E): CI read the megabyte at
   // 14.4 times the same path at an eighth (R would be 44), and the walk it
   // guards, the square of the length, reads 64 times its eighth: half is
-  // 32, under 44.
-  assert.ok(canonicalSeconds < 10);
+  // 32, under 44. The bound is unchanged; since #720 the reading is the
+  // least of three calls, because one cold call read up to three times a
+  // warm one and reddened unchanged code on slow runners. canonicalPath keeps
+  // an answer only while a hook call's disk memo is live (`diskMemo`, inside
+  // classifyForHook), and none is live here, so each call reads the path.
+  const canonical = leastOfThree(cpu(() => canonicalPath(join(root, megabyte))), () => cpu(() => canonicalPath(join(root, megabyte))));
+  const canonicalSeconds = canonical.least;
+  console.log(`# cost-line: DEADLINE canonicalPath, a megabyte: ${canonicalSeconds.toFixed(3)} CPU s (least of 3, calls ${canonical.calls.map((x) => x.toFixed(3)).join(" ")}; bound 10, not stretched; node ${process.version})`);
+  assert.ok(canonicalSeconds < 10, `the least of 3 calls ${canonicalSeconds.toFixed(3)} CPU s, bound 10`);
   const landingSeconds = cpu(() => physicalLanding(root, megabyte));
   console.log(`# cost-line: DEADLINE physicalLanding, a megabyte: ${landingSeconds.toFixed(3)} CPU s (bound 10, not stretched; node ${process.version})`);
   assert.ok(landingSeconds < 10);

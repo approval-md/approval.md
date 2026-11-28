@@ -27,7 +27,7 @@ import { after, test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand, collapseBracedVariables } from "../src/core/command-class.js";
-import { heldLine, pairReading, type RatioRule } from "./cost-runner.js";
+import { heldLine, leastOfThree, pairReading, type RatioRule } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-braced-cost-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -86,6 +86,15 @@ const BRACED_HELD: Readonly<Record<string, RatioRule>> = {
   "unclosed ${a:- run as a target, n=100000": { ratioBound: 141, controlCi: 0.099, most: 3 },
 };
 
+/**
+ * The line kept on {@link BOUND} with under five times headroom on CI. The
+ * bound is unchanged; since #720 the reading is the least of three calls,
+ * because one cold call read up to three times a warm one and reddened
+ * unchanged code on slow runners. It is one word, past every memo the
+ * classifier keeps between calls, so each call reads the same line.
+ */
+const BRACED_LEAST_OF_THREE: ReadonlySet<string> = new Set(["the run closed once at its end, n=100000"]);
+
 /** Classify `command` through `via`, and fail if it took {@link BOUND} CPU seconds or an earlier line already did. */
 function boundedLine(command: string, label: string, via: (text: string) => unknown): void {
   assert.equal(overBound, null, `${label}: not timed, an earlier line passed the bound (${String(overBound)})`);
@@ -100,6 +109,13 @@ function boundedLine(command: string, label: string, via: (text: string) => unkn
     console.log(text);
     if (over.length > 0) overBound = label;
     assert.deepEqual(over, [], `${label}: ${over.join("; ")}`);
+    return;
+  }
+  if (BRACED_LEAST_OF_THREE.has(label)) {
+    const { calls, least } = leastOfThree(seconds, () => cpuSeconds(() => void via(command)));
+    console.log(`# cost-line: BRACED ${label}: ${least.toFixed(3)} CPU s (least of 3, calls ${calls.map((x) => x.toFixed(3)).join(" ")}; bound ${String(BOUND)}, not stretched; node ${process.version})`);
+    if (least >= BOUND) overBound = label;
+    assert.ok(least < BOUND, `${label}: the least of 3 calls ${least.toFixed(2)} CPU s, bound ${String(BOUND)}`);
     return;
   }
   // This line's reading, printed before it is judged (#720's list).

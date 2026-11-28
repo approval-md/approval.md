@@ -31,7 +31,7 @@ import {
   commandSegmentShapes,
   SUBSTITUTION_SENTINEL,
 } from "../src/core/command-class.js";
-import { cpuSeconds, heldLine, pairReading, type RatioRule, runner, scaledBound } from "./cost-runner.js";
+import { cpuSeconds, heldLine, leastOfThree, pairReading, type RatioRule, runner, scaledBound } from "./cost-runner.js";
 
 function classesOf(command: string): string[] {
   const result = classifyCommand(command, []);
@@ -518,12 +518,18 @@ test("cost: 100 KB of dollar quotes is read in time; past the bound the rest of 
     const bound = scaledBound(1);
     // The held line is one word, longer than the classifier's memo of short
     // words with a `$` (`splicedCredentialMemo`) keeps, so each reading is of
-    // the line itself (#720's list).
-    for (const [label, command] of [
-      ["one word of quotes", `cp a ${"$'\\x41'".repeat(14_000)}`],
-      ["one quote of escapes", `cp a $'${"\\x41".repeat(24_000)}'`],
-      ["one quote of unread escapes", `cp a $'${"a\\q".repeat(33_000)}'`],
-      ["3,000 words", `echo ${Array.from({ length: 3000 }, (_, i) => `$'w\\x41${String(i)}'`).join(" ")} > out.txt`],
+    // the line itself (#720's list). The other three keep their 1 s: the bound
+    // is unchanged; since #720 the reading is the least of three calls,
+    // because one cold call read up to three times a warm one and reddened
+    // unchanged code on slow runners. The 3,000 words are short words with a
+    // `$`, which that memo keeps, so each further call spells them with
+    // another letter; the other two are one word each, read as they are.
+    const words = (letter: string): string => `echo ${Array.from({ length: 3000 }, (_, i) => `$'${letter}\\x41${String(i)}'`).join(" ")} > out.txt`;
+    for (const [label, command, again] of [
+      ["one word of quotes", `cp a ${"$'\\x41'".repeat(14_000)}`, undefined],
+      ["one quote of escapes", `cp a $'${"\\x41".repeat(24_000)}'`, undefined],
+      ["one quote of unread escapes", `cp a $'${"a\\q".repeat(33_000)}'`, undefined],
+      ["3,000 words", words("w"), (k: number): string => words(k === 1 ? "v" : "u")],
     ] as const) {
       assert.ok(command.length <= 100_000, label);
       let classes: string[] = [];
@@ -531,9 +537,9 @@ test("cost: 100 KB of dollar quotes is read in time; past the bound the rest of 
         const result = classifyForHook(command, [], cwd).result;
         classes = result.ok ? result.classes : [];
       });
-      // Measuring only (#720's list): the reading, printed before it is judged.
-      console.log(`# cost-line: DQ-100KB ${label}: ${seconds.toFixed(3)} CPU s (bound ${bound.toFixed(2)}; ${runner().line})`);
       const rule = DQ_HELD[label];
+      // Measuring only (#720's list): the held line's first reading, printed before it is judged.
+      if (rule !== undefined) console.log(`# cost-line: DQ-100KB ${label}: ${seconds.toFixed(3)} CPU s (bound ${bound.toFixed(2)}; ${runner().line})`);
       if (rule !== undefined) {
         // Held by the RATIO rule (#720's list): read three times beside a plain
         // word of its length, the least of each judged; the 1 s is printed.
@@ -542,7 +548,9 @@ test("cost: 100 KB of dollar quotes is read in time; past the bound the rest of 
         console.log(text);
         assert.deepEqual(over, [], `${label}: ${over.join("; ")}`);
       } else {
-        assert.ok(seconds < bound, `${label}: ${seconds.toFixed(3)} CPU s, bound ${bound.toFixed(2)} (${runner().line})`);
+        const { calls, least } = leastOfThree(seconds, (k) => cpuSeconds(() => void classifyForHook(again === undefined ? command : again(k), [], cwd)));
+        console.log(`# cost-line: DQ-100KB ${label}: ${least.toFixed(3)} CPU s (least of 3, calls ${calls.map((x) => x.toFixed(3)).join(" ")}; bound ${bound.toFixed(2)}; ${runner().line})`);
+        assert.ok(least < bound, `${label}: the least of 3 calls ${least.toFixed(3)} CPU s, bound ${bound.toFixed(2)} (${runner().line})`);
       }
       assert.ok(classes.length > 0, label);
     }

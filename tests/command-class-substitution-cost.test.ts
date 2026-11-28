@@ -31,7 +31,7 @@ import { after, test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand, globSegmentMatches } from "../src/core/command-class.js";
-import { cpuSeconds, heldLine, MOST, pairReading, type RatioRule, runner, scaledBound } from "./cost-runner.js";
+import { cpuSeconds, heldLine, leastOfThree, MOST, pairReading, type RatioRule, runner, scaledBound } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-subst-cost-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -141,7 +141,7 @@ function withinBound(seconds: number, label: string, own?: number): void {
  * with its own bound logs what it took, so the figure the bound came from can
  * be read again in any run.
  */
-function bounded(command: string, label: string, own?: number): string[] {
+function bounded(command: string, label: string, own?: number, variant?: (k: number) => string): string[] {
   notAlreadyOver(label);
   let answer: string[] = [];
   const seconds = cpuSeconds(() => {
@@ -150,6 +150,10 @@ function bounded(command: string, label: string, own?: number): string[] {
   if (own !== undefined) console.log(`# cost-line: ${label}: ${seconds.toFixed(2)} CPU s (bound ${own.toFixed(2)}; node ${process.version})`);
   if (own === undefined && SUB_HELD[label] !== undefined) {
     heldSub(label, seconds, command, (text) => pure(text));
+    return answer;
+  }
+  if (own === undefined && SUB_LEAST_OF_THREE.has(label)) {
+    leastOfThreeSub(label, seconds, (k) => cpuSeconds(() => void pure(variant === undefined ? command : variant(k))));
     return answer;
   }
   withinBound(seconds, label, own);
@@ -184,6 +188,33 @@ const SUB_HELD: Readonly<Record<string, RatioRule>> = {
   "printf %s of many words, n=400000": { ratioBound: 40, controlCi: 0.129, most: 3 },
   "echo of many flags, n=400000": { ratioBound: 26, controlCi: 0.204, most: 3 },
 };
+
+/**
+ * The lines kept on {@link BOUND} above with under five times headroom on CI.
+ * The bound is unchanged; since #720 the reading is the least of three calls,
+ * because one cold call read up to three times a warm one and reddened
+ * unchanged code on slow runners. Each is one word past every memo the
+ * classifier keeps between calls, but for the printf -v segments, which name
+ * a short `$d`: there each further call names another variable.
+ */
+const SUB_LEAST_OF_THREE: ReadonlySet<string> = new Set([
+  "brace groups and outputs, one word, 100 KB",
+  "one-alternative ranges beside outputs, n=2000",
+  "nested defaults with outputs, n=2000",
+  "nested expansions, n=60000",
+  "many printf -v segments, n=20000",
+  "hook, one-alternative ranges beside outputs",
+  "hook, brace groups and outputs, 100 KB",
+]);
+
+/** A line in {@link SUB_LEAST_OF_THREE}, first read at `first`: the least of three readings, judged by the stretched {@link BOUND}. */
+function leastOfThreeSub(label: string, first: number, again: (k: number) => number): void {
+  const bound = scaledBound(BOUND);
+  const { calls, least } = leastOfThree(first, again);
+  console.log(`# cost-line: SUB ${label}: ${least.toFixed(3)} CPU s (least of 3, calls ${calls.map((x) => x.toFixed(3)).join(" ")}; bound ${bound.toFixed(2)}; ${runner().line})`);
+  if (least >= bound) overBound = label;
+  assert.ok(least < bound, `${label}: the least of 3 calls ${least.toFixed(2)} CPU s, bound ${bound.toFixed(2)} (${String(BOUND)} x ${runner().line})`);
+}
 
 /** `command`, first read at `seconds`, held by its rule in {@link SUB_HELD}. */
 function heldSub(label: string, seconds: number, command: string, run: (text: string) => unknown): void {
@@ -493,6 +524,7 @@ test("cost: through the hook, in a checkout, the same lines are bounded", { skip
       classifyForHook(command, [], repo);
     });
     if (SUB_HELD[`hook, ${label}`] !== undefined) heldSub(`hook, ${label}`, seconds, command, (text) => classifyForHook(text, [], repo));
+    else if (SUB_LEAST_OF_THREE.has(`hook, ${label}`)) leastOfThreeSub(`hook, ${label}`, seconds, () => cpuSeconds(() => void classifyForHook(command, [], repo)));
     else withinBound(seconds, `hook, ${label}`);
   }
 });
@@ -514,7 +546,8 @@ test("cost: the gate follow-up's readers (zsh forms, printf modifiers and words)
     bounded(`${P}echo x > "$(printf '${"%%".repeat(n * 10)}%')"`, `many %% then a stray %, n=${String(n)}`);
     bounded(`${P}echo x > "$(printf %b${" '\\cX'".repeat(n)})"`, `many words with \\c, n=${String(n)}`);
     // review-b's read of #683: many `printf -v` segments, and printers by other paths.
-    bounded(`${P}${"printf -v d %s x; ".repeat(n)}echo x > "$d"`, `many printf -v segments, n=${String(n)}`);
+    const segments = (name: string): string => `${P}${`printf -v ${name} %s x; `.repeat(n)}echo x > "$${name}"`;
+    bounded(segments("d"), `many printf -v segments, n=${String(n)}`, undefined, (k) => segments(k === 1 ? "e" : "f"));
     bounded(`${P}echo x > "$(${"/usr/bin//printf x; ".repeat(n)}printf it)"`, `many printers by other paths, n=${String(n)}`);
   }
   assert.deepEqual(pure(`echo x > "$(printf %.4${"l".repeat(1000)}s .gitfoo)/config"`), [DIR_WRITE]);

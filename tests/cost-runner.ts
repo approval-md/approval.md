@@ -180,6 +180,17 @@ export function heldLine(id: string, label: string, reading: PairReading, rule: 
   return { text, over };
 }
 
+/**
+ * The reading of a cell kept on its fixed bound (#720's list): `first`, then
+ * `again(k)` for k = 1 and 2, and the least of the three, which is what the
+ * bound judges. A cell whose input the classifier keeps between calls reads
+ * a distinct input of the same shape and length each round.
+ */
+export function leastOfThree(first: number, again: (k: number) => number): { calls: number[]; least: number } {
+  const calls = [first, again(1), again(2)];
+  return { calls, least: Math.min(...calls) };
+}
+
 /** `bound` CPU seconds as written, stretched by this runner's factor. */
 export function scaledBound(bound: number): number {
   return bound * runner().factor;

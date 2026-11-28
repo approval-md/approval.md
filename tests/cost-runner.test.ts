@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { calibrationWork, factorOf, MOST, plainLike, ratioJudged, REFERENCE_SECONDS, runner, scaledBound } from "./cost-runner.js";
+import { calibrationWork, factorOf, leastOfThree, MOST, plainLike, ratioJudged, REFERENCE_SECONDS, runner, scaledBound } from "./cost-runner.js";
 
 test("the factor is the calibration time over the reference, held between 1 and the most a runner may stretch a bound", () => {
   assert.equal(factorOf(REFERENCE_SECONDS), 1);
@@ -48,4 +48,15 @@ test("a line's plain control keeps its head and its length (#720's list)", () =>
   assert.equal(plainLike("tee $a'a\\qa\\q'"), `tee ${"a".repeat(10)}`);
   assert.equal(plainLike("cp a $'x'", "b"), "cp bbbbbb");
   for (const command of ["git push --force && echo x > ${a:-${a:-x}}", "tee $a'a\\qa\\q'", "cp a $'x'"]) assert.equal(plainLike(command).length, command.length);
+});
+
+test("a cell kept on its fixed bound is judged on the least of three readings, the first and two more (#720's list)", () => {
+  const asked: number[] = [];
+  const reading = leastOfThree(2.5, (k) => {
+    asked.push(k);
+    return k === 1 ? 0.9 : 1.4;
+  });
+  assert.deepEqual(asked, [1, 2]);
+  assert.deepEqual(reading, { calls: [2.5, 0.9, 1.4], least: 0.9 });
+  assert.equal(leastOfThree(0.3, () => 0.7).least, 0.3);
 });
