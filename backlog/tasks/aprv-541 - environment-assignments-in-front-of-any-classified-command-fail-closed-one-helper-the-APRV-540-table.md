@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-28 14:31'
-updated_date: '2026-11-28 14:48'
+updated_date: '2026-11-28 15:17'
 labels:
   - classifier
   - security
@@ -28,7 +28,8 @@ Lead ruling on APRV-540 (binding, 0.4.10): writers get the same rule in 0.4.10 a
 - [x] #2 A bare steering assignment earlier on the line refuses every covered command after it, as it refused readers
 - [x] #3 The scope is one named predicate: every class (the ruling, committed) or the classes approval init's policy runs without a person; the count of existing lines each choice moves is reported
 - [x] #4 A before/after sweep of the conformance vectors, the overlay corpus and expected.json and the test literals lists every line that moves; a shipped overlay line that moves from allowed to refused is listed with the narrowest admitted pattern that would keep it, as a question for the lead
-- [x] #5 Tests first (red on the tests commit) per class family, through the pure classifier and the built hook under approval init's class rows; cost lines under the existing bound; conformance vectors at a minor bump
+- [x] #5 Tests first (red on the tests commit) per class family, through the pure classifier and the built hook under approval init's class rows; cost lines under the existing bound; conformance vectors at a MAJOR bump (3.0.0: one expectation moved, harness-launch-env-prefixed)
+- [x] #6 Option (a) (lead ruling): in front of a rule on the closed WORKSPACE_CODE_RULES list an unknown name keeps the command's class, TMPDIR and NODE_ENV kept by name; steering names refused everywhere; the list named in docs/claude-code-hook.md; nothing allowed that the readers base refuses
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -45,4 +46,28 @@ The narrower scope gives no relief for the common developer lines (NODE_ENV=test
 Conformance command-class 3.0.0 (MAJOR: harness-launch-env-prefixed moved), plus ten vectors.
 
 Credentials: the rule only adds refusals. curl -H with a Bearer $TOKEN header and no assignment stays read.web (APRV-533), and TOKEN=$(cat .approval/env) curl … stays opaque before and after.
+
+Option (a), the lead's ruling, built in c902aeb6 with tests first in 5a982da0 (red: 24 of 178 failed).
+
+WORKSPACE_CODE_RULES is a closed list: npm-script (npm, pnpm, yarn, bun run / run-script / test / start / build / lint / exec), node-script (node <file>), and workspace-tool for npx, tsx, ts-node, vitest, jest and make only.
+
+Left off:
+- tsc, oxlint, backlog: they run no workspace code.
+- eslint, prettier: they load a JS config only when one exists.
+- npm-pack, npm-init-create: they run code, but not as their plain purpose.
+- skill-script and exec-code rows: an assignment already declines them.
+- harness launches, installs, and every read, write, network, VCS or gate rule.
+
+WORKSPACE_CODE_KEPT_NAMES = TMPDIR, NODE_ENV. Both stay steering everywhere else. NODE_ENV is caught by the NODE_ prefix; the lead's tests keep it.
+
+A sandbox wrapper decides by the word after the assignments, so FOO=1 approval sandbox -- npm test is refused. The refusal names the program that follows the assignments.
+
+Sweep over the corpora at 5b04a6bd (1,378 commands):
+- 5467a7b1 moves 33 lines from base, and head moves 32.
+- Head differs from 5467a7b1 on 1: FOO=1 BAR=2 npm run build, back to npm-script.
+- Head allows 0 lines that base refuses.
+
+Over the corpora at 5467a7b1 plus the new tests (1,640 commands), head differs from 5467a7b1 on 8. Every one returns to base's answer.
+
+SPEC.md is not edited (a protected path). The closed list is in docs/claude-code-hook.md, and a proposed SPEC section 7 paragraph is in the lane report.
 <!-- SECTION:NOTES:END -->
