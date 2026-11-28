@@ -2588,8 +2588,12 @@ interface LexSegment {
   /**
    * Which outermost `( … )` this segment is inside, counted from 1 in line
    * order, or 0 outside every one: `(a) && (b)` puts `a` and `b` in groups 1
-   * and 2, `((a) && b)` puts both in group 1. Read only by the hook's write
-   * pass, which ends a subshell's cds where its group ends (review-b's S3).
+   * and 2. Read only by the hook's write pass, which ends a subshell's cds
+   * where its group ends (review-b's S3). -1 on EVERY segment of a line whose
+   * parentheses this lexer cannot pair for sure: a `)` with no `(` (a `case`
+   * pattern, a stray one), a `(` never closed, or a subshell nested inside
+   * another (`((a) && b)`, `((x=1))`); the pass then restores no frame as a
+   * replacement and reads the line the stricter way.
    */
   subshellGroup: number;
 }
@@ -2669,6 +2673,8 @@ function lex(command: string, bodiesCut = false): LexResult {
   let conditional = false;
   let listOp: "&&" | "||" | "|" | null = null;
   let subshellGroup = 0;
+  /** A `)` with no `(`, or a `(` inside another: the subshell groups are not sure (S3's security review). */
+  let parensUnsure = false;
   // Where the last descriptor dup's word ended (`2>&1`): zsh refuses a
   // redirect operator joined to it (`2>&1>!x` writes nothing).
   let dupEnd = -1;
@@ -3138,6 +3144,7 @@ function lex(command: string, bodiesCut = false): LexResult {
       if (ch === "(" && depth === 0) subshellGroup += 1;
       if (ch === "(") depth += 1;
       if (ch === ")") depth -= 1;
+      if (depth < 0 || depth > 1) parensUnsure = true;
       if (pipe) stdinFed = true;
       segmentStart = index;
       continue;
@@ -3168,6 +3175,7 @@ function lex(command: string, bodiesCut = false): LexResult {
     return { ok: false, detail: `heredoc <<${heredoc.terminator} is never terminated` };
   }
   flush(command.length);
+  if (parensUnsure || depth !== 0) for (const segment of segments) segment.subshellGroup = -1;
   return { ok: true, segments };
 }
 

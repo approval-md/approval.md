@@ -419,3 +419,21 @@ test("two subshells back to back: each one's cd ends with it (review-b's S3 on #
   holds("(cd docs) && (cd .claude && echo x > settings.json)", "policy.core");
   holds("((cd .claude); echo x > settings.json)", "policy.core");
 });
+
+test("a line whose parentheses do not pair for sure restores no subshell frame and is read the stricter way (S3's security review)", () => {
+  // A `)` with no `(`, a `(` never closed, arithmetic `((…))`, a subshell nested in another:
+  // the shell may stand where the subshell's cd went or where it was, and a relative write is guarded.
+  for (const line of [
+    "cd .claude; true ); cd ..; echo x > settings.json",
+    "(cd .claude; echo x > settings.json",
+    "cd .claude && ((x=1)) && (echo x > settings.json)",
+    "cd .claude && ((cd ..) && (echo x > settings.json))",
+  ]) {
+    holds(line, "files.write.guarded");
+  }
+  // Parentheses that pair at depth one keep S3's reading, with no guarded class.
+  const balanced = hook("(cd .claude) && (echo x > settings.json)");
+  assert.ok(typeof balanced !== "string" && !balanced.includes("files.write.guarded"), JSON.stringify(balanced));
+  // A quoted parenthesis is no paren to the lexer.
+  holds("cd .claude && echo ')' && (cd ..) && (echo x > settings.json)", "policy.core");
+});

@@ -5994,6 +5994,27 @@ export function refineWriteLandings(
   /** The state as a `$(…)` opened, restored at the segment that expands it. */
   let substitutionFrame: { standing: Standing; skippedFailed: Standing; skippedSucceeded: Standing } | null = null;
   let lastHost = -1;
+  /**
+   * S3's security review: a line whose parentheses the lexer cannot pair for
+   * sure (every segment's group is -1: a stray `)`, a `(` never closed, a
+   * nested subshell) restores no frame as a replacement. Where a subshell
+   * would end, the shell is taken to stand where it stood before OR where the
+   * subshell's cds went (a union), no cd on it is sure (S1), and a relative
+   * write on it is guarded as unreadable: never lighter than the pass gave
+   * before S3.
+   */
+  const parensUnsure = units.some((unit) => unit.host.subshellGroup === -1);
+  if (parensUnsure) cwdUnknown = true;
+  /** Where a frame ends: its state again, or on a line whose parentheses are not sure, its state joined with this one. */
+  const restoreFrame = (frame: { standing: Standing; skippedFailed: Standing; skippedSucceeded: Standing }): void => {
+    if (!parensUnsure) {
+      ({ standing, skippedFailed, skippedSucceeded } = frame);
+      return;
+    }
+    standing = joinStanding(frame.standing, standing);
+    skippedFailed = joinStanding(frame.skippedFailed, skippedFailed);
+    skippedSucceeded = joinStanding(frame.skippedSucceeded, skippedSucceeded);
+  };
   /** Move `standing` to where the segment at `index` runs. */
   const enterSegment = (index: number): void => {
     const unit = units[index] as Unit;
@@ -6001,7 +6022,7 @@ export function refineWriteLandings(
     if (subshellFrame !== null && (unit.host.subshell !== true || unit.host.subshellGroup !== subshellFrame.group)) {
       // The subshell leaves the shell where it was, whatever it ran; so does
       // each of two back-to-back ones (`(cd d) && (w)`, review-b's S3).
-      ({ standing, skippedFailed, skippedSucceeded } = subshellFrame);
+      restoreFrame(subshellFrame);
       outcome = null;
       subshellFrame = null;
     }
@@ -6132,7 +6153,7 @@ export function refineWriteLandings(
     // reads the script's segments in its place, so its cd seems to reach the
     // segments after it (review-b's S2), and only the failed branch kept the
     // shell where the script left it.
-    const sure = ok !== null && plain && landedSurely && !earlierMayChange && shape.listOp !== "|" && (units[index] as Unit).scripted !== true;
+    const sure = ok !== null && plain && landedSurely && !earlierMayChange && !parensUnsure && shape.listOp !== "|" && (units[index] as Unit).scripted !== true;
     if (!plain) earlierMayChange = true;
     outcome = { ok, failed: standing, sure };
     return ok;
