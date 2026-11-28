@@ -156,13 +156,16 @@ test("the same word as an argument, or a word both readings call a command, is u
 });
 
 test("a protected redirect still answers first, as for the plain spelling", () => {
-  const plain = classifyCommand("n=5 cat f > APPROVAL.md");
-  assert.equal(plain.ok, true);
-  for (const spelling of quotedSpellings("n=5")) {
-    const command = `${spelling} cat f > APPROVAL.md`;
-    assert.equal(classifyCommand(command).ok, true, command);
-    assert.equal(answer(command), answer("n=5 cat f > APPROVAL.md"), command);
+  // APRV-541: an assignment-shaped word in front of any classified command is
+  // judged by the admitted list whatever the segment answers, so the plain
+  // spelling and every quoted one (read on its dequoted text, as the cursor
+  // reads it) are refused, the stricter answer; the admitted twin keeps the
+  // protected redirect's answer.
+  for (const command of ["n=5 cat f > APPROVAL.md", ...quotedSpellings("n=5").map((spelling) => `${spelling} cat f > APPROVAL.md`)]) {
+    const result = classifyCommand(command);
+    assert.equal(result.ok ? "classified" : result.code, "unclassified", command);
   }
+  assert.equal(answer("NO_COLOR=1 cat f > APPROVAL.md"), "policy.core/redirect-protected");
 });
 
 test("the segment shapes name the word bash runs as the binary", () => {

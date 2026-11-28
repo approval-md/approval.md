@@ -272,8 +272,9 @@ const KEPT: readonly (readonly [string, string])[] = [
   ["declare -x GH_PAGER=./x; gh pr diff 1", "refused unclassified"],
   ["PATH=.; cat README.md", "refused unclassified"],
   ["LD_PRELOAD=./x.so; cat README.md", "refused unclassified"],
-  ["PATH=. cat .approval/env", "account.credential credential-path"],
-  ["PATH=. touch x", "files.write.workspace workspace-write"],
+  // APRV-541: the rule covers every classified command, so these refuse too.
+  ["PATH=. cat .approval/env", "refused unclassified"],
+  ["PATH=. touch x", "refused unclassified"],
   // `cd` is left to its own rules: an intrinsic that runs nothing, whose
   // CDPATH and HOME the landing rules already model.
   ["CDPATH=/ cd ./build", "read.shell read-shell"],

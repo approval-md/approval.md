@@ -101,10 +101,14 @@ for (const [bin, name, pkg] of HARNESSES) {
   });
 
   test(`${bin}: an env-prefixed invocation is the same launch`, () => {
-    const segment = only(`FOO=1 BAR=2 ${bin} run the task`);
+    // APRV-541: only admitted assignments leave the launch as it is; any
+    // other (FOO, a config directory) changes what runs and is refused.
+    const segment = only(`NO_COLOR=1 TERM=dumb ${bin} run the task`);
     assert.equal(segment.class, cls);
     assert.equal(segment.rule, rule);
     assert.equal(segment.path, "run the task");
+    const refused = classifyCommand(`FOO=1 BAR=2 ${bin} run the task`);
+    assert.equal(refused.ok ? "classified" : refused.code, "unclassified");
   });
 
   test(`${bin}: the package-runner spelling is the same launch`, () => {

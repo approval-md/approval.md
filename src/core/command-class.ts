@@ -5001,9 +5001,8 @@ function isHarmlessGitAssignment(word: LexWord): boolean {
  * `null` when every one is harmless (APRV-521).
  */
 function gitAssignmentRefusal(prefix: readonly LexWord[]): string | null {
-  const word = prefix.find((candidate) => !isHarmlessGitAssignment(candidate));
-  if (word === undefined) return null;
-  return `no rule for ${assignmentHead(word.text)}… in front of git: an environment assignment can run a program, repoint the repository or its configuration, or write a file`;
+  // APRV-541: the one helper, with git's own admitted list and text.
+  return assignmentRefusal(prefix, "git", GIT_ASSIGNMENTS);
 }
 
 /**
@@ -5143,9 +5142,10 @@ const SWITCH_VALUE = /^[A-Za-z0-9]{0,16}$/u;
 
 /**
  * The names admitted in front of a reader beyond git's list (APRV-540), each
- * with the only values admitted. A CLOSED list: in front of a command whose
- * class is a read, any other assignment leaves the segment `unclassified`
- * ({@link readerAssignmentRefusal}). None of these names a program, a library,
+ * with the only values admitted. A CLOSED list: in front of any classified
+ * command (a read since APRV-540, every class since APRV-541, as {@link
+ * assignmentRuleCovers} says), any other assignment leaves the segment
+ * `unclassified` ({@link assignmentRefusal}). None of these names a program, a library,
  * a directory or a configuration file, and no admitted value is a path:
  *
  * - `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `FORCE_COLOR`: colour switches
@@ -5325,29 +5325,95 @@ function assignmentRemedy(name: string, program: string): string {
 }
 
 /**
- * Why the assignments in front of a reader leave the segment `unclassified`,
- * or `null` when every one is admitted (APRV-540). The mechanism is git's
- * ({@link gitAssignmentRefusal}): the first word off the admitted lists
- * decides. The detail opens as git's does (`no rule for NAME=… in front of
- * <program>`), then says why, for a steering name what it steers, and what
- * to do.
+ * The admitted list and the refusal text {@link assignmentRefusal} applies
+ * (APRV-541): parameters of the one helper, so a tool with its own admitted
+ * list (git) is not a second rule.
  */
-function readerAssignmentRefusal(prefix: readonly LexWord[], program: string): string | null {
-  const word = prefix.find((candidate) => !isHarmlessReaderAssignment(candidate));
-  if (word === undefined) return null;
-  const name = assignedName(word.text);
-  const why = isReaderSteeringName(name)
-    ? steeringClause(name, program)
-    : `${name} is not on the short list of harmless ones (locale, time zone, colour and terminal switches)`;
-  return `no rule for ${assignmentHead(word.text)}… in front of ${program}: an environment assignment in front of a command can change which program runs or what it loads, and ${why}. ${assignmentRemedy(name, program)}`;
+interface AssignmentTable {
+  /** May this word stand in front of the program? */
+  admitted: (word: LexWord) => boolean;
+  /** The refusal for the first word that may not. */
+  refusal: (word: LexWord, program: string) => string;
 }
 
 /**
- * Why a reader after a steering name the line's own shell sets is
- * `unclassified` (APRV-540, {@link ClassifierContext.readerEnvWrite}).
+ * Every classified command's table (APRV-540 for readers, APRV-541 for every
+ * class): {@link isHarmlessReaderAssignment}, and a refusal that opens as
+ * git's does (`no rule for NAME=… in front of <program>`), says why, for a
+ * steering name what it steers, and what to do.
+ */
+const COMMAND_ASSIGNMENTS: AssignmentTable = {
+  admitted: isHarmlessReaderAssignment,
+  refusal: (word, program) => {
+    const name = assignedName(word.text);
+    const why = isReaderSteeringName(name)
+      ? steeringClause(name, program)
+      : `${name} is not on the short list of harmless ones (locale, time zone, colour and terminal switches)`;
+    return `no rule for ${assignmentHead(word.text)}… in front of ${program}: an environment assignment in front of a command can change which program runs or what it loads, and ${why}. ${assignmentRemedy(name, program)}`;
+  },
+};
+
+/** Git's table (APRV-521): its own shorter admitted list and its own text, unchanged. */
+const GIT_ASSIGNMENTS: AssignmentTable = {
+  admitted: isHarmlessGitAssignment,
+  refusal: (word) =>
+    `no rule for ${assignmentHead(word.text)}… in front of git: an environment assignment can run a program, repoint the repository or its configuration, or write a file`,
+};
+
+/**
+ * THE helper (APRV-540, APRV-541): why the assignments in front of a
+ * classified command leave the segment `unclassified`, or `null` when every
+ * one is on the table's admitted list. The first word off it decides.
+ */
+function assignmentRefusal(prefix: readonly LexWord[], program: string, table: AssignmentTable = COMMAND_ASSIGNMENTS): string | null {
+  const word = prefix.find((candidate) => !table.admitted(candidate));
+  return word === undefined ? null : table.refusal(word, program);
+}
+
+/**
+ * Which commands the assignment rule covers, by the class the segment
+ * answers (APRV-541). ONE LINE picks the behaviour:
+ *
+ * - `"every-class"`: the lead's ruling for 0.4.10, committed. Every
+ *   classified command, whatever its class.
+ * - `"unasked-by-default"`: only the classes `approval init`'s policy runs
+ *   without a person ({@link ASSIGNMENT_RULE_UNASKED_CLASSES}). A class that
+ *   policy already asks about (or refuses) keeps its ask: the person sees the
+ *   whole line, assignment included. A reader is covered either way
+ *   (APRV-540 judges the verb).
+ */
+const ASSIGNMENT_RULE_SCOPE: "every-class" | "unasked-by-default" = "every-class";
+
+/**
+ * The classes `approval init`'s policy (src/cli/scaffold.ts) runs without a
+ * person: its `autonomous` and `supervised-retro` rows, and `gate.self`,
+ * which the hook drops and allows. Read only under `"unasked-by-default"`;
+ * a test pins it to the policy's rows.
+ */
+export const ASSIGNMENT_RULE_UNASKED_CLASSES: readonly string[] = [
+  "read.*",
+  "files.write.workspace",
+  "files.write.out_of_scope",
+  "calendar.write.own",
+  "communicate.email.draft",
+  GATE_SELF_CLASS,
+];
+
+/** Does the assignment rule cover a segment answering this class ({@link ASSIGNMENT_RULE_SCOPE})? */
+function assignmentRuleCovers(cls: string): boolean {
+  if ((ASSIGNMENT_RULE_SCOPE as string) === "every-class") return true;
+  return cls.startsWith("read.") || ASSIGNMENT_RULE_UNASKED_CLASSES.includes(cls);
+}
+
+/**
+ * Why a covered command after a steering name the line's own shell sets is
+ * `unclassified` (APRV-540, APRV-541, {@link ClassifierContext.readerEnvWrite}).
  */
 function readerEnvWriteRefusal(name: string, program: string): string {
-  return `no rule for ${program} after ${name} is set on the same command line: an exported variable reaches ${program} and the programs it starts, and ${steeringClause(name, program)}. Run the line without setting ${name}; if ${program} needs it, a person sets ${name} in the environment the session starts from.`;
+  // A name the scan returns without its being a steering name is one the text
+  // does not settle (`declare a[$(…)]=1`, `printf -v "$n"`).
+  const why = isReaderSteeringName(name) ? steeringClause(name, program) : `the line sets ${name} in a way its text does not settle`;
+  return `no rule for ${program} after ${name} is set on the same command line: an exported variable reaches ${program} and the programs it starts, and ${why}. Run the line without setting ${name}; if ${program} needs it, a person sets ${name} in the environment the session starts from.`;
 }
 
 /** `git commit --amend` rewrites; a plain commit does not. */
@@ -15519,6 +15585,39 @@ function classifySegmentWithVerb(
     everyWriteLiterals,
   );
   const bin = words[cursor];
+  // APRV-540: the class the rule table gave the command, set by the walk.
+  let verbClass: string | null = null;
+  /**
+   * APRV-540, APRV-541: a classified command is classified by the
+   * assignments in front of it, not only by its verb. Every answer this
+   * segment gives passes here: an assignment off the admitted list
+   * ({@link assignmentRefusal}; the words before a sandbox wrapper count, as
+   * for git) leaves the segment `unclassified`, and so does a steering name
+   * the line's own shell sets ({@link ClassifierContext.readerEnvWrite}).
+   * `PATH=. cat f` runs `./cat`, `PATH=. touch x` runs `./touch`, and
+   * `GH_PAGER=./x gh pr diff 1` runs `./x`. The refusal is a deny under every
+   * policy, and every answer it replaces is an allow, an ask or a deny, so it
+   * only ever tightens. Which classes it covers is {@link
+   * assignmentRuleCovers}; a reader (its table class `read.*`) is covered
+   * whatever it answers.
+   *
+   * `cd`, spelled bare, is left to its own rules: POSIX's intrinsic utility,
+   * never looked up on PATH, it runs and loads nothing, and the two variables
+   * it reads from a prefix (`CDPATH`, `HOME`) are already modelled where it
+   * lands (APRV-508's recheck, fix M-B of the credential pass, fold 15 of the
+   * parents rule), which answer more exactly than a refusal here would.
+   */
+  const assignmentGate = (outcome: SegmentOutcome): SegmentOutcome => {
+    if (!outcome.ok || bin === undefined || bin === "cd") return outcome;
+    if (!((verbClass?.startsWith("read.") ?? false) || assignmentRuleCovers(outcome.class))) return outcome;
+    const program = pathSegments(bin).slice(-1)[0] ?? bin;
+    const refusal = assignmentRefusal(segment.words.slice(0, assignments.length), program);
+    if (refusal !== null) return { ok: false, code: "unclassified", detail: refusal };
+    if (context.readerEnvWrite !== undefined) {
+      return { ok: false, code: "unclassified", detail: readerEnvWriteRefusal(context.readerEnvWrite, program) };
+    }
+    return outcome;
+  };
   if (redirected !== null) {
     // APRV-503 recheck (SHOULD-FIX-R1): a segment that writes a protected path
     // AND reads credential material (`cat .approval/env > APPROVAL.md`, `cat <
@@ -15543,17 +15642,17 @@ function classifySegmentWithVerb(
     const own = foldedOnly((): ProtectedBeside[] =>
       protectedBeside(commandAnswer(segment.redirects.filter((redirect) => redirect.op === "<"))),
     );
-    return {
+    return assignmentGate({
       ok: true,
       class: redirected.surface,
       rule: "redirect-protected",
       path: redirected.path,
       ...(touched === null ? {} : { also: touched }),
       ...besideProtected(redirected.surface, [redirected], "redirect-protected", own),
-    };
+    });
   }
 
-  return commandAnswer(segment.redirects);
+  return assignmentGate(commandAnswer(segment.redirects));
 
   /**
    * The segment's answer from its command and the redirections given: every
@@ -16300,36 +16399,10 @@ function classifySegmentWithVerb(
   // rather than being handed a class and left to re-read the command.
   const boundPath = refined !== null && "path" in refined ? refined.path : undefined;
 
-  // APRV-540: a reader is classified by the assignments in front of it, not
-  // only by its verb. Once the table names the command a read, an assignment
-  // off the closed admitted lists ({@link readerAssignmentRefusal}; the words
-  // before a sandbox wrapper count, as for git) leaves the segment
-  // `unclassified`, and so does a steering name the line's own shell sets
-  // ({@link ClassifierContext.readerEnvWrite}). `PATH=. cat f` runs `./cat`,
-  // and `GH_PAGER=./x gh pr diff 1` runs `./x`. Here, ahead of every
-  // protected, write and scope answer below, so no later answer softens it:
-  // the refusal is a deny under every policy, and every answer it replaces is
-  // an allow, an ask or a deny.
-  //
-  // `cd`, spelled bare, is the one reader left to its own rules: POSIX's
-  // intrinsic utility, never looked up on PATH, it runs and loads nothing, and
-  // the two variables it reads from a prefix (`CDPATH`, `HOME`) are already
-  // modelled where it lands (APRV-508's recheck, fix M-B of the credential
-  // pass, fold 15 of the parents rule), which answer more exactly than a
-  // refusal here would. Bare means the word right after the assignments, not
-  // the command behind a sandbox wrapper: there the assignment steers the
-  // wrapper (`PATH=. approval sandbox -- cd x` runs `./approval`).
-  if (cls.startsWith("read.") && afterAssignments !== "cd") {
-    const readerRefusal = readerAssignmentRefusal(segment.words.slice(0, assignments.length), basename);
-    if (readerRefusal !== null) return { ok: false, code: "unclassified", detail: readerRefusal };
-    if (context.readerEnvWrite !== undefined) {
-      return {
-        ok: false,
-        code: "unclassified",
-        detail: readerEnvWriteRefusal(context.readerEnvWrite, basename),
-      };
-    }
-  }
+  // APRV-540: the table's class, before any protected, write or scope answer
+  // replaces it; a reader's assignments are judged whatever the segment ends
+  // up answering ({@link assignmentGate}).
+  verbClass = cls;
 
   // APRV-511 refuter S1: a download's output file is a write target, whatever
   // class the fetch earned (`curl -o ~/.hermes/plugins/x/__init__.py URL` is
