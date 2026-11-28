@@ -254,3 +254,20 @@ test("over-asking: a cd into an ordinary folder then a build, a test or a write 
   ];
   for (const [line, classes] of rows) assert.deepEqual(hook(line), classes, line);
 });
+
+test("an empty alternative in the cd word: bash's landing is followed, and what no shell lands is guarded (review-b's M3 on #715)", () => {
+  // bash and sh drop the empty word a brace makes and change to the other
+  // (`cd {,.claude}` lands in .claude); zsh keeps it and reads `cd '' .claude`,
+  // its two-word form, whose landing is not read: both answers are kept.
+  holds("cd {,.claude} && echo x > settings.json", "policy.core");
+  holds("cd {,.claude} && echo x > settings.json", "files.write.guarded");
+  holds("cd {.claude,} && echo x > settings.json", "policy.core");
+  holds("cd {,.approval}; echo x >> log/events.jsonl", "log.mutate");
+  // Empty in every alternative: bash's bare cd (the home), zsh's `cd '' ''`.
+  // Not followed, so a relative write after it is guarded.
+  holds("cd {,} && echo x > notes.md", "files.write.guarded");
+  // zsh's two-word form through a brace (`cd docs packages`): not read.
+  holds("cd {docs,packages} && echo x > notes.md", "files.write.guarded");
+  // A pattern that matches several folders is several words too (.claude, .codex, .cursor).
+  holds("cd .c* && echo x > notes.md", "files.write.guarded");
+});

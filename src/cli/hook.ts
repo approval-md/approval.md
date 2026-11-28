@@ -100,6 +100,7 @@ import { childEnvironment } from "../core/child-env.js";
 import { runUnderDeadline } from "../core/deadline.js";
 import {
   braceCandidates,
+  braceExpansions,
   copyArgvUnknown,
   classifyCommandInThisReading,
   classifyCommandInThisReadingWithMainRules,
@@ -6021,9 +6022,16 @@ export function refineWriteLandings(
     // and `-P` before the operand wins, as {@link cdTarget} reads the flags.
     const flags = shape.args.slice(0, target.kind === "home" ? shape.args.length : Math.max(0, shape.args.indexOf(target.word))).join("");
     const physical = flags.lastIndexOf("P") > flags.lastIndexOf("L");
+    // An empty alternative of a brace (`cd {,.claude}`) is no landing: bash
+    // and sh drop the empty word and change to the other one, so it is
+    // skipped. A word that is empty in every alternative (`cd {,}`) is bash's
+    // bare cd (the home) and zsh's `cd '' ''` (where it stands): not followed,
+    // and the main loop below marks the directory unknown for it, as it does
+    // for zsh's reading of any word a brace splits.
+    if (resolved.spellings.every((spelling) => spelling.length === 0)) return null;
     const out = new Set<string>();
     for (const spelling of resolved.spellings) {
-      if (spelling.length === 0) return null;
+      if (spelling.length === 0) continue;
       for (const each of isAbsolute(spelling) ? [spelling] : from.map((dir) => spelledAbsolute(dir, spelling))) {
         let placed = [each];
         if (/[*?[]/u.test(each)) {
@@ -6048,9 +6056,11 @@ export function refineWriteLandings(
     }
     return out.size > 64 ? null : [...out];
   };
-  /** Record the outcome of a `cd` at `index`. */
-  const followCd = (shape: CommandSegmentShape, index: number, bin: string): void => {
-    outcome = { ok: standing === null ? null : cdLanding(shape, index, bin, standing), failed: standing };
+  /** Record the outcome of a `cd` at `index`; its landing, `null` where it cannot be named. */
+  const followCd = (shape: CommandSegmentShape, index: number, bin: string): Standing => {
+    const ok = standing === null ? null : cdLanding(shape, index, bin, standing);
+    outcome = { ok, failed: standing };
+    return ok;
   };
   /** A relative word's spellings from the line's start, after the cds this pass follows (only those that differ). */
   const fromStart = (word: string, at: number): string[] => {
@@ -6159,13 +6169,24 @@ export function refineWriteLandings(
     const bin = shape.bin === null ? null : basename(shape.bin);
     enterSegment(index);
     if (bin === "cd" || bin === "pushd" || bin === "popd" || bin === "chdir") {
-      followCd(shape, index, bin);
+      // A cd {@link cdLanding} cannot land is one the `here` list cannot
+      // trust either: a relative write after it is guarded as unreadable
+      // (review-b's M3 on #715: `cd {,.claude}` lost both the landing and
+      // this answer).
+      if (followCd(shape, index, bin) === null) cwdUnknown = true;
       const target = bin === "popd" ? ({ kind: "unknown" } as const) : cdTarget(bin === "chdir" ? "cd" : bin, shape.args, shape.assignments);
       if (target.kind === "unknown") {
         cwdUnknown = true;
         continue;
       }
       const word = target.kind === "home" ? "~" : target.word;
+      // zsh hands cd every word a brace makes, the empty one included
+      // (`cd {,.claude}` is `cd '' .claude`, `cd {a,b}` is `cd a b`), and reads
+      // two operands as its substitution in the current path: a landing not
+      // read, as {@link cdTarget} reads two operands written out. bash's
+      // landing is still followed above; this only adds the unknown.
+      const words = target.kind === "dir" ? braceExpansions(word) : [word];
+      if (words === null || words.length > 1) cwdUnknown = true;
       const resolved = resolveWriteWord(word, index, line);
       let spelled = "unreadable" in resolved ? null : spellingsOf(resolved);
       // A pattern is read from the disk, as a write target's is (point 6):
@@ -6182,7 +6203,11 @@ export function refineWriteLandings(
             spelled = null;
             break;
           }
-          for (const path of expanded.paths) if (path.from !== "parent") placed.push(path.path);
+          const matched = expanded.paths.filter((path) => path.from !== "parent");
+          // Several folders matched are several words: zsh's two-word form, as
+          // a brace's (the word as written is kept beside them as `literal`).
+          if (matched.filter((path) => path.from === "match").length > 1) cwdUnknown = true;
+          for (const path of matched) placed.push(path.path);
         }
         if (spelled !== null) spelled = placed;
       }
