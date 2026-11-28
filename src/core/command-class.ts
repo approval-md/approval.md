@@ -5284,9 +5284,67 @@ const READER_STEERING_NAMES: readonly string[] = [
 const READER_STEERING_SHAPE =
   /^(?:LD_|DYLD_|BASH_|XDG_|GH_|GIT_|OPENSSL_|LESS|LC_|PYTHON|PERL|RUBY|NODE_|npm_config_|NPM_CONFIG_|BUN_|DENO_)|(?:PAGER|EDITOR|BROWSER|ASKPASS)$/u;
 
-/** Is this a name that steers a reader ({@link READER_STEERING_NAMES})? */
+/**
+ * The toolchain's steering names (APRV-541, a flagged gap in option (a)):
+ * names that make a command which runs the workspace's own code do MORE,
+ * fetch or load code from outside the workspace, pick another toolchain
+ * binary, or redirect its network trust. A package script or a Makefile can
+ * call any tool, so every family is reachable through `npm test` and `make`.
+ * Matched case-sensitively, as the tools read them, except where the tool
+ * itself folds case ({@link TOOLCHAIN_STEERING_FOLDED}).
+ *
+ * - make: `MAKEFILES` (extra makefiles read first), `MAKEFLAGS`, `MFLAGS`,
+ *   `GNUMAKEFLAGS` (options, `-f`, `-I`, `--eval`), and the implicit rules'
+ *   programs and flags `CC`, `CXX`, `CPP`, `LD`, `AR`, `AS`, `NM`, `RANLIB`,
+ *   `STRIP`, `CFLAGS`, `CXXFLAGS`, `CPPFLAGS`, `LDFLAGS` (`-B<dir>` and
+ *   `-fplugin=` pick binaries and plugins), `PKG_CONFIG`, `PKG_CONFIG_PATH`.
+ * - TypeScript runners: `ESBUILD_BINARY_PATH` (the esbuild binary tsx runs),
+ *   `TS_NODE_*` (compiler, project, `TS_NODE_COMPILER`), `TSX_*`.
+ * - Go: `GOFLAGS`, `GOPROXY`, `GOPATH`, `GOROOT`, `GOTOOLCHAIN` (downloads a
+ *   toolchain), `GOSUMDB`, `GONOSUMDB`, `GOPRIVATE`, `GONOPROXY`,
+ *   `GOINSECURE`, `GOBIN`, `GOENV`.
+ * - Rust: `CARGO_*`, `RUSTC*` (`RUSTC`, `RUSTC_WRAPPER`), `RUSTFLAGS`,
+ *   `RUSTDOCFLAGS`, `RUSTUP_*` (picks a toolchain).
+ * - Python: `PIP_*` (index URL, config file), `UV_*`, `POETRY_*`, `PYTEST_*`
+ *   (`PYTEST_ADDOPTS`, `PYTEST_PLUGINS` load plugins); `PYTHON*` already.
+ * - JVM and Ruby: `JAVA_HOME`, `MAVEN_OPTS`, `GRADLE_OPTS`,
+ *   `GRADLE_USER_HOME`, `BUNDLE_*`, `GEM_*`; `RUBY*` already.
+ * - Package managers: `YARN_*`, `PNPM_*`, `COREPACK_*` (downloads a package
+ *   manager from a URL); `npm_config_*`, `BUN_*`, `DENO_*`, `NODE_*` already.
+ */
+const TOOLCHAIN_STEERING_NAMES: readonly string[] = [
+  "MAKEFILES", "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS",
+  "CC", "CXX", "CPP", "LD", "AR", "AS", "NM", "RANLIB", "STRIP",
+  "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "PKG_CONFIG", "PKG_CONFIG_PATH",
+  "ESBUILD_BINARY_PATH",
+  "GOFLAGS", "GOPROXY", "GOPATH", "GOROOT", "GOTOOLCHAIN", "GOSUMDB", "GONOSUMDB", "GOPRIVATE", "GONOPROXY", "GOINSECURE", "GOBIN", "GOENV",
+  "RUSTFLAGS", "RUSTDOCFLAGS",
+  "JAVA_HOME", "MAVEN_OPTS", "GRADLE_OPTS", "GRADLE_USER_HOME",
+];
+
+/** {@link TOOLCHAIN_STEERING_NAMES}' prefixes. */
+const TOOLCHAIN_STEERING_SHAPE = /^(?:TS_NODE_|TSX_|CARGO_|RUSTC|RUSTUP_|PIP_|UV_|POETRY_|PYTEST_|BUNDLE_|GEM_|YARN_|PNPM_|COREPACK_)/u;
+
+/**
+ * The names a tool reads in any case, matched so: npm reads `npm_config_*`
+ * case-insensitively (as yarn 1 and pnpm read their own), and curl and most
+ * HTTP clients read the proxy variables in lower and upper case; the TLS
+ * trust variables are matched in both cases too, fail closed. Proxies and
+ * trust redirect where the toolchain fetches code from and whom it believes.
+ */
+const TOOLCHAIN_STEERING_FOLDED =
+  /^(?:npm_config_|yarn_|pnpm_|(?:http|https|ftp|all|no)_proxy$|ssl_cert_file$|ssl_cert_dir$|curl_ca_bundle$|requests_ca_bundle$|node_extra_ca_certs$)/iu;
+
+/** Is this a name that steers a reader, a writer or the toolchain ({@link READER_STEERING_NAMES}, {@link TOOLCHAIN_STEERING_NAMES})? */
 function isReaderSteeringName(name: string): boolean {
-  return READER_STEERING_NAMES.includes(name) || READER_STEERING_SHAPE.test(name) || isGitInheritedName(name);
+  return (
+    READER_STEERING_NAMES.includes(name) ||
+    READER_STEERING_SHAPE.test(name) ||
+    isGitInheritedName(name) ||
+    TOOLCHAIN_STEERING_NAMES.includes(name) ||
+    TOOLCHAIN_STEERING_SHAPE.test(name) ||
+    TOOLCHAIN_STEERING_FOLDED.test(name)
+  );
 }
 
 /**
@@ -5296,6 +5354,12 @@ function isReaderSteeringName(name: string): boolean {
  */
 function steeringClause(name: string, program: string): string {
   if (name === "PATH") return `${name} picks which ${program} runs`;
+  if (/^(?:(?:http|https|ftp|all|no)_proxy|ssl_cert_file|ssl_cert_dir|curl_ca_bundle|requests_ca_bundle|node_extra_ca_certs)$/iu.test(name)) {
+    return `${name} redirects where ${program} and the tools it starts connect, or which certificates they trust`;
+  }
+  if (TOOLCHAIN_STEERING_NAMES.includes(name) || TOOLCHAIN_STEERING_SHAPE.test(name) || /^(?:npm_config_|yarn_|pnpm_)/iu.test(name)) {
+    return `${name} can make ${program} or the tools it starts run or fetch code from outside the workspace, or pick another toolchain binary`;
+  }
   if (/^(?:IFS|ENV|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|ZDOTDIR|CDPATH|BASH_)/u.test(name)) {
     return `${name} steers a shell ${program} may start`;
   }
