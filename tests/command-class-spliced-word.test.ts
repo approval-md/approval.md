@@ -393,12 +393,14 @@ test("through the hook: a spliced write is not allowed alone, and a spliced cred
  * the walked-once cases in guarded-names-fold-case time theirs): the median
  * of the pairs' ratios, and the line's median call in CPU seconds.
  */
-function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number): { ratio: number; spent: number } {
+function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number): { ratio: number; spent: number; control: number } {
   // Once each, untimed: the first call pays for the compiler.
   controlRun();
   spentRun();
   const ratios: number[] = [];
   const spents: number[] = [];
+  // Measuring only (#720's list): the control's median call is printed too.
+  const controls: number[] = [];
   for (let round = 0; round < rounds; round += 1) {
     let control: number;
     let spent: number;
@@ -411,13 +413,14 @@ function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number
     }
     ratios.push(spent / Math.max(control, 1e-6));
     spents.push(spent);
+    controls.push(control);
   }
   const median = (values: number[]): number => {
     values.sort((left, right) => left - right);
     const middle = values.length >> 1;
     return values.length % 2 === 1 ? values[middle]! : (values[middle - 1]! + values[middle]!) / 2;
   };
-  return { ratio: median(ratios), spent: median(spents) };
+  return { ratio: median(ratios), spent: median(spents), control: median(controls) };
 }
 
 test("cost: a word of 3,000 unread parts is bounded, and past the bound could be any path", (t) => {
@@ -432,6 +435,8 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
     const seconds = cpuSeconds(() => {
       classes = classesOf(command);
     });
+    // Measuring only (#720's list): the reading, printed before it is judged.
+    console.log(`# cost-line: SPLICE ${label}: ${seconds.toFixed(3)} CPU s (bound ${bound.toFixed(2)}; ${runner().line})`);
     assert.ok(seconds < bound, `${label}: ${seconds.toFixed(3)} CPU s, bound ${bound.toFixed(2)} (${runner().line})`);
     if (strict) assert.ok(classes.some((cls) => GUARDED.has(cls)), `${label}: ${classes.join(",")}`);
     else assert.deepEqual(classes, mainClasses(command), label);
@@ -449,9 +454,13 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
     [`echo x > a$E${"b".repeat(99_000)}`, `echo x > ab${"b".repeat(99_000)}`, 8],
     [`cp a $'${"a\\q".repeat(33_000)}'`, `cp a $'${"a\\n".repeat(33_000)}'`, 3],
   ] as const) {
-    const { ratio, spent } = pairedCost(() => classifyCommand(control, []), () => classifyCommand(command, []), 21);
+    const { ratio, spent, control: controlSeconds } = pairedCost(() => classifyCommand(control, []), () => classifyCommand(command, []), 21);
     const label = `${command.slice(0, 20)}: median ${spent.toFixed(3)} CPU s, ${ratio.toFixed(2)} of its control (${runner().line})`;
     t.diagnostic(`${label}; bounds ${scaledBound(0.4).toFixed(2)} CPU s and ${String(most)}`);
+    // Measuring only (#720's list): the control's median call beside the line's.
+    console.log(
+      `# cost-line: SPLICE paired ${command.slice(0, 20)}: median ${spent.toFixed(3)} CPU s (bound ${scaledBound(0.4).toFixed(2)}; control median ${controlSeconds.toFixed(3)}, ratio ${ratio.toFixed(2)} of ${String(most)}; ${runner().line})`,
+    );
     assert.ok(spent < scaledBound(0.4), label);
     assert.ok(ratio <= most, label);
   }
@@ -463,6 +472,8 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
     const seconds = cpuSeconds(() => {
       classes = classesOf(command);
     });
+    // Measuring only (#720's list): the reading, printed before it is judged.
+    console.log(`# cost-line: SPLICE backslashes beside a parameter: ${seconds.toFixed(3)} CPU s (bound ${scaledBound(0.4).toFixed(2)}; ${runner().line})`);
     assert.ok(seconds < scaledBound(0.4), `backslashes beside a parameter: ${seconds.toFixed(3)} CPU s (${runner().line})`);
     assert.ok(classes.includes("log.mutate"), classes.join(","));
     assert.deepEqual(classesOf(`tee $a'${"a\\q".repeat(30)}'`), mainClasses(`tee $a'${"a\\q".repeat(30)}'`));

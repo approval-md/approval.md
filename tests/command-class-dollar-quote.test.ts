@@ -472,6 +472,10 @@ test("review of b58db9ec (M3): repeated unread quotes in one word are linear, as
   ] as const) {
     assert.ok(command.length <= 100_000, label);
     const seconds = cpuSeconds(() => classifyCommand(command, []));
+    // Measuring only (#720's list): the reading, its fixed bound and its relative one, printed before they are judged.
+    console.log(
+      `# cost-line: DQ-M3 ${label}: ${seconds.toFixed(3)} CPU s (bound ${bound.toFixed(2)}; control ${control.toFixed(3)}, relative bound ${Math.max(0.2, 8 * control).toFixed(3)}; ${runner().line})`,
+    );
     assert.ok(seconds < bound, `${label}: ${seconds.toFixed(3)} CPU s, bound ${bound.toFixed(2)}, control ${control.toFixed(3)} (${runner().line})`);
     assert.ok(seconds < Math.max(0.2, 8 * control), `${label}: ${seconds.toFixed(3)} CPU s against a control of ${control.toFixed(3)}`);
   }
@@ -496,6 +500,8 @@ test("cost: 100 KB of dollar quotes is read in time; past the bound the rest of 
         const result = classifyForHook(command, [], cwd).result;
         classes = result.ok ? result.classes : [];
       });
+      // Measuring only (#720's list): the reading, printed before it is judged.
+      console.log(`# cost-line: DQ-100KB ${label}: ${seconds.toFixed(3)} CPU s (bound ${bound.toFixed(2)}; ${runner().line})`);
       assert.ok(seconds < bound, `${label}: ${seconds.toFixed(3)} CPU s, bound ${bound.toFixed(2)} (${runner().line})`);
       assert.ok(classes.length > 0, label);
     }

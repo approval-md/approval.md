@@ -480,6 +480,8 @@ test("resolved words are re-read once a segment, and many brace words all at onc
   see(read(200));
   const small = least(3_200);
   const large = least(12_800);
+  // Measuring only (#720's list): a relative cell with a constant of 0.2 CPU s.
+  console.log(`# cost-line: WL 12,800 home paths: ${large.toFixed(3)} CPU s (3,200: ${small.toFixed(3)}; relative bound ${(small * 8 + 0.2).toFixed(3)}; node ${process.version})`);
   // Four times the words: about four times the cost when linear, sixteen when square.
   assert.ok(large < small * 8 + 0.2, `3,200 words ${small.toFixed(2)} CPU s, 12,800 words ${large.toFixed(2)} CPU s`);
 });

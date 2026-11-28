@@ -286,13 +286,21 @@ test("a megabyte of path costs what a megabyte costs: the walks are linear", { s
   ] as const) {
     const control = cpu(() => run(16 * 1024));
     const spent = cpu(() => run(64 * 1024));
+    // Measuring only (#720's list): a relative cell with a constant of 0.5 CPU s.
+    console.log(`# cost-line: DEADLINE ${label}: ${spent.toFixed(3)} CPU s at 64 KB (control ${control.toFixed(3)} at 16 KB; relative bound ${(8 * control + 0.5).toFixed(3)}; node ${process.version})`);
     assert.ok(spent <= 8 * control + 0.5, `${label}: ${spent.toFixed(3)} s at 64 KB against ${control.toFixed(3)} s at 16 KB`);
   }
   // And one megabyte is answered at all, in seconds: no spread of half a
   // million arguments, no climb of half a million components.
   const megabyte = deep(1024 * 1024, "b/");
-  assert.ok(cpu(() => canonicalPath(join(root, megabyte))) < 10);
-  assert.ok(cpu(() => physicalLanding(root, megabyte)) < 10);
+  // Measuring only (#720's list): each reading is held in a name and printed
+  // before the same assertion judges it, in the same order as before.
+  const canonicalSeconds = cpu(() => canonicalPath(join(root, megabyte)));
+  console.log(`# cost-line: DEADLINE canonicalPath, a megabyte: ${canonicalSeconds.toFixed(3)} CPU s (bound 10, not stretched; node ${process.version})`);
+  assert.ok(canonicalSeconds < 10);
+  const landingSeconds = cpu(() => physicalLanding(root, megabyte));
+  console.log(`# cost-line: DEADLINE physicalLanding, a megabyte: ${landingSeconds.toFixed(3)} CPU s (bound 10, not stretched; node ${process.version})`);
+  assert.ok(landingSeconds < 10);
   assert.equal(canonicalPath(join(root, megabyte)), join(root, megabyte).replace(/\/$/u, ""));
 });
 
@@ -309,6 +317,8 @@ test("through the hook's classification, a long read word, a long write target a
   ] as const) {
     const control = cpu(() => classifyForHook(line(16 * 1024), [], root));
     const spent = cpu(() => classifyForHook(line(64 * 1024), [], root));
+    // Measuring only (#720's list): a relative cell with a constant of 0.5 CPU s.
+    console.log(`# cost-line: DEADLINE hook ${label}: ${spent.toFixed(3)} CPU s at 64 KB (control ${control.toFixed(3)} at 16 KB; relative bound ${(8 * control + 0.5).toFixed(3)}; node ${process.version})`);
     assert.ok(spent <= 8 * control + 0.5, `${label}: ${spent.toFixed(3)} s at 64 KB against ${control.toFixed(3)} s at 16 KB`);
   }
 });

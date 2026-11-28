@@ -269,6 +269,8 @@ test("cost: a long `*` run is matched in bounded CPU time", () => {
       mayNameGitDirectory(`x/${pattern}/y`);
     }
   });
+  // Measuring only (#720's list): the reading, printed before it is judged.
+  console.log(`# cost-line: CGS long star run: ${ms.toFixed(1)} CPU ms (bound 500, not stretched; node ${process.version})`);
   assert.ok(ms < 500, `${ms.toFixed(1)} CPU ms, bound 500`);
 });
 
@@ -287,6 +289,8 @@ test("cost: a run of unclosed `[` is scanned once, not once per `[` (codex S1 on
       }
     }
   });
+  // Measuring only (#720's list): the reading, printed before it is judged.
+  console.log(`# cost-line: CGS unclosed bracket runs: ${ms.toFixed(1)} CPU ms (bound 500, not stretched; node ${process.version})`);
   assert.ok(ms < 500, `${ms.toFixed(1)} CPU ms, bound 500`);
 });
 
@@ -300,5 +304,7 @@ test("cost: a class of many members is matched in bounded CPU time", () => {
   // A guard: the `.git` reader tests each character with one cached
   // one-character expression, so this was never P x N. About 7 CPU ms here
   // (#680's walk); the bound is 20x.
+  // Measuring only (#720's list): the reading, printed before it is judged.
+  console.log(`# cost-line: CGS class of many members: ${ms.toFixed(1)} CPU ms (bound 150, not stretched; node ${process.version})`);
   assert.ok(ms < 150, `${ms.toFixed(1)} CPU ms, bound 150`);
 });

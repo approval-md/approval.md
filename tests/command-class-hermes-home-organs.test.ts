@@ -548,6 +548,8 @@ test("recheck S(new): the brace expander is bounded and fails to the stricter cl
   const used = process.cpuUsage(start);
   const ms = (used.user + used.system) / 1000;
   const bound = scaledBound(10) * 1000;
+  // Measuring only (#720's list): the reading, printed before it is judged.
+  console.log(`# cost-line: HHO brace expander block: ${ms.toFixed(1)} CPU ms (bound ${bound.toFixed(0)}; ${runner().line})`);
   assert.ok(ms < bound, `took ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (10 s x ${runner().line})`);
 });
 
@@ -563,6 +565,8 @@ test("cost: nested literal braces are read in one pass, not one scan per brace",
     });
     assert.deepEqual(classes, ["files.write.workspace"], `n=${String(n)}`);
     const bound = scaledBound(2) * 1000;
+    // Measuring only (#720's list): the reading, printed before it is judged.
+    console.log(`# cost-line: HHO nested literal braces n=${String(n)}: ${ms.toFixed(1)} CPU ms (bound ${bound.toFixed(0)}; ${runner().line})`);
     assert.ok(ms < bound, `n=${String(n)}: ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (2 s x ${runner().line})`);
   }
 });

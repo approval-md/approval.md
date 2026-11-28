@@ -268,6 +268,8 @@ test("cost: one test of a long pattern is bounded, whatever it holds", () => {
   });
   // About 125 CPU ms here for five 100,000-character patterns (the compile is
   // linear in the pattern); the bound is 8x that.
+  // Measuring only (#720's list): the reading, printed before it is judged.
+  console.log(`# cost-line: HGM long patterns: ${ms.toFixed(1)} CPU ms (bound 1000, not stretched; node ${process.version})`);
   assert.ok(ms < 1_000, `${ms.toFixed(1)} CPU ms, bound 1,000`);
 });
 
@@ -283,6 +285,8 @@ test("cost: a class of many members is one binary search a character (codex cave
       for (const name of names) assert.equal(compiled.test(name), false);
     }
   });
+  // Measuring only (#720's list): the reading, printed before it is judged.
+  console.log(`# cost-line: HGM class of many members: ${ms.toFixed(1)} CPU ms (bound 500, not stretched; node ${process.version})`);
   assert.ok(ms < 500, `${ms.toFixed(1)} CPU ms, bound 500`);
   // The merged ranges still answer as the members do.
   const mixed = globPattern("[zb-dz-za-ab-c0-9_]");
@@ -300,6 +304,8 @@ test("cost: a run of unclosed `[` compiles in one pass", () => {
   });
   // The hook's reader never rescanned (an unclosed `[` ends the compile):
   // about 9 CPU ms here, 35 on bfa73710; the bound is 10x.
+  // Measuring only (#720's list): the reading, printed before it is judged.
+  console.log(`# cost-line: HGM unclosed bracket run: ${ms.toFixed(1)} CPU ms (bound 100, not stretched; node ${process.version})`);
   assert.ok(ms < 100, `${ms.toFixed(1)} CPU ms, bound 100`);
 });
 

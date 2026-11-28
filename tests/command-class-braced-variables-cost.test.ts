@@ -69,6 +69,8 @@ let overBound: string | null = null;
 function bounded(run: () => void, label: string): void {
   assert.equal(overBound, null, `${label}: not timed, an earlier line passed the bound (${String(overBound)})`);
   const seconds = cpuSeconds(run);
+  // Measuring only (#720's list): this line's reading, printed before it is judged.
+  console.log(`# cost-line: BRACED ${label}: ${seconds.toFixed(3)} CPU s (bound ${String(BOUND)}, not stretched; node ${process.version})`);
   if (seconds >= BOUND) overBound = label;
   assert.ok(seconds < BOUND, `${label}: ${seconds.toFixed(2)} CPU s, bound ${String(BOUND)}`);
 }

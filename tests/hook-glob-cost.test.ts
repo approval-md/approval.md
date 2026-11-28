@@ -165,17 +165,29 @@ test("cost: the whole hook classification of a long `*` run is bounded in CPU ti
     // 36.7 CPU s at 8 `*` on a521a91d.
     for (const stars of [8, ...STAR_COUNTS]) {
       const word = `${"*".repeat(stars)}${"z".repeat(12)}`;
-      for (const command of [
-        `cat ${word}`,
-        `cat ~/.hermes/${word}`,
-        `echo x > ~/.hermes/${word}`,
-        `echo x > ${word}`,
-        `cat */${word}/x`,
-        `echo x > ~/.hermes/*/${word}`,
+      for (const shape of [
+        (each: string) => `cat ${each}`,
+        (each: string) => `cat ~/.hermes/${each}`,
+        (each: string) => `echo x > ~/.hermes/${each}`,
+        (each: string) => `echo x > ${each}`,
+        (each: string) => `cat */${each}/x`,
+        (each: string) => `echo x > ~/.hermes/*/${each}`,
       ]) {
+        const command = shape(word);
         const ms = cpuMs(() => {
           classifyForHook(command, [], dir, [], false, [dir]);
         });
+        // Measuring only (#720's list, HGC2): two more calls of the line, and
+        // three of the same line with the run of `*` replaced by plain `a`, the
+        // least of each printed. Nothing here is asserted.
+        const again = [1, 2].map(() => cpuMs(() => { classifyForHook(command, [], dir, [], false, [dir]); }));
+        const plainLine = shape(`${"a".repeat(stars)}${"z".repeat(12)}`);
+        const plains = [1, 2, 3].map(() => cpuMs(() => { classifyForHook(plainLine, [], dir, [], false, [dir]); }));
+        const calls = [ms, ...again];
+        t.diagnostic(
+          `cost-measure: HGC2 ${command.slice(0, 30)} (${String(stars)} stars): calls ${calls.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...calls).toFixed(1)} CPU ms; ` +
+            `plain ${plains.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...plains).toFixed(1)}; ratio of the least ${(Math.min(...calls) / Math.max(Math.min(...plains), 0.001)).toFixed(2)} (the runner's line is test 4's)`,
+        );
         report(t, `${command.slice(0, 30)} (${String(stars)} stars)`, ms, BOUND_MS * 2);
         assert.ok(ms < BOUND_MS * 2, `${command.slice(0, 30)} (${String(stars)} stars): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
       }
@@ -248,11 +260,23 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
       // A `cat` of a long `[` run is left out: its cost is the kernel refusing
       // a path that long (lstat through realpath, about 7 CPU ms a call,
       // the same before and after this change), not either glob reader.
-      const reads = word.startsWith("*") ? [`cat ${word}`, `cat ~/.hermes/${word}`] : [];
-      for (const command of [`echo x > ${word}`, `echo x > ~/.hermes/${word}`, ...reads]) {
+      const reads = word.startsWith("*") ? [(each: string) => `cat ${each}`, (each: string) => `cat ~/.hermes/${each}`] : [];
+      for (const shape of [(each: string) => `echo x > ${each}`, (each: string) => `echo x > ~/.hermes/${each}`, ...reads]) {
+        const command = shape(word);
         const ms = cpuMs(() => {
           classifyForHook(command, [], dir, [], false, [dir]);
         });
+        // Measuring only (#720's list, HGC3): four more calls of the line, and
+        // three of the same line with a plain name of the same length, the
+        // least of each printed. Nothing here is asserted.
+        const again = [1, 2, 3, 4].map(() => cpuMs(() => { classifyForHook(command, [], dir, [], false, [dir]); }));
+        const plainLine = shape("a".repeat(word.length));
+        const plains = [1, 2, 3].map(() => cpuMs(() => { classifyForHook(plainLine, [], dir, [], false, [dir]); }));
+        const calls = [ms, ...again];
+        t.diagnostic(
+          `cost-measure: HGC3 ${command.slice(0, 30)} (${String(word.length)} characters): calls ${calls.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...calls).toFixed(1)} CPU ms; ` +
+            `plain ${plains.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...plains).toFixed(1)}; ratio of the least ${(Math.min(...calls) / Math.max(Math.min(...plains), 0.001)).toFixed(2)} (the runner's line is test 4's)`,
+        );
         report(t, `${command.slice(0, 30)} (${String(word.length)} characters)`, ms, BOUND_MS * 2);
         assert.ok(ms < BOUND_MS * 2, `${command.slice(0, 30)} (${String(word.length)} characters): ${ms.toFixed(1)} CPU ms, bound ${String(BOUND_MS * 2)}`);
       }

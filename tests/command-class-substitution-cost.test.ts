@@ -100,6 +100,9 @@ const MANY_COMMAND_WORDS_BOUND = 1.5 * 7.35;
  */
 function withinBound(seconds: number, label: string, own?: number): void {
   const bound = own ?? scaledBound(BOUND);
+  // Measuring only (#720's list): every line held to the general bound prints
+  // its reading before it is judged (a line with its own bound already does).
+  if (own === undefined) console.log(`# cost-line: SUB ${label}: ${seconds.toFixed(3)} CPU s (bound ${bound.toFixed(2)}; ${runner().line})`);
   if (seconds >= bound) overBound = label;
   const how = own === undefined ? `${String(BOUND)} x ${runner().line}` : "this line's own bound, set from main's figure on CI and not stretched";
   assert.ok(seconds < bound, `${label}: ${seconds.toFixed(2)} CPU s, bound ${bound.toFixed(2)} (${how})`);
@@ -289,6 +292,25 @@ test("cost: review-b's shapes on b085cd91 (nested defaults, printf and echo bodi
     bounded(`${P}echo x > "$(echo${" -n".repeat(n)} a)"`, `echo of many flags, n=${String(n)}`);
     bounded(`${P}echo x > "$(${"command ".repeat(n)}printf a)"`, `many command words, n=${String(n)}`, n === 400000 ? MANY_COMMAND_WORDS_BOUND : undefined);
   }
+  // Measuring only (#720's list, SUB400K): the line with its own bound read
+  // three more times beside the same line at an eighth of its words, as #719
+  // reads its lines, the least of each printed. Nothing here is asserted.
+  {
+    const line = `${P}echo x > "$(${"command ".repeat(400000)}printf a)"`;
+    const control = `${P}echo x > "$(${"command ".repeat(50000)}printf a)"`;
+    const lines: number[] = [];
+    const controls: number[] = [];
+    for (let round = 0; round < 3; round += 1) {
+      controls.push(cpuSeconds(() => pure(control)));
+      lines.push(cpuSeconds(() => pure(line)));
+    }
+    const least = Math.min(...lines);
+    const leastControl = Math.min(...controls);
+    console.log(
+      `# cost-measure: SUB400K many command words, n=400000: calls ${lines.map((x) => x.toFixed(2)).join(" ")}, least ${least.toFixed(2)} CPU s; ` +
+        `n=50000 ${controls.map((x) => x.toFixed(3)).join(" ")}, least ${leastControl.toFixed(3)}; ratio ${(least / leastControl).toFixed(2)}; ${runner().line}`,
+    );
+  }
 });
 
 /**
@@ -308,6 +330,10 @@ function nearControl(line: string, control: string, label: string): void {
     pure(line);
   });
   const ok = seconds < CONTROL_FACTOR * base + scaledBound(1);
+  // Measuring only (#720's list): a relative cell with a constant of 1 CPU s (stretched), printed before it is judged.
+  console.log(
+    `# cost-line: SUB-NEAR ${label}: ${seconds.toFixed(3)} CPU s (control ${base.toFixed(3)}; relative bound ${(CONTROL_FACTOR * base + scaledBound(1)).toFixed(3)}; ${runner().line})`,
+  );
   if (!ok) overBound = label;
   assert.ok(ok, `${label}: ${seconds.toFixed(2)} CPU s, the control ${base.toFixed(2)}, factor ${String(CONTROL_FACTOR)}`);
 }
@@ -496,6 +522,8 @@ test("cost: a command with a line continuation is classified once, not again as 
     time(words("")); // warm the compiled readers once
     const plain = time(words(""));
     const continued = time(words("\\\n"));
+    // Measuring only (#720's list): a relative cell with a constant of 0.5 CPU s.
+    console.log(`# cost-line: SUB-REL hook, 4,000 continued words: ${continued.toFixed(3)} CPU s (plain ${plain.toFixed(3)}; relative bound ${(plain * 1.5 + 0.5).toFixed(3)}; ${runner().line})`);
     withinBound(continued, "hook, 4,000 continued words");
     assert.ok(continued < plain * 1.5 + 0.5, `continued ${continued.toFixed(2)} s against plain ${plain.toFixed(2)} s`);
   } finally {
@@ -522,6 +550,8 @@ test("cost: a word the zsh option reading changes, repeated, is landed on the di
   for (const word of ["^import", "~/.hermes/(#a1)auth.json", "~/^zz/auth.json", "~/.hermes/{a-z}uth.json", "~/.hermes/au#th.json"]) {
     notAlreadyOver(word);
     const seconds = hook(words(word));
+    // Measuring only (#720's list): a relative cell with a constant of 0.5 CPU s.
+    console.log(`# cost-line: SUB-REL ${word} x n, 40 KB: ${seconds.toFixed(3)} CPU s (plain ${plain.toFixed(3)}; relative bound ${(plain * 1.5 + 0.5).toFixed(3)}; ${runner().line})`);
     withinBound(seconds, `${word} x n, 40 KB`);
     assert.ok(seconds < plain * 1.5 + 0.5, `${word}: ${seconds.toFixed(2)} s against the plain word's ${plain.toFixed(2)} s`);
   }
