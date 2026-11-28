@@ -414,8 +414,28 @@ export function guardedEntryBelow(path: string, homes: readonly string[], config
   for (const home of homes) {
     const anchor = segmentsOf(home);
     if (anchor.length === 0) continue;
+    // A landing unrelated to this home cannot contain any of its entries.
+    // Compare the shared anchor once, rather than joining and folding it for
+    // every guarded entry and every sibling a pattern matches.
+    const common = Math.min(folded.length, anchor.length);
+    let related = true;
+    for (let index = 0; index < common; index += 1) {
+      if (folded[index] !== foldedWant(anchor[index] as string)) {
+        related = false;
+        break;
+      }
+    }
+    if (!related) continue;
     for (const entry of GUARDED_HOME_ENTRIES) {
-      if (strictlyUnder([...anchor, ...entry.segments])) return entry.name;
+      if (anchor.length + entry.segments.length <= folded.length) continue;
+      let under = true;
+      for (let index = anchor.length; index < folded.length; index += 1) {
+        if (folded[index] !== foldedWant(entry.segments[index - anchor.length] as string)) {
+          under = false;
+          break;
+        }
+      }
+      if (under) return entry.name;
     }
   }
   // `/Users` itself holds homes (its children); `/var` holds `/var/root`.

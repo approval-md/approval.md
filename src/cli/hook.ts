@@ -4342,6 +4342,16 @@ interface LandingForms {
 function landingFormsOf(spelled: string, disk: DiskReads): LandingForms {
   const known = disk.landingForms?.get(spelled);
   if (known !== undefined) return known;
+  // A normal POSIX path that is its own realpath has no alias to retain:
+  // its lexical, kernel and parent-plus-name forms are all that path. The
+  // process handles kernelLanding refuses must still take the full reader.
+  const normal = sep === "/" && spelled.startsWith("/") && !/\/\.{0,2}(?:\/|$)/u.test(spelled);
+  const processHandle = /^\/proc\/(?:self|thread-self|\d+)(?:\/(?:cwd|root|fd|fdinfo|map_files|task|exe)(?:\/|$)|$)/u.test(spelled);
+  if (normal && !processHandle && disk.realpath(spelled) === spelled) {
+    const found: LandingForms = { text: spelled, landing: { paths: [spelled], unknown: false }, distinct: [spelled] };
+    disk.landingForms?.set(spelled, found);
+    return found;
+  }
   const text = resolvePathSegments(spelled);
   const landing = landingPaths(spelled, null, disk);
   const forms = [text, ...landing.paths];
@@ -4899,7 +4909,7 @@ export interface WriteLandingMemo {
 export type PlainLineClass = { cls: string; rule: string; path: string; why?: string };
 
 /** A fresh {@link WriteLandingMemo}, for one `classifyForHook` call. */
-export function writeLandingMemo(): WriteLandingMemo {
+export function writeLandingMemo(disk: DiskReads = memoDiskReads()): WriteLandingMemo {
   const targets = new Map<string, string | null>();
   const writeTarget = (target: string, cwd: string): string | null => {
     const key = `${cwd}\u0000${target}`;
@@ -4908,7 +4918,7 @@ export function writeLandingMemo(): WriteLandingMemo {
     targets.set(key, resolved);
     return resolved;
   };
-  return { landings: new Map(), paths: new Map(), disk: memoDiskReads(), writeTarget, plainLines: new Map() };
+  return { landings: new Map(), paths: new Map(), disk, writeTarget, plainLines: new Map() };
 }
 
 /** How many landings the write pass has judged in this process (not answered from a memo): for tests. */
@@ -6562,7 +6572,9 @@ export function classifyForHook(
   // made once for this call: every reading below lands the same spellings,
   // and a landing's answer depends on neither the text's reading nor the
   // name reading ({@link WriteLandingMemo}).
-  const landings = writeLandingMemo();
+  // The write and credential passes read the same per-call disk snapshot.
+  // Share its entry/listing cache too, rather than lstat-ing those paths again.
+  const landings = writeLandingMemo(diskMemo.reads);
   try {
     const once = (text: string): RefinedClassification =>
       classifyForHookOnce(text, protectedPaths, cwd, readRoots, execCode, credentialCwds, noRuleSegments, writeScope, globListings, landings);
