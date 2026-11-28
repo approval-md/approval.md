@@ -401,6 +401,8 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     let asserted = 0;
     /** The 2,000-character lines held to their ratio and their control's bound: all eight. */
     let ratioHeld = 0;
+    /** Each shape's 2,000-character control, median CPU ms, for the measuring lines below. */
+    const controlOf = new Map<string, number>();
     const lines: Array<[string, (word: string) => string]> = [
       ["cp, destination", (word) => `cp README.md ${word}`],
       ["cp, source", (word) => `cp ${word} out.txt`],
@@ -425,6 +427,7 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
         const { controlBound, lineOver, controlOver } = judged(ratio, controlMs, fastMs, runner().factor);
         const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${String(COPY_RATIO_BOUND)}; the control's own bound ${controlBound.toFixed(1)}; the ${String(BOUND_MS * 2)} ms is printed, not asserted until the argv-line split: PRIORITIES`;
         t.diagnostic(`cost: ${label}`);
+        controlOf.set(named(shape, prefix), controlMs);
         ratioHeld += 1;
         if (lineOver) over.push(label);
         // The control's own bound: it is the classifier too, and a change
@@ -440,6 +443,18 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
         const ms = cpuMs(() => {
           classifyForHook(command, [], dir, [], false, [dir]);
         });
+        // Measuring only (HGC20K): four more calls of the line, and three of
+        // the same line with a plain name of the same length, printed beside
+        // the shape's 2,000-character control. Nothing here is asserted.
+        const again = [1, 2, 3, 4].map(() => cpuMs(() => { classifyForHook(command, [], dir, [], false, [dir]); }));
+        const plainLine = line(`${prefix}${"a".repeat(20_000)}`);
+        const plains = [1, 2, 3].map(() => cpuMs(() => { classifyForHook(plainLine, [], dir, [], false, [dir]); }));
+        const calls = [ms, ...again];
+        const median = (values: number[]): number => [...values].sort((x, y) => x - y)[Math.floor(values.length / 2)] as number;
+        t.diagnostic(
+          `cost-measure: HGC20K ${named(shape, prefix)}: calls ${calls.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...calls).toFixed(1)}, median ${median(calls).toFixed(1)} CPU ms; ` +
+            `plain 20,000 ${plains.map((x) => x.toFixed(1)).join(" ")}; the 2,000-character control ${(controlOf.get(named(shape, prefix)) ?? Number.NaN).toFixed(1)}; ${runner().line}`,
+        );
         const held = !printOnly(shape, prefix, 20_000);
         if (held) asserted += 1;
         if (held) report(t, `${command.slice(0, 30)} (20000 characters)`, ms, BOUND_MS * 2);
