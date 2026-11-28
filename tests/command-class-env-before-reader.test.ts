@@ -265,6 +265,12 @@ const KEPT: readonly (readonly [string, string])[] = [
   ["LD_PRELOAD=./x.so; cat README.md", "refused unclassified"],
   ["PATH=. cat .approval/env", "account.credential credential-path"],
   ["PATH=. touch x", "files.write.workspace workspace-write"],
+  // `cd` is left to its own rules: an intrinsic that runs nothing, whose
+  // CDPATH and HOME the landing rules already model.
+  ["CDPATH=/ cd ./build", "read.shell read-shell"],
+  ["HOME=/tmp cd", "read.shell read-shell"],
+  ["PATH=. cd foo", "read.shell read-shell"],
+  ["IFS=x; cd foo", "read.shell assignment | read.shell read-shell"],
 ];
 
 /** Every segment as `class rule`, joined; a refusal as `refused <code>`. */

@@ -3465,6 +3465,14 @@ export interface ClassifierContext {
    */
   shellEnvWrite?: string;
   /**
+   * A name that steers a reader ({@link isReaderSteeringName}) that the
+   * command line's own shell sets (APRV-540), found by the same scan as
+   * {@link shellEnvWrite} and handed down the same way; every segment whose
+   * class is a read under it is `unclassified`. A caller that sets it only
+   * refuses more.
+   */
+  readerEnvWrite?: string;
+  /**
    * May an opaque PROGRAM be classified `exec.code` rather than refused
    * (APRV-510)?
    *
@@ -5076,8 +5084,15 @@ const PARAMETER_ASSIGNMENT = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?:?=/u;
  * body runs again after its own later assignments. A subshell or a pipeline
  * stage that keeps its assignment to itself is counted too, which only ever
  * refuses more.
+ *
+ * APRV-540: the same scan reads a reader's steering names when handed
+ * {@link isReaderSteeringName} and {@link isHarmlessReaderAssignment}.
  */
-function gitEnvironmentWrite(segments: readonly LexSegment[]): string | null {
+function gitEnvironmentWrite(
+  segments: readonly LexSegment[],
+  inherited: (name: string) => boolean = isGitInheritedName,
+  harmless: (word: LexWord) => boolean = isHarmlessGitAssignment,
+): string | null {
   const nameOf = assignedName;
   for (const segment of segments) {
     const words = segment.words;
@@ -5087,7 +5102,7 @@ function gitEnvironmentWrite(segments: readonly LexSegment[]): string | null {
     const base = binWord === undefined ? null : (pathSegments(binWord.text).slice(-1)[0] ?? binWord.text);
     if (base === null || POSIX_SPECIAL_BUILTINS.includes(base)) {
       for (const word of words.slice(0, cursor)) {
-        if (isGitInheritedName(nameOf(word.text)) && !isHarmlessGitAssignment(word)) return nameOf(word.text);
+        if (inherited(nameOf(word.text)) && !harmless(word)) return nameOf(word.text);
       }
     }
     if (base !== null && SHELL_SETTING_BUILTINS.includes(base)) {
@@ -5097,7 +5112,7 @@ function gitEnvironmentWrite(segments: readonly LexSegment[]): string | null {
         // The name as written, subscript included: `a[$x]` is not a name the text settles.
         const written = word.text.includes("=") ? word.text.slice(0, word.text.indexOf("=")) : word.text;
         if (/[$`]/u.test(written)) return name;
-        if (isGitInheritedName(name) && !isHarmlessGitAssignment(word)) return name;
+        if (inherited(name) && !harmless(word)) return name;
       }
     }
     if (base === "printf") {
@@ -5108,15 +5123,185 @@ function gitEnvironmentWrite(segments: readonly LexSegment[]): string | null {
         const name = arg === "-v" ? args[at + 1] : arg.startsWith("-v") ? arg.slice(2) : undefined;
         if (name === undefined) continue;
         const bare = name.replace(/\[.*$/su, "");
-        if (/[$`]/u.test(bare) || isGitInheritedName(bare)) return bare;
+        if (/[$`]/u.test(bare) || inherited(bare)) return bare;
       }
     }
     for (const word of [...words, ...segment.redirects.map((redirect) => redirect.target)]) {
       const match = PARAMETER_ASSIGNMENT.exec(word.text);
-      if (match !== null && isGitInheritedName(match[1] as string)) return match[1] as string;
+      if (match !== null && inherited(match[1] as string)) return match[1] as string;
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Environment assignments in front of a reader (APRV-540)
+// ---------------------------------------------------------------------------
+
+/** A presence or Boolean switch: a short word of letters and digits, or nothing. */
+const SWITCH_VALUE = /^[A-Za-z0-9]{0,16}$/u;
+
+/**
+ * The names admitted in front of a reader beyond git's list (APRV-540), each
+ * with the only values admitted. A CLOSED list: in front of a command whose
+ * class is a read, any other assignment leaves the segment `unclassified`
+ * ({@link readerAssignmentRefusal}). None of these names a program, a library,
+ * a directory or a configuration file, and no admitted value is a path:
+ *
+ * - `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `FORCE_COLOR`: colour switches
+ *   (no-color.org; ls(1) on macOS; the Node `supports-color` convention). They
+ *   change the bytes a reader prints, never what it runs.
+ * - `CI`: the continuous-integration switch tools read to stop prompting and
+ *   colouring.
+ * - `GH_PROMPT_DISABLED`, `GH_NO_UPDATE_NOTIFIER`, `GH_SPINNER_DISABLED`:
+ *   gh(1) environment switches that turn a prompt, the update check and the
+ *   spinner off.
+ * - `COLUMNS`, `LINES`: the terminal size, digits only.
+ * - `TERM`: a terminal type, looked up by name in the terminfo database; no
+ *   `/`, so never a file the agent chose (`TERMINFO` and `TERMINFO_DIRS`,
+ *   which name the database, are not admitted).
+ * - `GH_PAGER=cat`, `GH_PAGER=` (empty): gh(1) runs no pager for `cat` or an
+ *   empty value, as git does for `GIT_PAGER` (git's own `PAGER=cat` is in
+ *   {@link GIT_HARMLESS_ASSIGNMENTS}).
+ * - `GH_REPO=OWNER/REPO`: the repository gh acts on, as `-R OWNER/REPO` names
+ *   it; the `HOST/OWNER/REPO` form, which names another host, is not admitted.
+ *
+ * Git's list ({@link isHarmlessGitAssignment}: `GIT_TERMINAL_PROMPT=0`, the
+ * no-op pagers and editors, the locale and the zone with a plain value) is
+ * admitted too, so every word admitted in front of `git` is admitted in front
+ * of a reader.
+ */
+const READER_HARMLESS_VALUES: Readonly<Record<string, RegExp>> = {
+  NO_COLOR: SWITCH_VALUE,
+  CLICOLOR: SWITCH_VALUE,
+  CLICOLOR_FORCE: SWITCH_VALUE,
+  FORCE_COLOR: SWITCH_VALUE,
+  CI: SWITCH_VALUE,
+  GH_PROMPT_DISABLED: SWITCH_VALUE,
+  GH_NO_UPDATE_NOTIFIER: SWITCH_VALUE,
+  GH_SPINNER_DISABLED: SWITCH_VALUE,
+  COLUMNS: /^[0-9]{1,5}$/u,
+  LINES: /^[0-9]{1,5}$/u,
+  TERM: /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}$/u,
+  GH_PAGER: /^(?:cat)?$/u,
+  GH_REPO: /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u,
+};
+
+/**
+ * May this assignment word stand in front of a reader without changing which
+ * program runs or what it loads (APRV-540)? Git's list, or a name of
+ * {@link READER_HARMLESS_VALUES} with a value its pattern admits, spelled
+ * plainly and carrying no substitution.
+ */
+function isHarmlessReaderAssignment(word: LexWord): boolean {
+  if (isHarmlessGitAssignment(word)) return true;
+  if (word.substitutions.length > 0) return false;
+  const text = word.text;
+  if (!PLAIN_ASSIGNMENT.test(text)) return false;
+  const equals = text.indexOf("=");
+  const name = text.slice(0, equals);
+  const pattern = Object.hasOwn(READER_HARMLESS_VALUES, name) ? READER_HARMLESS_VALUES[name] : undefined;
+  return pattern !== undefined && pattern.test(text.slice(equals + 1));
+}
+
+/**
+ * The names that steer a reader (APRV-540): set in front of it, or by the
+ * line's own shell before it when the name is exported, each can change which
+ * program runs, what it loads, or the configuration that names one. Named so
+ * the refusal says so, and so a bare assignment earlier on the line is caught
+ * (the line scan, {@link gitEnvironmentWrite} handed
+ * {@link isReaderSteeringName}). In front of the reader itself this list is
+ * not what refuses: every word off the admitted lists does.
+ *
+ * - The program and its libraries: `PATH`, and by shape `LD_*` (`LD_PRELOAD`,
+ *   `LD_LIBRARY_PATH`, `LD_AUDIT`) and `DYLD_*`.
+ * - A shell the reader starts: `IFS`, `ENV`, `BASH_ENV` (and `BASH_*`),
+ *   `SHELLOPTS`, `BASHOPTS`, `PS4`, `PROMPT_COMMAND`, `ZDOTDIR`, `CDPATH`,
+ *   `SHELL`.
+ * - Configuration that names a program: `HOME`, `XDG_*`, `GH_CONFIG_DIR` (and
+ *   `GH_*`), `CURL_HOME`, `WGETRC`, `RIPGREP_CONFIG_PATH`, `OPENSSL_*`,
+ *   `GIT_*` (gh runs git), `TMPDIR` (where a reader writes its spill files and
+ *   some programs unpack helpers).
+ * - A program by name: `PAGER`, `MANPAGER`, `EDITOR`, `VISUAL`, `BROWSER`,
+ *   `SUDO_ASKPASS`, `SSH_ASKPASS`, and by shape every `*PAGER`, `*EDITOR`,
+ *   `*BROWSER`, `*ASKPASS`; `LESS*` (`LESS=+!cmd`, `LESSOPEN`, `LESSCLOSE`).
+ * - Options or code handed to a tool or an interpreter: `MANOPT`,
+ *   `GREP_OPTIONS`, `GZIP`, `BZIP2`, `XZ_OPT`, `XZ_DEFAULTS`, `TAR_OPTIONS`,
+ *   `ZIPOPT`, `UNZIP`, `UNZIPOPT`, `POSIXLY_CORRECT`, `PYTHON*`
+ *   (`PYTHONSTARTUP`, `PYTHONPATH`), `PERL*` (`PERL5OPT`, `PERL5LIB`), `RUBY*`
+ *   (`RUBYOPT`, `RUBYLIB`), `NODE_*` (`NODE_OPTIONS`, `NODE_PATH`),
+ *   `npm_config_*` / `NPM_CONFIG_*`, `BUN_*`, `DENO_*`, `JAVA_TOOL_OPTIONS`,
+ *   `_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS`, `CLASSPATH`.
+ * - The C library's own files: `LANG`, `LANGUAGE`, `LC_*` (a value that is a
+ *   path), `TZ`, `TZDIR`, `LOCPATH`, `GCONV_PATH`, `NLSPATH`, `TERMINFO`,
+ *   `TERMINFO_DIRS`, `TERMCAP`.
+ */
+const READER_STEERING_NAMES: readonly string[] = [
+  "PATH",
+  "IFS",
+  "ENV",
+  "SHELLOPTS",
+  "BASHOPTS",
+  "PS4",
+  "PROMPT_COMMAND",
+  "ZDOTDIR",
+  "CDPATH",
+  "SHELL",
+  "HOME",
+  "CURL_HOME",
+  "WGETRC",
+  "RIPGREP_CONFIG_PATH",
+  "TMPDIR",
+  "VISUAL",
+  "MANOPT",
+  "GREP_OPTIONS",
+  "GZIP",
+  "BZIP2",
+  "XZ_OPT",
+  "XZ_DEFAULTS",
+  "TAR_OPTIONS",
+  "ZIPOPT",
+  "UNZIP",
+  "UNZIPOPT",
+  "POSIXLY_CORRECT",
+  "JAVA_TOOL_OPTIONS",
+  "_JAVA_OPTIONS",
+  "JDK_JAVA_OPTIONS",
+  "CLASSPATH",
+  "LANG",
+  "LANGUAGE",
+  "TZ",
+  "TZDIR",
+  "LOCPATH",
+  "GCONV_PATH",
+  "NLSPATH",
+  "TERMINFO",
+  "TERMINFO_DIRS",
+  "TERMCAP",
+];
+
+/** The steering names by shape: the prefixes and suffixes {@link READER_STEERING_NAMES} lists. */
+const READER_STEERING_SHAPE =
+  /^(?:LD_|DYLD_|BASH_|XDG_|GH_|GIT_|OPENSSL_|LESS|LC_|PYTHON|PERL|RUBY|NODE_|npm_config_|NPM_CONFIG_|BUN_|DENO_)|(?:PAGER|EDITOR|BROWSER|ASKPASS)$/u;
+
+/** Is this a name that steers a reader ({@link READER_STEERING_NAMES})? */
+function isReaderSteeringName(name: string): boolean {
+  return READER_STEERING_NAMES.includes(name) || READER_STEERING_SHAPE.test(name) || isGitInheritedName(name);
+}
+
+/**
+ * Why the assignments in front of a reader leave the segment `unclassified`,
+ * or `null` when every one is admitted (APRV-540). The mechanism and the
+ * wording are git's ({@link gitAssignmentRefusal}): the first word off the
+ * admitted lists decides, and a steering name is named as one.
+ */
+function readerAssignmentRefusal(prefix: readonly LexWord[], program: string): string | null {
+  const word = prefix.find((candidate) => !isHarmlessReaderAssignment(candidate));
+  if (word === undefined) return null;
+  const head = `no rule for ${assignmentHead(word.text)}… in front of ${program}`;
+  return isReaderSteeringName(assignedName(word.text))
+    ? `${head}: an environment assignment can run a program, change what it loads, or repoint its configuration`
+    : `${head}: an environment assignment this classifier does not know may change which program runs or what it loads`;
 }
 
 /** `git commit --amend` rewrites; a plain commit does not. */
@@ -16069,6 +16254,35 @@ function classifySegmentWithVerb(
   // rather than being handed a class and left to re-read the command.
   const boundPath = refined !== null && "path" in refined ? refined.path : undefined;
 
+  // APRV-540: a reader is classified by the assignments in front of it, not
+  // only by its verb. Once the table names the command a read, an assignment
+  // off the closed admitted lists ({@link readerAssignmentRefusal}; the words
+  // before a sandbox wrapper count, as for git) leaves the segment
+  // `unclassified`, and so does a steering name the line's own shell sets
+  // ({@link ClassifierContext.readerEnvWrite}). `PATH=. cat f` runs `./cat`,
+  // and `GH_PAGER=./x gh pr diff 1` runs `./x`. Here, ahead of every
+  // protected, write and scope answer below, so no later answer softens it:
+  // the refusal is a deny under every policy, and every answer it replaces is
+  // an allow, an ask or a deny.
+  //
+  // `cd`, spelled bare, is the one reader left to its own rules: POSIX's
+  // intrinsic utility, never looked up on PATH, it runs and loads nothing, and
+  // the two variables it reads from a prefix (`CDPATH`, `HOME`) are already
+  // modelled where it lands (APRV-508's recheck, fix M-B of the credential
+  // pass, fold 15 of the parents rule), which answer more exactly than a
+  // refusal here would.
+  if (cls.startsWith("read.") && bin !== "cd") {
+    const readerRefusal = readerAssignmentRefusal(segment.words.slice(0, assignments.length), basename);
+    if (readerRefusal !== null) return { ok: false, code: "unclassified", detail: readerRefusal };
+    if (context.readerEnvWrite !== undefined) {
+      return {
+        ok: false,
+        code: "unclassified",
+        detail: `no rule for ${basename} after ${context.readerEnvWrite} is set on the same command line: a reader and the programs it starts inherit the shell's exported environment`,
+      };
+    }
+  }
+
   // APRV-511 refuter S1: a download's output file is a write target, whatever
   // class the fetch earned (`curl -o ~/.hermes/plugins/x/__init__.py URL` is
   // `read.web` by its method). A protected output answers with its class, as a
@@ -16889,6 +17103,11 @@ function classifyCommandAsReadWithRules(
   // reaches every git segment on the line and in its substitutions.
   const shellEnvWrite = context.shellEnvWrite ?? gitEnvironmentWrite(lexed.segments) ?? undefined;
   if (shellEnvWrite !== undefined) context = { ...context, shellEnvWrite };
+  // APRV-540: a name that steers a reader, set the same way, reaches every
+  // reader on the line and in its substitutions.
+  const readerEnvWrite =
+    context.readerEnvWrite ?? gitEnvironmentWrite(lexed.segments, isReaderSteeringName, isHarmlessReaderAssignment) ?? undefined;
+  if (readerEnvWrite !== undefined) context = { ...context, readerEnvWrite };
 
   const segments: ClassifiedSegment[] = [];
   const classes: string[] = [];

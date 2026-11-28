@@ -74,6 +74,17 @@ function answer(command: string): string {
   return result.ok ? result.segments.map((segment) => `${segment.class}/${segment.rule}`).join(" ") : `refused/${result.code}`;
 }
 
+/**
+ * Was the word read as an assignment in front of the program? Answered, or
+ * refused by the rule for an assignment in front of git or a reader, which
+ * names the word as one (APRV-521, APRV-540: `n=5 ls` is refused because `n`
+ * is not on the reader's admitted list, and the refusal says `in front of ls`).
+ */
+function readAsAssignment(command: string): boolean {
+  const result = classifyCommand(command);
+  return result.ok || / in front of /u.test(result.detail);
+}
+
 function failure(command: string): { code: string; detail: string } {
   const result = classifyCommand(command);
   assert.equal(result.ok, false, `${command} must be refused, got ${answer(command)}`);
@@ -84,7 +95,7 @@ test("the plain spellings are answered (the controls)", () => {
   for (const source of SOURCES) {
     for (const tail of tailsOf(source)) {
       const command = `${source} ${tail}`;
-      assert.equal(classifyCommand(command).ok, true, `${command}: ${answer(command)}`);
+      assert.ok(readAsAssignment(command), `${command}: ${answer(command)}`);
     }
   }
   assert.equal(answer("n=5"), "read.shell/assignment");
@@ -124,7 +135,7 @@ test("a quoted value, or a quoted subscript, keeps the word an assignment", () =
     ['LANG="C" cat f', "LANG=C cat f"],
   ] as const) {
     assert.equal(answer(quoted), answer(plain), quoted);
-    assert.equal(classifyCommand(quoted).ok, true, quoted);
+    assert.ok(readAsAssignment(quoted), quoted);
   }
   // A quoted subscript is an assignment to bash, and a subscripted one is
   // refused as before (APRV-521), with its own detail.
@@ -341,7 +352,9 @@ test("hook: under this repository's policy a quoted or escaped name is refused a
   }
 
   // The controls: the plain and quoted-value spellings still run unattended.
-  for (const command of ["n=5 ls", 'n="5" ls', "GIT_PAGER=cat git log", 'GIT_PAGER="cat" git log']) {
+  // APRV-540: `n=5 ls` is refused now (`n` is off the reader's admitted list),
+  // so the reader's controls use an admitted name.
+  for (const command of ["NO_COLOR=1 ls", 'NO_COLOR="1" ls', "GIT_PAGER=cat git log", 'GIT_PAGER="cat" git log']) {
     const read = verdict(dir, command);
     assert.equal(read.permission, "allow", `${command}: ${read.reason}`);
     assert.match(read.reason, /^autonomous: read\.shell/u, command);
