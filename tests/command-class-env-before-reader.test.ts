@@ -175,6 +175,13 @@ const FORMS: readonly string[] = [
   "PATH=. sort -o out.txt README.md",
   "PATH=. cat .git/HEAD",
   "GH_PAGER=./x approval sandbox -- gh pr diff 1",
+  // The cd exemption is for a bare cd only: behind a sandbox wrapper the
+  // assignment steers the wrapper (PATH=. picks which approval, node or
+  // sandbox-exec runs), so the line is refused.
+  "PATH=. approval sandbox -- cd x",
+  "PATH=. node ./cli.js sandbox -- cd x",
+  "PATH=. sandbox-exec -f p.sb cd x",
+  "LD_PRELOAD=./x.so approval sandbox -- cd x",
   // A steering name set earlier on the line by a bare assignment (the value
   // reaches the reader when the name is exported, and PAGER usually is).
   "IFS=x; cat README.md",
@@ -270,6 +277,18 @@ const KEPT: readonly (readonly [string, string])[] = [
   // `cd` is left to its own rules: an intrinsic that runs nothing, whose
   // CDPATH and HOME the landing rules already model.
   ["CDPATH=/ cd ./build", "read.shell read-shell"],
+  ["PATH=. cd x", "read.shell read-shell"],
+  ["approval sandbox -- cd x", "read.shell read-shell"],
+  // The wrappers the classifier does not peel are refused as programs already.
+  ["PATH=. nice cd x", "refused unclassified"],
+  ["PATH=. env cd x", "refused opaque"],
+  ["PATH=. command cd x", "refused unclassified"],
+  ["PATH=. time cd x", "refused opaque"],
+  ["PATH=. nohup cd x", "refused opaque"],
+  ["PATH=. timeout 5 cd x", "refused opaque"],
+  ["PATH=. exec cd x", "refused opaque"],
+  ["PATH=. builtin cd x", "refused unclassified"],
+  ["PATH=. command -v cd", "refused unclassified"],
   ["HOME=/tmp cd", "read.shell read-shell"],
   ["PATH=. cd foo", "read.shell read-shell"],
   ["IFS=x; cd foo", "read.shell assignment | read.shell read-shell"],
