@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { after, test, type TestContext } from "node:test";
 
 import { classifyForHook, credentialReadLandings } from "../src/cli/hook.js";
+import { runner, scaledBound } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-glob-cost-")));
 
@@ -263,21 +264,99 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
 });
 
 /**
- * Test 4's lines printed and not held to the 100 ms bound until the argv-line
- * split (the owed row of L63574), each by its shape, its prefix and the run's
- * length. Two are the lead's ruling, CLAIMS L63667: `cp <run> out.txt` and
- * `cp README.md <run>` at 2,000 characters, 87.5 and 79.9 on the merge
- * queue's runner (run 45745887200, node 22, every median under 100). The
- * third, the single call of `cp ~/.hermes/<run> out.txt` at 20,000
- * characters (80.3 there), is the lead's by the same reasoning, CLAIMS
- * L63680. Node 20 reads about 1.2 times node 22 and the queue has a node-20
- * floor, so on it each would stand at or past the bound (about 105, 96 and
- * 96). The cost of all three is the copy's argv of every entry, judged in
- * each name reading; each returns to the assert with that split. Every other
- * line keeps its bound: test 4 counts the thirteen it asserts, and test 5
- * holds this list to these three.
+ * Test 4's one 20,000-character line printed and not held to the 100 ms bound
+ * until the argv-line split (the owed row of L63574): the single call of
+ * `cp ~/.hermes/<run> out.txt`, 80.3 CPU ms on the merge queue's runner (run
+ * 45745887200, node 22) and about 96 on node 20, the lead's by CLAIMS L63680.
+ * Its cost is the copy's argv of every entry, judged in each name reading; it
+ * returns to the assert with that split. The other seven 20,000-character
+ * lines keep the bound. The eight 2,000-character lines are held another way:
+ * see {@link COPY_RATIO_BOUND}.
  */
-const PRINT_ONLY: readonly string[] = ["cp, source 2000", "cp, destination 2000", "~/.hermes/ cp, source 20000"];
+const PRINT_ONLY: readonly string[] = ["~/.hermes/ cp, source 20000"];
+
+/**
+ * The most a 2,000-character `cp` or `mv` line of test 4 may cost over its
+ * control, the median of the pairs' ratios (lead ruling, CLAIMS L66128).
+ *
+ * Until that ruling six of these eight lines held a fixed 100 CPU ms (the two
+ * plain `cp` lines were printed only, CLAIMS L63667). The full gate draws two
+ * kinds of runner, and on the slower kind every line of this test reads 1.4
+ * to 1.6 times dearer, its controls included: `mv README.md <run>` 118.1 CPU
+ * ms beside a control of 8.1 on one attempt of a job, and 61.7 beside 4.3 on
+ * the next attempt of the same job at the same commit (run 46095148223). A
+ * fixed bound then fails for the runner: the merge queue went red on it twice
+ * (46109998734, 46112543067). `tests/cost-runner.ts` does not see this
+ * slowness: its calibration is string work and read 1.00 to 1.14 on those red
+ * shards, while these lines also read two directories of 200 entries.
+ *
+ * A ratio to the control does not move with the runner: 11.7 to 37.0 across
+ * ten full-gate runs on both kinds, 17 to 50 on main by test 4's own note. A
+ * walk that has become quadratic is in the hundreds. The fixed 100 ms returns
+ * with the argv-line split (owed: PRIORITIES), which brings these ratios
+ * under test 3's {@link RUN_RATIO_BOUND}; until then it is printed beside
+ * each line.
+ */
+const COPY_RATIO_BOUND = 60;
+
+/**
+ * Test 4's eight control lines on the faster kind of GitHub-hosted runner, in
+ * CPU ms: for each, the largest median of six full-gate runs that drew one
+ * (node 22: 45877300800, 46025999658, 46061144003, 46074304957 and the second
+ * attempt of 46095148223; node 20: 45877300800's floor).
+ *
+ * A ratio alone would pass a change that slowed every `cp` line, the control
+ * with the run. So each control holds a bound of its own:
+ * {@link CONTROL_MOST} times its figure here, stretched by the runner's
+ * factor as the other cost files stretch theirs ({@link scaledBound}). The
+ * slower runners read 1.07 to 1.54 times these figures.
+ */
+const CONTROL_FAST_MS: Readonly<Record<string, number>> = {
+  "cp, destination": 7.2,
+  "cp, source": 3.6,
+  "mv, destination": 5.4,
+  "mv, source": 3.3,
+  "~/.hermes/ cp, destination": 5.7,
+  "~/.hermes/ cp, source": 3.3,
+  "~/.hermes/ mv, destination": 5.4,
+  "~/.hermes/ mv, source": 3.0,
+};
+
+/** The most a control may read of its faster-runner figure, before the runner's factor. */
+const CONTROL_MOST = 2;
+
+/**
+ * One 2,000-character line of test 4 judged with its control: whether the
+ * line is over its ratio to the control, and whether the control is over its
+ * own bound (`runnerFactor` is {@link runner}'s, passed in so the rule can be
+ * tested with figures).
+ */
+function judged(ratio: number, controlMs: number, fastMs: number, runnerFactor: number): { controlBound: number; lineOver: boolean; controlOver: boolean } {
+  const controlBound = CONTROL_MOST * fastMs * runnerFactor;
+  return { controlBound, lineOver: !(ratio < COPY_RATIO_BOUND), controlOver: !(controlMs < controlBound) };
+}
+
+test("cost: a 2,000-character copy or move is held by its ratio to its control, and the control by its own bound (CLAIMS L66128)", () => {
+  // `mv README.md <run>` as two attempts of one job read it (run 46095148223):
+  // 61.7 beside 4.3 on the faster runner, 118.1 beside 8.1 on the slower. Both pass.
+  assert.deepEqual(judged(14.36, 4.3, 5.4, 1), { controlBound: 10.8, lineOver: false, controlOver: false });
+  assert.deepEqual(judged(15.16, 8.1, 5.4, 1), { controlBound: 10.8, lineOver: false, controlOver: false });
+  // A line at or past sixty times its control is red, on any runner.
+  assert.equal(judged(59.99, 4.3, 5.4, 1).lineOver, false);
+  assert.equal(judged(60, 4.3, 5.4, 1).lineOver, true);
+  assert.equal(judged(240, 8.1, 5.4, 1).lineOver, true);
+  // A control at twice its figure is red itself, whatever its line's ratio:
+  // a change that slowed every `cp` line keeps the ratio and fails here.
+  assert.deepEqual(judged(15, 10.8, 5.4, 1), { controlBound: 10.8, lineOver: false, controlOver: true });
+  assert.equal(judged(15, 10.7, 5.4, 1).controlOver, false);
+  // The runner's factor stretches the control's bound and nothing else.
+  assert.deepEqual(judged(60, 10.8, 5.4, 1.5), { controlBound: CONTROL_MOST * 5.4 * 1.5, lineOver: true, controlOver: false });
+  // Each of the eight lines has its control's figure, and the factor used is the shared runner's.
+  const shapes = ["cp, destination", "cp, source", "mv, destination", "mv, source"];
+  assert.deepEqual(Object.keys(CONTROL_FAST_MS).sort(), [...shapes, ...shapes.map((shape) => `~/.hermes/ ${shape}`)].sort());
+  for (const fast of Object.values(CONTROL_FAST_MS)) assert.ok(fast > 0);
+  assert.equal(scaledBound(CONTROL_MOST * 5.4), CONTROL_MOST * 5.4 * runner().factor);
+});
 
 test("cost: cp and mv with a run of unclosed `[` as an operand, through the whole classification (PRIORITIES:331)", (t) => {
   const { dir, home } = workspace();
@@ -305,27 +384,32 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     // (node 20: 34 to 65) and first calls up to 108 (node 20, `cp` to the
     // run).
     //
-    // No ratio bound yet (lead ruling, CLAIMS L63574): the copy's or move's
-    // argv of every entry is one synthetic line, judged again in each name
-    // reading (three for these lines), where `echo x >`'s plain names are
-    // judged once for the call (test 3's split, which does not carry over to
-    // an argv: there a name's place decides what it is). So these lines read
-    // 17 to 50 times their control on main, against test 3's 18. The ratio is
-    // printed with each line, and the bound returns with the argv-line split
-    // (owed: PRIORITIES, the argv-line split).
+    // Not test 3's ratio bound yet (lead ruling, CLAIMS L63574): the copy's
+    // or move's argv of every entry is one synthetic line, judged again in
+    // each name reading (three for these lines), where `echo x >`'s plain
+    // names are judged once for the call (test 3's split, which does not
+    // carry over to an argv: there a name's place decides what it is). So
+    // these lines read 17 to 50 times their control on main, against test 3's
+    // 18, and hold {@link COPY_RATIO_BOUND} in its place; the fixed 100 ms is
+    // printed with each line and returns with the argv-line split (owed:
+    // PRIORITIES, the argv-line split).
     const run = "[".repeat(2_000);
     const plain = "a".repeat(2_000);
     /** Each line over its bound, named with its figures, asserted at the end. */
     const over: string[] = [];
-    /** The lines held to their bound: every line but the three PRINT_ONLY names. */
+    /** The 20,000-character lines held to the fixed bound: every one but the PRINT_ONLY name. */
     let asserted = 0;
+    /** The 2,000-character lines held to their ratio and their control's bound: all eight. */
+    let ratioHeld = 0;
     const lines: Array<[string, (word: string) => string]> = [
       ["cp, destination", (word) => `cp README.md ${word}`],
       ["cp, source", (word) => `cp ${word} out.txt`],
       ["mv, destination", (word) => `mv README.md ${word}`],
       ["mv, source", (word) => `mv ${word} out.txt`],
     ];
-    const printOnly = (shape: string, prefix: string, length: number): boolean => PRINT_ONLY.includes(`${prefix === "" ? "" : `${prefix} `}${shape} ${String(length)}`);
+    const named = (shape: string, prefix: string): string => `${prefix === "" ? "" : `${prefix} `}${shape}`;
+    const printOnly = (shape: string, prefix: string, length: number): boolean => PRINT_ONLY.includes(`${named(shape, prefix)} ${String(length)}`);
+    t.diagnostic(`cost: ${runner().line}`);
     const PRINTED = "(printed, not asserted until the argv-line split: PRIORITIES)";
     for (const prefix of ["", "~/.hermes/"]) {
       for (const [shape, line] of lines) {
@@ -337,11 +421,15 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
           21,
           5,
         );
-        const held = !printOnly(shape, prefix, 2_000);
-        const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} (no ratio bound: PRIORITIES argv-line split)${held ? "" : ` ${PRINTED}`}`;
+        const fastMs = CONTROL_FAST_MS[named(shape, prefix)]!;
+        const { controlBound, lineOver, controlOver } = judged(ratio, controlMs, fastMs, runner().factor);
+        const label = `${command.slice(0, 30)} (2000 characters): median ${spent.toFixed(1)} CPU ms of ${(BOUND_MS * 2).toFixed(1)}, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${String(COPY_RATIO_BOUND)}; the control's own bound ${controlBound.toFixed(1)}; the ${String(BOUND_MS * 2)} ms is printed, not asserted until the argv-line split: PRIORITIES`;
         t.diagnostic(`cost: ${label}`);
-        if (held) asserted += 1;
-        if (held && !(spent < BOUND_MS * 2)) over.push(label);
+        ratioHeld += 1;
+        if (lineOver) over.push(label);
+        // The control's own bound: it is the classifier too, and a change
+        // that slowed the plain line and the run together keeps the ratio.
+        if (controlOver) over.push(`the control of ${command.slice(0, 30)} (2000 characters): median ${controlMs.toFixed(1)} CPU ms, its own bound ${controlBound.toFixed(1)} (${String(CONTROL_MOST)} x its ${fastMs.toFixed(1)} on the faster runner, ${runner().line})`);
       }
     }
     // Test 3's 20,000-character run, one call each: past the longest path the
@@ -362,18 +450,24 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     // Every line is measured and printed before any is held to its bound, so
     // one run (a CI shard) reads them all.
     assert.deepEqual(over, [], `over the bound:\n${over.join("\n")}`);
-    // Each PRINT_ONLY name took exactly one of the sixteen lines off the assert.
-    assert.equal(asserted, 13);
+    // All eight 2,000-character lines hold their ratio; the PRINT_ONLY name
+    // took exactly one of the eight 20,000-character lines off the assert.
+    assert.equal(ratioHeld, 8);
+    assert.equal(asserted, 7);
   } finally {
     if (savedHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = savedHome;
   }
 });
 
-test("cost: test 4 prints only the three lines the lead ruled off the assert, two by CLAIMS L63667 and one by L63680", () => {
+test("cost: test 4 prints only the one 20,000-character line the lead ruled off the assert (CLAIMS L63680); the 2,000-character lines hold a ratio (L66128)", () => {
   // The list cannot grow unseen: a line taken off the assert is a ruling, and
-  // each of these returns to it with the argv-line split.
-  assert.deepEqual([...PRINT_ONLY], ["cp, source 2000", "cp, destination 2000", "~/.hermes/ cp, source 20000"]);
+  // this one returns to it with the argv-line split. The two plain `cp` lines
+  // of 2,000 characters that CLAIMS L63667 had here hold COPY_RATIO_BOUND now,
+  // as all eight do.
+  assert.deepEqual([...PRINT_ONLY], ["~/.hermes/ cp, source 20000"]);
+  assert.equal(COPY_RATIO_BOUND, 60);
+  assert.equal(CONTROL_MOST, 2);
 });
 
 test("a guarded name after or among unclosed `[` still takes its class: the entries a long run is judged to match keep theirs (build-5, the unclosed-`[` cost line)", () => {
