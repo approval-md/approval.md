@@ -411,8 +411,9 @@ const CONTROL_MOST = 2;
  * Each ratio bound is about three times the largest ratio CI read, and under
  * half of what the walk its test guards against reads. Each control figure is
  * the largest least reading of that control on CI. The figures are named with
- * their runs: 46140003817 (attempt 1, node 22, at e84e394a) and 46137342920
- * (node 22, at 34d33e22).
+ * their runs: 46140003817 (attempts 1 and 2, node 22, at e84e394a) and
+ * 46137342920 (node 22, at 34d33e22). Each walk is compared with its control
+ * on the same machine (a laptop), where both were measured.
  */
 
 /**
@@ -426,19 +427,20 @@ const LEAST_CONTROL_MOST = 3;
 
 /**
  * Test 2: the most a line may cost over its control (the same line with the
- * run of `*` spelled as plain `a`). CI's largest: 5.25, `echo x >` with 8 `*`
- * (46140003817, attempt 1); the rest 0.9 to 5.1. The walk the test guards
- * against, the old matcher's backtracking, took 0.95 CPU s at 12 `*` in the
- * credential pass and 36.7 at 8 `*` in the write pass on a521a91d, against
- * controls of 1 to 21 CPU ms: hundreds to thousands of times.
+ * run of `*` spelled as plain `a`). CI's largest: 5.63, `echo x >` with 160
+ * `*` (46140003817 attempt 2; 5.25 in attempt 1); the rest 0.9 to 5.3. The
+ * walk the test guards against, the old matcher's backtracking, took 0.95 CPU
+ * s at 12 `*` in the credential pass and 36.7 at 8 `*` in the write pass on
+ * a521a91d, against controls under 6 CPU ms on a laptop: hundreds to
+ * thousands of times.
  */
-const STAR_RATIO_BOUND = 16;
+const STAR_RATIO_BOUND = 17;
 
-/** Test 2's controls by shape, CPU ms: the largest least reading over the five star counts (46140003817, attempt 1). */
+/** Test 2's controls by shape, CPU ms: the largest least reading over the five star counts (46140003817, attempts 1 and 2). */
 const STAR_CONTROL_CI_MS: Readonly<Record<string, number>> = {
-  cat: 3.6,
+  cat: 4.2,
   "cat ~/.hermes/": 3.2,
-  "echo x > ~/.hermes/": 6.1,
+  "echo x > ~/.hermes/": 6.2,
   "echo x >": 2.8,
   "cat */…/x": 2.5,
   "echo x > ~/.hermes/*/": 21.1,
@@ -459,21 +461,22 @@ const RUN_CONTROL_CI_MS: Readonly<Record<string, number>> = {
 /**
  * Test 3's long words: the most a line may cost over its control (a plain
  * name of the same length). CI's largest: 6.42, `echo x > *[5,000 z]X`
- * (46140003817, attempt 1); the rest 1.2 to 2.3. The walks the test guards
- * against, on bfa73710: 20,000 `[` 2.8 CPU s (each `[` scanned to the end)
- * against a control of 12.5, about 220 times; `cat *[5,000 z]X` 160 CPU ms
- * (each character tested against every member) against 2.6, about 60 times.
- * Nineteen is under half of the smaller.
+ * (46140003817, attempt 1; attempt 2 read 5.11); the rest 1.2 to 2.3. The
+ * walks the test guards against, on bfa73710 on a laptop: 20,000 `[` 2.8 CPU
+ * s (each `[` scanned to the end) against a control of about 3 CPU ms there,
+ * some 900 times; `cat *[5,000 z]X` 160 CPU ms (each character tested
+ * against every member) against about 1.1, some 145 times. Nineteen is
+ * under half of the smaller.
  */
 const LONG_RATIO_BOUND = 19;
 
-/** Test 3's long words' controls, CPU ms: the largest least reading (46140003817, attempt 1). */
+/** Test 3's long words' controls, CPU ms: the largest least reading (46140003817, attempts 1 and 2). */
 const LONG_CONTROL_CI_MS: Readonly<Record<string, number>> = {
-  "echo x > 20,000 [": 12.5,
-  "echo x > ~/.hermes/ 20,000 [": 17.8,
-  "echo x > *[5,000 z]X": 2.4,
-  "echo x > ~/.hermes/ *[5,000 z]X": 7.0,
-  "cat *[5,000 z]X": 2.6,
+  "echo x > 20,000 [": 13.9,
+  "echo x > ~/.hermes/ 20,000 [": 26.0,
+  "echo x > *[5,000 z]X": 3.6,
+  "echo x > ~/.hermes/ *[5,000 z]X": 8.5,
+  "cat *[5,000 z]X": 4.8,
   "cat ~/.hermes/ *[5,000 z]X": 3.7,
 };
 
@@ -482,18 +485,19 @@ const LONG_CONTROL_CI_MS: Readonly<Record<string, number>> = {
  * (the same line with a plain name of 20,000 characters; the seat's choice).
  * CI's largest: 4.17, `mv <run> out.txt` (46137342920: least 47.1 beside
  * 11.3); the rest 0.7 to 3.1, `~/.hermes/ cp, source` (PRINT_ONLY's line)
- * 2.55. The walk the test guards against, a run of `[` scanned from every
- * `[` (2.8 CPU s for 20,000 on bfa73710), is 47 to 230 times these controls.
+ * 2.55; attempt 2 read 2.94 at most. The walk the test guards against, a run
+ * of `[` scanned from every `[` (2.8 CPU s for 20,000 on bfa73710, a laptop),
+ * is 230 to 350 times these controls on a laptop (8 to 12 CPU ms).
  */
 const COPY_20K_RATIO_BOUND = 13;
 
-/** Test 4's 20,000-character controls, CPU ms: the largest least reading (46137342920 and 46140003817 attempt 1). */
+/** Test 4's 20,000-character controls, CPU ms: the largest least reading (46137342920, and 46140003817 attempts 1 and 2). */
 const COPY_20K_CONTROL_CI_MS: Readonly<Record<string, number>> = {
   "cp, destination": 38.7,
-  "cp, source": 19.9,
+  "cp, source": 27.9,
   "mv, destination": 36.1,
-  "mv, source": 12.3,
-  "~/.hermes/ cp, destination": 46.5,
+  "mv, source": 14.7,
+  "~/.hermes/ cp, destination": 52.0,
   "~/.hermes/ cp, source": 60.4,
   "~/.hermes/ mv, destination": 52.2,
   "~/.hermes/ mv, source": 51.2,
@@ -577,7 +581,7 @@ test("cost: the lines that held a fixed bound are held by their ratio and their 
   assert.deepEqual(Object.keys(COPY_20K_CONTROL_CI_MS).sort(), Object.keys(CONTROL_FAST_MS).sort());
   assert.equal(LEAST_ROUNDS, 5);
   assert.equal(LEAST_CONTROL_MOST, 3);
-  assert.equal(STAR_RATIO_BOUND, 16);
+  assert.equal(STAR_RATIO_BOUND, 17);
   assert.equal(LONG_RATIO_BOUND, 19);
   assert.equal(COPY_20K_RATIO_BOUND, 13);
 });

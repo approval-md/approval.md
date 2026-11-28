@@ -424,11 +424,11 @@ function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number
 }
 
 /**
- * Each paired control's median on CI, CPU s (#720's list; run 46140003817,
- * attempt 1, node 22: the parameter line's control 0.014 beside a median of
- * 0.043, the escapes line's 0.085 beside 0.131).
+ * Each paired control's largest median on CI, CPU s (#720's list; run
+ * 46140003817, attempts 1 and 2, node 22: the parameter line's control 0.014
+ * beside a median of 0.043, attempt 1; the escapes line's 0.094, attempt 2).
  */
-const PAIRED_CONTROL_CI_S: Readonly<Record<"parameter" | "escapes", number>> = { parameter: 0.014, escapes: 0.085 };
+const PAIRED_CONTROL_CI_S: Readonly<Record<"parameter" | "escapes", number>> = { parameter: 0.014, escapes: 0.094 };
 
 /**
  * The most a paired control may read of its CI figure, before the runner's
