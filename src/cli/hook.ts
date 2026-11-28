@@ -5970,7 +5970,9 @@ export function refineWriteLandings(
    * exists now may be gone, renamed or unsearchable when a later cd runs if an
    * earlier unit writes, deletes, moves, links or changes modes anywhere
    * (`rmdir d; cd d`, `mv d e; cd d`, `chmod 000 d; cd d`, `npm test; cd d`).
-   * Only a cd and a read with no redirection leave it false.
+   * Only a cd and {@link CANNOT_CHANGE_DISK}'s builtins with no redirection
+   * leave it false: a reader can run code (`sort --compress-program`, `rg
+   * --pre`, sed's `e`), so a `read.*` class is no proof.
    */
   let earlierMayChange = false;
   /** Did the last {@link cdLanding} find every landing an existing folder the shell may search, read from the word as written? */
@@ -6105,12 +6107,15 @@ export function refineWriteLandings(
    * cannot be named. S1 (review-b on #715): a cd cannot fail, so it keeps no
    * failed branch, when every landing is an existing folder the shell may
    * search, nothing earlier on the line may change the disk, and the cd has
-   * no redirection that may fail to open (`cd d > /nonexistent/x` does not
-   * run the cd); `/dev/null` is the one target taken as safe.
+   * redirection of any kind (a redirection that fails to open does not run
+   * the cd: `cd d > /nonexistent/x`; a dup or a close is not kept in the
+   * shape, so the segment's own text is read for `<` and `>`) and no
+   * assignment prefix.
    */
   const followCd = (shape: CommandSegmentShape, index: number, bin: string): Standing => {
     const ok = standing === null ? null : cdLanding(shape, index, bin, standing);
-    const quietRedirects = shape.reads.length === 0 && (shape.clobberBashWrites?.length ?? 0) === 0 && shape.writes.every((word) => word === "/dev/null");
+    const quietRedirects =
+      shape.reads.length === 0 && shape.writes.length === 0 && (shape.clobberBashWrites?.length ?? 0) === 0 && shape.assignments.length === 0 && !/[<>]/u.test(shape.text);
     // A later stage of a pipeline may run in a subshell (bash): never sure.
     // Nor a cd inside a script the line runs (`sh -c 'cd ..'`): this pass
     // reads the script's segments in its place, so its cd seems to reach the
@@ -6291,11 +6296,16 @@ export function refineWriteLandings(
 
     const unit = units[index] as Unit;
     const host = unit.host.text;
-    // S1: anything but a read with no redirection may change the disk for a later cd.
+    // S1: anything but a cd or one of a few builtins with no redirection may change the disk for a later cd.
     if (!earlierMayChange) {
-      const own = unit.unreadable === null ? ownAnswer(shape) : null;
-      const readsOnly = own !== null && own.class.startsWith("read.") && shape.writes.length === 0 && (shape.clobberBashWrites?.length ?? 0) === 0;
-      if (!readsOnly) earlierMayChange = true;
+      const quiet =
+        unit.unreadable === null &&
+        bin !== null &&
+        CANNOT_CHANGE_DISK.has(bin) &&
+        shape.writes.length === 0 &&
+        (shape.clobberBashWrites?.length ?? 0) === 0 &&
+        !/[<>]/u.test(shape.text);
+      if (!quiet) earlierMayChange = true;
     }
     if (unit.unreadable !== null) {
       // Nothing this unit writes can be read: guarded, and nothing after it
@@ -6543,6 +6553,13 @@ export function refineWriteLandings(
 
 /** The longest spelling this pass lands on the disk; longer is guarded (cost bound). */
 const MAX_LANDING_BYTES = 4096;
+
+/**
+ * Builtins that change nothing on the disk when they have no redirection
+ * (review-b's S1 on #715, tightened on its security review): only these, and
+ * a cd, leave a later cd into an existing folder sure to succeed.
+ */
+const CANNOT_CHANGE_DISK: ReadonlySet<string> = new Set(["true", ":", "echo", "printf", "pwd", "test", "["]);
 
 /**
  * The most `<dir>/<source name>` landings one copy, move or link segment is

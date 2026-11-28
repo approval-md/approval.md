@@ -349,3 +349,21 @@ test("a cd into a folder that exists cannot fail, unless the line may change the
     holds(line, "log.mutate");
   }
 });
+
+test("a sure cd has no redirection of any kind, and only a cd or a quiet builtin may come before it (S1, tightened on its security review)", () => {
+  // A redirection that fails to open does not run the cd; a dup or a close is not kept in the shape.
+  for (const line of [
+    "cd .approval/log; cd .. 2>&1; echo x >> events.jsonl",
+    "cd .approval/log; cd .. < ../env; echo x >> events.jsonl",
+    "cd .approval/log; cd .. >/dev/null; echo x >> events.jsonl",
+    // A reader can run code (`sort --compress-program`, `rg --pre`, sed's `e`): not proof that nothing changed.
+    "cd .approval/log; sort events.jsonl; cd ..; echo x >> events.jsonl",
+    "cd .approval/log; sed -n p events.jsonl; cd ..; echo x >> events.jsonl",
+    "cd .approval/log; cat events.jsonl; cd ..; echo x >> events.jsonl",
+    "cd .approval/log; rg x .; cd ..; echo x >> events.jsonl",
+  ]) {
+    holds(line, "log.mutate");
+  }
+  // The closed list (true, :, echo, printf, pwd, test, [) with no redirection keeps the cd sure.
+  assert.deepEqual(hook("cd .approval; pwd; echo hi; cd ..; echo x > notes.md"), ALLOWED);
+});
