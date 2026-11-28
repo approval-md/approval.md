@@ -152,13 +152,14 @@ test("B: the same commands writing elsewhere, or not writing, do not move", () =
   assert.deepEqual(pure('sed -n "/word/p" x'), ["read.shell sed-read"]);
   assert.deepEqual(pure('sed "s/w/v/" x'), ["read.shell sed-read"]);
   assert.deepEqual(pure("sort -t, -k1 x"), [READ_SHELL]);
-  assert.deepEqual(pure("sed -f s.sed x"), ["read.shell sed-read"]);
+  // A script file is not in the words: opaque since finding readers-run-code,
+  // as a script that may hold GNU sed's e command.
+  assert.deepEqual(pure("sed -f s.sed x"), ["refused opaque"]);
 });
 
 test("B review: a sed script is not parsed; with a w or W, its words and the rest of each w's line are possible targets", () => {
   for (const command of [
     'sed -n "w .git/config" x',
-    'sed -n "/a[/]b/w .git/config" x',
     'sed -e ":a;w .git/config" x',
     'sed -n "w .git/my config" x',
     'sed "s/a/b/w .git/config" x',
@@ -177,13 +178,18 @@ test("B review: a sed script is not parsed; with a w or W, its words and the res
     'sed "s/www/x/" file',
     'sed -n "/word/p" .git/config',
     'sed -n "w out.txt" x',
-    'sed -n "1e echo" f',
   ]) {
     assert.deepEqual(pure(command), ["read.shell sed-read"], command);
   }
   assert.deepEqual(pure('sed -i "" "s/old/new/" src/w.ts'), ["files.write.workspace sed-in-place"]);
-  // A script file cannot be read from the line (a known limit).
-  assert.deepEqual(pure("sed -f s.sed x"), ["read.shell sed-read"]);
+  // GNU sed's e command runs a command, and a script file cannot be read from
+  // the line: both opaque since finding readers-run-code. So is a bracket
+  // holding the delimiter: BSD sed reads `/a[/]b/` as one address, GNU sed
+  // ends the regex at the `/` inside the bracket and refuses it, and the
+  // classifier, reading GNU's extents, cannot read the script to its end.
+  assert.deepEqual(pure('sed -n "/a[/]b/w .git/config" x'), ["refused opaque"]);
+  assert.deepEqual(pure('sed -n "1e echo" f'), ["refused opaque"]);
+  assert.deepEqual(pure("sed -f s.sed x"), ["refused opaque"]);
 });
 
 test("B review hook: a sed write through a link to .git, a name with blanks kept whole", { skip }, () => {

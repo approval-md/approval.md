@@ -5165,6 +5165,7 @@ const GIT_REMOTE_WRITE: Refinement = { class: "vcs.history.rewrite", rule: "git-
 const GIT_REMOTE_READ: Refinement = { class: "read.vcs.remote", rule: "git-remote-read" };
 
 function refineGitRemote(ctx: RuleContext): Refinement {
+  if (namesUploadPack(ctx)) return { opaque: `git ${String(ctx.sub)} --upload-pack runs the program it names` };
   if (ctx.sub !== "remote") return GIT_REMOTE_READ;
   // A word that came out of a substitution may be the subcommand.
   if (ctx.substituted) return GIT_REMOTE_WRITE;
@@ -5789,7 +5790,9 @@ export function readWriteTargets(bin: string, args: readonly string[]): string[]
     case "uniq":
       return uniqOutput(args);
     case "sed":
-      return sedScripts(args).flatMap(sedWriteFiles);
+      // GNU sed's own reading too, each script once: `--expr=` and `-l`'s
+      // value (finding readers-run-code).
+      return [...new Set([...sedScripts(args), ...gnuSedProgram(args).scripts])].flatMap(sedWriteFiles);
     default:
       return [];
   }
@@ -7265,14 +7268,462 @@ function refineFind(ctx: RuleContext): Refinement {
   return { class: "read.shell", rule: "find-read" };
 }
 
-/** `sed -i` edits in place; every other `sed` reads. */
+/**
+ * `sed -i` edits in place; every other `sed` reads. A script that runs a
+ * program, or one this classifier cannot read, is opaque first, in place or
+ * not ({@link sedRunsProgram}).
+ */
 function refineSed(ctx: RuleContext): Refinement {
+  const runs = sedRunsProgram(ctx);
+  if (runs !== null) return { opaque: runs };
   const inPlace =
     hasFlag(ctx.args, ["--in-place"]) ||
     ctx.args.some((arg) => arg.startsWith("-i") && !arg.startsWith("--"));
   return inPlace
     ? { class: "files.write.workspace", rule: "sed-in-place" }
     : { class: "read.shell", rule: "sed-read" };
+}
+
+// ===========================================================================
+// Readers that run a program the line names (finding readers-run-code)
+// ===========================================================================
+//
+// Some commands this table reads take a word naming a PROGRAM they then run:
+// `sort --compress-program`, `rg --pre` and `--hostname-bin`, `git grep -O`,
+// `git ls-remote` / `git fetch --upload-pack`, `openssl dgst -engine` /
+// `-provider`, and GNU sed's `e` command and the `e` flag of `s`. Each ran its
+// program classed as a read. They take the answer `find -exec` and `xargs`
+// take (APRV-283): `opaque`, because what runs is not in the words this file
+// reads. No `--` is taken as the end of the options here: it may be the value
+// of the option before it (`sort -o -- --compress-program=x`), and reading on
+// only ever answers stricter.
+
+/**
+ * Is `arg` the long option `option`, whole or abbreviated to a prefix of three
+ * characters or more, with or without an `=` value? GNU getopt_long and git's
+ * parse-options both take a unique prefix (`--compress-prog=x`, `--open=x`);
+ * a prefix that is also another option's is refused by the tool, and reading
+ * it as this one only answers stricter.
+ */
+function namesLongOption(arg: string, option: string): boolean {
+  if (!arg.startsWith("--")) return false;
+  const equals = arg.indexOf("=");
+  const name = equals === -1 ? arg : arg.slice(0, equals);
+  return name.length >= 3 && option.startsWith(name);
+}
+
+/** Does an assignment in front of the command set this variable? */
+function assigns(ctx: RuleContext, test: (name: string) => boolean): boolean {
+  return ctx.assignments.some((word) => test(assignedName(word)));
+}
+
+const READ_SHELL_ROW: Refinement = { class: "read.shell", rule: "read-shell" };
+
+/**
+ * The read table's own answer, unless the reader is `sort` or `rg` naming a
+ * program it runs: sort runs `--compress-program` once it spills to temporary
+ * files, rg runs `--pre` on every file it searches and `--hostname-bin` to
+ * fill a hyperlink, and `RIPGREP_CONFIG_PATH` names a file rg reads more flags
+ * from, either of those among them.
+ */
+function refineReadShell(ctx: RuleContext): Refinement {
+  if (ctx.bin === "sort" && ctx.args.some((arg) => namesLongOption(arg, "--compress-program"))) {
+    return { opaque: "sort --compress-program runs the program it names" };
+  }
+  if (ctx.bin === "rg") {
+    if (assigns(ctx, (name) => name === "RIPGREP_CONFIG_PATH")) {
+      return { opaque: "rg reads more flags, --pre among them, from the file RIPGREP_CONFIG_PATH names" };
+    }
+    if (ctx.args.some((arg) => namesLongOption(arg, "--pre") || namesLongOption(arg, "--hostname-bin"))) {
+      return { opaque: "rg --pre and --hostname-bin run the program they name" };
+    }
+  }
+  return READ_SHELL_ROW;
+}
+
+const GIT_READ_ROW: Refinement = { class: "read.shell", rule: "git-read" };
+
+/**
+ * `git grep`'s short options that take a value: in a cluster, the rest of the
+ * word (or the next word) is that value, so an `O` after one is not `-O`
+ * (`-eFOO` searches for `FOO`). From `git grep -h`, git 2.50.1.
+ */
+const GIT_GREP_VALUED_LETTERS = "ABCefm";
+
+/** Is this word `git grep -O` (in a cluster too) or a spelling of `--open-files-in-pager`? */
+function isGitGrepPagerOption(arg: string): boolean {
+  if (namesLongOption(arg, "--open-files-in-pager")) return true;
+  if (!arg.startsWith("-") || arg.startsWith("--")) return false;
+  for (let at = 1; at < arg.length; at += 1) {
+    const letter = arg[at] as string;
+    if (letter === "O") return true;
+    if (GIT_GREP_VALUED_LETTERS.includes(letter)) return false;
+  }
+  return false;
+}
+
+/**
+ * The git read verbs' own answer, unless `git grep` opens its matches in a
+ * pager: `-O<pager>` runs the program it names, and a bare `-O` the configured
+ * pager, on the matched files.
+ */
+function refineGitRead(ctx: RuleContext): Refinement {
+  if (ctx.sub === "grep" && ctx.args.some(isGitGrepPagerOption)) {
+    return { opaque: "git grep -O runs the pager it names, or the configured one, on the files it matched" };
+  }
+  return GIT_READ_ROW;
+}
+
+/**
+ * Does this `git fetch` / `git ls-remote` name the upload-pack program git runs
+ * (for a local repository, as a shell command)? `--upload-pack` and its
+ * prefixes for both, and `ls-remote`'s `-u` in any cluster: a word of
+ * `ls-remote`'s short options holding a `u` anywhere is read as one.
+ */
+function namesUploadPack(ctx: RuleContext): boolean {
+  if (ctx.sub !== "fetch" && ctx.sub !== "ls-remote") return false;
+  return ctx.args.some(
+    (arg) =>
+      namesLongOption(arg, "--upload-pack") ||
+      (ctx.sub === "ls-remote" && arg.startsWith("-") && !arg.startsWith("--") && arg.includes("u")),
+  );
+}
+
+/** OpenSSL's options that load a module (a shared library) into the command, spelled `-x`, `--x` or `-x=v`. */
+const OPENSSL_MODULE_OPTIONS: readonly string[] = ["engine", "provider", "provider-path"];
+
+/**
+ * Does this `openssl` digest load a module: `-engine` (an id or a library
+ * path), `-provider` (a name or a module path), `-provider-path`, or an
+ * `OPENSSL_*` variable in front of it (`OPENSSL_CONF` names a configuration
+ * that can load either)?
+ */
+function opensslLoadsModule(ctx: RuleContext): boolean {
+  if (assigns(ctx, (name) => name.startsWith("OPENSSL_"))) return true;
+  return ctx.args.some((arg) => {
+    if (!arg.startsWith("-")) return false;
+    const bare = arg.slice(arg.startsWith("--") ? 2 : 1);
+    const equals = bare.indexOf("=");
+    return OPENSSL_MODULE_OPTIONS.includes(equals === -1 ? bare : bare.slice(0, equals));
+  });
+}
+
+/** What GNU sed's option parser takes from a `sed` argv. */
+interface GnuSedProgram {
+  /** Each script, in order: every `-e` value, else the first operand. */
+  scripts: string[];
+  /** A script comes from a file (`-f`, `--file`, any prefix of it). */
+  fromFile: boolean;
+  /** `--posix` (any prefix of it). */
+  posix: boolean;
+}
+
+/**
+ * The scripts GNU sed 4.x takes from its argv, read as its getopt_long reads
+ * it: options anywhere until `--` (it permutes), long options by any prefix
+ * of three characters or more (`--expr=`, `--fi=`), `-e`, `-f` and `-l` taking
+ * the rest of a cluster or the next word, and `-i` the rest of a cluster as a
+ * suffix. `-l`'s value is a line length and no script; {@link sedScripts}
+ * read it as the first operand, which put the real script out of reach.
+ */
+function gnuSedProgram(args: readonly string[]): GnuSedProgram {
+  const scripts: string[] = [];
+  let fromFile = false;
+  let posix = false;
+  let first: string | undefined;
+  let ended = false;
+  for (let at = 0; at < args.length; at += 1) {
+    const arg = args[at] as string;
+    if (ended || arg === "-" || !arg.startsWith("-")) {
+      if (first === undefined) first = arg;
+      continue;
+    }
+    if (arg === "--") {
+      ended = true;
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      const equals = arg.indexOf("=");
+      const value = equals === -1 ? args[at + 1] : arg.slice(equals + 1);
+      if (namesLongOption(arg, "--file")) fromFile = true;
+      else if (namesLongOption(arg, "--expression")) {
+        if (value !== undefined) scripts.push(value);
+      } else if (!namesLongOption(arg, "--line-length")) {
+        if (namesLongOption(arg, "--posix")) posix = true;
+        continue;
+      }
+      if (equals === -1) at += 1;
+      continue;
+    }
+    for (let index = 1; index < arg.length; index += 1) {
+      const letter = arg[index] as string;
+      if (letter === "i") break;
+      if (letter !== "e" && letter !== "f" && letter !== "l") continue;
+      const rest = arg.slice(index + 1);
+      const value = rest.length > 0 ? rest : args[at + 1];
+      if (rest.length === 0) at += 1;
+      if (letter === "e" && value !== undefined) scripts.push(value);
+      if (letter === "f") fromFile = true;
+      break;
+    }
+  }
+  if (scripts.length === 0 && !fromFile && first !== undefined) scripts.push(first);
+  return { scripts, fromFile, posix };
+}
+
+/**
+ * Why this `sed` runs a program, or may, or `null` when it cannot. A script
+ * from a file is not in the words; `--posix` and `POSIXLY_CORRECT` change how
+ * GNU sed reads its options and its script; a script with a non-ASCII
+ * character under an assignment may be read in a double-byte locale (Big5,
+ * GBK), where a byte of that character takes the backslash after it. Every
+ * other script is read by {@link sedScriptRuns}, one `-e` at a time.
+ */
+function sedRunsProgram(ctx: RuleContext): string | null {
+  const program = gnuSedProgram(ctx.args);
+  if (program.fromFile) return "sed -f runs a script file this classifier does not read";
+  if (program.posix || assigns(ctx, (name) => name === "POSIXLY_CORRECT")) {
+    return "sed in POSIX mode reads its options and its script in a way this classifier does not follow";
+  }
+  for (const script of program.scripts) {
+    if (ctx.assigned && !isAscii(script)) {
+      return "sed under an assignment that may set a double-byte locale, with a script that is not ASCII";
+    }
+    const runs = sedScriptRuns(script);
+    if (runs !== null) return runs;
+  }
+  return null;
+}
+
+/** Is every character of this text ASCII? */
+function isAscii(text: string): boolean {
+  for (let at = 0; at < text.length; at += 1) if (text.charCodeAt(at) > 0x7f) return false;
+  return true;
+}
+
+/** sed's blanks (`ISBLANK`) and spaces (`ISSPACE`). */
+function isSedBlank(char: string | undefined): boolean {
+  return char === " " || char === "\t";
+}
+function isSedSpace(char: string | undefined): boolean {
+  return isSedBlank(char) || char === "\n" || char === "\v" || char === "\f" || char === "\r";
+}
+function isSedDigit(char: string | undefined): boolean {
+  return char !== undefined && char >= "0" && char <= "9";
+}
+
+/** The commands GNU sed reads to the end of the command and no further (`read_end_of_cmd`). */
+const SED_PLAIN_COMMANDS = "=dDFgGhHnNpPxz}";
+
+/**
+ * Does this ONE sed script (one `-e`, or the operand) hold GNU sed's `e`
+ * command or the `e` flag of `s`? The reason when it does, or when it does
+ * not read to its end; `null` when it reads clean.
+ *
+ * It is GNU sed 4.x's `compile_program`, read for extents only: addresses
+ * (`/re/I`, `\cREc`, `N`, `first~step`, `$`, `+N`, `~N`, `!`), then the
+ * command, then exactly what that command consumes. A regex or replacement
+ * ends at its delimiter, a backslash taking the next character, a newline
+ * included (`match_slash`); `a`, `i` and `c` text ends at a newline no
+ * backslash takes (`read_text`), after a leading `\` and the one character
+ * it takes as it is; a label ends at a space or `;`; a file name and a
+ * comment at the newline. So the letter `e` in a regex, a replacement, a
+ * text, a label or a file name is never read as the command (`s/e/x/`,
+ * `/e/d`). Anything GNU sed refuses to compile reads as unread: refused here
+ * too, and it runs nothing there.
+ *
+ * Each script is read alone: GNU sed starts each `-e` at a command, and
+ * carries only an `a\` that ends one into the next, as text. Reading that
+ * next line as commands reads more of it, never less. Linear: every step
+ * moves forward.
+ */
+function sedScriptRuns(script: string): string | null {
+  const unread = "sed: a script this classifier cannot read to its end may hold the e command";
+  const end = script.length;
+  let at = 0;
+  const skipBlanks = (): void => {
+    while (at < end && isSedBlank(script[at])) at += 1;
+  };
+  const skipDigits = (): void => {
+    while (at < end && isSedDigit(script[at])) at += 1;
+  };
+  const skipLine = (): void => {
+    const newline = script.indexOf("\n", at);
+    at = newline === -1 ? end : newline + 1;
+  };
+  // `match_slash`: up to the delimiter; false at a newline or the end.
+  const delimited = (delimiter: string): boolean => {
+    while (at < end) {
+      const char = script[at] as string;
+      at += 1;
+      if (char === delimiter) return true;
+      if (char === "\n") return false;
+      if (char === "\\") {
+        if (at >= end) return false;
+        at += 1;
+      }
+    }
+    return false;
+  };
+  // A delimiter GNU sed takes: one ASCII character, not a newline or a backslash.
+  const delimiter = (): string | null => {
+    const char = script[at];
+    if (char === undefined || char === "\n" || char === "\\" || char.charCodeAt(0) > 0x7f) return null;
+    at += 1;
+    return char;
+  };
+  // `read_end_of_cmd`: blanks, then the end, `;`, a newline, `}` or `#`.
+  const endOfCommand = (): boolean => {
+    skipBlanks();
+    const char = script[at];
+    if (char === undefined || char === "}" || char === "#") return true;
+    if (char === "\n" || char === ";") {
+      at += 1;
+      return true;
+    }
+    return false;
+  };
+  // `compile_address`: true when one was read, false when none, null when it does not read.
+  const address = (): boolean | null => {
+    const char = script[at];
+    if (char === "/" || char === "\\") {
+      at += 1;
+      const close = char === "\\" ? delimiter() : "/";
+      if (close === null || !delimited(close)) return null;
+      for (;;) {
+        skipBlanks();
+        if (script[at] !== "I" && script[at] !== "M") return true;
+        at += 1;
+      }
+    }
+    if (isSedDigit(char)) {
+      skipDigits();
+      skipBlanks();
+      if (script[at] === "~") {
+        at += 1;
+        skipBlanks();
+        skipDigits();
+      }
+      return true;
+    }
+    if (char === "+" || char === "~") {
+      at += 1;
+      skipBlanks();
+      skipDigits();
+      return true;
+    }
+    if (char === "$") {
+      at += 1;
+      return true;
+    }
+    return false;
+  };
+  // `read_text`: to a newline no backslash takes.
+  const text = (): void => {
+    while (at < end) {
+      const char = script[at] as string;
+      at += 1;
+      if (char === "\n") return;
+      if (char === "\\" && at < end) at += 1;
+    }
+  };
+  // `read_label`: to a space or `;`, which the loop below skips.
+  const label = (): void => {
+    skipBlanks();
+    while (at < end && !isSedSpace(script[at]) && script[at] !== ";") at += 1;
+  };
+
+  for (;;) {
+    while (at < end && (script[at] === ";" || isSedSpace(script[at]))) at += 1;
+    if (at >= end) return null;
+    const addressed = address();
+    if (addressed === null) return unread;
+    if (addressed) {
+      skipBlanks();
+      if (script[at] === ",") {
+        at += 1;
+        skipBlanks();
+        if (address() !== true) return unread;
+        skipBlanks();
+      }
+    }
+    if (script[at] === "!") {
+      at += 1;
+      skipBlanks();
+      if (script[at] === "!") return unread;
+    }
+    const command = script[at];
+    at += 1;
+    if (command === undefined) return unread;
+    if (command === "e") return "sed's e command runs a command";
+    if (SED_PLAIN_COMMANDS.includes(command)) {
+      if (!endOfCommand()) return unread;
+      continue;
+    }
+    switch (command) {
+      case "{":
+        continue;
+      case "#":
+        if (addressed) return unread;
+        skipLine();
+        continue;
+      case "l":
+      case "L":
+      case "q":
+      case "Q":
+        skipBlanks();
+        skipDigits();
+        if (!endOfCommand()) return unread;
+        continue;
+      case "a":
+      case "i":
+      case "c":
+        skipBlanks();
+        if (at >= end) return unread;
+        // `a\`: the backslash and the one character after it, taken as they are.
+        if (script[at] === "\\") at = Math.min(end, at + 2);
+        text();
+        continue;
+      case ":":
+      case "b":
+      case "t":
+      case "T":
+      case "v":
+        label();
+        continue;
+      case "r":
+      case "R":
+      case "w":
+      case "W":
+        skipLine();
+        continue;
+      case "y": {
+        const close = delimiter();
+        if (close === null || !delimited(close) || !delimited(close) || !endOfCommand()) return unread;
+        continue;
+      }
+      case "s": {
+        const close = delimiter();
+        if (close === null || !delimited(close) || !delimited(close)) return unread;
+        // `mark_subst_opts`: the flags, to the end of the command.
+        for (;;) {
+          const flag = script[at];
+          if (flag === undefined || flag === "}" || flag === "#") break;
+          at += 1;
+          if (flag === "e") return "the e flag of sed's s runs the pattern space as a command";
+          if (flag === "w") {
+            skipLine();
+            break;
+          }
+          if (flag === "\n" || flag === ";") break;
+          if (!("gpiImM".includes(flag) || isSedDigit(flag) || isSedBlank(flag))) return unread;
+        }
+        continue;
+      }
+      default:
+        return unread;
+    }
+  }
 }
 
 // ===========================================================================
@@ -7648,6 +8099,7 @@ const OPENSSL_DIGEST_SUBS: readonly string[] = [
 
 /** `openssl dgst …` — a read of its named files, unless `-out` names one to write. */
 function refineOpensslDigest(ctx: RuleContext): Refinement {
+  if (opensslLoadsModule(ctx)) return { opaque: "openssl loads the module -engine, -provider or an OPENSSL_ variable names" };
   const destination = namedDestination(ctx.args, ["-out"]);
   return destination.length === 0
     ? { class: "read.shell", rule: "openssl-digest" }
@@ -8648,6 +9100,8 @@ export const COMMAND_RULES: readonly CommandRule[] = [
       "status",
     ],
     class: "read.shell",
+    // `git grep -O<pager>`: {@link refineGitRead}.
+    refine: refineGitRead,
   },
 
   // -- gh ------------------------------------------------------------------
@@ -9006,6 +9460,8 @@ export const COMMAND_RULES: readonly CommandRule[] = [
       "which",
     ],
     class: "read.shell",
+    // `sort --compress-program`, `rg --pre`: {@link refineReadShell}.
+    refine: refineReadShell,
   },
 ];
 
