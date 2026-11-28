@@ -167,6 +167,42 @@ for (const [name, runner] of TOOLCHAIN_STEERING) {
   });
 }
 
+/**
+ * Names whose VALUE alone is run as a command, or steers the compiler driver
+ * or a build tool, with no workspace file needed: make's "Variables Used by
+ * Implicit Rules" (programs and flags) and its own MAKE and VPATH, the gcc and
+ * clang driver's variables, Go's and the JVM's. `RM='sh -c …' make clean` runs
+ * the value through make's built-in rules. Each refused before make and npm
+ * test.
+ */
+const BUILD_STEERING: readonly string[] = [
+  // make: programs of the implicit rules, and the commonly used extras
+  "RM", "YACC", "LEX", "FC", "F77", "M2C", "PC", "M4", "CO", "GET", "LINT", "MAKEINFO", "TEX", "TEXI2DVI",
+  "WEAVE", "CWEAVE", "TANGLE", "CTANGLE", "INSTALL", "AWK", "SED", "MAKE", "VPATH",
+  // make: flags of the implicit rules
+  "ARFLAGS", "ASFLAGS", "YFLAGS", "LFLAGS", "FFLAGS", "RFLAGS", "PFLAGS", "COFLAGS", "GFLAGS", "LINTFLAGS",
+  "LDLIBS", "LOADLIBES", "TARGET_ARCH",
+  // gcc and clang driver
+  "GCC_EXEC_PREFIX", "COMPILER_PATH", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH",
+  "OBJC_INCLUDE_PATH", "DEPENDENCIES_OUTPUT", "SUNPRO_DEPENDENCIES", "CCACHE_PREFIX", "DISTCC_HOSTS",
+  // Go
+  "CGO_CFLAGS", "CGO_LDFLAGS", "GOWORK", "GOEXPERIMENT", "GOMODCACHE", "GOCACHE", "GOVCS", "GOAUTH", "GOFIPS140", "GOTOOLDIR",
+  // JVM
+  "JAVA_OPTS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "MAVEN_ARGS", "MAVEN_CONFIG", "SBT_OPTS", "JVM_OPTS",
+  "GRADLE_HOME", "ANT_OPTS", "ANT_ARGS", "CLASSPATH",
+];
+
+for (const name of BUILD_STEERING) {
+  test(`a build-tool steering name is refused before make and npm test: ${name}`, () => {
+    assert.equal(answer(`${name}='sh -c x' make clean`), "refused unclassified", `${name} make`);
+    assert.equal(answer(`${name}=./x npm test`), "refused unclassified", `${name} npm test`);
+  });
+}
+
+test("MAKELEVEL is left as an unknown name: make only counts recursion with it", () => {
+  assert.equal(answer("MAKELEVEL=1 make"), answer("make"));
+});
+
 /** Unknown names (and TMPDIR) in front of a workspace-code command keep its answer. */
 const KEPT_NAMES: readonly string[] = ["NODE_ENV=test", "PORT=3000", "DEBUG=x", "TMPDIR=/private/tmp", "FOO=1"];
 const WORKSPACE_CODE: readonly string[] = [
