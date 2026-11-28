@@ -40,7 +40,7 @@ import {
   isGateOrganPath,
   protectedPathClass,
 } from "../src/core/command-class.js";
-import { besidePlain, cpuSeconds, runner, scaledBound } from "./cost-runner.js";
+import { heldLine, pairReading, type RatioRule, runner, scaledBound } from "./cost-runner.js";
 
 function classesOf(command: string): string[] {
   const result = classifyCommand(command);
@@ -515,6 +515,18 @@ test("recheck M(new): a brace sequence that collapses to one word is judged as t
   assert.deepEqual(classesOf("echo x > notes{1..1}.md"), ["files.write.workspace"]);
 });
 
+/**
+ * The brace lines CI read under five times their bound with the code
+ * unchanged, each held by the RATIO rule (#720's list): R three times the
+ * largest ratio CI read (run 46145131980, attempts 1 and 2, node 22), the
+ * control figure its largest least
+ * reading there, CPU s. The walk, a scan from every `{` to its close, took
+ * 3.7 CPU s at 40,000: about a thousand times this control.
+ */
+const HHO_HELD: Readonly<Record<string, RatioRule>> = {
+  "nested literal braces n=160000": { ratioBound: 43, controlCi: 0.056, most: 3 },
+};
+
 /** CPU milliseconds (user and system) spent in `run`: a shared runner's wall clock is no bound. */
 function cpuMs(run: () => void): number {
   const start = process.cpuUsage();
@@ -548,23 +560,12 @@ test("recheck S(new): the brace expander is bounded and fails to the stricter cl
   const used = process.cpuUsage(start);
   const ms = (used.user + used.system) / 1000;
   const bound = scaledBound(10) * 1000;
-  // Measuring only (#720's list): the reading, printed before it is judged.
+  // The reading, printed before it is judged (#720's list). The block keeps
+  // its fixed bound: CI read it at 8.0 of 10.6 CPU s, but one of its lines
+  // (`{s..s}` x 5,000) has no control the RATIO rule can use: at this size
+  // the walk it guards against costs what the line costs now (see #720's
+  // list, section E).
   console.log(`# cost-line: HHO brace expander block: ${ms.toFixed(1)} CPU ms (bound ${bound.toFixed(0)}; ${runner().line})`);
-  // Measuring only (#720's list, step 3): each of the block's six lines read
-  // on its own beside a plain word of its length, the least of each printed.
-  if (ms * 6 >= bound) {
-    for (const command of [
-      `echo x > out${"{a,b}".repeat(20000)}.txt`,
-      `echo x > out${"{a,b}".repeat(2000)}.txt`,
-      `echo x > out${"{s..s}".repeat(5000)}.txt`,
-      `echo x > ${"{a,".repeat(5000)}b${"}".repeat(5000)}`,
-      `echo x > ${"{".repeat(20000)}a${"}".repeat(20000)}`,
-      `echo x > ${"{".repeat(60000)}`,
-    ]) {
-      const first = cpuSeconds(() => void classifyCommand(command));
-      console.log(`${besidePlain("HHOR", `brace block line ${command.slice(9, 25)} (${String(command.length)} characters)`, first, command, (text) => classifyCommand(text))}; ${runner().line}`);
-    }
-  }
   assert.ok(ms < bound, `took ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (10 s x ${runner().line})`);
 });
 
@@ -582,9 +583,16 @@ test("cost: nested literal braces are read in one pass, not one scan per brace",
     const bound = scaledBound(2) * 1000;
     // Measuring only (#720's list): the reading, printed before it is judged.
     console.log(`# cost-line: HHO nested literal braces n=${String(n)}: ${ms.toFixed(1)} CPU ms (bound ${bound.toFixed(0)}; ${runner().line})`);
-    // Measuring only (#720's list, step 3): beside a plain word of its length.
-    if (ms * 6 >= bound) console.log(`${besidePlain("HHOR", `nested literal braces n=${String(n)}`, ms / 1000, line, (text) => classifyCommand(text))}; ${runner().line}`);
-    assert.ok(ms < bound, `n=${String(n)}: ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (2 s x ${runner().line})`);
+    const rule = HHO_HELD[`nested literal braces n=${String(n)}`];
+    if (rule !== undefined) {
+      // Held by the RATIO rule (#720's list): read three times beside a plain
+      // word of its length, the least of each judged; the 2 s is printed.
+      const { text, over } = heldLine("HHO", `nested literal braces n=${String(n)}`, pairReading(ms / 1000, line, (text) => classifyCommand(text)), rule, `${(bound / 1000).toFixed(2)} CPU s`);
+      console.log(text);
+      assert.deepEqual(over, [], over.join("; "));
+    } else {
+      assert.ok(ms < bound, `n=${String(n)}: ${ms.toFixed(0)} CPU ms, bound ${bound.toFixed(0)} (2 s x ${runner().line})`);
+    }
   }
 });
 

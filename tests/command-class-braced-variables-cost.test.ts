@@ -27,7 +27,7 @@ import { after, test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand, collapseBracedVariables } from "../src/core/command-class.js";
-import { besidePlain } from "./cost-runner.js";
+import { heldLine, pairReading, type RatioRule } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-braced-cost-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -66,18 +66,44 @@ function pure(command: string): string[] {
 /** Set once a line has passed {@link BOUND}; the lines after it fail at once. */
 let overBound: string | null = null;
 
+/**
+ * The lines CI read under five times {@link BOUND} with the code unchanged,
+ * each held by the RATIO rule (#720's list), not by the bound. R is three
+ * times the largest ratio CI read (run 46145131980, attempts 1 and 2, node
+ * 22; the `%output{` line printed its reading in attempt 2 only); each
+ * control figure is its largest least reading there, CPU s. The walks, the
+ * whole-text read at b085cd91 under node 24 here against the larger of its
+ * control and this code's: 18.1 CPU s for the unclosed target (1,140 times),
+ * 17.9 in double quotes (1,130), 17.8 through the hook (215) and 21.3 for
+ * the hook's `%output{` (167). Each R is under half of its walk. The run
+ * closed once at its end keeps its bound: at b085cd91 it read 0.026 CPU s,
+ * no walk at all, so no ratio can be shown to sit under half of one.
+ */
+const BRACED_HELD: Readonly<Record<string, RatioRule>> = {
+  "hook, unclosed ${a:- run as a target": { ratioBound: 53, controlCi: 0.336, most: 3 },
+  "hook, %output{ run closed once": { ratioBound: 10, controlCi: 0.509, most: 3 },
+  "the same in double quotes, n=100000": { ratioBound: 102, controlCi: 0.076, most: 3 },
+  "unclosed ${a:- run as a target, n=100000": { ratioBound: 141, controlCi: 0.099, most: 3 },
+};
+
 /** Classify `command` through `via`, and fail if it took {@link BOUND} CPU seconds or an earlier line already did. */
 function boundedLine(command: string, label: string, via: (text: string) => unknown): void {
   assert.equal(overBound, null, `${label}: not timed, an earlier line passed the bound (${String(overBound)})`);
   const seconds = cpuSeconds(() => {
     via(command);
   });
-  // Measuring only (#720's list): this line's reading, printed before it is judged.
+  const rule = BRACED_HELD[label];
+  if (rule !== undefined) {
+    // Held by the RATIO rule (#720's list): read three times beside a plain
+    // word of its length, the least of each judged; the bound is printed.
+    const { text, over } = heldLine("BRACED", label, pairReading(seconds, command, via), rule, `${String(BOUND)} CPU s`);
+    console.log(text);
+    if (over.length > 0) overBound = label;
+    assert.deepEqual(over, [], `${label}: ${over.join("; ")}`);
+    return;
+  }
+  // This line's reading, printed before it is judged (#720's list).
   console.log(`# cost-line: BRACED ${label}: ${seconds.toFixed(3)} CPU s (bound ${String(BOUND)}, not stretched; node ${process.version})`);
-  // Measuring only (#720's list, step 3): a line within six times its bound
-  // is read twice more beside three readings of a plain word of its length,
-  // the least of each printed. Nothing here is asserted.
-  if (seconds * 6 >= BOUND) console.log(`${besidePlain("BRACEDR", label, seconds, command, via)}; bound ${String(BOUND)}; node ${process.version}`);
   if (seconds >= BOUND) overBound = label;
   assert.ok(seconds < BOUND, `${label}: ${seconds.toFixed(2)} CPU s, bound ${String(BOUND)}`);
 }

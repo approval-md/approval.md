@@ -31,7 +31,7 @@ import {
   commandSegmentShapes,
   SUBSTITUTION_SENTINEL,
 } from "../src/core/command-class.js";
-import { besidePlain, cpuSeconds, runner, scaledBound } from "./cost-runner.js";
+import { cpuSeconds, heldLine, pairReading, type RatioRule, runner, scaledBound } from "./cost-runner.js";
 
 function classesOf(command: string): string[] {
   const result = classifyCommand(command, []);
@@ -462,6 +462,25 @@ test("reviews of the M1 fix: where a dollar quote holds a NUL the line is read a
   }
 });
 
+/**
+ * The lines CI read under five times their 1 CPU s with the code unchanged,
+ * each held by the RATIO rule (#720's list) and not by the bound, which is
+ * printed beside it. R is three times the largest ratio CI read (run
+ * 46145131980, attempts 1 and 2, node 22), each control figure its largest
+ * least reading there, CPU s. The walks:
+ * the unread escapes took 4.55 CPU s before 5e24ab67 (measured here under
+ * node 24; 132 times this code's control, R 5); the repeated $'\q' took
+ * 1.9 before the M3 fix (that commit's figure; about 380 times this
+ * control, R 47). The other three
+ * 100 KB lines keep their bound: no walk was ever measured on them (before
+ * 5e24ab67 they cost what they cost now), so no ratio can be shown to be
+ * under half of one (#720's list, section E).
+ */
+const DQ_HELD: Readonly<Record<string, RatioRule>> = {
+  "a$'\\q' repeated": { ratioBound: 47, controlCi: 0.008, most: 3 },
+  "one quote of unread escapes": { ratioBound: 5, controlCi: 0.085, most: 3 },
+};
+
 test("review of b58db9ec (M3): repeated unread quotes in one word are linear, as main is", () => {
   const bound = scaledBound(1);
   const control = cpuSeconds(() => classifyCommand(`tee ${"a$'b'".repeat(17_000)}`, []));
@@ -476,9 +495,16 @@ test("review of b58db9ec (M3): repeated unread quotes in one word are linear, as
     console.log(
       `# cost-line: DQ-M3 ${label}: ${seconds.toFixed(3)} CPU s (bound ${bound.toFixed(2)}; control ${control.toFixed(3)}, relative bound ${Math.max(0.2, 8 * control).toFixed(3)}; ${runner().line})`,
     );
-    // Measuring only (#720's list, step 3): beside a plain word of its length.
-    if (seconds * 6 >= bound) console.log(`${besidePlain("DQ-M3R", label, seconds, command, (text) => classifyCommand(text, []))}; bound ${bound.toFixed(2)}; ${runner().line}`);
-    assert.ok(seconds < bound, `${label}: ${seconds.toFixed(3)} CPU s, bound ${bound.toFixed(2)}, control ${control.toFixed(3)} (${runner().line})`);
+    const rule = DQ_HELD[label];
+    if (rule !== undefined) {
+      // Held by the RATIO rule (#720's list): read three times beside a plain
+      // word of its length, the least of each judged; the 1 s is printed.
+      const { text, over } = heldLine("DQ-M3", label, pairReading(seconds, command, (text) => classifyCommand(text, [])), rule, `${bound.toFixed(2)} CPU s`);
+      console.log(text);
+      assert.deepEqual(over, [], `${label}: ${over.join("; ")}`);
+    } else {
+      assert.ok(seconds < bound, `${label}: ${seconds.toFixed(3)} CPU s, bound ${bound.toFixed(2)}, control ${control.toFixed(3)} (${runner().line})`);
+    }
     assert.ok(seconds < Math.max(0.2, 8 * control), `${label}: ${seconds.toFixed(3)} CPU s against a control of ${control.toFixed(3)}`);
   }
 });
@@ -490,6 +516,9 @@ test("cost: 100 KB of dollar quotes is read in time; past the bound the rest of 
   const cwd = mkdtempSync(join(tmpdir(), "approval-md-dollar-quote-cost-"));
   try {
     const bound = scaledBound(1);
+    // The held line is one word, longer than the classifier's memo of short
+    // words with a `$` (`splicedCredentialMemo`) keeps, so each reading is of
+    // the line itself (#720's list).
     for (const [label, command] of [
       ["one word of quotes", `cp a ${"$'\\x41'".repeat(14_000)}`],
       ["one quote of escapes", `cp a $'${"\\x41".repeat(24_000)}'`],
@@ -504,9 +533,17 @@ test("cost: 100 KB of dollar quotes is read in time; past the bound the rest of 
       });
       // Measuring only (#720's list): the reading, printed before it is judged.
       console.log(`# cost-line: DQ-100KB ${label}: ${seconds.toFixed(3)} CPU s (bound ${bound.toFixed(2)}; ${runner().line})`);
-      // Measuring only (#720's list, step 3): beside a plain word of its length.
-      if (seconds * 6 >= bound) console.log(`${besidePlain("DQ-100KBR", label, seconds, command, (text) => classifyForHook(text, [], cwd))}; bound ${bound.toFixed(2)}; ${runner().line}`);
-      assert.ok(seconds < bound, `${label}: ${seconds.toFixed(3)} CPU s, bound ${bound.toFixed(2)} (${runner().line})`);
+      const rule = DQ_HELD[label];
+      if (rule !== undefined) {
+        // Held by the RATIO rule (#720's list): read three times beside a plain
+        // word of its length, the least of each judged; the 1 s is printed.
+        const reading = pairReading(seconds, command, (text) => classifyForHook(text, [], cwd));
+        const { text, over } = heldLine("DQ-100KB", label, reading, rule, `${bound.toFixed(2)} CPU s`);
+        console.log(text);
+        assert.deepEqual(over, [], `${label}: ${over.join("; ")}`);
+      } else {
+        assert.ok(seconds < bound, `${label}: ${seconds.toFixed(3)} CPU s, bound ${bound.toFixed(2)} (${runner().line})`);
+      }
       assert.ok(classes.length > 0, label);
     }
     // Past the bound the word is unknown: a copy to it keeps the fail-closed class.

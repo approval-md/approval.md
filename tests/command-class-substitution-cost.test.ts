@@ -31,7 +31,7 @@ import { after, test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand, globSegmentMatches } from "../src/core/command-class.js";
-import { besidePlain, cpuSeconds, MOST, runner, scaledBound } from "./cost-runner.js";
+import { cpuSeconds, heldLine, MOST, pairReading, type RatioRule, runner, scaledBound } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-subst-cost-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -95,6 +95,33 @@ function notAlreadyOver(label: string): void {
 const MANY_COMMAND_WORDS_BOUND = 1.5 * 7.35;
 
 /**
+ * The line's RATIO rule (#720's list), or null where no control qualified
+ * and the line keeps {@link MANY_COMMAND_WORDS_BOUND}. The control is a plain
+ * word of the line's length (the seat's ruling: the eighth of the words does
+ * not qualify). CI read the line at 3.72 times it at most (run 46145131980,
+ * attempts 1 and 2, node 22), so R is 12; the control's figure is 1.09 CPU s
+ * there. The walk ef0531c0
+ * removed (shifts, at b085cd91) read 10.5 CPU s under node 24 here, 48.7
+ * times this code's plain word (90 times b085cd91's own): half is 24.4, over
+ * 12. Against the eighth it read 36.7, under the 26 that eighth would need.
+ */
+const MANY_COMMAND_WORDS_RULE: RatioRule | null = { ratioBound: 12, controlCi: 1.09, most: 3 };
+
+/**
+ * `line` held by its ratio to a plain word of its length: read three times
+ * beside three readings of the plain word, the least of each judged; the
+ * fixed bound is printed. One word, longer than any memo keeps.
+ */
+function manyCommandWordsHeld(line: string, label: string, rule: RatioRule): void {
+  notAlreadyOver(label);
+  const first = cpuSeconds(() => void pure(line));
+  const { text, over } = heldLine("SUB", label, pairReading(first, line, (text) => pure(text), "a".repeat(line.length)), rule, `${MANY_COMMAND_WORDS_BOUND.toFixed(2)} CPU s, not stretched`);
+  console.log(text);
+  if (over.length > 0) overBound = label;
+  assert.deepEqual(over, [], `${label}: ${over.join("; ")}`);
+}
+
+/**
  * Fail if `seconds` is over the bound, and remember it. The bound is
  * {@link BOUND} as this runner stretches it, or `own` as written.
  */
@@ -121,15 +148,49 @@ function bounded(command: string, label: string, own?: number): string[] {
     answer = pure(command);
   });
   if (own !== undefined) console.log(`# cost-line: ${label}: ${seconds.toFixed(2)} CPU s (bound ${own.toFixed(2)}; node ${process.version})`);
-  if (own === undefined) measuredBesidePlain("SUBR", label, seconds, scaledBound(BOUND), (text) => pure(text), command);
+  if (own === undefined && SUB_HELD[label] !== undefined) {
+    heldSub(label, seconds, command, (text) => pure(text));
+    return answer;
+  }
   withinBound(seconds, label, own);
   return answer;
 }
 
-/** Measuring only (#720's list, step 3): a line within six times its bound is read beside a plain word of its length ({@link besidePlain}). */
-function measuredBesidePlain(id: string, label: string, first: number, bound: number, run: (text: string) => unknown, command: string): void {
-  if (first * 6 < bound) return;
-  console.log(`${besidePlain(id, label, first, command, run)}; bound ${bound.toFixed(2)}; ${runner().line}`);
+/**
+ * The lines CI read under five times {@link BOUND} with the code unchanged,
+ * each held by the RATIO rule (#720's list) and not by the bound, which is
+ * printed beside it: the line read three times beside three readings of the
+ * same line with its costly part spelled as a plain word of the same length
+ * (`plainLike` in cost-runner.ts), the least of each judged ({@link heldLine}). R is three
+ * times the largest ratio CI read (run 46145131980, attempts 1 and 2, node
+ * 22; printf %s printed its reading in attempt 2 only); each control figure
+ * is its largest least reading there, CPU s. The walks, at b085cd91 on a
+ * laptop under node 24 against the larger of its control and this code's:
+ * nested defaults 98 CPU s (3,700 times; through the hook the same walk and
+ * more), `echo` of unclosed ${ 97 (1,060), printf %.0s 106 (1,750), printf
+ * %s 15.2 (437), echo's flags 14.4 (305). Each R is under half of its walk.
+ * Lines CI read under five times the bound that keep it, with no control
+ * that can tell their walk at this size (#720's list, section E): brace
+ * groups and one-alternative ranges beside outputs, pure and through the
+ * hook (R 728 and 282, 1,950 and 823; walks 645 and 296, 600 and 310 times),
+ * nested defaults at n=2000 (R 543; walk 384), nested expansions (R 54; walk
+ * 35) and many printf -v segments (no walk was measured).
+ */
+const SUB_HELD: Readonly<Record<string, RatioRule>> = {
+  "nested defaults with outputs, n=20000": { ratioBound: 313, controlCi: 0.032, most: 3 },
+  "hook, nested defaults with outputs": { ratioBound: 108, controlCi: 0.16, most: 3 },
+  "hook, echo of unclosed ${": { ratioBound: 55, controlCi: 0.274, most: 3 },
+  "printf %.0s of many words, n=400000": { ratioBound: 33, controlCi: 0.225, most: 3 },
+  "printf %s of many words, n=400000": { ratioBound: 40, controlCi: 0.129, most: 3 },
+  "echo of many flags, n=400000": { ratioBound: 26, controlCi: 0.204, most: 3 },
+};
+
+/** `command`, first read at `seconds`, held by its rule in {@link SUB_HELD}. */
+function heldSub(label: string, seconds: number, command: string, run: (text: string) => unknown): void {
+  const { text, over } = heldLine("SUB", label, pairReading(seconds, command, run), SUB_HELD[label]!, `${scaledBound(BOUND).toFixed(2)} CPU s`);
+  console.log(text);
+  if (over.length > 0) overBound = label;
+  assert.deepEqual(over, [], `${label}: ${over.join("; ")}`);
 }
 
 test("cost: this runner is measured before any bound is used, and the measurement is logged", (t) => {
@@ -297,34 +358,9 @@ test("cost: review-b's shapes on b085cd91 (nested defaults, printf and echo bodi
     bounded(`${P}echo x > "$(printf '%.0s'${" a".repeat(n)})"`, `printf %.0s of many words, n=${String(n)}`);
     bounded(`${P}echo x > "$(printf '%s'${" a".repeat(n)})"`, `printf %s of many words, n=${String(n)}`);
     bounded(`${P}echo x > "$(echo${" -n".repeat(n)} a)"`, `echo of many flags, n=${String(n)}`);
-    bounded(`${P}echo x > "$(${"command ".repeat(n)}printf a)"`, `many command words, n=${String(n)}`, n === 400000 ? MANY_COMMAND_WORDS_BOUND : undefined);
-  }
-  // Measuring only (#720's list, SUB400K): the line with its own bound read
-  // three more times beside the same line at an eighth of its words, as #719
-  // reads its lines, the least of each printed. Nothing here is asserted.
-  {
-    const line = `${P}echo x > "$(${"command ".repeat(400000)}printf a)"`;
-    const control = `${P}echo x > "$(${"command ".repeat(50000)}printf a)"`;
-    const lines: number[] = [];
-    const controls: number[] = [];
-    for (let round = 0; round < 3; round += 1) {
-      controls.push(cpuSeconds(() => pure(control)));
-      lines.push(cpuSeconds(() => pure(line)));
-    }
-    const least = Math.min(...lines);
-    const leastControl = Math.min(...controls);
-    console.log(
-      `# cost-measure: SUB400K many command words, n=400000: calls ${lines.map((x) => x.toFixed(2)).join(" ")}, least ${least.toFixed(2)} CPU s; ` +
-        `n=50000 ${controls.map((x) => x.toFixed(3)).join(" ")}, least ${leastControl.toFixed(3)}; ratio ${(least / leastControl).toFixed(2)}; ${runner().line}`,
-    );
-    // Measuring only (#720's list, step 3): a plain word of the line's length,
-    // the other control candidate (the walk ef0531c0 removed, shifts, read
-    // only 5.3 to 31 times the eighth-of-the-words control on this Mac).
-    const plain = "a".repeat(line.length);
-    const plains = [1, 2, 3].map(() => cpuSeconds(() => pure(plain)));
-    console.log(
-      `# cost-measure: SUB400KP many command words, n=400000: plain ${String(line.length)} ${plains.map((x) => x.toFixed(3)).join(" ")}, least ${Math.min(...plains).toFixed(3)}; ratio of the line's least ${(least / Math.min(...plains)).toFixed(2)}`,
-    );
+    const words = `${P}echo x > "$(${"command ".repeat(n)}printf a)"`;
+    if (n === 400000 && MANY_COMMAND_WORDS_RULE !== null) manyCommandWordsHeld(words, `many command words, n=${String(n)}`, MANY_COMMAND_WORDS_RULE);
+    else bounded(words, `many command words, n=${String(n)}`, n === 400000 ? MANY_COMMAND_WORDS_BOUND : undefined);
   }
 });
 
@@ -456,8 +492,8 @@ test("cost: through the hook, in a checkout, the same lines are bounded", { skip
     const seconds = cpuSeconds(() => {
       classifyForHook(command, [], repo);
     });
-    measuredBesidePlain("SUBR", `hook, ${label}`, seconds, scaledBound(BOUND), (text) => classifyForHook(text, [], repo), command);
-    withinBound(seconds, `hook, ${label}`);
+    if (SUB_HELD[`hook, ${label}`] !== undefined) heldSub(`hook, ${label}`, seconds, command, (text) => classifyForHook(text, [], repo));
+    else withinBound(seconds, `hook, ${label}`);
   }
 });
 

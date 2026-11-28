@@ -37,6 +37,23 @@ function cpuMs(run: () => void): number {
 }
 
 /**
+ * Three letters (from `b` to `y`), a different three for every call of a
+ * repeated reading (#720's list): each call's line or control ends its costly
+ * word in them, so no call is served what an earlier one left behind. The hook
+ * keeps each glob component it compiles (`compiledGlobPattern`, keyed on the
+ * component), and the classifier the last pattern segment it read
+ * (`globElements`), so a second call of the same word would skip the compile
+ * the first one paid.
+ */
+let tagCount = 0;
+function nextTag(): string {
+  const at = tagCount;
+  tagCount += 1;
+  const letter = (index: number): string => String.fromCharCode(98 + (index % 24));
+  return `${letter(Math.floor(at / 576))}${letter(Math.floor(at / 24))}${letter(at)}`;
+}
+
+/**
  * A line and its control run back to back, the order turning each round (as
  * #707's walked-once cases in guarded-names-fold-case and #709's spliced
  * words time theirs): the medians of the line's calls, of the control's and of
@@ -45,11 +62,11 @@ function cpuMs(run: () => void): number {
  * `controlCalls` calls made back to back, so the pair's ratio is not one short
  * call's jitter.
  */
-function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number, controlCalls = 1): { spent: number; control: number; ratio: number } {
-  controlRun();
-  spentRun();
+function pairedCost(controlRun: (tag: string) => void, spentRun: (tag: string) => void, rounds: number, controlCalls = 1): { spent: number; control: number; ratio: number } {
+  controlRun(nextTag());
+  spentRun(nextTag());
   const controlOnce = (): void => {
-    for (let call = 0; call < controlCalls; call += 1) controlRun();
+    for (let call = 0; call < controlCalls; call += 1) controlRun(nextTag());
   };
   const spents: number[] = [];
   const controls: number[] = [];
@@ -59,9 +76,11 @@ function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number
     let spent: number;
     if (round % 2 === 0) {
       control = cpuMs(controlOnce) / controlCalls;
-      spent = cpuMs(spentRun);
+      const tag = nextTag();
+      spent = cpuMs(() => spentRun(tag));
     } else {
-      spent = cpuMs(spentRun);
+      const tag = nextTag();
+      spent = cpuMs(() => spentRun(tag));
       control = cpuMs(controlOnce) / controlCalls;
     }
     spents.push(spent);
@@ -82,12 +101,14 @@ function pairedCost(controlRun: () => void, spentRun: () => void, rounds: number
  * ms: the least of several calls is what the code costs, where one call also
  * holds the first call's compile and the runner's phase (#720's list).
  */
-function leastCost(controlRun: () => void, spentRun: () => void, rounds: number): { spent: number; control: number; ratio: number; spents: number[]; controls: number[] } {
+function leastCost(controlRun: (tag: string) => void, spentRun: (tag: string) => void, rounds: number): { spent: number; control: number; ratio: number; spents: number[]; controls: number[] } {
   const spents: number[] = [];
   const controls: number[] = [];
   for (let round = 0; round < rounds; round += 1) {
-    controls.push(cpuMs(controlRun));
-    spents.push(cpuMs(spentRun));
+    const controlTag = nextTag();
+    controls.push(cpuMs(() => controlRun(controlTag)));
+    const spentTag = nextTag();
+    spents.push(cpuMs(() => spentRun(spentTag)));
   }
   const spent = Math.min(...spents);
   const control = Math.min(...controls);
@@ -140,10 +161,10 @@ const STAR_SHAPES: ReadonlyArray<readonly [string, (word: string) => string]> = 
   ["echo x > ~/.hermes/*/", (word) => `echo x > ~/.hermes/*/${word}`],
 ];
 
-/** Test 3's two long words, by name. */
-const LONG_WORDS: ReadonlyArray<readonly [string, string]> = [
-  ["20,000 [", "[".repeat(20_000)],
-  ["*[5,000 z]X", `*[${"z".repeat(5_000)}]X`],
+/** Test 3's two long words, by name, each ending its costly part in a call's three letters ({@link nextTag}). */
+const LONG_WORDS: ReadonlyArray<readonly [string, (tag: string) => string]> = [
+  ["20,000 [", (tag) => `${"[".repeat(19_997)}${tag}`],
+  ["*[5,000 z]X", (tag) => `*[${"z".repeat(4_997)}${tag}]X`],
 ];
 
 /**
@@ -208,14 +229,14 @@ test("cost: the whole hook classification of a long `*` run is bounded in CPU ti
     // `a`, which no reader backtracks on.
     const over: string[] = [];
     for (const stars of [8, ...STAR_COUNTS]) {
-      const word = `${"*".repeat(stars)}${"z".repeat(12)}`;
-      const plainWord = `${"a".repeat(stars)}${"z".repeat(12)}`;
+      // Each call ends the word in its own three letters ({@link nextTag}).
+      const word = (tag: string): string => `${"*".repeat(stars)}${"z".repeat(9)}${tag}`;
+      const plainWord = (tag: string): string => `${"a".repeat(stars)}${"z".repeat(9)}${tag}`;
       for (const [name, shape] of STAR_SHAPES) {
-        const command = shape(word);
-        const control = shape(plainWord);
+        const command = shape(word("zzz"));
         const { spent, control: controlMs, ratio } = leastCost(
-          () => classifyForHook(control, [], dir, [], false, [dir]),
-          () => classifyForHook(command, [], dir, [], false, [dir]),
+          (tag) => classifyForHook(shape(plainWord(tag)), [], dir, [], false, [dir]),
+          (tag) => classifyForHook(shape(word(tag)), [], dir, [], false, [dir]),
           LEAST_ROUNDS,
         );
         const ciMs = STAR_CONTROL_CI_MS[name]!;
@@ -278,10 +299,10 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
     for (const prefix of ["", "~/.hermes/"]) {
       const most = RUN_RATIO_BOUND;
       const command = `echo x > ${prefix}${"[".repeat(2_000)}`;
-      const control = `echo x > ${"a".repeat(2_000)}`;
+      // Each call ends the run, and its control, in its own three letters ({@link nextTag}).
       const { spent, control: controlMs, ratio } = pairedCost(
-        () => classifyForHook(control, [], dir, [], false, [dir]),
-        () => classifyForHook(command, [], dir, [], false, [dir]),
+        (tag) => classifyForHook(`echo x > ${"a".repeat(1_997)}${tag}`, [], dir, [], false, [dir]),
+        (tag) => classifyForHook(`echo x > ${prefix}${"[".repeat(1_997)}${tag}`, [], dir, [], false, [dir]),
         21,
         5,
       );
@@ -304,20 +325,20 @@ test("cost: a run of unclosed `[` and a class of many members, through the whole
       // A `cat` of a long `[` run is left out: its cost is the kernel refusing
       // a path that long (lstat through realpath, about 7 CPU ms a call,
       // the same before and after this change), not either glob reader.
-      const reads: Array<[string, (each: string) => string]> = word.startsWith("*") ? [["cat", (each) => `cat ${each}`], ["cat ~/.hermes/", (each) => `cat ~/.hermes/${each}`]] : [];
+      const reads: Array<[string, (each: string) => string]> = word("zzz").startsWith("*") ? [["cat", (each) => `cat ${each}`], ["cat ~/.hermes/", (each) => `cat ~/.hermes/${each}`]] : [];
       const shapes: Array<[string, (each: string) => string]> = [["echo x >", (each) => `echo x > ${each}`], ["echo x > ~/.hermes/", (each) => `echo x > ~/.hermes/${each}`], ...reads];
       for (const [shapeName, shape] of shapes) {
-        const command = shape(word);
-        const control = shape("a".repeat(word.length));
+        const command = shape(word("zzz"));
+        // Each call ends the word, and its control, in its own three letters ({@link nextTag}).
         const { spent, control: controlMs, ratio } = leastCost(
-          () => classifyForHook(control, [], dir, [], false, [dir]),
-          () => classifyForHook(command, [], dir, [], false, [dir]),
+          (tag) => classifyForHook(shape(`${"a".repeat(command.length - shape("").length - 3)}${tag}`), [], dir, [], false, [dir]),
+          (tag) => classifyForHook(shape(word(tag)), [], dir, [], false, [dir]),
           LEAST_ROUNDS,
         );
         const name = `${shapeName} ${wordName}`;
         const ciMs = LONG_CONTROL_CI_MS[name]!;
         const { controlBound, lineOver, controlOver } = heldBy(ratio, controlMs, ciMs, runner().factor, LONG_RATIO_BOUND, LEAST_CONTROL_MOST);
-        const label = `${command.slice(0, 30)} (${String(word.length)} characters): least ${spent.toFixed(1)} CPU ms, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${String(LONG_RATIO_BOUND)}; the control's own bound ${controlBound.toFixed(1)}; the fixed ${String(BOUND_MS * 2)} ms is printed, not asserted`;
+        const label = `${command.slice(0, 30)} (${String(word("zzz").length)} characters): least ${spent.toFixed(1)} CPU ms, control ${controlMs.toFixed(1)}, ratio ${ratio.toFixed(2)} of ${String(LONG_RATIO_BOUND)}; the control's own bound ${controlBound.toFixed(1)}; the fixed ${String(BOUND_MS * 2)} ms is printed, not asserted`;
         t.diagnostic(`cost: ${label}`);
         if (lineOver) over.push(label);
         if (controlOver) over.push(`the control of ${label} (${String(LEAST_CONTROL_MOST)} x its CI ${ciMs.toFixed(1)}, ${runner().line})`);
@@ -470,14 +491,14 @@ const RUN_CONTROL_CI_MS: Readonly<Record<string, number>> = {
  */
 const LONG_RATIO_BOUND = 19;
 
-/** Test 3's long words' controls, CPU ms: the largest least reading (46140003817, attempts 1 and 2). */
+/** Test 3's long words' controls, CPU ms: the largest least reading (46140003817 attempts 1 and 2, 46145131980 attempts 1 and 2). */
 const LONG_CONTROL_CI_MS: Readonly<Record<string, number>> = {
   "echo x > 20,000 [": 13.9,
   "echo x > ~/.hermes/ 20,000 [": 26.0,
   "echo x > *[5,000 z]X": 3.6,
   "echo x > ~/.hermes/ *[5,000 z]X": 8.5,
   "cat *[5,000 z]X": 4.8,
-  "cat ~/.hermes/ *[5,000 z]X": 3.7,
+  "cat ~/.hermes/ *[5,000 z]X": 3.8,
 };
 
 /**
@@ -642,10 +663,10 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     for (const prefix of ["", "~/.hermes/"]) {
       for (const [shape, line] of lines) {
         const command = line(`${prefix}${run}`);
-        const control = line(plain);
+        // Each call ends the run, and its control, in its own three letters ({@link nextTag}).
         const { spent, control: controlMs, ratio } = pairedCost(
-          () => classifyForHook(control, [], dir, [], false, [dir]),
-          () => classifyForHook(command, [], dir, [], false, [dir]),
+          (tag) => classifyForHook(line(`${plain.slice(3)}${tag}`), [], dir, [], false, [dir]),
+          (tag) => classifyForHook(line(`${prefix}${run.slice(3)}${tag}`), [], dir, [], false, [dir]),
           21,
           5,
         );
@@ -670,10 +691,10 @@ test("cost: cp and mv with a run of unclosed `[` as an operand, through the whol
     for (const prefix of ["", "~/.hermes/"]) {
       for (const [shape, line] of lines) {
         const command = line(`${prefix}${"[".repeat(20_000)}`);
-        const control = line(`${prefix}${"a".repeat(20_000)}`);
+        // Each call ends the run, and its control, in its own three letters ({@link nextTag}).
         const { spent, control: controlMs, ratio } = leastCost(
-          () => classifyForHook(control, [], dir, [], false, [dir]),
-          () => classifyForHook(command, [], dir, [], false, [dir]),
+          (tag) => classifyForHook(line(`${prefix}${"a".repeat(19_997)}${tag}`), [], dir, [], false, [dir]),
+          (tag) => classifyForHook(line(`${prefix}${"[".repeat(19_997)}${tag}`), [], dir, [], false, [dir]),
           LEAST_ROUNDS,
         );
         const name = named(shape, prefix);

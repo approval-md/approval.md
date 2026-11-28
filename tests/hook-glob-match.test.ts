@@ -26,6 +26,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { ratioJudged, type RatioRule, runner } from "./cost-runner.js";
+
 import { globPattern } from "../src/core/glob-match.js";
 
 /** The matcher this replaced, verbatim from src/cli/hook.ts at a521a91d: the oracle. */
@@ -295,6 +297,16 @@ test("cost: a class of many members is one binary search a character (codex cave
   }
 });
 
+/**
+ * The unclosed `[` compile block's RATIO rule (#720's list), CPU ms. The plain
+ * patterns cost more than the run (an unclosed `[` ends the compile): CI read
+ * 0.43 at most (run 46145131980, attempts 1 and 2, node 22), so R is 2; the
+ * control's figure is its largest least reading there. The walk, a rescan from
+ * every `[`, took 35 CPU ms on bfa73710 where this block takes 9 and its
+ * control 4: about 9 times the control, half of it 4.4.
+ */
+const UNCLOSED_RULE: RatioRule = { ratioBound: 2, controlCi: 17.3, most: 3 };
+
 test("cost: a run of unclosed `[` compiles in one pass", () => {
   const ms = cpuMs(() => {
     for (const length of [2_000, 20_000, 200_000]) {
@@ -304,13 +316,14 @@ test("cost: a run of unclosed `[` compiles in one pass", () => {
   });
   // The hook's reader never rescanned (an unclosed `[` ends the compile):
   // about 9 CPU ms here, 35 on bfa73710; the bound is 10x.
-  // Measuring only (#720's list): the reading, printed before it is judged.
-  console.log(`# cost-line: HGM unclosed bracket run: ${ms.toFixed(1)} CPU ms (bound 100, not stretched; node ${process.version})`);
-  // Measuring only (#720's list, step 3): the block read twice more beside
-  // three readings of plain patterns of the same lengths, the least printed.
-  // globPattern keeps what it compiled, so each reading adds `round` to each
-  // length: a pattern never compiled before, as the first reading had.
-  if (ms * 6 >= 100) {
+  // Since #720 the block is held by the RATIO rule ({@link UNCLOSED_RULE}),
+  // not by the 100 CPU ms, which is printed (CI read 36.2 of it with the
+  // code unchanged): the block read twice more beside three readings of
+  // plain patterns of the same lengths, the least of each judged. globPattern
+  // keeps what it compiled, keyed on the pattern, so each reading adds
+  // `round` to each length: a pattern never compiled before, as the first
+  // reading had.
+  {
     let round = 0;
     const block = (unit: string): void => {
       round += 1;
@@ -323,9 +336,16 @@ test("cost: a run of unclosed `[` compiles in one pass", () => {
       calls.push(cpuMs(() => block("[")));
     }
     plains.push(cpuMs(() => block("a")));
-    console.log(`# cost-measure: HGMR unclosed bracket run: calls ${calls.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...calls).toFixed(1)} CPU ms; plain ${plains.map((x) => x.toFixed(1)).join(" ")}, least ${Math.min(...plains).toFixed(1)}; ratio ${(Math.min(...calls) / Math.max(Math.min(...plains), 0.001)).toFixed(2)}`);
+    const least = Math.min(...calls);
+    const leastPlain = Math.min(...plains);
+    const ratio = least / Math.max(leastPlain, 0.001);
+    const { controlBound, lineOver, controlOver } = ratioJudged(ratio, leastPlain, UNCLOSED_RULE, runner().factor);
+    console.log(
+      `# cost-line: HGM unclosed bracket run: ${least.toFixed(1)} CPU ms (the least of 3, calls ${calls.map((x) => x.toFixed(1)).join(" ")}; control ${leastPlain.toFixed(2)}, ratio ${ratio.toFixed(2)} of ${String(UNCLOSED_RULE.ratioBound)}; the control's own bound ${controlBound.toFixed(2)}; the fixed 100 is printed, not asserted; ${runner().line})`,
+    );
+    assert.ok(!lineOver, `the block: ${least.toFixed(1)} CPU ms, ${ratio.toFixed(2)} times its control, bound ${String(UNCLOSED_RULE.ratioBound)}`);
+    assert.ok(!controlOver, `the control: ${leastPlain.toFixed(2)} CPU ms, its own bound ${controlBound.toFixed(2)}`);
   }
-  assert.ok(ms < 100, `${ms.toFixed(1)} CPU ms, bound 100`);
 });
 
 /**

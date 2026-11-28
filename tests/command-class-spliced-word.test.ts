@@ -31,7 +31,7 @@ import { test } from "node:test";
 
 import { classifyForHook } from "../src/cli/hook.js";
 import { classifyCommand, classifyCommandWithDollarQuotesKept, classifyCommandWithMainRules, splicedCredentialMemoHeld } from "../src/core/command-class.js";
-import { besidePlain, cpuSeconds, runner, scaledBound } from "./cost-runner.js";
+import { cpuSeconds, heldLine, pairReading, type RatioRule, runner, scaledBound } from "./cost-runner.js";
 
 const ROUTES = [
   { path: ".github/workflows/", class: "policy.edit.ci" },
@@ -437,6 +437,14 @@ const PAIRED_CONTROL_CI_S: Readonly<Record<"parameter" | "escapes", number>> = {
  */
 const PAIRED_CONTROL_MOST = 3;
 
+/**
+ * The backslash line's RATIO rule (#720's list): R three times the largest
+ * ratio CI read, 5.03 (run 46145131980, attempts 1 and 2, node 22); the
+ * control's figure its largest least reading there, CPU s. The walk (before the segments bound) took 0.8
+ * CPU s, about a hundred times this control.
+ */
+const BACKSLASH_RULE: RatioRule = { ratioBound: 16, controlCi: 0.013, most: 3 };
+
 /** A paired control against its own bound (`runnerFactor` passed in so the rule can be tested with figures). */
 function pairedControlJudged(controlSeconds: number, ciSeconds: number, runnerFactor: number): { controlBound: number; controlOver: boolean } {
   const controlBound = PAIRED_CONTROL_MOST * ciSeconds * runnerFactor;
@@ -511,11 +519,13 @@ test("cost: a word of 3,000 unread parts is bounded, and past the bound could be
     const seconds = cpuSeconds(() => {
       classes = classesOf(command);
     });
-    // Measuring only (#720's list): the reading, printed before it is judged.
-    console.log(`# cost-line: SPLICE backslashes beside a parameter: ${seconds.toFixed(3)} CPU s (bound ${scaledBound(0.4).toFixed(2)}; ${runner().line})`);
-    // Measuring only (#720's list, step 3): beside a plain word of its length.
-    if (seconds * 6 >= scaledBound(0.4)) console.log(`${besidePlain("SPLICER", "backslashes beside a parameter", seconds, command, (text) => classifyCommand(text, []))}; bound ${scaledBound(0.4).toFixed(2)}; ${runner().line}`);
-    assert.ok(seconds < scaledBound(0.4), `backslashes beside a parameter: ${seconds.toFixed(3)} CPU s (${runner().line})`);
+    // Held by the RATIO rule (#720's list: CI read 0.217 of its 0.4 with the
+    // code unchanged): read three times beside a plain word of its length,
+    // the least of each judged; the 0.4 is printed. One word, longer than the
+    // spliced memo keeps, so no reading is served from it.
+    const { text, over } = heldLine("SPLICE", "backslashes beside a parameter", pairReading(seconds, command, (each) => classifyCommand(each, [])), BACKSLASH_RULE, `${scaledBound(0.4).toFixed(2)} CPU s`);
+    console.log(text);
+    assert.deepEqual(over, [], over.join("; "));
     assert.ok(classes.includes("log.mutate"), classes.join(","));
     assert.deepEqual(classesOf(`tee $a'${"a\\q".repeat(30)}'`), mainClasses(`tee $a'${"a\\q".repeat(30)}'`));
     // A `\\` counts toward that bound only past 1,024 of them: a pattern's

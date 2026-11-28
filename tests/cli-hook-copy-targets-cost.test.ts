@@ -15,11 +15,11 @@
  * a line those programs refuse.
  *
  * Each line runs the hook's entry (`classifyForHook`, both name readings) in a
- * made-up project and logs `# cost-line: COST695 <name>: <n.nn> CPU s (bound
- * <n.nn>; node <v>)`. Each bound is about three times a local measurement of
- * the fixed pass on an M-series laptop (runner factor 1) and far below main
- * 606df106's figure, stretched by the runner's factor only
- * (`tests/cost-runner.ts`). The plain line's figure is mostly the classifier's
+ * made-up project and logs `# cost-line: COST695 <name>: ...`. Since #720 each
+ * line is held by the RATIO rule ({@link RULES}), not by its fixed bound (about
+ * three times a laptop's figure, stretched by the runner's factor), which is
+ * printed: one cold call read 2.95 of 6 and 0.82 of 2.5 CPU s on CI with the
+ * code unchanged. The plain line's figure is mostly the classifier's
  * own reading of the line (about 1.2 of its 2 CPU s, the same before #695);
  * the write pass is about 0.4 of it. CPU time, not wall-clock time.
  * Hermetic: HOME and the project are fixture directories; no line is run.
@@ -32,7 +32,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 
 import { classifyForHook, WRITE_SCOPE_OFF } from "../src/cli/hook.js";
-import { cpuSeconds, runner, scaledBound } from "./cost-runner.js";
+import { cpuSeconds, heldLine, ratioJudged, type RatioRule, scaledBound } from "./cost-runner.js";
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "approval-md-copy-targets-cost-")));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -70,50 +70,85 @@ function classesOf(command: string): string[] {
   return result.ok ? result.classes : [`refused ${result.code}`];
 }
 
-function pinned(name: string, command: string, written: number, control: string, smaller: readonly string[] = []): string[] {
+/**
+ * The control is the same line built to this fraction of the line's bytes
+ * (the seat's ruling on #720's list: the largest fraction for which both
+ * conditions of the RATIO rule hold on CI's figures). At an eighth, CI read the
+ * plain line at up to 12.7 times its control, so R would be 38, and main
+ * 606df106's walk (the landings #695 removed) reads 39.8 there on a laptop:
+ * not under half. At a sixteenth: 24.1 on CI, R 73, the walk 119 (half
+ * 59.5): not either. At a thirty-second: 41.1 and 20.4 on CI (plain,
+ * credential), R 124 and 62, the walk 333 and 315.6 (halves 166 and 158).
+ */
+const CONTROL_DIVISOR = 32;
+
+/** How many times each line and its control are read; the least reading of each is judged. */
+const ROUNDS = 3;
+
+/**
+ * Each line's RATIO rule (#720's list), CPU s: the most it may cost of its
+ * control, its control's figure on CI, and the most the control may read of
+ * it before the runner's factor. R is three times the largest ratio CI read
+ * at a thirty-second (41.07 and 20.42, run 46145131980 attempt 1, node 22;
+ * attempt 2 read 29.28 and 19.19); each control figure is its largest least
+ * reading in attempts 1 and 2 (0.049 and 0.018, both attempt 2).
+ */
+const RULES: Readonly<Record<string, RatioRule>> = {
+  many_targets_plain: { ratioBound: 124, controlCi: 0.049, most: 3 },
+  many_targets_credential: { ratioBound: 62, controlCi: 0.018, most: 3 },
+};
+
+/**
+ * The line `build(8192)` held by its ratio to `build(8192 / CONTROL_DIVISOR)`
+ * (#720's list, as #719 holds COST686). Each round reads the control, then
+ * the line; the least of each is judged. `written` is the line's old fixed
+ * bound: printed, stretched as it was, and not asserted. The classifier
+ * keeps no answer keyed on these words between calls (no glob, no `$`, and
+ * the hook's disk memo lives for one call), so each round reads the same line.
+ */
+function pinned(name: string, build: (bytes: number) => string, written: number): string[] {
+  const command = build(8192);
+  const control = build(8192 / CONTROL_DIVISOR);
   assert.ok(Buffer.byteLength(command) <= 8192 && Buffer.byteLength(command) > 8000);
-  const bound = scaledBound(written);
   let classes: string[] = [];
-  const seconds = cpuSeconds(() => {
-    classes = classesOf(command);
-  });
-  console.log(`# cost-line: COST695 ${name}: ${seconds.toFixed(2)} CPU s (bound ${bound.toFixed(2)}; node ${process.version}; ${runner().line})`);
-  // Measuring only (#720's list, COST695R): after the reading above, three
-  // rounds of the same line at an eighth of its bytes and then the line, as
-  // #719 reads its lines, the least of each printed. Nothing here is asserted.
   const lines: number[] = [];
   const controls: number[] = [];
-  for (let round = 0; round < 3; round += 1) {
+  for (let round = 0; round < ROUNDS; round += 1) {
     controls.push(cpuSeconds(() => classesOf(control)));
-    lines.push(cpuSeconds(() => classesOf(command)));
+    lines.push(
+      cpuSeconds(() => {
+        classes = classesOf(command);
+      }),
+    );
   }
   const least = Math.min(...lines);
   const leastControl = Math.min(...controls);
-  console.log(
-    `# cost-measure: COST695R ${name}: first ${seconds.toFixed(2)}, calls ${lines.map((x) => x.toFixed(2)).join(" ")}, least ${least.toFixed(2)} CPU s; ` +
-      `an eighth (${String(Buffer.byteLength(control))} bytes) ${controls.map((x) => x.toFixed(3)).join(" ")}, least ${leastControl.toFixed(3)}; ratio ${(least / leastControl).toFixed(2)}; ${runner().line}`,
-  );
-  // Measuring only (#720's list, step 3): the same line at a sixteenth and a
-  // thirty-second of its bytes, three readings each, the least printed: a
-  // smaller control parts the fixed line from the walk #695 removed further.
-  for (const each of smaller) {
-    const readings = [1, 2, 3].map(() => cpuSeconds(() => classesOf(each)));
-    const leastEach = Math.min(...readings);
-    console.log(`# cost-measure: COST695S ${name}: ${String(Buffer.byteLength(each))} bytes ${readings.map((x) => x.toFixed(3)).join(" ")}, least ${leastEach.toFixed(3)}; ratio of the line's least ${(least / leastEach).toFixed(2)}`);
-  }
-  assert.ok(seconds < bound, `${name}: ${seconds.toFixed(2)} CPU s, bound ${bound.toFixed(2)} (${runner().line})`);
+  const reading = { calls: lines, controls, least, leastControl, ratio: least / Math.max(leastControl, 1e-6) };
+  const { text, over } = heldLine("COST695", name, reading, RULES[name]!, `${scaledBound(written).toFixed(2)} CPU s`);
+  console.log(`${text.slice(0, -1)}; control at a ${String(CONTROL_DIVISOR)}th of the bytes, ${String(Buffer.byteLength(control))}; node ${process.version})`);
+  assert.deepEqual(over, [], `${name}: ${over.join("; ")}`);
   return classes;
 }
 
+test("cost: each COST695 line's rule is set, and the control's bound follows the runner (#720's list)", () => {
+  assert.deepEqual(Object.keys(RULES).sort(), ["many_targets_credential", "many_targets_plain"]);
+  for (const rule of Object.values(RULES)) {
+    assert.ok(rule.ratioBound > 0 && rule.controlCi > 0);
+    assert.equal(rule.most, 3);
+    // A line at its ratio bound reds; a control at `most` times its figure reds, unless the runner is slower.
+    assert.equal(ratioJudged(rule.ratioBound, rule.controlCi, rule, 1).lineOver, true);
+    assert.equal(ratioJudged(1, 3 * rule.controlCi, rule, 1).controlOver, true);
+    assert.equal(ratioJudged(1, 3 * rule.controlCi, rule, 1.2).controlOver, false);
+  }
+});
+
 test("cost: `cp notes.txt -t d0 s0/x -t d1 s1/x …` at 8 KB is judged within the bound, and guarded", () => {
-  const unit = (i: number): string => ` -t d${String(i)} s${String(i)}/x`;
-  const classes = pinned("many_targets_plain", filled("cp notes.txt", unit, 8192), BOUND_PLAIN_S, filled("cp notes.txt", unit, 8192 / 8), [filled("cp notes.txt", unit, 8192 / 16), filled("cp notes.txt", unit, 8192 / 32)]);
+  const classes = pinned("many_targets_plain", (bytes) => filled("cp notes.txt", (i) => ` -t d${String(i)} s${String(i)}/x`, bytes), BOUND_PLAIN_S);
   assert.ok(classes.includes("files.write.workspace") && classes.includes(GUARDED), classes.join(","));
 });
 
 test("cost: `cp ~/.hermes/.env -t .approval/keys0 s0/env …` at 8 KB is judged within the bound", () => {
-  const unit = (i: number): string => ` -t .approval/keys${String(i)} s${String(i)}/env`;
-  const classes = pinned("many_targets_credential", filled("cp ~/.hermes/.env", unit, 8192), BOUND_CREDENTIAL_S, filled("cp ~/.hermes/.env", unit, 8192 / 8), [filled("cp ~/.hermes/.env", unit, 8192 / 16), filled("cp ~/.hermes/.env", unit, 8192 / 32)]);
+  const classes = pinned("many_targets_credential", (bytes) => filled("cp ~/.hermes/.env", (i) => ` -t .approval/keys${String(i)} s${String(i)}/env`, bytes), BOUND_CREDENTIAL_S);
   assert.ok(classes.includes("policy.core") && classes.includes("account.credential") && classes.includes(GUARDED), classes.join(","));
 });
 

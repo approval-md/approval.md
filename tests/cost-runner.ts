@@ -103,31 +103,81 @@ export function runner(): Runner {
 }
 
 /**
- * Measuring only (#720's list, step 3): `command`, first read at `first` CPU
- * seconds, read twice more beside three readings of the same line with its
- * costly part spelled as a plain word of the same length (`run(plain)`: the
- * line's head, through its first `> ` when that comes early, else its first
- * word, then `a` to the line's length; the control candidate for a line under
- * five times its bound), and one line that says the least of each and their
- * ratio. Asserts nothing.
+ * The control of a line held by the RATIO rule (#720's list): the same line
+ * with its costly part spelled as a plain word of the same length. The
+ * line's head is kept (through its first `> ` when that comes early, else its
+ * first word), then `filler` to the line's length.
  */
-export function besidePlain(id: string, label: string, first: number, command: string, run: (text: string) => unknown): string {
+export function plainLike(command: string, filler = "a"): string {
   const redirect = command.indexOf("> ");
   const head = redirect >= 0 && redirect < 60 ? command.slice(0, redirect + 2) : command.slice(0, command.indexOf(" ") + 1);
-  const plain = `${head}${"a".repeat(Math.max(1, command.length - head.length))}`;
+  return `${head}${filler.repeat(Math.max(1, command.length - head.length))}`;
+}
+
+/** A line's readings beside its control's: the least of each, and their ratio. */
+export interface PairReading {
+  calls: number[];
+  controls: number[];
+  least: number;
+  leastControl: number;
+  ratio: number;
+}
+
+/**
+ * `command`, first read at `first` CPU seconds, read twice more beside three
+ * readings of its control ({@link plainLike}, or `control` when given), the
+ * control first each round (#720's list, as #719 reads its lines). `variant`
+ * gives the line for the k-th further reading (k = 1, 2) where the classifier
+ * keeps an answer keyed on the line's own words between calls, so no reading
+ * is served from it; without it every reading is of `command` itself.
+ */
+export function pairReading(first: number, command: string, run: (text: string) => unknown, control?: string, variant?: (k: number) => string): PairReading {
+  const plain = control ?? plainLike(command);
   const calls = [first];
-  const plains: number[] = [];
-  for (let round = 0; round < 2; round += 1) {
-    plains.push(cpuSeconds(() => void run(plain)));
-    calls.push(cpuSeconds(() => void run(command)));
+  const controls: number[] = [];
+  for (let k = 1; k <= 2; k += 1) {
+    controls.push(cpuSeconds(() => void run(plain)));
+    const line = variant === undefined ? command : variant(k);
+    calls.push(cpuSeconds(() => void run(line)));
   }
-  plains.push(cpuSeconds(() => void run(plain)));
+  controls.push(cpuSeconds(() => void run(plain)));
   const least = Math.min(...calls);
-  const leastPlain = Math.min(...plains);
-  return (
-    `# cost-measure: ${id} ${label}: calls ${calls.map((x) => x.toFixed(3)).join(" ")}, least ${least.toFixed(3)} CPU s; ` +
-    `plain ${String(command.length)} ${plains.map((x) => x.toFixed(3)).join(" ")}, least ${leastPlain.toFixed(3)}; ratio ${(least / Math.max(leastPlain, 1e-6)).toFixed(2)}`
-  );
+  const leastControl = Math.min(...controls);
+  return { calls, controls, least, leastControl, ratio: least / Math.max(leastControl, 1e-6) };
+}
+
+/**
+ * A line's RATIO rule (#718, #719, #720): the most it may cost of its
+ * control (`ratioBound`), the control's figure on CI (`controlCi`, the unit
+ * of its readings) and the most the control may read of it before the
+ * runner's factor (`most`).
+ */
+export interface RatioRule {
+  readonly ratioBound: number;
+  readonly controlCi: number;
+  readonly most: number;
+}
+
+/** A reading judged by its rule: whether the line is over its ratio, and whether the control is over its own bound. */
+export function ratioJudged(ratio: number, control: number, rule: RatioRule, runnerFactor: number): { controlBound: number; lineOver: boolean; controlOver: boolean } {
+  const controlBound = rule.most * rule.controlCi * runnerFactor;
+  return { controlBound, lineOver: !(ratio < rule.ratioBound), controlOver: !(control < controlBound) };
+}
+
+/**
+ * The text a held line prints, and what is over (empty when nothing is):
+ * `fixed` is the bound the line held before, printed and not asserted.
+ */
+export function heldLine(id: string, label: string, reading: PairReading, rule: RatioRule, fixed: string): { text: string; over: string[] } {
+  const factor = runner().factor;
+  const { controlBound, lineOver, controlOver } = ratioJudged(reading.ratio, reading.leastControl, rule, factor);
+  const text =
+    `# cost-line: ${id} ${label}: ${reading.least.toFixed(3)} CPU s (the least of ${String(reading.calls.length)}; control ${reading.leastControl.toFixed(4)}, ratio ${reading.ratio.toFixed(2)} of ${String(rule.ratioBound)}; ` +
+    `the control's own bound ${controlBound.toFixed(4)}; the fixed ${fixed} is printed, not asserted; ${runner().line})`;
+  const over: string[] = [];
+  if (lineOver) over.push(`${label}: ${reading.least.toFixed(3)} CPU s is ${reading.ratio.toFixed(2)} times its control (${reading.leastControl.toFixed(4)}), bound ${String(rule.ratioBound)}`);
+  if (controlOver) over.push(`${label}'s control: ${reading.leastControl.toFixed(4)} CPU s, its own bound ${controlBound.toFixed(4)} (${String(rule.most)} times CI's ${String(rule.controlCi)}, by the runner's factor)`);
+  return { text, over };
 }
 
 /** `bound` CPU seconds as written, stretched by this runner's factor. */
