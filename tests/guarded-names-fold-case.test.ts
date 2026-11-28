@@ -2713,3 +2713,30 @@ test("behind a wrapper, a built destination given as an option's value is read a
     assert.deepEqual(pure(line, TWO_ROUTES), [CRED, UNKNOWN], line);
   }
 });
+
+// review-b's M2 on #714: with an option the copy table does not know, the
+// destination fell back to the last operand alone while the `-t` values were
+// among the written words, so a `-t` value that may spell the credential path
+// was left out as the read. It is a destination the argv names as such.
+test("behind a wrapper, an argv the copy table cannot read keeps its -t values as destinations (review-b's M2 on #714)", () => {
+  for (const [line, plain, want] of [
+    ["nice cp --frob -t $A-$B .approval/env", "cp --frob -t $A-$B .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["nice cp --frob -t ~/.hermes/$X .approval/env", "cp --frob -t ~/.hermes/$X .approval/env", [CRED, UNKNOWN, "cron.manage protected-path"]],
+    // The same value given to the long option (M1's reading of it).
+    [
+      "nice cp --frob --target-directory=$A-$B .approval/env",
+      "cp --frob --target-directory=$A-$B .approval/env",
+      [CRED, UNKNOWN, "log.mutate protected-path"],
+    ],
+  ] as const) {
+    const got = classSet(line);
+    for (const cls of classSet(plain)) assert.ok(got.includes(cls), `${line}: ${cls} of plain ${plain} missing from ${got.join(" ")}`);
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    assert.deepEqual(hook(line, TWO_ROUTES), want, `${line} through the hook`);
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], `${line} as spelled`);
+  }
+  // The last-operand fallback stays (e8ef8c76's rows): a word before the last
+  // operand that no -t names stays the read.
+  assert.deepEqual(pure("command cp --frob .approval/env $A-$B", TWO_ROUTES), [CRED, UNKNOWN, "log.mutate protected-path"]);
+  assert.deepEqual(pure("command cp --frob .approval/env $A-$B notes.txt", TWO_ROUTES), [CRED, UNKNOWN]);
+});

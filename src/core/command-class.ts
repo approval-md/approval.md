@@ -12437,6 +12437,12 @@ interface CopyPlan {
   files: string[];
   unknown: string | null;
   operands: string[];
+  /**
+   * Where `unknown` is set, the `-t`/`--target-directory` values (they are
+   * also among `dests`, with every operand): the destinations the argv names
+   * as such (review-b's M2 on #714).
+   */
+  targets?: string[];
 }
 
 /**
@@ -12491,7 +12497,7 @@ function copyPlan(basename: string, args: readonly string[]): CopyPlan | null {
   const targets = parsed.values.filter((entry) => entry.name === "t" || entry.name === "target-directory").map((entry) => entry.value);
   if (parsed.unknown !== null) {
     const all = local([...operands, ...targets]);
-    return { dests: all, sources: [...operands], anyName: [...all], files: [], unknown: parsed.unknown, operands };
+    return { dests: all, sources: [...operands], anyName: [...all], files: [], unknown: parsed.unknown, operands, targets: local(targets) };
   }
   // rsync with one operand lists it; every tool needs a source and a destination.
   // Review of e6b7bf97 (1): `ln TARGET` links into the working directory,
@@ -15308,14 +15314,20 @@ function classifySegmentWithVerb(
       // automated security review of #714: a union, never one reading in
       // place of the other). The destination is the plan's when its argv
       // reads (`-t` included), else the last operand, as an unreadable argv's
-      // credential path is read (S1 of #706). Elsewhere (an `rsync` or `scp`
+      // credential path is read (S1 of #706), with the `-t` values such an
+      // argv still names as destinations (review-b's M2 on #714: `nice cp
+      // --frob -t $A-$B .approval/env`). Elsewhere (an `rsync` or `scp`
       // source, which `writtenOperands` counts as written) it stays the read,
       // as plain `cp`'s scans leave it, so a read through a wrapper takes no
       // write class (the read-only bar). A program that writes every path it
       // names keeps them all, as plain `mv` does ({@link credentialSideScan}'s
       // rule).
       const lastOperand = copyPositionals.length >= 2 ? copyPositionals.slice(-1) : [];
-      const destination = new Set(plan !== null && plan.unknown === null && plan.dests.length > 0 && plan.implicitDest !== true ? plan.dests : lastOperand);
+      const destination = new Set(
+        plan !== null && plan.unknown === null && plan.dests.length > 0 && plan.implicitDest !== true
+          ? plan.dests
+          : [...lastOperand, ...(plan !== null && plan.unknown !== null ? (plan.targets ?? []) : [])],
+      );
       const writesOnly = copying !== null && (credentialWritesOnly(copying.basename, copyArgs) || credentialProtectedScanKeeps(copying.basename));
       // Each built word is matched by its text and, for an option, by the
       // value it carries ({@link copyWordReadings}; review-b's M1 on #714):
