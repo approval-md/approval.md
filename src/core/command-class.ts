@@ -5290,18 +5290,61 @@ function isReaderSteeringName(name: string): boolean {
 }
 
 /**
+ * What a steering name does to the program in front of which it is set, as a
+ * clause of the refusal (APRV-540, the lead's ruling on the message): `PATH
+ * picks which cat runs`. Grouped as {@link READER_STEERING_NAMES} groups them.
+ */
+function steeringClause(name: string, program: string): string {
+  if (name === "PATH") return `${name} picks which ${program} runs`;
+  if (/^(?:IFS|ENV|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|ZDOTDIR|CDPATH|BASH_)/u.test(name)) {
+    return `${name} steers a shell ${program} may start`;
+  }
+  if (/(?:PAGER|EDITOR|BROWSER|ASKPASS)$|^(?:VISUAL|SHELL|LESS|LV$)/u.test(name)) {
+    return `${name} names a program ${program} may start`;
+  }
+  if (/^(?:LD_|DYLD_|LC_|LANG|TZ|LOCPATH$|GCONV_PATH$|NLSPATH$|TERMINFO|TERMCAP$)/u.test(name)) {
+    return `${name} names a library or a data file ${program} loads`;
+  }
+  if (/^(?:HOME$|XDG_|GH_|GIT_|GNUPGHOME$|CURL_HOME$|WGETRC$|RIPGREP_CONFIG_PATH$|OPENSSL_|TMPDIR$)/u.test(name)) {
+    return `${name} moves the configuration ${program} reads, which can name a program`;
+  }
+  return `${name} hands ${program} options or code`;
+}
+
+/**
+ * What to do instead, said the same way in every assignment refusal (the
+ * lead's ruling: the deny says why and what to do). The hook adds its own
+ * remedy after the detail (`src/cli/hook.ts`: rewrite the command, or run the
+ * effect through `approval run` with a granted token).
+ */
+function assignmentRemedy(name: string, program: string): string {
+  return `Run ${program} without the assignment; if it needs ${name}, a person sets ${name} in the environment the session starts from.`;
+}
+
+/**
  * Why the assignments in front of a reader leave the segment `unclassified`,
- * or `null` when every one is admitted (APRV-540). The mechanism and the
- * wording are git's ({@link gitAssignmentRefusal}): the first word off the
- * admitted lists decides, and a steering name is named as one.
+ * or `null` when every one is admitted (APRV-540). The mechanism is git's
+ * ({@link gitAssignmentRefusal}): the first word off the admitted lists
+ * decides. The detail opens as git's does (`no rule for NAME=… in front of
+ * <program>`), then says why, for a steering name what it steers, and what
+ * to do.
  */
 function readerAssignmentRefusal(prefix: readonly LexWord[], program: string): string | null {
   const word = prefix.find((candidate) => !isHarmlessReaderAssignment(candidate));
   if (word === undefined) return null;
-  const head = `no rule for ${assignmentHead(word.text)}… in front of ${program}`;
-  return isReaderSteeringName(assignedName(word.text))
-    ? `${head}: an environment assignment can run a program, change what it loads, or repoint its configuration`
-    : `${head}: an environment assignment this classifier does not know may change which program runs or what it loads`;
+  const name = assignedName(word.text);
+  const why = isReaderSteeringName(name)
+    ? steeringClause(name, program)
+    : `${name} is not on the short list of harmless ones (locale, time zone, colour and terminal switches)`;
+  return `no rule for ${assignmentHead(word.text)}… in front of ${program}: an environment assignment in front of a command can change which program runs or what it loads, and ${why}. ${assignmentRemedy(name, program)}`;
+}
+
+/**
+ * Why a reader after a steering name the line's own shell sets is
+ * `unclassified` (APRV-540, {@link ClassifierContext.readerEnvWrite}).
+ */
+function readerEnvWriteRefusal(name: string, program: string): string {
+  return `no rule for ${program} after ${name} is set on the same command line: an exported variable reaches ${program} and the programs it starts, and ${steeringClause(name, program)}. Run the line without setting ${name}; if ${program} needs it, a person sets ${name} in the environment the session starts from.`;
 }
 
 /** `git commit --amend` rewrites; a plain commit does not. */
@@ -16278,7 +16321,7 @@ function classifySegmentWithVerb(
       return {
         ok: false,
         code: "unclassified",
-        detail: `no rule for ${basename} after ${context.readerEnvWrite} is set on the same command line: a reader and the programs it starts inherit the shell's exported environment`,
+        detail: readerEnvWriteRefusal(context.readerEnvWrite, basename),
       };
     }
   }
