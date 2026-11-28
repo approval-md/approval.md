@@ -51,13 +51,11 @@ const REFUSED: readonly (readonly [string, string])[] = [
   ["LD_PRELOAD=./x.so cp a b", "files.write.workspace"],
   ["PATH=. sed -i s/a/b/ f", "files.write.workspace"],
   ["FOO=1 rm x", "files.write.workspace"],
-  // files.write.workspace: commands that already run project code
+  // files.write.workspace: commands that already run project code refuse a
+  // steering name (an unknown one keeps their class: the lead's option (a),
+  // pinned in KEPT below and in command-class-env-workspace-code)
   ["NODE_OPTIONS=--require=./x node --version", "files.write.workspace"],
-  ["NODE_ENV=test npm test", "files.write.workspace"],
-  ["DEBUG=x node script.js", "files.write.workspace"],
-  ["FOO=bar make", "files.write.workspace"],
-  ["PORT=3000 npm start", "files.write.workspace"],
-  ["TMPDIR=/private/tmp bun test", "files.write.workspace"],
+  ["PATH=. npm test", "files.write.workspace"],
   // gate.self
   ["PATH=. approval status", "gate.self"],
   ["APPROVAL_HUMAN=human:carter approval status", "gate.self"],
@@ -94,6 +92,12 @@ const REFUSED: readonly (readonly [string, string])[] = [
 const KEPT: readonly (readonly [string, string])[] = [
   ["touch x", "files.write.workspace workspace-write"],
   ["npm test", "files.write.workspace npm-script"],
+  // Option (a): an unknown name in front of a workspace-code rule keeps its class.
+  ["NODE_ENV=test npm test", "files.write.workspace npm-script"],
+  ["DEBUG=x node script.js", "files.write.workspace node-script"],
+  ["FOO=bar make", "files.write.workspace workspace-tool"],
+  ["PORT=3000 npm start", "files.write.workspace npm-script"],
+  ["TMPDIR=/private/tmp bun test", "files.write.workspace npm-script"],
   ["CI=1 npm test", "files.write.workspace npm-script"],
   ["CI=true npm ci", "deps.install npm-ci"],
   ["NO_COLOR=1 npm test", "files.write.workspace npm-script"],
@@ -146,8 +150,8 @@ test("one helper, one text: a writer's refusal reads as a reader's; git's own te
     "no rule for PATH=… in front of touch: an environment assignment in front of a command can change which program runs or what it loads, and PATH picks which touch runs. Run touch without the assignment; if it needs PATH, a person sets PATH in the environment the session starts from.",
   );
   assert.equal(
-    detail("NODE_ENV=test npm test"),
-    "no rule for NODE_ENV=… in front of npm: an environment assignment in front of a command can change which program runs or what it loads, and NODE_ENV hands npm options or code. Run npm without the assignment; if it needs NODE_ENV, a person sets NODE_ENV in the environment the session starts from.",
+    detail("NODE_ENV=test touch x"),
+    "no rule for NODE_ENV=… in front of touch: an environment assignment in front of a command can change which program runs or what it loads, and NODE_ENV hands touch options or code. Run touch without the assignment; if it needs NODE_ENV, a person sets NODE_ENV in the environment the session starts from.",
   );
   assert.equal(
     detail("GH_PAGER=./x; npm test"),
@@ -251,7 +255,8 @@ function hookVerdict(dir: string, command: string): string {
 const HOOK: readonly (readonly [string, string])[] = [
   ["PATH=. touch x", "deny hook-unclassified"],
   ["NODE_OPTIONS=--require=./x node --version", "deny hook-unclassified"],
-  ["NODE_ENV=test npm test", "deny hook-unclassified"],
+  ["NODE_ENV=test npm test", "allow"],
+  ["NODE_OPTIONS=--require=./x npm test", "deny hook-unclassified"],
   ["PATH=. approval status", "deny hook-unclassified"],
   ["PATH=. npm install left-pad", "deny hook-unclassified"],
   ["GH_PAGER=./x; npm test", "deny hook-unclassified"],
