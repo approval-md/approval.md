@@ -5970,10 +5970,11 @@ export function refineWriteLandings(
    * exists now may be gone, renamed or unsearchable when a later cd runs if an
    * earlier unit writes, deletes, moves, links or changes modes anywhere
    * (`rmdir d; cd d`, `mv d e; cd d`, `chmod 000 d; cd d`, `npm test; cd d`).
-   * Only a cd and {@link CANNOT_CHANGE_DISK}'s builtins with no redirection,
-   * assignment or expansion leave it false (an assignment may move where a
-   * later cd lands: `printf -v CDPATH`, `: ${CDPATH:=/tmp}`, `read CDPATH`): a reader can run code (`sort --compress-program`, `rg
-   * --pre`, sed's `e`), so a `read.*` class is no proof.
+   * Only a plain cd (see {@link followCd}) leaves it false: any other unit,
+   * a builtin included, may write, run code (`sort --compress-program`, `rg
+   * --pre`, sed's `e`) or assign where a later cd lands (`printf -v CDPATH`,
+   * `: ${CDPATH:=/tmp}`, `[ a -eq 1 ]` evaluates names), and a cd that is not
+   * plain may expand or assign in its own words.
    */
   let earlierMayChange = false;
   /** Did the last {@link cdLanding} find every landing an existing folder the shell may search, read from the word as written? */
@@ -6106,23 +6107,32 @@ export function refineWriteLandings(
   /**
    * Record the outcome of a `cd` at `index`; its landing, `null` where it
    * cannot be named. S1 (review-b on #715): a cd cannot fail, so it keeps no
-   * failed branch, when every landing is an existing folder the shell may
-   * search, nothing earlier on the line may change the disk, and the cd has
-   * redirection of any kind (a redirection that fails to open does not run
-   * the cd: `cd d > /nonexistent/x`; a dup or a close is not kept in the
-   * shape, so the segment's own text is read for `<` and `>`) and no
-   * assignment prefix.
+   * failed branch, when it is plain, every landing is an existing folder the
+   * shell may search, and no unit before it on the line is anything but a
+   * plain cd. Plain: no redirection of any kind (one that fails to open does
+   * not run the cd, `cd d > /nonexistent/x`; a dup or a close is not kept in
+   * the shape, so the segment's own text is read for `<` and `>`), no
+   * assignment prefix, and every word a {@link PLAIN_CD_WORD} that the lexer
+   * did not mark as split or expanded. A cd that is not plain is never sure,
+   * and no cd after it is either: its words may assign or expand.
    */
   const followCd = (shape: CommandSegmentShape, index: number, bin: string): Standing => {
     const ok = standing === null ? null : cdLanding(shape, index, bin, standing);
-    const quietRedirects =
-      shape.reads.length === 0 && shape.writes.length === 0 && (shape.clobberBashWrites?.length ?? 0) === 0 && shape.assignments.length === 0 && !/[<>]/u.test(shape.text);
+    const plain =
+      (bin === "cd" || bin === "chdir") &&
+      shape.reads.length === 0 &&
+      shape.writes.length === 0 &&
+      (shape.clobberBashWrites?.length ?? 0) === 0 &&
+      shape.assignments.length === 0 &&
+      !/[<>]/u.test(shape.text) &&
+      shape.args.every((word, at) => PLAIN_CD_WORD.test(word) && !(shape.argFlags[at]?.splits ?? true) && !(shape.argFlags[at]?.expands ?? true));
     // A later stage of a pipeline may run in a subshell (bash): never sure.
     // Nor a cd inside a script the line runs (`sh -c 'cd ..'`): this pass
     // reads the script's segments in its place, so its cd seems to reach the
     // segments after it (review-b's S2), and only the failed branch kept the
     // shell where the script left it.
-    const sure = ok !== null && landedSurely && !earlierMayChange && quietRedirects && shape.listOp !== "|" && (units[index] as Unit).scripted !== true;
+    const sure = ok !== null && plain && landedSurely && !earlierMayChange && shape.listOp !== "|" && (units[index] as Unit).scripted !== true;
+    if (!plain) earlierMayChange = true;
     outcome = { ok, failed: standing, sure };
     return ok;
   };
@@ -6297,20 +6307,8 @@ export function refineWriteLandings(
 
     const unit = units[index] as Unit;
     const host = unit.host.text;
-    // S1: anything but a cd or one of a few builtins with no redirection may change the disk for a later cd.
-    if (!earlierMayChange) {
-      const quiet =
-        unit.unreadable === null &&
-        bin !== null &&
-        CANNOT_CHANGE_DISK.has(bin) &&
-        shape.assignments.length === 0 &&
-        shape.writes.length === 0 &&
-        (shape.clobberBashWrites?.length ?? 0) === 0 &&
-        // Nor a `$` or a backtick: an expansion may assign where a later cd
-        // lands (`: ${CDPATH:=/tmp}`, `echo ${HOME:=/x}`). Blunt on purpose.
-        !/[<>$`]/u.test(shape.text);
-      if (!quiet) earlierMayChange = true;
-    }
+    // S1: every unit but a cd may change the disk, or the shell's state, for a later cd. No exceptions.
+    earlierMayChange = true;
     if (unit.unreadable !== null) {
       // Nothing this unit writes can be read: guarded, and nothing after it
       // can trust the disk either.
@@ -6559,13 +6557,14 @@ export function refineWriteLandings(
 const MAX_LANDING_BYTES = 4096;
 
 /**
- * Builtins that change nothing on the disk, and set no variable, when they
- * have no redirection, no assignment prefix and no `$` or backtick (review-b's
- * S1 on #715, tightened on its security reviews; `printf -v` assigns, so
- * printf is not here): only these, and a cd, leave a later cd into an existing
- * folder sure to succeed.
+ * A word of a plain cd (S1 of review-b on #715): letters, digits and
+ * `_ . , / + @ : -`, not opening with `-` or `+`; or `~`, `~/…`; or one of
+ * the flags `-L`, `-P`, `--`. Read on the word after quote removal, beside the
+ * lexer's own flags for an unquoted variable, substitution, brace or glob
+ * ({@link ArgExpansion}: `splits`, `expands`), which a quoted `$`, a backtick
+ * or `~+` does not raise.
  */
-const CANNOT_CHANGE_DISK: ReadonlySet<string> = new Set(["true", ":", "echo", "pwd", "test", "["]);
+const PLAIN_CD_WORD = /^(?:-L|-P|--|~|~\/[A-Za-z0-9_.,/+@:-]*|[A-Za-z0-9_.,/@:][A-Za-z0-9_.,/+@:-]*)$/u;
 
 /**
  * The most `<dir>/<source name>` landings one copy, move or link segment is

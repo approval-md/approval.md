@@ -379,6 +379,29 @@ test("a sure cd has no redirection of any kind, and only a cd or a quiet builtin
     const got = hook(line);
     assert.ok(typeof got === "string" || got.includes("log.mutate"), `${line}: ${JSON.stringify(got)}`);
   }
-  // The closed list (true, :, echo, pwd, test, [) with no redirection, assignment or expansion keeps the cd sure.
-  assert.deepEqual(hook("cd .approval; pwd; echo hi; cd ..; echo x > notes.md"), ALLOWED);
+});
+
+test("only a plain cd, with nothing but plain cds before it, is sure (S1, on its fourth security review)", () => {
+  // Any earlier unit, a builtin included, keeps the failed branch of the cd after it.
+  // (Refused whole by the classifier, as `: x` is on this base, is the stricter answer.)
+  for (const before of ["true", ": x", "echo hi", "pwd", "test a -eq 1", "[ a -eq 1 ]"]) {
+    const line = `${before}; cd .approval; cd ..; echo x > notes.md`;
+    const got = hook(line);
+    assert.ok(typeof got === "string" || got.includes("policy.core"), `${line}: ${JSON.stringify(got)}`);
+  }
+  // A cd that is not plain (a brace, `~+`, a pattern, an expansion) is not sure, nor is any cd after it.
+  holds("cd {.approval,}; cd ..; echo x > notes.md", "policy.core");
+  holds("cd ~+; cd .approval; cd ..; echo x > notes.md", "policy.core");
+  holds("cd .appr*; cd ..; echo x > notes.md", "policy.core");
+  holds("cd ${X:=.approval}; cd ..; echo x > notes.md", "files.write.guarded");
+  // Plain cds alone: main's answer.
+  for (const line of [
+    "cd .approval; cd ..; echo x > notes.md",
+    "cd .approval && cd .. && echo x > notes.md",
+    "cd -P .approval; cd ..; echo x > notes.md",
+    "cd ./.approval; cd ..; echo x > notes.md",
+    "cd ~/ws/.approval; cd ..; echo x > notes.md",
+  ]) {
+    assert.deepEqual(hook(line), ALLOWED, line);
+  }
 });
