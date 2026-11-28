@@ -17,6 +17,22 @@ before a tag.
 
 ### Fixed
 
+- **An environment assignment in front of any classified command is judged
+  as one in front of a reader is (APRV-541).** APRV-540's closed list covered
+  readers only, so `PATH=. touch x` and `PATH=. mkdir x` stayed
+  `files.write.workspace` (autonomous under `approval init`'s policy) and ran
+  `./touch`, `PATH=. approval status` stayed `gate.self`, and
+  `NODE_OPTIONS=--require=./x node --version` stayed `files.write.workspace`.
+  Now one helper judges the assignments in front of every classified command,
+  whatever its class; git keeps its own list and text through the same
+  helper, and a bare `cd` keeps its own rules. Cost: `NODE_ENV=test npm test`,
+  `DEBUG=x node script.js`, `FOO=bar make`, `PORT=3000 npm start` and
+  `TMPDIR=… bun test` are refused (drop the assignment, or have a person set
+  the variable in the environment the session starts from); `CI=1 npm test`,
+  `NO_COLOR=1 …` and a plain locale stay as they were. The refusal says why and
+  what to do. Conformance command-class 3.0.0: `FOO=1 grok run` moved from
+  `harness.launch.grok` to `unclassified`.
+
 - **An environment assignment in front of a reader no longer rides the read
   (APRV-540).** The classifier read past every `NAME=value` word in front of a
   command and classified it by its verb alone, except in front of git
