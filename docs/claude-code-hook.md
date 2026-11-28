@@ -392,8 +392,32 @@ it as well as by its verb. One table answers, in three parts:
   `GNUPGHOME` and the rest of APRV-521's list). A steering name set bare
   earlier on the line (`IFS=x; cat f`, `GH_PAGER=./x && gh pr diff 1`,
   `printf -v`, `${NAME:=v}`) refuses the commands after it too.
+  The toolchain's names are steering too: `npm_config_*`, `yarn_*` and
+  `pnpm_*` in any case (npm reads its own in any case), `YARN_`, `PNPM_`,
+  `COREPACK_`, `TS_NODE_`, `TSX_`, `CARGO_`, `RUSTC`, `RUSTUP_`, `PIP_`,
+  `UV_`, `POETRY_`, `PYTEST_`, `BUNDLE_`, `GEM_` names, `MAKEFILES`,
+  `MAKEFLAGS`, `MFLAGS`, `GNUMAKEFLAGS`, `CC`, `CXX`, `CPP`, `LD`, `AR`, `AS`,
+  `NM`, `RANLIB`, `STRIP`, `CFLAGS`, `CXXFLAGS`, `CPPFLAGS`, `LDFLAGS`,
+  `PKG_CONFIG`, `PKG_CONFIG_PATH`, `ESBUILD_BINARY_PATH`, `GOFLAGS`,
+  `GOPROXY`, `GOPATH`, `GOROOT`, `GOTOOLCHAIN`, `GOSUMDB`, `GONOSUMDB`,
+  `GOPRIVATE`, `GONOPROXY`, `GOINSECURE`, `GOBIN`, `GOENV`, `RUSTFLAGS`,
+  `RUSTDOCFLAGS`, `JAVA_HOME`, `MAVEN_OPTS`, `GRADLE_OPTS`,
+  `GRADLE_USER_HOME`, and, in either case, `http_proxy`, `https_proxy`,
+  `ftp_proxy`, `all_proxy`, `no_proxy`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+  `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE` and `NODE_EXTRA_CA_CERTS`.
 - **Unknown** names (any other) are refused, except in front of a command
   that already runs the workspace's own code, where they keep its class.
+
+The principle. In front of a workspace-code command an unknown name is kept,
+because the command already runs the workspace's code and the name gains an
+agent nothing it lacks without it. A name is on the steering list when it can
+make the toolchain run or fetch code from outside the workspace, pick another
+toolchain binary, or redirect its network trust; a package script or a
+Makefile can call any tool, so every tool's family counts. The steering list
+is a denylist, and a denylist can be incomplete. That is why it decides only
+in front of the workspace-code rules below, where the command runs arbitrary
+workspace code anyway; everywhere else the admitted list (an allowlist)
+decides, and an unknown name is refused.
 
 The rules that run the workspace's own code are a closed list, by rule id
 (and, where one rule names several programs, by program):

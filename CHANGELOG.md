@@ -32,7 +32,12 @@ before a tag.
   command's class, and so do `TMPDIR` and `NODE_ENV`: `NODE_ENV=test npm
   test`, `PORT=3000 npm start` and `FOO=bar make` are unchanged, while a
   steering name (`PATH`, `NODE_OPTIONS`, a pager, a preload) is refused there
-  as everywhere. Cost: an unknown name in front of a reader or a plain writer
+  as everywhere, and so are the toolchain's names that fetch or load code from
+  outside the workspace, pick another toolchain binary or redirect its network
+  trust (`npm_config_*` in any case, `YARN_*`, `COREPACK_*`, `MAKEFLAGS`, `CC`,
+  `GOPROXY`, `CARGO_*`, `PIP_*`, the proxy and TLS variables, and kin). The
+  steering list is a denylist, so it decides only there; everywhere else the
+  admitted list does. Cost: an unknown name in front of a reader or a plain writer
   (`FOO=1 touch x`), and any name off the admitted list in front of an asked
   class, a harness launch or a sandbox wrapper, is refused (drop the
   assignment, or have a person set the variable in the environment the

@@ -4885,6 +4885,18 @@ const commandClassVectors = [
     control: true,
   },
   {
+    id: "project-script-registry-unclassified",
+    description: "npm reads npm_config_* in any case, and a registry fetches code from outside the workspace: unclassified",
+    input: { command: "Npm_Config_Registry=https://example.com npm test" },
+    control: true,
+  },
+  {
+    id: "project-script-proxy-unclassified",
+    description: "a proxy redirects where the toolchain fetches code from: unclassified, lower case too",
+    input: { command: "https_proxy=http://h:1 npm test" },
+    control: true,
+  },
+  {
     id: "writer-unknown-assignment-unclassified",
     description: "an unknown name in front of a plain writer stays refused",
     input: { command: "FOO=1 touch x" },
@@ -6377,7 +6389,8 @@ const SUITES = [
     // test keeps npm-script), and three more are added (a steering name in
     // front of npm test, the wrapper form, an unknown name in front of touch).
     // Against 2.2.0 the only moved expectation is still harness-launch-env-
-    // prefixed; thirteen vectors are new.
+    // prefixed; fifteen vectors are new (two more for the toolchain's
+    // steering names: npm_config_* in any case, and a lower-case proxy).
     vectors_version: "3.0.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
