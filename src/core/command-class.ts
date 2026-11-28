@@ -5305,8 +5305,11 @@ function steeringClause(name: string, program: string): string {
   if (/^(?:LD_|DYLD_|LC_|LANG|TZ|LOCPATH$|GCONV_PATH$|NLSPATH$|TERMINFO|TERMCAP$)/u.test(name)) {
     return `${name} names a library or a data file ${program} loads`;
   }
-  if (/^(?:HOME$|XDG_|GH_|GIT_|GNUPGHOME$|CURL_HOME$|WGETRC$|RIPGREP_CONFIG_PATH$|OPENSSL_|TMPDIR$)/u.test(name)) {
+  if (/^(?:HOME$|XDG_|GH_CONFIG_DIR$|GIT_CONFIG|GNUPGHOME$|CURL_HOME$|WGETRC$|RIPGREP_CONFIG_PATH$|OPENSSL_|TMPDIR$)/u.test(name)) {
     return `${name} moves the configuration ${program} reads, which can name a program`;
+  }
+  if (/^(?:GH_|GIT_)/u.test(name)) {
+    return `${name} is read by gh or git and can change the program, repository, host or credentials they use`;
   }
   return `${name} hands ${program} options or code`;
 }
