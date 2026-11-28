@@ -184,6 +184,8 @@ const FORMS: readonly string[] = [
   "PAGER=./x; gh pr diff 1",
   "cat README.md; GH_PAGER=./x; gh pr diff 1",
   "printf -v GH_PAGER %s ./x; gh pr diff 1",
+  "echo ${GH_PAGER:=./x}; gh pr diff 1",
+  "cat ${IFS=x} README.md",
   "TAR_OPTIONS=--to-command=./x; tar -tf a.tar",
   "PS4='$(./x)'; git log",
   "BROWSER=./x; gh pr view --web",
