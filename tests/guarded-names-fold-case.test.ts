@@ -108,6 +108,31 @@ function hook(command: string, extra: readonly ProtectedPathEntry[] = []): strin
   return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [`refused ${result.code}`];
 }
 
+/**
+ * A checkout under the fixture HOME, made once (review-b's N7 on #714). The
+ * rows that pin a wrapped copy's whole answer through the hook read it here:
+ * wherever the temp folder is (a TMPDIR under /Users/<name>, outside this
+ * HOME, is another user's home to the hook, which then adds
+ * `files.write.guarded` to every write in it), a write in this checkout is
+ * the user's own.
+ */
+let homeCheckout: string | null = null;
+function homeRepo(): string {
+  if (homeCheckout !== null) return homeCheckout;
+  const dir = join(HOME, "ws");
+  mkdirSync(dir, { recursive: true });
+  const ran = spawnSync("git", ["init", "-q"], { cwd: dir, encoding: "utf8", env: process.env });
+  assert.equal(ran.status, 0, ran.stderr);
+  homeCheckout = dir;
+  return dir;
+}
+
+/** {@link hook} in the checkout under the fixture HOME ({@link homeRepo}). */
+function homeHook(command: string, extra: readonly ProtectedPathEntry[] = []): string[] {
+  const { result } = classifyForHook(command, extra, homeRepo());
+  return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [`refused ${result.code}`];
+}
+
 /** {@link pure} in the as-spelled reading: how main 21fc5fdc read the line. */
 function spelledPure(command: string, extra: readonly ProtectedPathEntry[] = []): string[] {
   return withNamesAsSpelled(() => pure(command, extra));
@@ -2471,8 +2496,8 @@ test("a copy into a credential path behind a wrapper takes the write's class pla
   }
   assert.deepEqual(pure("nice cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
   assert.deepEqual(pure("command cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
-  assert.deepEqual(hook("nice cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
-  assert.deepEqual(hook("command cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
+  assert.deepEqual(homeHook("nice cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
+  assert.deepEqual(homeHook("command cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
 });
 
 test("behind a wrapper, only a copy program's table is read: a read, an unknown program and an opaque wrapper answer as on main (build-1's S1 on #706)", () => {
@@ -2559,8 +2584,8 @@ test("a copy into a credential path behind a wrapper: the forms of the read's S1
     const got = pure(line, TWO_ROUTES);
     assert.deepEqual(got, want, line);
     for (const entry of main) assert.ok(got.includes(entry), `${line}: ${entry} lost`);
-    // Through the hook, in the fixture checkout: the same.
-    assert.deepEqual(hook(line, TWO_ROUTES), want, `${line} through the hook`);
+    // Through the hook, in the checkout under the fixture HOME: the same.
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
   }
 });
 
@@ -2598,7 +2623,7 @@ test("behind a wrapper, a built target the copy writes: the read's S2 lines pinn
     ["command cp -t ${X:-.github/workflows} .approval/env", [CRED, UNKNOWN, "policy.edit.ci protected-path"]],
   ] as const) {
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
-    assert.deepEqual(hook(line, TWO_ROUTES), want, `${line} through the hook`);
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
     // As spelled: main's answer, the credential class alone.
     assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], `${line} as spelled`);
   }
@@ -2638,7 +2663,7 @@ test("behind a wrapper, a built target the copy writes: the read's S2 lines pinn
     ["command cp --frob .approval/env $A-$B notes.txt", [CRED, UNKNOWN]],
   ] as const) {
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
-    assert.deepEqual(hook(line, TWO_ROUTES), want, `${line} through the hook`);
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
   }
   // The two lines of the review: what plain `cp` names, the wrapped line names.
   for (const target of ["$A-$B", "${X:-.approval/env}", "$'~/.hermes/.env'"]) {
@@ -2696,7 +2721,7 @@ test("behind a wrapper, a built destination given as an option's value is read a
     const got = classSet(line);
     for (const cls of classSet(plain)) assert.ok(got.includes(cls), `${line}: ${cls} of plain ${plain} missing from ${got.join(" ")}`);
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
-    assert.deepEqual(hook(line, TWO_ROUTES), want, `${line} through the hook`);
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
     // As spelled: main's answer, the credential class alone.
     assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], `${line} as spelled`);
   }
@@ -2732,7 +2757,7 @@ test("behind a wrapper, an argv the copy table cannot read keeps its -t values a
     const got = classSet(line);
     for (const cls of classSet(plain)) assert.ok(got.includes(cls), `${line}: ${cls} of plain ${plain} missing from ${got.join(" ")}`);
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
-    assert.deepEqual(hook(line, TWO_ROUTES), want, `${line} through the hook`);
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
     assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], `${line} as spelled`);
   }
   // The last-operand fallback stays (e8ef8c76's rows): a word before the last

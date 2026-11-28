@@ -48,7 +48,11 @@ delete process.env["HERMES_HOME"];
 delete process.env["APPROVAL_HERMES_HOME"];
 delete process.env["CLAUDE_CONFIG_DIR"];
 delete process.env["CLAUDE_PROJECT_DIR"];
-const ws = join(base, "ws");
+// The checkout sits under the fixture HOME (review-b's N7 on #714): wherever
+// the temp folder is (a TMPDIR under /Users/<name>, outside this HOME, is
+// another user's home to the hook, which then guards every write in it), a
+// write in the checkout is the user's own.
+const ws = join(base, "home", "ws");
 mkdirSync(ws, { recursive: true });
 spawnSync("git", ["init", "-q"], { cwd: ws });
 for (const path of ["APPROVAL.md", "notes.txt", "a.yml", ".approval/env", ".approval/log/events.jsonl", ".claude/settings.json", ".github/workflows/ci.yml"]) {
