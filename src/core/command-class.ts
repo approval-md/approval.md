@@ -16316,8 +16316,10 @@ function classifySegmentWithVerb(
   // the two variables it reads from a prefix (`CDPATH`, `HOME`) are already
   // modelled where it lands (APRV-508's recheck, fix M-B of the credential
   // pass, fold 15 of the parents rule), which answer more exactly than a
-  // refusal here would.
-  if (cls.startsWith("read.") && bin !== "cd") {
+  // refusal here would. Bare means the word right after the assignments, not
+  // the command behind a sandbox wrapper: there the assignment steers the
+  // wrapper (`PATH=. approval sandbox -- cd x` runs `./approval`).
+  if (cls.startsWith("read.") && afterAssignments !== "cd") {
     const readerRefusal = readerAssignmentRefusal(segment.words.slice(0, assignments.length), basename);
     if (readerRefusal !== null) return { ok: false, code: "unclassified", detail: readerRefusal };
     if (context.readerEnvWrite !== undefined) {
