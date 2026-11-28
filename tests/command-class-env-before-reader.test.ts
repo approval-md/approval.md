@@ -293,31 +293,39 @@ for (const [command, expected] of KEPT) {
   });
 }
 
-test("the refusal names the assignment and the reader, in git's wording", () => {
-  const steering = classifyCommand("GH_PAGER=./x gh pr diff 1");
-  assert.equal(steering.ok, false);
-  if (!steering.ok) {
-    assert.equal(
-      steering.detail,
-      "no rule for GH_PAGER=… in front of gh: an environment assignment can run a program, change what it loads, or repoint its configuration",
-    );
-  }
-  const unknown = classifyCommand("FOO=1 cat README.md");
-  assert.equal(unknown.ok, false);
-  if (!unknown.ok) {
-    assert.equal(
-      unknown.detail,
-      "no rule for FOO=… in front of cat: an environment assignment this classifier does not know may change which program runs or what it loads",
-    );
-  }
-  const line = classifyCommand("IFS=x; cat README.md");
-  assert.equal(line.ok, false);
-  if (!line.ok) {
-    assert.equal(
-      line.detail,
-      "no rule for cat after IFS is set on the same command line: a reader and the programs it starts inherit the shell's exported environment",
-    );
-  }
+/**
+ * The refusal's text (lead ruling on APRV-540: the deny says why and what to
+ * do, since `FOO=x ls` will surprise people). It opens as git's does, says
+ * why, for a steering name what it steers, and what to do; the hook adds its
+ * own remedy after it (`approval run` with a granted token).
+ */
+const UNKNOWN_DETAIL =
+  "no rule for FOO=… in front of cat: an environment assignment in front of a command can change which program runs or what it loads, and FOO is not on the short list of harmless ones (locale, time zone, colour and terminal switches). Run cat without the assignment; if it needs FOO, a person sets FOO in the environment the session starts from.";
+
+test("the refusal says why and what to do: an unknown name, a steering name, a line-scoped one; git's text is unchanged", () => {
+  const detail = (command: string): string => {
+    const result = classifyCommand(command);
+    assert.equal(result.ok, false, command);
+    return result.ok ? "" : result.detail;
+  };
+  assert.equal(detail("FOO=1 cat README.md"), UNKNOWN_DETAIL);
+  assert.equal(
+    detail("PATH=. cat README.md"),
+    "no rule for PATH=… in front of cat: an environment assignment in front of a command can change which program runs or what it loads, and PATH picks which cat runs. Run cat without the assignment; if it needs PATH, a person sets PATH in the environment the session starts from.",
+  );
+  assert.equal(
+    detail("GH_PAGER=./x gh pr diff 1"),
+    "no rule for GH_PAGER=… in front of gh: an environment assignment in front of a command can change which program runs or what it loads, and GH_PAGER names a program gh may start. Run gh without the assignment; if it needs GH_PAGER, a person sets GH_PAGER in the environment the session starts from.",
+  );
+  assert.equal(
+    detail("IFS=x; cat README.md"),
+    "no rule for cat after IFS is set on the same command line: an exported variable reaches cat and the programs it starts, and IFS steers a shell cat may start. Run the line without setting IFS; if cat needs it, a person sets IFS in the environment the session starts from.",
+  );
+  // git's own rule keeps its text (APRV-521).
+  assert.equal(
+    detail("PAGER=./x git log"),
+    "no rule for PAGER=… in front of git: an environment assignment can run a program, repoint the repository or its configuration, or write a file",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -453,6 +461,27 @@ for (const abstain of [false, true]) {
     assert.deepEqual(wrong, []);
   });
 }
+
+test("the built hook prints the refusal's why and what to do, then its own remedy", () => {
+  const dir = gateRoot("reason", false);
+  calls += 1;
+  const body = JSON.stringify({
+    hook_event_name: "PreToolUse",
+    session_id: "env-before-reader",
+    tool_use_id: `ebr-${String(calls)}`,
+    cwd: dir,
+    tool_name: "Bash",
+    tool_input: { command: "FOO=1 cat README.md" },
+  });
+  const run = runCli(["hook", "claude-code", "--as", "agent:cc", "--dir", dir, "--timeout", "1s"], dir, body);
+  assert.equal(run.code, 0, run.stderr);
+  const nested = (JSON.parse(run.stdout) as { hookSpecificOutput?: Record<string, unknown> }).hookSpecificOutput ?? {};
+  assert.equal(nested["permissionDecision"], "deny");
+  assert.equal(
+    nested["permissionDecisionReason"],
+    `hook-unclassified: ${UNKNOWN_DETAIL} (segment: FOO=1 cat README.md). Rewrite it as a command the classifier can read, or run the effect through \`approval run\` with a granted token.`,
+  );
+});
 
 // ---------------------------------------------------------------------------
 // Cost: the assignments are read once, and the line scan is one pass
