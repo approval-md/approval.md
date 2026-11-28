@@ -350,7 +350,7 @@ test("a cd into a folder that exists cannot fail, unless the line may change the
   }
 });
 
-test("a sure cd has no redirection of any kind, and only a cd or a quiet builtin may come before it (S1, tightened on its security review)", () => {
+test("a sure cd has no redirection of any kind, and a reader or an assignment before it keeps its failed branch (S1, on its security review)", () => {
   // A redirection that fails to open does not run the cd; a dup or a close is not kept in the shape.
   for (const line of [
     "cd .approval/log; cd .. 2>&1; echo x >> events.jsonl",
@@ -364,7 +364,7 @@ test("a sure cd has no redirection of any kind, and only a cd or a quiet builtin
   ]) {
     holds(line, "log.mutate");
   }
-  // An earlier unit that may assign a variable a later cd reads (CDPATH, HOME, OLDPWD) is not quiet either.
+  // An earlier unit that may assign a variable a later cd reads (CDPATH, HOME, OLDPWD) keeps it too.
   for (const before of [
     "printf -v CDPATH '%s' /tmp",
     ": ${CDPATH:=/tmp}",
