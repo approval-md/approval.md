@@ -25,13 +25,20 @@ before a tag.
   `NODE_OPTIONS=--require=./x node --version` stayed `files.write.workspace`.
   Now one helper judges the assignments in front of every classified command,
   whatever its class; git keeps its own list and text through the same
-  helper, and a bare `cd` keeps its own rules. Cost: `NODE_ENV=test npm test`,
-  `DEBUG=x node script.js`, `FOO=bar make`, `PORT=3000 npm start` and
-  `TMPDIR=… bun test` are refused (drop the assignment, or have a person set
-  the variable in the environment the session starts from); `CI=1 npm test`,
-  `NO_COLOR=1 …` and a plain locale stay as they were. The refusal says why and
-  what to do. Conformance command-class 3.0.0: `FOO=1 grok run` moved from
-  `harness.launch.grok` to `unclassified`.
+  helper, and a bare `cd` keeps its own rules. In front of a command that
+  already runs the workspace's own code (rules `npm-script`, `node-script`,
+  and `workspace-tool` for `npx`, `tsx`, `ts-node`, `vitest`, `jest` and
+  `make`; docs/claude-code-hook.md lists them) an unknown name keeps the
+  command's class, and so do `TMPDIR` and `NODE_ENV`: `NODE_ENV=test npm
+  test`, `PORT=3000 npm start` and `FOO=bar make` are unchanged, while a
+  steering name (`PATH`, `NODE_OPTIONS`, a pager, a preload) is refused there
+  as everywhere. Cost: an unknown name in front of a reader or a plain writer
+  (`FOO=1 touch x`), and any name off the admitted list in front of an asked
+  class, a harness launch or a sandbox wrapper, is refused (drop the
+  assignment, or have a person set the variable in the environment the
+  session starts from). The refusal says why and what to do, naming the
+  program that follows the assignments. Conformance command-class 3.0.0:
+  `FOO=1 grok run` moved from `harness.launch.grok` to `unclassified`.
 
 - **An environment assignment in front of a reader no longer rides the read
   (APRV-540).** The classifier read past every `NAME=value` word in front of a
