@@ -108,6 +108,31 @@ function hook(command: string, extra: readonly ProtectedPathEntry[] = []): strin
   return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [`refused ${result.code}`];
 }
 
+/**
+ * A checkout under the fixture HOME, made once (review-b's N7 on #714). The
+ * rows that pin a wrapped copy's whole answer through the hook read it here:
+ * wherever the temp folder is (a TMPDIR under /Users/<name>, outside this
+ * HOME, is another user's home to the hook, which then adds
+ * `files.write.guarded` to every write in it), a write in this checkout is
+ * the user's own.
+ */
+let homeCheckout: string | null = null;
+function homeRepo(): string {
+  if (homeCheckout !== null) return homeCheckout;
+  const dir = join(HOME, "ws");
+  mkdirSync(dir, { recursive: true });
+  const ran = spawnSync("git", ["init", "-q"], { cwd: dir, encoding: "utf8", env: process.env });
+  assert.equal(ran.status, 0, ran.stderr);
+  homeCheckout = dir;
+  return dir;
+}
+
+/** {@link hook} in the checkout under the fixture HOME ({@link homeRepo}). */
+function homeHook(command: string, extra: readonly ProtectedPathEntry[] = []): string[] {
+  const { result } = classifyForHook(command, extra, homeRepo());
+  return result.ok ? result.segments.map((segment) => `${segment.class} ${segment.rule}`) : [`refused ${result.code}`];
+}
+
 /** {@link pure} in the as-spelled reading: how main 21fc5fdc read the line. */
 function spelledPure(command: string, extra: readonly ProtectedPathEntry[] = []): string[] {
   return withNamesAsSpelled(() => pure(command, extra));
@@ -1508,7 +1533,14 @@ for (const program of UNREAD_PROGRAMS) {
     // line does, and it is refused.
     assert.deepEqual(pure(`${program} notes.txt .github/workflows/ci.yml`, TWO_ROUTES), ["refused unclassified"]);
     assert.deepEqual(pure(`${program} .approval/env .github/workflows/ci.yml`, TWO_ROUTES), [CRED, "policy.edit.ci protected-path"]);
-    assert.deepEqual(pure(`${program} .github/workflows/ci.yml .approval/env`, TWO_ROUTES), [CRED, "policy.edit.ci protected-path"]);
+    // A copy program behind the words in front of it writes the credential
+    // path it is handed last: the write's class first, as plain `cp` gives it
+    // (build-1's S1 on #706). Any other program: the credential class and
+    // the workflow, as on main.
+    assert.deepEqual(
+      pure(`${program} .github/workflows/ci.yml .approval/env`, TWO_ROUTES),
+      program.endsWith(" cp") ? ["policy.core protected-path", CRED, "policy.edit.ci protected-path"] : [CRED, "policy.edit.ci protected-path"],
+    );
     assert.deepEqual(pure(`${program} .approval/env design/x .github/workflows/ci.yml`, TWO_ROUTES), [
       CRED,
       "policy.edit.design protected-path",
@@ -1564,10 +1596,23 @@ const UNKNOWN = "policy.core copy-target-unknown";
  * the word, where it sits in the line, what the folded reading adds, and the
  * literal control that stands in its place.
  */
-function builtTarget(word: string, added: readonly string[], control = "notes.txt"): void {
+function builtTarget(
+  word: string,
+  added: readonly string[],
+  control = "notes.txt",
+  into: readonly string[] | null = null,
+  reached: readonly string[] = [],
+): void {
   for (const program of BUILT_TARGET_PROGRAMS) {
     for (const line of [`${program} .approval/env ${word}`, `${program} ${word} .approval/env`]) {
-      assert.deepEqual(pure(line, TWO_ROUTES), [CRED, ...added], line);
+      // `into`: where the copy behind the wrapper reads `.approval/env` as
+      // its destination, the write's class answers first (build-1's S1 on #706).
+      const writes = into !== null && program.endsWith(" cp") && line.endsWith(" .approval/env");
+      // `reached`: where the copy behind the wrapper writes the built word,
+      // the classes GLOB-WRITE's readings of it name ride after the unknown
+      // target, as plain `cp` reaches them (build-1's S2 on #706).
+      const built = program.endsWith(" cp") && line.endsWith(` ${word}`) ? reached : [];
+      assert.deepEqual(pure(line, TWO_ROUTES), writes ? into : [CRED, ...added, ...built], line);
       // As spelled: main's answer, the credential class alone.
       assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], line);
     }
@@ -1599,7 +1644,7 @@ test("a credential read through a wrapper names an unknown target for a variable
 
 test("a credential read through a wrapper names an unknown target for a braced variable", () => {
   builtTarget("${X}", [UNKNOWN]);
-  builtTarget("${X:-.github/workflows/ci.yml}", [UNKNOWN]);
+  builtTarget("${X:-.github/workflows/ci.yml}", [UNKNOWN], "notes.txt", null, ["policy.edit.ci protected-path"]);
 });
 
 test("a credential read through a wrapper names an unknown target for a command substitution", () => {
@@ -1608,8 +1653,11 @@ test("a credential read through a wrapper names an unknown target for a command 
 });
 
 test("a credential read through a wrapper names an unknown target for a glob", () => {
-  builtTarget(".gith*/workflows/ci.yml", [UNKNOWN], ".github-notes/ci.yml");
-  builtTarget("*.md", [UNKNOWN], "notes.md");
+  builtTarget(".gith*/workflows/ci.yml", [UNKNOWN], ".github-notes/ci.yml", ["policy.core protected-path", CRED], [
+    "policy.edit.ci protected-path",
+    "policy.edit protected-path",
+  ]);
+  builtTarget("*.md", [UNKNOWN], "notes.md", null, ["policy.edit protected-path", "policy.edit.spec protected-path"]);
   // A quoted glob is a literal.
   for (const program of BUILT_TARGET_PROGRAMS) {
     assert.deepEqual(pure(`${program} .approval/env '*.md'`, TWO_ROUTES), [CRED], program);
@@ -1618,8 +1666,8 @@ test("a credential read through a wrapper names an unknown target for a glob", (
 });
 
 test("a credential read through a wrapper names an unknown target for a brace expansion and a ~user", () => {
-  builtTarget("{a,b}.yml", [UNKNOWN], "a.yml");
-  builtTarget("~bob/x", [UNKNOWN], "bob/x");
+  builtTarget("{a,b}.yml", [UNKNOWN], "a.yml", ["policy.core protected-path", CRED]);
+  builtTarget("~bob/x", [UNKNOWN], "bob/x", ["policy.core protected-path", CRED]);
 });
 
 test("a credential read through a wrapper reads the path attached to a short option", () => {
@@ -1799,8 +1847,9 @@ test("a target the shell builds beside a credential read: the order, one entry p
     // (#686's glob reading of the copy's destination, as main answers it.)
     ["cp .approval/env .gith*/workflows/ci.yml", [CRED, "policy.edit.ci protected-path", "policy.edit protected-path"]],
     // Behind a wrapper the walk refuses, and the pattern is a target the
-    // shell builds: the unknown target, not the pattern read as written.
-    ["command cp .approval/env .gith*/workflows/ci.yml", [CRED, UNKNOWN]],
+    // shell builds: the unknown target, then what the pattern may name, as
+    // plain `cp` reads it (build-1's S2 on #706).
+    ["command cp .approval/env .gith*/workflows/ci.yml", [CRED, UNKNOWN, "policy.edit.ci protected-path", "policy.edit protected-path"]],
     ["cat .approval/env $X", [CRED]],
     ["base64 .approval/env *.md", [CRED]],
     // No credential read, a refusal above the credential tier, a path that
@@ -2393,4 +2442,374 @@ test("a source lands as a credential path only where a credential name could, an
   ] as const) {
     assert.deepEqual(pure(line, TWO_ROUTES), want, line);
   }
+});
+
+// build-1's S1 on #706 and review-a's N1 (CLAIMS L63058; the lead's ruling
+// CLAIMS L63062, a 0.4.10 row): a copy INTO a credential path behind a word
+// the classifier has no rule for (`nice`, `command`, `stdbuf -o0`) is read by
+// the copy program's own table, so it takes the write's class plain `cp`
+// gives it. A union with main's answer: every class main gave stays.
+const WRAPPERS = [
+  "command",
+  "builtin",
+  "nice",
+  "nice -n 5",
+  "noglob",
+  "nocorrect",
+  "caffeinate",
+  "stdbuf -o0",
+  "-",
+  "command -p",
+  "command nice",
+] as const;
+
+/** The class set of a line, a refusal as `refused`. */
+function classSet(line: string): string[] {
+  const result = classifyCommand(line, TWO_ROUTES);
+  return result.ok ? [...result.classes].sort() : ["refused"];
+}
+
+test("a copy into a credential path behind a wrapper takes the write's class plain cp gives (build-1's S1 on #706)", () => {
+  for (const wrapper of WRAPPERS) {
+    for (const copy of [
+      "cp README.md .approval/env",
+      "cp README.md ~/.hermes/.env",
+      "cp README.md ~/.hermes/auth.json",
+      "cp ~/.hermes/.env .approval/env",
+      "cp .github/workflows/ci.yml .approval/env",
+      "cp -t .approval/env README.md",
+      "mv README.md .approval/env",
+      "ln -s README.md .approval/env",
+      "rsync -a README.md .approval/env",
+      "scp README.md .approval/env",
+    ]) {
+      const line = `${wrapper} ${copy}`;
+      const got = classSet(line);
+      assert.ok(got.includes("policy.core"), `${line}: ${got.join(" ")}`);
+      // Never lighter than main, which gave the credential class (and any
+      // class a guarded source names).
+      assert.ok(got.includes("account.credential"), `${line}: ${got.join(" ")}`);
+      for (const cls of classSet(copy)) {
+        if (cls !== "refused") assert.ok(got.includes(cls), `${line}: ${cls} of plain ${copy} missing`);
+      }
+    }
+  }
+  assert.deepEqual(pure("nice cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
+  assert.deepEqual(pure("command cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
+  assert.deepEqual(homeHook("nice cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
+  assert.deepEqual(homeHook("command cp README.md .approval/env", TWO_ROUTES), ["policy.core protected-path", CRED]);
+});
+
+test("behind a wrapper, only a copy program's table is read: a read, an unknown program and an opaque wrapper answer as on main (build-1's S1 on #706)", () => {
+  for (const [line, want] of [
+    // A program with no rule and no table: nobody can say what it writes (the
+    // read's "still short": out of scope), with or without a wrapper.
+    ["frobnicate README.md .approval/env", [CRED]],
+    ["nice frobnicate README.md .approval/env", [CRED]],
+    ["command ditto README.md .approval/env", [CRED]],
+    // A credential READ behind a wrapper gains nothing.
+    ["nice cat .approval/env", [CRED]],
+    ["command cat .approval/env", [CRED]],
+    ["nice cp .approval/env notes.txt", [CRED]],
+    ["command cp ~/.hermes/.env notes.txt", [CRED]],
+    ["stdbuf -o0 rsync -a .approval/env backup/", [CRED]],
+    // Where the table cannot read the argv, a credential path behind a
+    // wrapper is the read unless it sits in the copy's last slot (below): a
+    // literal credential path there is the read (build-1's S2 on #701).
+    ["command cp .approval/env '$X'", [CRED]],
+    ["command cp --in=.approval/env notes.txt", [CRED]],
+    ["command cp --frob .approval/env notes.txt", [CRED]],
+    // The value of an option cp does not know may be read or written (plain
+    // `cp` adds policy.core for `--out=` and `--in=` alike): behind a
+    // wrapper it is the read, as on main.
+    ["command cp --out=.approval/env ~/.hermes/.env", [CRED]],
+    // An attached value of a program with no table: as on main.
+    ["frobnicate -o.approval/env ~/.hermes/.env", [CRED]],
+    // The program behind the wrapper is a known reader: its words are not a
+    // copy's, though one of them is spelled `cp`.
+    ["nice grep cp README.md .approval/env", [CRED]],
+    ["command less cp README.md .approval/env", [CRED]],
+    // An opaque wrapper is refused above the credential tier, as on main.
+    ["env cp README.md .approval/env", ["refused opaque"]],
+    ["sudo cp README.md .approval/env", ["refused opaque"]],
+    ["nohup cp README.md .approval/env", ["refused opaque"]],
+    ["timeout 5 cp README.md .approval/env", ["refused opaque"]],
+    // No credential word: refused, as on main.
+    ["nice cp README.md notes.txt", ["refused unclassified"]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+  // A path that outranks the credential class defers it, and the walk
+  // refuses for the wrapper: refused, as on main.
+  for (const line of [
+    "nice cp APPROVAL.md .approval/env",
+    "command cp .approval/log/x .approval/env",
+    "command cp README.md .approval/env --out=APPROVAL.md",
+    // A Hermes profile is a guarded folder that outranks the credential.
+    "command cp .approval/env s/auth.json -t ~/.hermes/profiles/p",
+  ]) {
+    assert.deepEqual(pure(line, TWO_ROUTES), ["refused unclassified"], line);
+  }
+});
+
+test("a copy into a credential path behind a wrapper: the forms of the read's S1 family, main's classes kept (build-1's S1 on #706)", () => {
+  for (const [line, main, want] of [
+    ["nice cp README.md .approval/env", [CRED], ["policy.core protected-path", CRED]],
+    ["nice cp README.md ~/.hermes/.env", [CRED], ["policy.core protected-path", CRED]],
+    ["command cp ~/.hermes/.env '.approval/env'", [CRED], ["policy.core protected-path", CRED]],
+    ["command cp .github/workflows/ci.yml .approval/env", [CRED, "policy.edit.ci protected-path"], ["policy.core protected-path", CRED, "policy.edit.ci protected-path"]],
+    ["command cp README.md .approval/env design/x", [CRED, "policy.edit.design protected-path"], [CRED, "policy.edit.design protected-path"]],
+    ["command cp README.md design/x .approval/env", [CRED, "policy.edit.design protected-path"], ["policy.core protected-path", CRED, "policy.edit.design protected-path"]],
+    ["command cp -t .approval/env README.md", [CRED], ["policy.core protected-path", CRED]],
+    ["command cp --target-directory=.approval/env README.md", [CRED], ["policy.core protected-path", CRED]],
+    // A landing: a source named `env` copied into the gate's directory.
+    ["command cp ~/.hermes/.env -t .approval/keys", [CRED], ["policy.core protected-path", CRED]],
+    // Every program with a copy table.
+    ["nice mv README.md .approval/env", [CRED], ["policy.core protected-path", CRED]],
+    ["nice ln -s README.md .approval/env", [CRED], ["policy.core protected-path", CRED]],
+    ["nice install -m 600 README.md .approval/env", [CRED], ["policy.core protected-path", CRED]],
+    ["nice rsync -a README.md .approval/env", [CRED], ["policy.core protected-path", CRED]],
+    ["nice scp README.md .approval/env", [CRED], ["policy.core protected-path", CRED]],
+    // A program path, and a word no rule names in front of the copy.
+    ["command /bin/cp README.md .approval/env", [CRED], ["policy.core protected-path", CRED]],
+    ["caffeinate -i -t 60 cp README.md .approval/env", [CRED], ["policy.core protected-path", CRED]],
+    ["busybox cp README.md .approval/env", [CRED], ["policy.core protected-path", CRED]],
+    // An argv the table cannot read (an unknown option, a word with a `$`):
+    // the credential path in the last slot may be written, as plain `cp`
+    // reads it; the class is added after main's.
+    ["command cp --frob README.md .approval/env", [CRED], [CRED, "policy.core protected-path"]],
+    ["nice cp '$X' .approval/env", [CRED], [CRED, "policy.core protected-path"]],
+  ] as const) {
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), main.filter((entry) => entry === CRED), `${line} as spelled`);
+    const got = pure(line, TWO_ROUTES);
+    assert.deepEqual(got, want, line);
+    for (const entry of main) assert.ok(got.includes(entry), `${line}: ${entry} lost`);
+    // Through the hook, in the checkout under the fixture HOME: the same.
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
+  }
+});
+
+// build-1's S2 on #706 (the lead's ruling CLAIMS L63062, a 0.4.10 row):
+// behind a wrapper the walk refuses, so GLOB-WRITE's readings of a target
+// the shell builds were never made, and a glob or a `${X:-G}` destination
+// took `policy.core` (copy-target-unknown) but not G's own class. Now each
+// built word is read as plain `cp` reads it, and every class a reading names
+// rides beside, after the unknown target.
+test("behind a wrapper, a glob or ${X:-G} target reaches G's own class beside policy.core (build-1's S2 on #706)", () => {
+  for (const [target, classes] of [
+    [".gith*/workflows/ci.yml", ["policy.edit.ci"]],
+    ["${X:-.github/workflows/ci.yml}", ["policy.edit.ci"]],
+    ["${X:-.approval/log/events.jsonl}", ["log.mutate"]],
+    ["${X:-~/.hermes/scripts/x.sh}", ["cron.manage"]],
+  ] as const) {
+    for (const wrapper of ["command", "nice", "nice -n 5", "stdbuf -o0", "command nice"]) {
+      const line = `${wrapper} cp .approval/env ${target}`;
+      const got = classSet(line);
+      for (const cls of ["account.credential", "policy.core", ...classes]) assert.ok(got.includes(cls), `${line}: ${cls} missing from ${got.join(" ")}`);
+      // What plain `cp` reaches, the wrapped line reaches.
+      for (const cls of classSet(`cp .approval/env ${target}`)) assert.ok(got.includes(cls), `${line}: ${cls} of plain cp missing`);
+    }
+  }
+});
+
+test("behind a wrapper, a built target the copy writes: the read's S2 lines pinned, and what does not move (build-1's S2 on #706)", () => {
+  for (const [line, want] of [
+    ["command cp .approval/env .gith*/workflows/ci.yml", [CRED, UNKNOWN, "policy.edit.ci protected-path", "policy.edit protected-path"]],
+    ["command cp .approval/env ${X:-.github/workflows/ci.yml}", [CRED, UNKNOWN, "policy.edit.ci protected-path"]],
+    ["command cp .approval/env ${X:-.approval/log/events.jsonl}", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["command cp .approval/env ${X:-~/.hermes/scripts/x.sh}", [CRED, UNKNOWN, "cron.manage protected-path"]],
+    ["nice -n 5 cp .approval/env ${X:-.github/workflows/ci.yml}", [CRED, UNKNOWN, "policy.edit.ci protected-path"]],
+    ["nice mv .approval/env ${X:-.github/workflows/ci.yml}", [CRED, UNKNOWN, "policy.edit.ci protected-path"]],
+    ["command cp -t ${X:-.github/workflows} .approval/env", [CRED, UNKNOWN, "policy.edit.ci protected-path"]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
+    // As spelled: main's answer, the credential class alone.
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], `${line} as spelled`);
+  }
+  for (const [line, want] of [
+    // A built word the copy only reads (a source of cp) is not read as written.
+    ["command cp ${X:-.github/workflows/ci.yml} notes.txt .approval/keys/", [CRED, UNKNOWN]],
+    ["command cp .approval/env .gith*/x notes.txt", [CRED, UNKNOWN]],
+    // A program with no table, and a reader behind a wrapper: as on main.
+    ["frobnicate .approval/env ${X:-.github/workflows/ci.yml}", [CRED, UNKNOWN]],
+    ["ditto .approval/env .gith*/workflows/ci.yml", [CRED, UNKNOWN]],
+    ["command less .approval/env ${X:-.github/workflows/ci.yml}", [CRED, UNKNOWN]],
+    ["nice cat .approval/env .gith*/workflows/ci.yml", [CRED, UNKNOWN]],
+    // A literal target: main's answer (the protected scan already names it).
+    ["command cp .approval/env .github/workflows/ci.yml", [CRED, "policy.edit.ci protected-path"]],
+    // A built word that may spell a credential path (two unread parts may
+    // spell `.approval/env`) in the copy's DESTINATION is read both ways (the
+    // automated security review of #714): the credential class stays and the
+    // write's classes ride beside it.
+    ["command cp .approval/env $A-$B", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["command cp .approval/env $'~/.hermes/.env'", ["policy.core protected-path", CRED, "log.mutate protected-path", "cron.manage protected-path"]],
+    ["command cp .approval/env ${X:-.approval/env}", [CRED, UNKNOWN]],
+    ["command cp -t $A-$B .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["command rsync -a .approval/env $A-$B", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    // In a SOURCE slot it stays the read, as plain `cp` leaves it, though
+    // `rsync` and `scp` count every operand as written: a read through a
+    // wrapper takes no write class.
+    ["command rsync -a .approval/env $A-$B backup/", [CRED, UNKNOWN]],
+    ["command scp .approval/env $'~/.hermes/.env' host:x", [CRED, UNKNOWN]],
+    ["command scp $'~/.hermes/.env' notes.txt", [CRED, UNKNOWN]],
+    ["command cp -t backup/ .approval/env $A-$B", [CRED, UNKNOWN]],
+    ["nice cp .approval/env $A-$B notes.txt", [CRED, UNKNOWN]],
+    // An argv the copy table cannot read (`--frob`): the destination is the
+    // last operand, so a built word there is still read both ways, and one
+    // before it stays the read. (The heavy phase's mutant F4: without the
+    // last-operand fallback no test failed.)
+    ["command cp --frob .approval/env $A-$B", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["command cp --frob .approval/env $A-$B notes.txt", [CRED, UNKNOWN]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
+  }
+  // The two lines of the review: what plain `cp` names, the wrapped line names.
+  for (const target of ["$A-$B", "${X:-.approval/env}", "$'~/.hermes/.env'"]) {
+    for (const wrapper of ["command", "nice"]) {
+      const line = `${wrapper} cp .approval/env ${target}`;
+      const got = classSet(line);
+      for (const cls of classSet(`cp .approval/env ${target}`)) assert.ok(got.includes(cls), `${line}: ${cls} of plain cp missing`);
+    }
+  }
+  for (const [line, want] of [
+    // `mv` writes every path it names: its built words are all read, as
+    // plain `mv`'s are.
+    ["command mv .approval/env $'~/.hermes/.env'", ["policy.core protected-path", CRED, "log.mutate protected-path", "cron.manage protected-path"]],
+    // `install` has no rule, so its own walk refuses: its built target is
+    // read the same way, with or without a wrapper.
+    ["install $APPROVAL_TG_TOKEN .appr*/log/x", [ENV, UNKNOWN, "log.mutate protected-path"]],
+    ["command install $APPROVAL_TG_TOKEN .appr*/log/x", [ENV, UNKNOWN, "log.mutate protected-path"]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+});
+
+// review-b's M1 on #714: behind a wrapper a built destination given as an
+// option's VALUE (`--target-directory=V`, `-tV`, rsync's `--log-file=V` and
+// `--write-batch=V`) was not read as written, where the same value as its own
+// word was. Each wrapped line now names every class its plain twin names.
+test("behind a wrapper, a built destination given as an option's value is read as written (review-b's M1 on #714)", () => {
+  for (const [line, plain, want] of [
+    [
+      "nice cp .approval/env --target-directory=${X:-.approval/log}",
+      "cp .approval/env --target-directory=${X:-.approval/log}",
+      [CRED, UNKNOWN, "log.mutate protected-path"],
+    ],
+    // A unique prefix of the long option, as GNU reads it.
+    [
+      "command cp .approval/env --target=${X:-.github/workflows}",
+      "cp .approval/env --target=${X:-.github/workflows}",
+      [CRED, UNKNOWN, "policy.edit.ci protected-path"],
+    ],
+    // The value attached to the short option; a word that may spell the
+    // credential path is in the destination, so it is read both ways.
+    ["nice cp .approval/env -t$A-$B", "cp .approval/env -t$A-$B", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    // The files an rsync option writes.
+    [
+      "nice rsync -a --log-file=${X:-.approval/log/events.jsonl} .approval/env backup/",
+      "rsync -a --log-file=${X:-.approval/log/events.jsonl} .approval/env backup/",
+      [CRED, UNKNOWN, "log.mutate protected-path"],
+    ],
+    [
+      "nice rsync -a --write-batch=${X:-.approval/log/events.jsonl} .approval/env backup/",
+      "rsync -a --write-batch=${X:-.approval/log/events.jsonl} .approval/env backup/",
+      [CRED, UNKNOWN, "log.mutate protected-path"],
+    ],
+  ] as const) {
+    const got = classSet(line);
+    for (const cls of classSet(plain)) assert.ok(got.includes(cls), `${line}: ${cls} of plain ${plain} missing from ${got.join(" ")}`);
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
+    // As spelled: main's answer, the credential class alone.
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], `${line} as spelled`);
+  }
+  // A directory an rsync option names (`--backup-dir=V`) is read as the same
+  // value as its own word was already read (`--backup-dir V`).
+  assert.deepEqual(
+    pure("nice rsync -a --backup-dir=${X:-.approval/log} .approval/env backup/", TWO_ROUTES),
+    pure("nice rsync -a --backup-dir ${X:-.approval/log} .approval/env backup/", TWO_ROUTES),
+  );
+  // A value that may spell the credential path where the option only writes a
+  // log stays the read, as plain rsync leaves it; an option cp does not know
+  // is the read, as before.
+  for (const line of ["nice rsync -a --log-file=$A-$B .approval/env backup/", "nice cp --in=$A-$B .approval/env notes.txt"]) {
+    assert.deepEqual(pure(line, TWO_ROUTES), [CRED, UNKNOWN], line);
+  }
+});
+
+// review-b's M2 on #714: with an option the copy table does not know, the
+// destination fell back to the last operand alone while the `-t` values were
+// among the written words, so a `-t` value that may spell the credential path
+// was left out as the read. It is a destination the argv names as such.
+test("behind a wrapper, an argv the copy table cannot read keeps its -t values as destinations (review-b's M2 on #714)", () => {
+  for (const [line, plain, want] of [
+    ["nice cp --frob -t $A-$B .approval/env", "cp --frob -t $A-$B .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["nice cp --frob -t ~/.hermes/$X .approval/env", "cp --frob -t ~/.hermes/$X .approval/env", [CRED, UNKNOWN, "cron.manage protected-path"]],
+    // The same value given to the long option (M1's reading of it).
+    [
+      "nice cp --frob --target-directory=$A-$B .approval/env",
+      "cp --frob --target-directory=$A-$B .approval/env",
+      [CRED, UNKNOWN, "log.mutate protected-path"],
+    ],
+  ] as const) {
+    const got = classSet(line);
+    for (const cls of classSet(plain)) assert.ok(got.includes(cls), `${line}: ${cls} of plain ${plain} missing from ${got.join(" ")}`);
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+    assert.deepEqual(homeHook(line, TWO_ROUTES), want, `${line} through the hook`);
+    assert.deepEqual(spelledPure(line, TWO_ROUTES), [CRED], `${line} as spelled`);
+  }
+  // The last-operand fallback stays (e8ef8c76's rows): a word before the last
+  // operand that no -t names stays the read.
+  assert.deepEqual(pure("command cp --frob .approval/env $A-$B", TWO_ROUTES), [CRED, UNKNOWN, "log.mutate protected-path"]);
+  assert.deepEqual(pure("command cp --frob .approval/env $A-$B notes.txt", TWO_ROUTES), [CRED, UNKNOWN]);
+});
+
+// review-b's S2 on #714: four behaviours this branch adds behind a wrapper,
+// each pinned in the pure classifier (no checkout, no HOME: a red here never
+// comes from the machine), so that undoing one fails a test.
+test("behind a wrapper: a program path, install -t, an unreadable argv's -t value and mv's built source each keep the write's class (review-b's S2 on #714)", () => {
+  for (const [line, want] of [
+    // The copy program named by a path: its last component is the program.
+    ["nice /bin/cp README.md .approval/env", ["policy.core protected-path", CRED]],
+    ["nice -n 5 /bin/cp README.md ~/.hermes/auth.json", ["policy.core protected-path", CRED]],
+    ["nice ./cp README.md .approval/env", ["policy.core protected-path", CRED]],
+    // `install` is read by its own table: its `-t` value is the destination.
+    ["nice install -t $A-$B .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["nice install .approval/env -t ${X:-.approval/log}", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    // ... and with a `-t` destination its last operand is a source, the read.
+    ["nice install -t backup/ .approval/env ${X:-.github/workflows/ci.yml}", [CRED, UNKNOWN]],
+    // An option the table does not know: the `-t` value is still written.
+    ["nice cp --frob -t ${X:-.approval/log} .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    // `mv` writes every path it names, its built sources too.
+    ["nice mv $A-$B .approval/env backup/", [CRED, UNKNOWN, "log.mutate protected-path"]],
+    ["command mv $A-$B .claude/x .approval/env", [CRED, UNKNOWN, "log.mutate protected-path"]],
+  ] as const) {
+    assert.deepEqual(pure(line, TWO_ROUTES), want, line);
+  }
+});
+
+// review-b's N1 on #714: behind a wrapper, an argv the copy table cannot read
+// had every word read for a credential path twice (the copy's unreadable-argv
+// pass, whose answer only the last slot keeps, and the side scan). Past the
+// spliced memo's size (more distinct built words than it holds) each second
+// read was made from nothing: the line's cost jumped. Only the last slot is
+// read in the first pass now. CPU time against the same words handed to a
+// reader behind a wrapper (one read each), as a ratio: no fixed bound.
+test("behind a wrapper, many built -t values cost about one credential read each (review-b's N1 on #714)", () => {
+  const cpu = (run: () => void): number => {
+    const start = process.cpuUsage();
+    run();
+    const used = process.cpuUsage(start);
+    return (used.user + used.system) / 1e6;
+  };
+  const least = (run: () => void): number => Math.min(cpu(run), cpu(run));
+  // 4,500 distinct words: more than the spliced memo holds.
+  const words = Array.from({ length: 4500 }, (_, at) => `$A${at}-$B${at}`);
+  const line = `command cp .approval/env ${words.map((word) => `-t ${word}`).join(" ")}`;
+  const control = least(() => classifyCommand(`nice cat .approval/env ${words.join(" ")}`, TWO_ROUTES));
+  const spent = least(() => classifyCommand(line, TWO_ROUTES));
+  assert.ok(spent <= 3.5 * control, `${spent.toFixed(3)} s against ${control.toFixed(3)} s (the reader's line)`);
+  assert.deepEqual(pure(line, TWO_ROUTES), [CRED, UNKNOWN, "log.mutate protected-path"]);
 });

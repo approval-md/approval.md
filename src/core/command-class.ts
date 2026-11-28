@@ -3501,6 +3501,8 @@ export interface ClassifierContext {
   organParentsOff?: boolean;
   /** The values the line (and any line it sits in) assigns each variable, for the parents rule (lead ruling L62435). Internal. */
   lineAssigned?: ReadonlyMap<string, readonly string[]>;
+  /** The home variables the line (or one it sits in) assigns in a segment of assignments alone ({@link homesAssignedBare}; #709's owed row, S1). Internal. */
+  lineAssignedHomes?: ReadonlySet<string>;
   /** An earlier segment of the line moved the shell to a parent spelling (`cd ..`; lead ruling L62435, S2). Internal. */
   organCdParent?: boolean;
   /** The line (or one it sits in) assigns `CDPATH` (security review of the fold, 15). Internal. */
@@ -9377,6 +9379,39 @@ interface CredentialWrites {
 
 const NO_CREDENTIAL_WRITES: CredentialWrites = { words: new Set(), landings: [], possible: [] };
 
+/**
+ * The program a segment runs behind the words in front of it that the
+ * classifier has no rule for (build-1's S1 on #706, review-a's N1 at CLAIMS
+ * L63058): `nice cp`, `command -p cp`, `stdbuf -o0 cp`, `command nice cp`.
+ * The classifier keeps no list of such wrappers; it reads them as {@link
+ * tailReachesRule} does, where `caffeinate -i npm publish` runs `npm
+ * publish`: a word no rule names may run the words after it. So from a
+ * program with no rule and no copy table, every later word is passed over
+ * (a flag, a flag's value, another such wrapper) until one is a program the
+ * classifier knows. A program with a copy table ({@link COPY_OPTION_TABLES})
+ * is `copy`: its table reads the words after it. Any other known program is
+ * `known` (`nice cat .approval/env` runs `cat`, a reader), and with none,
+ * `none` (`frobnicate README.md .approval/env`: what it writes is unknown).
+ * `at` is the index in `args` of the program found, or -1. Linear in the
+ * words; the words are only compared by name.
+ */
+interface WrappedProgram {
+  kind: "copy" | "known" | "none";
+  at: number;
+  basename: string;
+}
+
+function wrappedProgram(basename: string, args: readonly string[]): WrappedProgram {
+  if (COPY_OPTION_TABLES[basename] !== undefined) return { kind: "copy", at: -1, basename };
+  if (knownRuleBin(basename) || GLOB_READ_BINS.has(basename)) return { kind: "known", at: -1, basename };
+  for (const [at, word] of args.entries()) {
+    const name = pathSegments(word).slice(-1)[0] ?? word;
+    if (COPY_OPTION_TABLES[name] !== undefined) return { kind: "copy", at, basename: name };
+    if (knownRuleBin(name) || GLOB_READ_BINS.has(name)) return { kind: "known", at, basename: name };
+  }
+  return { kind: "none", at: -1, basename };
+}
+
 function credentialWrites(
   basename: string,
   args: readonly string[],
@@ -10506,7 +10541,7 @@ function strictestProtectedWrite(
     if (!inexact(word)) {
       // A substitution leaves its word `exact` to the lexer, and its output is
       // an unread part all the same (`APPROVAL$(true).md`).
-      if (word.includes(SUBSTITUTION_SENTINEL) && !(skipProse && /\s/u.test(word))) offerSpliced(splicedGuardClass(word, protectedPaths, glob.budget, glob.options, globLive(glob, word), literalAt), word);
+      if (word.includes(SUBSTITUTION_SENTINEL) && !(skipProse && /\s/u.test(word))) offerSpliced(splicedGuardClass(word, protectedPaths, glob.budget, glob.options, globLive(glob, word), literalAt, glob.homesAssigned), word);
       continue;
     }
     if (skipProse && /\s/u.test(word)) continue;
@@ -10531,7 +10566,7 @@ function strictestProtectedWrite(
       // An unread part spliced into literal text (lead ruling CLAIMS L62568):
       // `APPROVAL$E.md` is the policy file when E is empty, inside double
       // quotes too (the value is spliced in, only not globbed).
-      offerSpliced(splicedGuardClass(reading, protectedPaths, glob.budget, glob.options, globLive(glob, word), reading === word ? literalAt : undefined), word);
+      offerSpliced(splicedGuardClass(reading, protectedPaths, glob.budget, glob.options, globLive(glob, word), reading === word ? literalAt : undefined, glob.homesAssigned), word);
     }
     spent.set(spentKey, budgetBefore - glob.budget.left);
   }
@@ -10572,6 +10607,13 @@ interface GlobReading {
   budget: { left: number };
   off: boolean;
   tracker?: { raised: boolean; parent?: boolean };
+  /**
+   * The home variables ({@link HOME_VARIABLES}) the line assigns itself
+   * (`HERMES_HOME=.claude; echo x > $HERMES_HOME/settings.json`): a word that
+   * opens with one is read as the home AND as an unread part, the way `$D`
+   * is read ({@link assignedHomeAsPart}; #709's owed row, S1).
+   */
+  homesAssigned?: ReadonlySet<string>;
 }
 /**
  * `(text) => words.some((word) => word.includes(text))`, the segment's
@@ -12395,6 +12437,26 @@ interface CopyPlan {
   files: string[];
   unknown: string | null;
   operands: string[];
+  /**
+   * Where `unknown` is set, the `-t`/`--target-directory` values (they are
+   * also among `dests`, with every operand): the destinations the argv names
+   * as such (review-b's M2 on #714).
+   */
+  targets?: string[];
+}
+
+/**
+ * The texts a word of a copy program's argv may be read as by its table: the
+ * word itself and, for an option, the value it carries in the same word
+ * (`--target-directory=V`, `--log-file=V`, a unique prefix such as
+ * `--target=V`, `-tV`), as {@link parseCopyArgv} reads that value. Behind a
+ * wrapper a target the shell builds is matched to the plan's written words
+ * by these (review-b's M1 on #714: `nice cp .approval/env
+ * --target-directory=${X:-.approval/log}` writes the value).
+ */
+function copyWordReadings(text: string, table: CopyOptionTable | undefined): string[] {
+  if (table === undefined || !isFlag(text) || text === "--") return [text];
+  return [text, ...parseCopyArgv([text], table).values.map((entry) => entry.value)];
 }
 
 /**
@@ -12435,7 +12497,7 @@ function copyPlan(basename: string, args: readonly string[]): CopyPlan | null {
   const targets = parsed.values.filter((entry) => entry.name === "t" || entry.name === "target-directory").map((entry) => entry.value);
   if (parsed.unknown !== null) {
     const all = local([...operands, ...targets]);
-    return { dests: all, sources: [...operands], anyName: [...all], files: [], unknown: parsed.unknown, operands };
+    return { dests: all, sources: [...operands], anyName: [...all], files: [], unknown: parsed.unknown, operands, targets: local(targets) };
   }
   // rsync with one operand lists it; every tool needs a source and a destination.
   // Review of e6b7bf97 (1): `ln TARGET` links into the working directory,
@@ -13184,12 +13246,13 @@ function splicedGuardClass(
   options: boolean,
   live: boolean,
   literalAt?: readonly number[],
+  homesAssigned?: ReadonlySet<string>,
 ): { surface: string | null; also: readonly string[] } {
   // Every class a counted candidate takes, not only the strictest: the plain
   // spelling's class rides beside a stricter one (`.$X/settings.json` may be
   // `.approval/log/settings.json` or `.claude/settings.json`).
   const also = new Set<string>();
-  const surface = splicedClass(word, budget, options, live, (path) => protectedPathClass(path, protectedPaths), protectedPaths, "log.mutate", false, also, literalAt);
+  const surface = splicedClass(word, budget, options, live, (path) => protectedPathClass(path, protectedPaths), protectedPaths, "log.mutate", false, also, literalAt, homesAssigned);
   // A word whose literal text and unread parts may join into `.git` (`.$X/hooks/x`)
   // is a git-dir write as well, as {@link splicedNamesGit} reads it alone.
   if (surface !== null) {
@@ -13282,21 +13345,73 @@ function splicedClass(
   directoryKeeps = false,
   also?: Set<string>,
   literalAt?: readonly number[],
+  homesAssigned?: ReadonlySet<string>,
 ): string | null {
-  const own = splicedClassOf(word, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also, literalAt);
-  // A home variable's default (`${HOME:-/x}`), read as the home in `own`, is
-  // read as its default too: the strictest of the two answers, every class
-  // either reached beside (review of the home-operator reading).
+  let answer = splicedClassOf(word, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also, literalAt);
+  const join = (other: string | null): void => {
+    if (other !== null) also?.add(other);
+    if (other !== null && (answer === null || protectedRank(other) < protectedRank(answer))) answer = other;
+  };
+  // A home variable's default (`${HOME:-/x}`), read as the home in the first
+  // answer, is read as its default too: the strictest of the two answers,
+  // every class either reached beside (review of the home-operator reading).
   const defaulted = mainRulesOnly ? null : homeDefaultReading(word);
-  if (defaulted === null) return own;
-  const other =
-    unreadParts(defaulted) === null
-      ? judge(defaulted)
-      : splicedClassOf(defaulted, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also);
-  if (other !== null) also?.add(other);
-  if (own === null) return other;
-  if (other === null) return own;
-  return protectedRank(other) < protectedRank(own) ? other : own;
+  if (defaulted !== null) {
+    join(
+      unreadParts(defaulted) === null
+        ? judge(defaulted)
+        : splicedClassOf(defaulted, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also),
+    );
+  }
+  // A home variable the line assigns itself, read as the home above, is read
+  // as an unread part too, as `$D` is (#709's owed row, S1): the union of the
+  // two readings, never one in place of the other.
+  const asPart = mainRulesOnly || homesAssigned === undefined ? null : assignedHomeAsPart(word, homesAssigned);
+  if (asPart !== null) join(splicedClassOf(asPart, budget, options, live, judge, protectedPaths, wide, directoryKeeps, also));
+  return answer;
+}
+
+/** The variables the spliced reading takes as a home when they open a word (the list {@link unreadPartsOf} reads). */
+const HOME_VARIABLES: readonly string[] = ["HOME", "HERMES_HOME"];
+
+/**
+ * The home variables ({@link HOME_VARIABLES}) a line assigns itself in a
+ * segment of assignments alone (`HERMES_HOME=.claude;`, `HERMES_HOME=a
+ * HOME=b &&`), with the ones a line it sits in assigns (`outer`), as a
+ * {@link ClassifierContext} field. A prefix assignment (`HERMES_HOME=. tee
+ * $HERMES_HOME/x`) is not one: the shell expands the command's own words
+ * before it applies, so that word keeps its answer. Any other binding of a
+ * home variable (`export`, `read`, `for`, `${NAME:=…}`) is refused before
+ * this reading. Wherever on the line, before or after the word: `$D` is an
+ * unread part with no assignment at all, so this reading is never wider than
+ * D's. None, no field.
+ */
+function homesAssignedBare(segments: readonly LexSegment[], outer: ReadonlySet<string> | undefined): { lineAssignedHomes?: ReadonlySet<string> } {
+  let names: Set<string> | null = outer === undefined ? null : new Set(outer);
+  for (const segment of segments) {
+    if (segment.words.length === 0 || !segment.words.every((word) => word.assignment)) continue;
+    for (const word of segment.words) {
+      const name = assignedName(word.text);
+      if (HOME_VARIABLES.includes(name)) (names ??= new Set()).add(name);
+    }
+  }
+  return names === null || names.size === 0 ? {} : { lineAssignedHomes: names };
+}
+
+/**
+ * A word that opens with a home variable the line assigns (`$HERMES_HOME/x`,
+ * `${HERMES_HOME}/x`, `${HERMES_HOME:-d}/x`, as the word's first component:
+ * the place {@link unreadPartsOf} reads as the home) with that variable as an
+ * unread part, the way `$D/x` is read, or `null`. The line's value may not be
+ * what the operator set, so the word is any path that ends as it does: the
+ * spliced reading of an unread part (#709).
+ */
+function assignedHomeAsPart(word: string, homes: ReadonlySet<string>): string | null {
+  if (!word.startsWith("$")) return null;
+  const opening = /^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::?-[^$}]*)?\}|([A-Za-z_][A-Za-z0-9_]*))(?=\/|$)/u.exec(word);
+  const name = opening?.[1] ?? opening?.[2];
+  if (opening === null || name === undefined || !homes.has(name)) return null;
+  return `${SUBSTITUTION_SENTINEL}${word.slice(opening[0].length)}`;
 }
 
 /**
@@ -14669,6 +14784,7 @@ function classifySegmentWithVerb(
     budget: context.globBudget ?? { left: GLOB_GUARD_STEP_CAP },
     off: context.globPatternsOff === true,
     ...(context.globTracker === undefined ? {} : { tracker: context.globTracker }),
+    ...(context.lineAssignedHomes === undefined ? {} : { homesAssigned: context.lineAssignedHomes }),
   };
   const redirected = strictestProtectedWrite(
     everyWriteTarget,
@@ -15012,10 +15128,69 @@ function classifySegmentWithVerb(
   const argvUnknown = (): string | null => (unknownMemo ??= { value: copyArgvUnknown(args, argFlags) }).value;
   // The credential paths a copy WRITES ({@link credentialWrites}): folded
   // reading only, as the rest of this tier's additions (as spelled, main's).
+  // Behind a wrapper the classifier has no rule for (`nice cp README.md
+  // .approval/env`), the copy program's own table reads the words after it
+  // ({@link wrappedProgram}; build-1's S1 on #706): the write's class is
+  // added to main's answer as for plain `cp`. Only a copy program is read
+  // so: behind a wrapper, a reader or a program with no table is left as main
+  // answers it (`nice cat .approval/env`, `nice frobnicate README.md
+  // .approval/env`).
+  const wrapped = credential === null && redirectCredential === null ? null : wrappedProgram(basename, args);
+  const peeled = wrapped !== null && wrapped.kind === "copy" && wrapped.at !== -1 ? wrapped : null;
+  // The copy program's table reading of the words after it, made once.
+  let peeledPlanMemo: { value: CopyPlan | null } | undefined;
+  const peeledPlan = (): CopyPlan | null =>
+    (peeledPlanMemo ??= { value: peeled === null ? null : copyPlan(peeled.basename, args.slice(peeled.at + 1)) }).value;
   const copyWrites =
-    credential === null && redirectCredential === null
+    wrapped === null
       ? NO_CREDENTIAL_WRITES
-      : (foldedOnly(() => [credentialWrites(basename, args, argFlags, argsPlan, argvUnknown)])[0] ?? NO_CREDENTIAL_WRITES);
+      : peeled === null
+        ? (foldedOnly(() => [credentialWrites(basename, args, argFlags, argsPlan, argvUnknown)])[0] ?? NO_CREDENTIAL_WRITES)
+        : (foldedOnly(() => {
+            const innerArgs = args.slice(peeled.at + 1);
+            const innerFlags = argFlags.slice(peeled.at + 1);
+            let innerUnknownMemo: { value: string | null } | undefined;
+            const innerUnknown = (): string | null => (innerUnknownMemo ??= { value: copyArgvUnknown(innerArgs, innerFlags) }).value;
+            // Cost (review-b's N1 on #714): where the table cannot read the
+            // argv, {@link credentialWrites} reads EVERY word for a credential
+            // path (`possible`), and behind a wrapper only the last slot's is
+            // kept (below). So here only the last slot is read: the same
+            // answer, without a spliced reading of every other word (`command
+            // cp .approval/env -t $A1-$B1 …` read each `$Ai-$Bi` here and
+            // again in the side scan, and past the spliced memo's size each
+            // second read was made from nothing).
+            const innerPlan = peeledPlan();
+            if (innerPlan === null || innerPlan.unknown !== null || innerUnknown() !== null) {
+              const innerOperands = innerArgs.filter((arg) => !isFlag(arg));
+              const innerLast = innerOperands.length < 2 ? undefined : innerOperands[innerOperands.length - 1];
+              const kept =
+                innerLast === undefined
+                  ? []
+                  : innerArgs.flatMap((arg) => {
+                      const equals = arg.indexOf("=");
+                      return [arg, ...(equals === -1 ? [] : [arg.slice(equals + 1)])].filter((word) => word === innerLast);
+                    });
+              return [
+                kept.length > 0 && isCredentialPathAsRead(innerLast as string) ? { words: new Set<string>(), landings: [], possible: kept } : NO_CREDENTIAL_WRITES,
+              ];
+            }
+            const read = credentialWrites(peeled.basename, innerArgs, innerFlags, peeledPlan, innerUnknown);
+            // The paths the table reads as WRITTEN (a destination word, a
+            // landing). Where it cannot read the argv (`possible`: an option
+            // it does not know, a word that may become one), only a credential
+            // path in the copy's last slot is taken as written (`command cp
+            // '$X' .approval/env`, `command cp --frob README.md .approval/env`);
+            // any other credential path behind a wrapper is the read, as on
+            // main (build-1's S2 on #701, the seat's ruling): `command cp
+            // .approval/env '$X'`, `command cp --in=.approval/env notes.txt`,
+            // and a lone operand (`command cp .approval/env -oX`).
+            const operands = innerArgs.filter((arg) => !isFlag(arg));
+            const last = operands.length < 2 ? undefined : operands[operands.length - 1];
+            const possible = read.possible.filter((word) => word === last);
+            return [
+              read.words.size === 0 && read.landings.length === 0 && possible.length === 0 ? NO_CREDENTIAL_WRITES : { ...read, possible },
+            ];
+          })[0] ?? NO_CREDENTIAL_WRITES);
   const sideScan =
     credential === null && redirectCredential === null
       ? null
@@ -15089,7 +15264,10 @@ function classifySegmentWithVerb(
       // refusal stands (the review of the M1 fold on #706). Its answer at
       // dbebd65d was that walk, deferred; a refusal is the strictest answer,
       // so the union of main's answer and the write's class is the refusal.
-      if (copyWrites.words.size > 0 || copyWrites.landings.length > 0) {
+      // Behind a wrapper the walk refuses for the wrapper (`no rule for
+      // nice`), and main answered with the credential class and the branch
+      // below: that answer is the one the write's class is added to.
+      if (peeled === null && (copyWrites.words.size > 0 || copyWrites.landings.length > 0)) {
         refused.outcome = rest;
         return [];
       }
@@ -15113,17 +15291,108 @@ function classifySegmentWithVerb(
         refused.outcome = rest;
         return [];
       }
-      const built = segment.words
+      const builtAt = segment.words
         .slice(cursor + 1)
-        .find(
-          (word) =>
-            (word.splits || word.expands || !word.exact || word.substitutions.length > 0) &&
-            !isCredentialArgWord(word, protectedPaths, GLOB_READ_BINS.has(basename)),
+        .flatMap((word, at) =>
+          (word.splits || word.expands || !word.exact || word.substitutions.length > 0) &&
+          !isCredentialArgWord(word, protectedPaths, GLOB_READ_BINS.has(basename))
+            ? [cursor + 1 + at]
+            : [],
         );
+      const built = builtAt.length === 0 ? undefined : segment.words[builtAt[0] as number];
       const named = [sideScan?.found ?? null, optionHit, attachedHit];
       const unknown: ProtectedBeside[] =
         built === undefined ? [] : [{ class: "policy.core", rule: "copy-target-unknown", path: built.text }];
-      return besideProtected(answered.class, named, "protected-path", unknown).more ?? [];
+      // build-1's S2 on #706: behind a wrapper, a target the shell builds
+      // that the copy program writes is read as GLOB-WRITE reads plain
+      // `cp`'s ({@link strictestProtectedWrite}: the `${X:-…}` default, every
+      // guarded path a pattern may match), and each class a reading names
+      // rides beside, after the unknown target (`command cp .approval/env
+      // .gith*/workflows/ci.yml` names the workflow, as plain `cp` does). The
+      // words read are the ones plain `cp`'s walk reads as written (its
+      // `writtenOperands`): its sources are not. Only for a copy program
+      // ({@link wrappedProgram}), behind a wrapper or not (`install`, which
+      // has no rule, refuses its walk too): what a program with no table
+      // writes is unknown, and a reader writes none of its operands.
+      const copying = wrapped !== null && wrapped.kind === "copy" && builtAt.length > 0 ? wrapped : null;
+      const copyArgs = copying === null ? [] : copying.at === -1 ? args : args.slice(copying.at + 1);
+      const plan = copying === null ? null : copying.at === -1 ? argsPlan() : peeledPlan();
+      const copyPositionals = copyArgs.filter((arg) => !isFlag(arg));
+      // The words the copy writes. Beside its operands, the files an option
+      // writes and the directories an option names (`rsync --log-file=V`,
+      // `--write-batch=V`, `--backup-dir=V`, `--temp-dir=V`; the plan's
+      // `files` and `anyName`), as plain `rsync`'s walk reads them
+      // (review-b's M1 on #714): the same value as its own word (`--log-file
+      // V`) was already read, as an operand.
+      const written = ((): ReadonlySet<string> | null => {
+        if (copying === null) return null;
+        if (plan === null || !["cp", "ln", "install"].includes(copying.basename)) {
+          return new Set([...globWriteOperands(copying.basename, copyPositionals), ...(plan === null ? [] : [...plan.files, ...plan.anyName])]);
+        }
+        if (plan.unknown !== null) return new Set([...plan.operands, ...plan.dests]);
+        return new Set(plan.dests.length === 0 || plan.implicitDest === true ? [...copyPositionals, ...plan.dests] : plan.dests);
+      })();
+      // A built word that may also spell a credential path (`$A-$B` may
+      // spell `.approval/env`, {@link isCredentialReadWord}) may be the read
+      // or the write. In the copy's DESTINATION it takes both readings: the
+      // credential class stays, and the write's classes ride beside it (the
+      // automated security review of #714: a union, never one reading in
+      // place of the other). The destination is the plan's when its argv
+      // reads (`-t` included), else the last operand, as an unreadable argv's
+      // credential path is read (S1 of #706), with the `-t` values such an
+      // argv still names as destinations (review-b's M2 on #714: `nice cp
+      // --frob -t $A-$B .approval/env`). Elsewhere (an `rsync` or `scp`
+      // source, which `writtenOperands` counts as written) it stays the read,
+      // as plain `cp`'s scans leave it, so a read through a wrapper takes no
+      // write class (the read-only bar). A program that writes every path it
+      // names keeps them all, as plain `mv` does ({@link credentialSideScan}'s
+      // rule).
+      const lastOperand = copyPositionals.length >= 2 ? copyPositionals.slice(-1) : [];
+      const destination = new Set(
+        plan !== null && plan.unknown === null && plan.dests.length > 0 && plan.implicitDest !== true
+          ? plan.dests
+          : [...lastOperand, ...(plan !== null && plan.unknown !== null ? (plan.targets ?? []) : [])],
+      );
+      const writesOnly = copying !== null && (credentialWritesOnly(copying.basename, copyArgs) || credentialProtectedScanKeeps(copying.basename));
+      // Each built word is matched by its text and, for an option, by the
+      // value it carries ({@link copyWordReadings}; review-b's M1 on #714):
+      // `--target-directory=${X:-.approval/log}` writes its value, as the
+      // same value as a word of its own does.
+      const table = copying === null ? undefined : COPY_OPTION_TABLES[copying.basename];
+      const builtWritten =
+        written === null
+          ? []
+          : builtAt.flatMap((at) =>
+              copyWordReadings((segment.words[at] as LexWord).text, table).filter(
+                (text) => written.has(text) && (writesOnly || destination.has(text) || !isCredentialReadWord(text, protectedPaths)),
+              ),
+            );
+      const reading =
+        builtWritten.length === 0
+          ? null
+          : strictestProtectedWrite(
+              builtWritten,
+              protectedPaths,
+              inexact,
+              false,
+              glob,
+              null,
+            );
+      // The copy fills a destination it may name with any name, as plain
+      // `cp`'s does: where that destination is a built word, an organ
+      // directory its pattern may match takes its class too ({@link
+      // organDestination}: `.gith*/workflows/ci.yml` may be under `.github`).
+      const anyName = new Set(plan?.anyName ?? []);
+      const organ = builtWritten.flatMap((text) => {
+        const hit = anyName.has(text) ? organDestination(text, inexact, glob) : null;
+        return hit === null ? [] : [hit];
+      });
+      const readings: ProtectedBeside[] = [...(reading === null ? [] : [reading, ...reading.others]), ...organ].map((hit) => ({
+        class: hit.surface,
+        rule: "protected-path",
+        path: hit.path,
+      }));
+      return besideProtected(answered.class, named, "protected-path", [...unknown, ...readings]).more ?? [];
     });
     if (refused.outcome !== undefined) return refused.outcome;
     return addWritten(addPossible({ ok: true, ...answered, ...(more.length === 0 ? {} : { more: [...more] }) }));
@@ -16181,8 +16450,9 @@ function classifyCommandAsReadWithRules(
     globBudget: context.globBudget ?? { left: GLOB_GUARD_STEP_CAP },
   };
   const lineAssigned = lineAssignments(lexed.segments, context.lineAssigned);
-  context = { ...context, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned };
-  execContext = { ...execContext, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned };
+  const homesField = homesAssignedBare(lexed.segments, context.lineAssignedHomes);
+  context = { ...context, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned, ...homesField };
+  execContext = { ...execContext, lineNamesGit, lineSetsDotglob, ...diskField, spelledSegments, bodyAlreadyRead: false, lineAssigned, ...homesField };
   // Lead ruling L62435 (S2, narrow): a `cd` to a parent spelling earlier on the line.
   let cdParent = context.organCdParent === true;
   // Security review of the fold, 15, 19 and 20: the token `CDPATH` anywhere
