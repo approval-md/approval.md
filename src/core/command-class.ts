@@ -5406,6 +5406,78 @@ function assignmentRuleCovers(cls: string): boolean {
 }
 
 /**
+ * The rules whose command, by its own definition, runs the workspace's own
+ * code (APRV-541, the lead's ruling on option (a)). A CLOSED list, by rule id
+ * and, where one rule names several binaries, by binary. In front of a
+ * command one of these decides, an UNKNOWN assignment name keeps the
+ * command's class: `NODE_ENV=test npm test` gains nothing an attacker lacks
+ * without it, since the command already runs whatever the workspace holds.
+ * A name on the steering list ({@link isReaderSteeringName}) is refused here
+ * as everywhere. SPEC.md §7 names the same list.
+ *
+ * - `npm-script` (npm, pnpm, yarn, bun `run`, `run-script`, `test`, `start`,
+ *   `build`, `lint`, `exec`): runs a `package.json` script, or a package
+ *   binary, the workspace names.
+ * - `node-script` (`node <file>`): runs a JavaScript file.
+ * - `workspace-tool`, for `npx`, `tsx`, `ts-node`, `vitest`, `jest` and
+ *   `make` only: a package binary, a TypeScript file, test files, a Makefile's
+ *   recipes. The same row's `tsc`, `oxlint` and `backlog` run no workspace
+ *   code, and `eslint` and `prettier` load a JavaScript config only when one
+ *   exists, so they are left off: an unknown name in front of them stays
+ *   refused.
+ *
+ * Left off as well: `npm-pack` and `npm-init-create` (they run code, but not
+ * as their plain purpose), the skill-script and `exec.code` rows (an
+ * assignment already declines them), harness launches, installs, and every
+ * reading, writing, network, VCS or gate rule.
+ */
+const WORKSPACE_CODE_RULES: Readonly<Record<string, readonly string[] | null>> = {
+  "npm-script": null,
+  "node-script": null,
+  "workspace-tool": ["npx", "tsx", "ts-node", "vitest", "jest", "make"],
+};
+
+/**
+ * Names kept in front of a workspace-code command although the steering list
+ * names them (the lead's ruling keeps `TMPDIR` and `NODE_ENV` before `npm
+ * test`). Two, each by name:
+ *
+ * - `TMPDIR` only says where temporary files go: it names no program, library
+ *   or configuration. It is steering in front of a reader or a plain writer
+ *   because `sort` spills there and some programs unpack helpers there; a
+ *   command that already runs the workspace's code may write anywhere in the
+ *   workspace anyway.
+ * - `NODE_ENV` is caught by the `NODE_` prefix, which is there for
+ *   `NODE_OPTIONS`, `NODE_PATH` and kin. It names a mode the project reads to
+ *   pick its own configuration, files a workspace-code command loads anyway.
+ *   In front of anything else it stays refused (steering by its prefix).
+ */
+const WORKSPACE_CODE_KEPT_NAMES: readonly string[] = ["TMPDIR", "NODE_ENV"];
+
+/** Is this answer a workspace-code rule's, for this program ({@link WORKSPACE_CODE_RULES})? */
+function runsWorkspaceCode(rule: string, program: string): boolean {
+  if (!Object.hasOwn(WORKSPACE_CODE_RULES, rule)) return false;
+  const bins = WORKSPACE_CODE_RULES[rule];
+  return bins === null || bins === undefined || bins.includes(program);
+}
+
+/**
+ * The table in front of a workspace-code command: the admitted list, and any
+ * plainly spelled name off the steering list (or on
+ * {@link WORKSPACE_CODE_KEPT_NAMES}). A value's substitution is classified
+ * before this is read, so a credential read in it is refused already.
+ */
+const WORKSPACE_CODE_ASSIGNMENTS: AssignmentTable = {
+  admitted: (word) => {
+    if (COMMAND_ASSIGNMENTS.admitted(word)) return true;
+    if (!PLAIN_ASSIGNMENT.test(word.text)) return false;
+    const name = assignedName(word.text);
+    return WORKSPACE_CODE_KEPT_NAMES.includes(name) || !isReaderSteeringName(name);
+  },
+  refusal: COMMAND_ASSIGNMENTS.refusal,
+};
+
+/**
  * Why a covered command after a steering name the line's own shell sets is
  * `unclassified` (APRV-540, APRV-541, {@link ClassifierContext.readerEnvWrite}).
  */
@@ -15610,10 +15682,15 @@ function classifySegmentWithVerb(
   const assignmentGate = (outcome: SegmentOutcome): SegmentOutcome => {
     // Bare `cd` only: the word right after the assignments, never the command
     // behind a sandbox wrapper, whose program the assignment steers.
-    if (!outcome.ok || bin === undefined || afterAssignments === "cd") return outcome;
+    if (!outcome.ok || bin === undefined || afterAssignments === undefined || afterAssignments === "cd") return outcome;
     if (!((verbClass?.startsWith("read.") ?? false) || assignmentRuleCovers(outcome.class))) return outcome;
-    const program = pathSegments(bin).slice(-1)[0] ?? bin;
-    const refusal = assignmentRefusal(segment.words.slice(0, assignments.length), program);
+    // The program that follows the assignments: a sandbox wrapper when one
+    // was consumed, which the assignment steers, else the command itself.
+    const program = pathSegments(afterAssignments).slice(-1)[0] ?? afterAssignments;
+    // Option (a): an unknown name keeps a workspace-code command's class; a
+    // wrapper in between decides by the wrapper, which is no such rule.
+    const table = sandbox === null && runsWorkspaceCode(outcome.rule, program) ? WORKSPACE_CODE_ASSIGNMENTS : COMMAND_ASSIGNMENTS;
+    const refusal = assignmentRefusal(segment.words.slice(0, assignments.length), program, table);
     if (refusal !== null) return { ok: false, code: "unclassified", detail: refusal };
     if (context.readerEnvWrite !== undefined) {
       return { ok: false, code: "unclassified", detail: readerEnvWriteRefusal(context.readerEnvWrite, program) };
