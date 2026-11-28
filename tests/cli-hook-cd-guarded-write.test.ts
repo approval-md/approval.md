@@ -272,6 +272,17 @@ test("an empty alternative in the cd word: bash's landing is followed, and what 
   holds("cd .c* && echo x > notes.md", "files.write.guarded");
 });
 
+test("an empty variable as the cd word: bash runs a bare cd, so a relative write after it is guarded (review-a's S1 on the fold)", () => {
+  // `D=; cd $D` is `cd` with no word in bash and sh: it lands in the home, and
+  // the next relative name is a file there (~/.hermes/auth.json, ~/.zshrc).
+  // The hook cannot name that landing, so the write is guarded. Without the
+  // line that marks a cd with no landing as unknown, each row is a plain
+  // workspace write.
+  holds("D=; cd $D; cd .hermes; echo x > auth.json", "files.write.guarded");
+  holds("D=; cd $D && echo x > .zshrc", "files.write.guarded");
+  holds("D=; cd $D && echo x >> .ssh/authorized_keys", "files.write.guarded");
+});
+
 test("a delete or a move's source after a cd this hook cannot follow is guarded, as a write there is (review-b's M4 on #715)", () => {
   for (const cd of ["cd -", "cd $UNSET_B6", 'cd "$(echo .approval/log)"', "cd {,}"]) {
     // (`unlink` and `shred` are refused by the classifier on this base: refused whole, so not listed.)
