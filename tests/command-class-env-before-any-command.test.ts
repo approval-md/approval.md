@@ -79,6 +79,11 @@ const REFUSED: readonly (readonly [string, string])[] = [
   // harness.launch.*
   ["PATH=. claude -p hi", "harness.launch.claude"],
   ["CLAUDE_CONFIG_DIR=/tmp/x claude -p hi", "harness.launch.claude"],
+  // the cd exemption is for a bare cd: behind a sandbox wrapper the assignment
+  // steers the wrapper (PATH=. picks which approval, node or sandbox-exec runs)
+  ["PATH=. approval sandbox -- cd x", "read.shell"],
+  ["FOO=1 node ./cli.js sandbox -- cd x", "read.shell"],
+  ["NO_COLOR=1 PATH=. sandbox-exec -f p.sb cd x", "read.shell"],
   // a steering name set bare earlier on the line
   ["GH_PAGER=./x; npm test", "files.write.workspace"],
   ["IFS=x; touch y", "files.write.workspace"],
@@ -99,6 +104,8 @@ const KEPT: readonly (readonly [string, string])[] = [
   ["GIT_TERMINAL_PROMPT=0 git push origin lane", "vcs.history.rewrite git-push-unreadable"],
   ["FOO=bar; npm test", "read.shell assignment | files.write.workspace npm-script"],
   ["CDPATH=/ cd ./build", "read.shell read-shell"],
+  ["PATH=. cd x", "read.shell read-shell"],
+  ["NO_COLOR=1 approval sandbox -- cd x", "read.shell read-shell"],
   ["approval status", "gate.self approval"],
   // already refused, and not by this rule
   ["PATH=.; npm test", "refused unclassified"],
