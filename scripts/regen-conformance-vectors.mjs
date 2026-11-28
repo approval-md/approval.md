@@ -4742,6 +4742,102 @@ const commandClassVectors = [
     description: "the companion: a digest with no module is a read",
     input: { command: "openssl dgst -sha256 README.md" },
   },
+  // --- environment assignments in front of a reader (APRV-540) ---
+  // Each was a plain read on 0.4.9: the assignment changes which program runs
+  // or what it loads. In front of a reader only a closed admitted list keeps
+  // the read; any other assignment is `unclassified`, as in front of git.
+  {
+    id: "reader-path-assignment-unclassified",
+    description: "PATH in front of cat picks which cat runs: unclassified",
+    input: { command: "PATH=. cat README.md" },
+    control: true,
+  },
+  {
+    id: "reader-ld-preload-unclassified",
+    description: "LD_PRELOAD loads a library the line names into the reader: unclassified",
+    input: { command: "LD_PRELOAD=./x.so cat README.md" },
+    control: true,
+  },
+  {
+    id: "reader-dyld-insert-unclassified",
+    description: "DYLD_INSERT_LIBRARIES is macOS's LD_PRELOAD: unclassified",
+    input: { command: "DYLD_INSERT_LIBRARIES=./x.dylib cat README.md" },
+    control: true,
+  },
+  {
+    id: "reader-ifs-unclassified",
+    description: "IFS steers a shell the reader may start: unclassified",
+    input: { command: "IFS=x cat README.md" },
+    control: true,
+  },
+  {
+    id: "reader-gh-pager-unclassified",
+    description: "GH_PAGER names the program gh pipes its output through: unclassified",
+    input: { command: "GH_PAGER=./x gh pr diff 1" },
+    control: true,
+  },
+  {
+    id: "reader-browser-unclassified",
+    description: "BROWSER names the program gh pr view --web opens: unclassified",
+    input: { command: "BROWSER=./x gh pr view --web" },
+    control: true,
+  },
+  {
+    id: "reader-node-options-unclassified",
+    description: "NODE_OPTIONS --require loads code into npm before it prints its version: unclassified",
+    input: { command: "NODE_OPTIONS=--require=./x npm --version" },
+    control: true,
+  },
+  {
+    id: "reader-tar-options-unclassified",
+    description: "TAR_OPTIONS hands tar a --to-command: unclassified",
+    input: { command: "TAR_OPTIONS=--to-command=./x tar -tf a.tar" },
+    control: true,
+  },
+  {
+    id: "reader-unknown-assignment-unclassified",
+    description: "a name on neither list in front of a reader: the default is the same refusal",
+    input: { command: "FOO=1 cat README.md" },
+    control: true,
+  },
+  {
+    id: "reader-proxy-assignment-unclassified",
+    description: "a proxy variable in front of curl is off the admitted list: unclassified",
+    input: { command: "HTTPS_PROXY=http://h:1 curl https://example.com" },
+    control: true,
+  },
+  {
+    id: "reader-admitted-then-steering-unclassified",
+    description: "several assignments: one off the admitted list decides",
+    input: { command: "LC_ALL=C PATH=. cat README.md" },
+    control: true,
+  },
+  {
+    id: "reader-after-bare-steering-unclassified",
+    description: "a bare steering assignment earlier on the line reaches the reader when the name is exported: unclassified",
+    input: { command: "GH_PAGER=./x && gh pr diff 1" },
+    control: true,
+  },
+  {
+    id: "reader-locale-stays-read",
+    description: "the companion: a locale with a plain value is admitted",
+    input: { command: "LC_ALL=C sort README.md" },
+  },
+  {
+    id: "reader-no-color-stays-remote-read",
+    description: "the companion: a colour switch is admitted",
+    input: { command: "NO_COLOR=1 gh pr view 1" },
+  },
+  {
+    id: "reader-gh-pager-cat-stays-remote-read",
+    description: "the companion: GH_PAGER=cat runs no pager",
+    input: { command: "GH_PAGER=cat gh pr diff 1" },
+  },
+  {
+    id: "reader-bare-unknown-then-reader-stays-read",
+    description: "the companion: a bare name off the steering list earlier on the line leaves the reader alone",
+    input: { command: "f=README.md; cat \"$f\"" },
+  },
 ];
 
 const gateVectors = [
@@ -6178,7 +6274,15 @@ const SUITES = [
     // `--expr=` takes the protected class. Regenerating over 2.0.0 leaves all
     // 432 byte-identical. If another lane's number merges first, the
     // collision rule applies on regeneration.
-    vectors_version: "2.1.0",
+    // 2.2.0 (APRV-540, lane:claude-build-2@edge2): a MINOR bump, sixteen new
+    // vectors and no expectation moved. Twelve assignments in front of a
+    // reader that are off the admitted list refuse as `unclassified` (PATH,
+    // LD_PRELOAD, DYLD_INSERT_LIBRARIES, IFS, GH_PAGER, BROWSER, NODE_OPTIONS,
+    // TAR_OPTIONS, an unknown name, a proxy, one bad word among good ones, a
+    // bare steering assignment earlier on the line); four companions keep
+    // their read. Regenerating over 2.1.0 leaves all 456 byte-identical. If
+    // another lane's number merges first, the collision rule applies.
+    vectors_version: "2.2.0",
     algorithm:
       "SPEC.md §7 command classification: the shell's own command boundary, then the class of each segment",
     description:

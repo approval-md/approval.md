@@ -17,6 +17,27 @@ before a tag.
 
 ### Fixed
 
+- **An environment assignment in front of a reader no longer rides the read
+  (APRV-540).** The classifier read past every `NAME=value` word in front of a
+  command and classified it by its verb alone, except in front of git
+  (APRV-521). So `PATH=. cat README.md` ran `./cat`, `LD_PRELOAD`,
+  `DYLD_INSERT_LIBRARIES` or `IFS` in front of `cat` stayed `read.shell`,
+  `GH_PAGER=./x gh pr diff 1` and `BROWSER=./x gh pr view --web` stayed
+  `read.vcs.remote`, and `NODE_OPTIONS=--require=./x npm --version` loaded
+  `./x` under `read.shell`. This is on 0.4.9. Now, in front of a command whose
+  class is a read, every assignment must be on a closed list: git's (the
+  no-op pagers and editors, `GIT_TERMINAL_PROMPT=0`, a plain locale or zone),
+  the colour and prompt switches (`NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`,
+  `FORCE_COLOR`, `CI`, `GH_PROMPT_DISABLED`, `GH_NO_UPDATE_NOTIFIER`,
+  `GH_SPINNER_DISABLED`), `COLUMNS` and `LINES` as digits, `TERM` as a name,
+  `GH_PAGER=cat` or empty, and `GH_REPO=OWNER/REPO`. Any other assignment,
+  steering or unknown, leaves the segment `unclassified` and the hook refuses
+  it, under `unclassified_command: abstain` too. A steering name set bare
+  earlier on the line (`IFS=x; cat f`, `GH_PAGER=./x && gh pr diff 1`,
+  `printf -v`, `${NAME:=v}`) refuses the readers after it. A bare `cd` keeps
+  its own rules. Cost: `n=5 ls`, `FOO=1 cat f` and `HTTPS_PROXY=… curl …` now
+  need the assignment dropped or a person.
+
 - **A copy or move from or into a pattern that matches many entries reads the
   disk once per path in a hook call (PRIORITIES:331).** Past 1,024 glob
   characters a pattern matches every entry of its directory, so `cp <2,000 [>

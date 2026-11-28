@@ -179,9 +179,16 @@ test("a prefix assignment does not apply to its own command's words", () => {
   // pass gives up on the name (a prefix taints it), as for `D`, and the
   // classifier does not count a prefix as the line's own binding: the word
   // keeps the answer it had before this change (pinned here as it was).
-  for (const line of ["HERMES_HOME=.approval/log echo x >> $HERMES_HOME/events.jsonl", "HERMES_HOME=.claude tee $HERMES_HOME/settings.json </dev/null"]) {
+  for (const line of ["HERMES_HOME=.claude tee $HERMES_HOME/settings.json </dev/null"]) {
     assert.deepEqual(classesOf(hook(line), line), ["files.write.workspace", GUARDED], line);
     assert.deepEqual(classesOf(pure(line), line), ["files.write.workspace"], line);
+  }
+  // APRV-540: `echo` is a reader, and an assignment off the admitted list in
+  // front of a reader refuses the segment, so this spelling is refused
+  // outright (the stricter answer); `tee` above is a writer and keeps its pin.
+  for (const line of ["HERMES_HOME=.approval/log echo x >> $HERMES_HOME/events.jsonl"]) {
+    assert.equal(hook(line), "REF:unclassified", line);
+    assert.equal(pure(line), "REF:unclassified", line);
   }
   // The D= twin of the second has policy.core from the spliced reading alone
   // (`$D/settings.json` is an unread part with or without an assignment), not
