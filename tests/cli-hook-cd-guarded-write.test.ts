@@ -434,6 +434,11 @@ test("a line whose parentheses do not pair for sure restores no subshell frame a
   // Parentheses that pair at depth one keep S3's reading, with no guarded class.
   const balanced = hook("(cd .claude) && (echo x > settings.json)");
   assert.ok(typeof balanced !== "string" && !balanced.includes("files.write.guarded"), JSON.stringify(balanced));
+  // With no cd on the line there is no landing to get wrong: an unpaired paren adds nothing.
+  for (const line of ["(echo x > notes.md", "echo x > notes.md )"]) {
+    const got = hook(line);
+    assert.ok(typeof got !== "string" && !got.includes("files.write.guarded"), `${line}: ${JSON.stringify(got)}`);
+  }
   // A quoted parenthesis is no paren to the lexer.
   holds("cd .claude && echo ')' && (cd ..) && (echo x > settings.json)", "policy.core");
 });

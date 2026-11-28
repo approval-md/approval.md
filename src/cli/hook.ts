@@ -5999,12 +5999,15 @@ export function refineWriteLandings(
    * sure (every segment's group is -1: a stray `)`, a `(` never closed, a
    * nested subshell) restores no frame as a replacement. Where a subshell
    * would end, the shell is taken to stand where it stood before OR where the
-   * subshell's cds went (a union), no cd on it is sure (S1), and a relative
-   * write on it is guarded as unreadable: never lighter than the pass gave
-   * before S3.
+   * subshell's cds went (a union), no cd on it is sure (S1), and, where the
+   * line holds a cd, pushd, popd or chdir, a relative write on it is guarded
+   * as unreadable: never lighter than the pass gave before S3.
    */
   const parensUnsure = units.some((unit) => unit.host.subshellGroup === -1);
-  if (parensUnsure) cwdUnknown = true;
+  // Only where a cd may move the shell: with no cd-family unit on the line
+  // there is no landing to get wrong (`(echo x > notes.md` keeps its answer).
+  const movesDirectory = units.some((unit) => unit.shape.bin !== null && ["cd", "pushd", "popd", "chdir"].includes(basename(unit.shape.bin)));
+  if (parensUnsure && movesDirectory) cwdUnknown = true;
   /** Where a frame ends: its state again, or on a line whose parentheses are not sure, its state joined with this one. */
   const restoreFrame = (frame: { standing: Standing; skippedFailed: Standing; skippedSucceeded: Standing }): void => {
     if (!parensUnsure) {
