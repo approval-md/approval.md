@@ -395,16 +395,33 @@ it as well as by its verb. One table answers, in three parts:
   The toolchain's names are steering too: `npm_config_*`, `yarn_*` and
   `pnpm_*` in any case (npm reads its own in any case), `YARN_`, `PNPM_`,
   `COREPACK_`, `TS_NODE_`, `TSX_`, `CARGO_`, `RUSTC`, `RUSTUP_`, `PIP_`,
-  `UV_`, `POETRY_`, `PYTEST_`, `BUNDLE_`, `GEM_` names, `MAKEFILES`,
-  `MAKEFLAGS`, `MFLAGS`, `GNUMAKEFLAGS`, `CC`, `CXX`, `CPP`, `LD`, `AR`, `AS`,
-  `NM`, `RANLIB`, `STRIP`, `CFLAGS`, `CXXFLAGS`, `CPPFLAGS`, `LDFLAGS`,
-  `PKG_CONFIG`, `PKG_CONFIG_PATH`, `ESBUILD_BINARY_PATH`, `GOFLAGS`,
-  `GOPROXY`, `GOPATH`, `GOROOT`, `GOTOOLCHAIN`, `GOSUMDB`, `GONOSUMDB`,
-  `GOPRIVATE`, `GONOPROXY`, `GOINSECURE`, `GOBIN`, `GOENV`, `RUSTFLAGS`,
-  `RUSTDOCFLAGS`, `JAVA_HOME`, `MAVEN_OPTS`, `GRADLE_OPTS`,
-  `GRADLE_USER_HOME`, and, in either case, `http_proxy`, `https_proxy`,
+  `UV_`, `POETRY_`, `PYTEST_`, `BUNDLE_`, `GEM_`, `CCACHE_`, `DISTCC_`,
+  `CGO_` names, `MAKEFILES`, `MAKEFLAGS`, `MFLAGS`, `GNUMAKEFLAGS`, `MAKE`,
+  `VPATH`, GNU make's "Variables Used by Implicit Rules" (the programs `CC`,
+  `CXX`, `CPP`, `LD`, `AR`, `AS`, `NM`, `RANLIB`, `STRIP`, `RM`, `YACC`,
+  `LEX`, `FC`, `F77`, `M2C`, `PC`, `M4`, `CO`, `GET`, `LINT`, `MAKEINFO`,
+  `TEX`, `TEXI2DVI`, `WEAVE`, `CWEAVE`, `TANGLE`, `CTANGLE`, and the flags
+  `CFLAGS`, `CXXFLAGS`, `CPPFLAGS`, `LDFLAGS`, `ARFLAGS`, `ASFLAGS`,
+  `YFLAGS`, `LFLAGS`, `FFLAGS`, `RFLAGS`, `PFLAGS`, `COFLAGS`, `GFLAGS`,
+  `LINTFLAGS`, `LDLIBS`, `LOADLIBES`, `TARGET_ARCH`), `INSTALL`, `AWK`,
+  `SED`, `PKG_CONFIG`, `PKG_CONFIG_PATH`, the gcc and clang driver's
+  `GCC_EXEC_PREFIX`, `COMPILER_PATH`, `LIBRARY_PATH`, `CPATH`,
+  `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`,
+  `DEPENDENCIES_OUTPUT`, `SUNPRO_DEPENDENCIES`, `ESBUILD_BINARY_PATH`,
+  `GOFLAGS`, `GOPROXY`, `GOPATH`, `GOROOT`, `GOTOOLCHAIN`, `GOSUMDB`,
+  `GONOSUMDB`, `GOPRIVATE`, `GONOPROXY`, `GOINSECURE`, `GOBIN`, `GOENV`,
+  `GOWORK`, `GOEXPERIMENT`, `GOMODCACHE`, `GOCACHE`, `GOVCS`, `GOAUTH`,
+  `GOFIPS140`, `GOTOOLDIR`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `JAVA_HOME`,
+  `JAVA_OPTS`, `JVM_OPTS`, `MAVEN_OPTS`, `MAVEN_ARGS`, `MAVEN_CONFIG`,
+  `GRADLE_OPTS`, `GRADLE_HOME`, `GRADLE_USER_HOME`, `SBT_OPTS`, `ANT_OPTS`,
+  `ANT_ARGS`, and, in either case, `http_proxy`, `https_proxy`,
   `ftp_proxy`, `all_proxy`, `no_proxy`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
   `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE` and `NODE_EXTRA_CA_CERTS`.
+  A short, common-looking name such as `RM` or `AWK` is refused in front of
+  `make`, `npm test` and the other workspace-code commands on purpose:
+  make's built-in rules run its value as a command (`RM='sh -c …' make
+  clean` runs the value, with no change to any workspace file). `MAKELEVEL`
+  only counts make's recursion and stays an unknown name.
 - **Unknown** names (any other) are refused, except in front of a command
   that already runs the workspace's own code, where they keep its class.
 

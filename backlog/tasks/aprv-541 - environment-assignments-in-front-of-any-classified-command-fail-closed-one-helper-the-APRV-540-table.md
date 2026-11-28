@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-28 14:31'
-updated_date: '2026-11-28 15:26'
+updated_date: '2026-11-28 15:36'
 labels:
   - classifier
   - security
@@ -72,4 +72,6 @@ Over the corpora at 5467a7b1 plus the new tests (1,640 commands), head differs f
 SPEC.md is not edited (a protected path). The closed list is in docs/claude-code-hook.md, and a proposed SPEC section 7 paragraph is in the lane report.
 
 Flagged gap, fixed in the commits after c561778b (tests first; red 57 of 187): the toolchain's names that fetch or load code from outside the workspace, pick another toolchain binary or redirect network trust are steering. They are TOOLCHAIN_STEERING_NAMES, TOOLCHAIN_STEERING_SHAPE and TOOLCHAIN_STEERING_FOLDED (npm_config_, yarn_, pnpm_ and the proxy and TLS variables, in any case). docs/claude-code-hook.md states the principle and that the steering list is a denylist, deciding only in front of workspace-code rules. No existing line moved.
+
+Last fold (lead): make's Variables Used by Implicit Rules (RM, YACC, LEX, FC, F77, M2C, PC, M4, CO, GET, LINT, MAKEINFO, TEX, TEXI2DVI, WEAVE, CWEAVE, TANGLE, CTANGLE; ARFLAGS, ASFLAGS, YFLAGS, LFLAGS, FFLAGS, RFLAGS, PFLAGS, COFLAGS, GFLAGS, LINTFLAGS, LDLIBS, LOADLIBES, TARGET_ARCH), INSTALL, AWK, SED, MAKE, VPATH; the gcc and clang driver's GCC_EXEC_PREFIX, COMPILER_PATH, LIBRARY_PATH, CPATH, C_INCLUDE_PATH, CPLUS_INCLUDE_PATH, OBJC_INCLUDE_PATH, DEPENDENCIES_OUTPUT, SUNPRO_DEPENDENCIES, CCACHE_*, DISTCC_*; Go's CGO_*, GOWORK, GOEXPERIMENT, GOMODCACHE, GOCACHE, GOVCS, GOAUTH, GOFIPS140, GOTOOLDIR; the JVM's JAVA_OPTS, JVM_OPTS, MAVEN_ARGS, MAVEN_CONFIG, GRADLE_HOME, SBT_OPTS, ANT_OPTS, ANT_ARGS are steering. MAKELEVEL stays unknown. One vector for the make family (project-script-make-program-unclassified, 3.0.0, 488 vectors). Sweep: 0 lines the readers base refused are allowed.
 <!-- SECTION:NOTES:END -->

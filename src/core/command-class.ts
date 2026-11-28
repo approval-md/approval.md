@@ -5297,18 +5297,40 @@ const READER_STEERING_SHAPE =
  *   `GNUMAKEFLAGS` (options, `-f`, `-I`, `--eval`), and the implicit rules'
  *   programs and flags `CC`, `CXX`, `CPP`, `LD`, `AR`, `AS`, `NM`, `RANLIB`,
  *   `STRIP`, `CFLAGS`, `CXXFLAGS`, `CPPFLAGS`, `LDFLAGS` (`-B<dir>` and
- *   `-fplugin=` pick binaries and plugins), `PKG_CONFIG`, `PKG_CONFIG_PATH`.
+ *   `-fplugin=` pick binaries and plugins), `PKG_CONFIG`, `PKG_CONFIG_PATH`;
+ *   the rest of GNU make's "Variables Used by Implicit Rules", programs
+ *   (`RM`, `YACC`, `LEX`, `FC`, `F77`, `M2C`, `PC`, `M4`, `CO`, `GET`, `LINT`,
+ *   `MAKEINFO`, `TEX`, `TEXI2DVI`, `WEAVE`, `CWEAVE`, `TANGLE`, `CTANGLE`)
+ *   and flags (`ARFLAGS`, `ASFLAGS`, `YFLAGS`, `LFLAGS`, `FFLAGS`, `RFLAGS`,
+ *   `PFLAGS`, `COFLAGS`, `GFLAGS`, `LINTFLAGS`, `LDLIBS`, `LOADLIBES`,
+ *   `TARGET_ARCH`), the programs makefiles commonly call by variable
+ *   (`INSTALL`, `AWK`, `SED`), and make's own `MAKE` (what a recursive
+ *   `$(MAKE)` runs) and `VPATH` (where prerequisites are looked for). A short,
+ *   common-looking name such as `RM` or `AWK` is here because make's built-in
+ *   rules run its value as a command. `MAKELEVEL` only counts recursion and
+ *   is left an unknown name; `.SHELLFLAGS` cannot be an environment name.
+ * - The gcc and clang driver: `GCC_EXEC_PREFIX`, `COMPILER_PATH` (where the
+ *   driver finds cc1, as and ld), `LIBRARY_PATH`, `CPATH`, `C_INCLUDE_PATH`,
+ *   `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`, `DEPENDENCIES_OUTPUT`,
+ *   `SUNPRO_DEPENDENCIES` (write a file), `CCACHE_*` (`CCACHE_PREFIX` runs a
+ *   program), `DISTCC_*` (sends the build to other hosts).
  * - TypeScript runners: `ESBUILD_BINARY_PATH` (the esbuild binary tsx runs),
  *   `TS_NODE_*` (compiler, project, `TS_NODE_COMPILER`), `TSX_*`.
  * - Go: `GOFLAGS`, `GOPROXY`, `GOPATH`, `GOROOT`, `GOTOOLCHAIN` (downloads a
  *   toolchain), `GOSUMDB`, `GONOSUMDB`, `GOPRIVATE`, `GONOPROXY`,
- *   `GOINSECURE`, `GOBIN`, `GOENV`.
+ *   `GOINSECURE`, `GOBIN`, `GOENV`, `GOWORK` (other modules' code),
+ *   `GOEXPERIMENT`, `GOMODCACHE`, `GOCACHE` (a planted build cache),
+ *   `GOVCS`, `GOAUTH` (runs a command), `GOFIPS140`, `GOTOOLDIR`, `CGO_*`
+ *   (`CGO_CFLAGS`, `CGO_LDFLAGS` reach the C compiler).
  * - Rust: `CARGO_*`, `RUSTC*` (`RUSTC`, `RUSTC_WRAPPER`), `RUSTFLAGS`,
  *   `RUSTDOCFLAGS`, `RUSTUP_*` (picks a toolchain).
  * - Python: `PIP_*` (index URL, config file), `UV_*`, `POETRY_*`, `PYTEST_*`
  *   (`PYTEST_ADDOPTS`, `PYTEST_PLUGINS` load plugins); `PYTHON*` already.
- * - JVM and Ruby: `JAVA_HOME`, `MAVEN_OPTS`, `GRADLE_OPTS`,
- *   `GRADLE_USER_HOME`, `BUNDLE_*`, `GEM_*`; `RUBY*` already.
+ * - JVM and Ruby: `JAVA_HOME`, `JAVA_OPTS`, `JVM_OPTS`, `MAVEN_OPTS`,
+ *   `MAVEN_ARGS`, `MAVEN_CONFIG`, `GRADLE_OPTS`, `GRADLE_HOME`,
+ *   `GRADLE_USER_HOME`, `SBT_OPTS`, `ANT_OPTS`, `ANT_ARGS`, `BUNDLE_*`,
+ *   `GEM_*`; `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`, `_JAVA_OPTIONS`,
+ *   `CLASSPATH` and `RUBY*` already.
  * - Package managers: `YARN_*`, `PNPM_*`, `COREPACK_*` (downloads a package
  *   manager from a URL); `npm_config_*`, `BUN_*`, `DENO_*`, `NODE_*` already.
  */
@@ -5316,14 +5338,22 @@ const TOOLCHAIN_STEERING_NAMES: readonly string[] = [
   "MAKEFILES", "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS",
   "CC", "CXX", "CPP", "LD", "AR", "AS", "NM", "RANLIB", "STRIP",
   "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "PKG_CONFIG", "PKG_CONFIG_PATH",
+  "RM", "YACC", "LEX", "FC", "F77", "M2C", "PC", "M4", "CO", "GET", "LINT", "MAKEINFO", "TEX", "TEXI2DVI",
+  "WEAVE", "CWEAVE", "TANGLE", "CTANGLE", "INSTALL", "AWK", "SED", "MAKE", "VPATH",
+  "ARFLAGS", "ASFLAGS", "YFLAGS", "LFLAGS", "FFLAGS", "RFLAGS", "PFLAGS", "COFLAGS", "GFLAGS", "LINTFLAGS",
+  "LDLIBS", "LOADLIBES", "TARGET_ARCH",
+  "GCC_EXEC_PREFIX", "COMPILER_PATH", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH",
+  "OBJC_INCLUDE_PATH", "DEPENDENCIES_OUTPUT", "SUNPRO_DEPENDENCIES",
   "ESBUILD_BINARY_PATH",
   "GOFLAGS", "GOPROXY", "GOPATH", "GOROOT", "GOTOOLCHAIN", "GOSUMDB", "GONOSUMDB", "GOPRIVATE", "GONOPROXY", "GOINSECURE", "GOBIN", "GOENV",
+  "GOWORK", "GOEXPERIMENT", "GOMODCACHE", "GOCACHE", "GOVCS", "GOAUTH", "GOFIPS140", "GOTOOLDIR",
   "RUSTFLAGS", "RUSTDOCFLAGS",
-  "JAVA_HOME", "MAVEN_OPTS", "GRADLE_OPTS", "GRADLE_USER_HOME",
+  "JAVA_HOME", "JAVA_OPTS", "JVM_OPTS", "MAVEN_OPTS", "MAVEN_ARGS", "MAVEN_CONFIG", "GRADLE_OPTS", "GRADLE_HOME", "GRADLE_USER_HOME",
+  "SBT_OPTS", "ANT_OPTS", "ANT_ARGS",
 ];
 
 /** {@link TOOLCHAIN_STEERING_NAMES}' prefixes. */
-const TOOLCHAIN_STEERING_SHAPE = /^(?:TS_NODE_|TSX_|CARGO_|RUSTC|RUSTUP_|PIP_|UV_|POETRY_|PYTEST_|BUNDLE_|GEM_|YARN_|PNPM_|COREPACK_)/u;
+const TOOLCHAIN_STEERING_SHAPE = /^(?:TS_NODE_|TSX_|CARGO_|RUSTC|RUSTUP_|PIP_|UV_|POETRY_|PYTEST_|BUNDLE_|GEM_|YARN_|PNPM_|COREPACK_|CCACHE_|DISTCC_|CGO_)/u;
 
 /**
  * The names a tool reads in any case, matched so: npm reads `npm_config_*`

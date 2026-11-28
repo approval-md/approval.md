@@ -4897,6 +4897,12 @@ const commandClassVectors = [
     control: true,
   },
   {
+    id: "project-script-make-program-unclassified",
+    description: "make's built-in rules run RM's value as a command, so a short common name steers make: unclassified",
+    input: { command: "RM='sh -c x' make clean" },
+    control: true,
+  },
+  {
     id: "writer-unknown-assignment-unclassified",
     description: "an unknown name in front of a plain writer stays refused",
     input: { command: "FOO=1 touch x" },
