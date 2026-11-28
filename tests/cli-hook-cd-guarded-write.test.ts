@@ -319,3 +319,33 @@ test("a spelling that names nothing guarded moves nothing: a delete after a cd i
     assert.ok(typeof got !== "string" && !got.includes("files.delete.out_of_scope"), `${line}: ${JSON.stringify(got)}`);
   }
 });
+
+test("a cd into a folder that exists cannot fail, unless the line may change the disk first (review-b's S1 on #715)", () => {
+  // The cd cannot fail: no failed branch, so the shell is not taken to stand where it was.
+  assert.deepEqual(hook("cd .approval; cd ..; echo x > notes.md"), ALLOWED);
+  assert.deepEqual(hook("cd .approval\ncd ..\necho x > notes.md"), ALLOWED);
+  assert.deepEqual(hook("cd .claude; cd ..; echo x > settings.json"), ALLOWED);
+  const out = hook("cd .approval/log; cd ..; echo x >> events.jsonl");
+  assert.ok(typeof out !== "string" && !out.includes("log.mutate"), JSON.stringify(out));
+  // What it lands in keeps its class, and a cd that may fail keeps both.
+  holds("cd .approval; echo x > env", "policy.core");
+  holds("cd nosuch; echo x > .claude/settings.json", "policy.core");
+  // The failed branch is kept wherever the cd may still fail when the line runs: an earlier
+  // segment that may remove, move or lock a folder (the hook reads the disk before the line
+  // runs), a program that may do anything, a cd in a process of its own (`&`, a later
+  // pipeline stage), a redirection that may fail to open, and a word the kernel cannot walk.
+  for (const line of [
+    "cd .approval/log; chmod 000 ..; cd ..; echo x >> events.jsonl",
+    "cd .approval/log; rm -rf ../../docs; cd ..; echo x >> events.jsonl",
+    "cd .approval/log; mv ../../docs ../../d2; cd ..; echo x >> events.jsonl",
+    "cd .approval/log; npm test; cd ..; echo x >> events.jsonl",
+    "cd .approval/log; cd .. & echo x >> events.jsonl",
+    "cd .approval/log; true | cd ..; echo x >> events.jsonl",
+    "cd .approval/log; cd .. 2>/nonexistent-b6/x; echo x >> events.jsonl",
+    "cd .approval/log; cd ../env/..; echo x >> events.jsonl",
+    // A script's cd is read in its place: the shell stays where the script left it.
+    "cd .approval/log; sh -c 'cd ..'; echo x >> events.jsonl",
+  ]) {
+    holds(line, "log.mutate");
+  }
+});

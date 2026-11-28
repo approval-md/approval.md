@@ -74,6 +74,8 @@
 
 import { spawnSync } from "node:child_process";
 import {
+  accessSync,
+  constants as fsConstants,
   existsSync,
   lstatSync,
   readdirSync,
@@ -5047,6 +5049,8 @@ export function refineWriteLandings(
     hostIndex: number;
     /** Why what this unit writes cannot be read at all (fails to guarded), or `null`. */
     unreadable: string | null;
+    /** Does this unit come from a script the line runs (`sh -c '…'`), read in its place? */
+    scripted?: boolean;
   }
   const withSubstitutions = (shape: CommandSegmentShape, host: CommandSegmentShape, hostIndex: number, depth: number, unreadable: string | null): Unit[] => {
     if (depth > 4 && shape.substitutions.length > 0) {
@@ -5059,15 +5063,17 @@ export function refineWriteLandings(
     });
     return [...inner, { shape, host, hostIndex, unreadable }];
   };
-  type Primary = { shape: CommandSegmentShape; unreadable: string | null };
+  type Primary = { shape: CommandSegmentShape; unreadable: string | null; scripted?: boolean };
   const primary: Primary[] = top.flatMap((shape): Primary[] => {
     if (shape.opaqueShell) return [{ shape, unreadable: `\`${shape.text.slice(0, 80)}\` runs an inline script in a shape this hook does not unwrap` }];
     if (shape.script === null) return [{ shape, unreadable: null }];
     const inner = commandSegmentShapes(shape.script);
     if (inner === null) return [{ shape, unreadable: `the script of \`${shape.text.slice(0, 80)}\` could not be read` }];
-    return inner.map((each) => ({ shape: each, unreadable: null }));
+    return inner.map((each) => ({ shape: each, unreadable: null, scripted: true }));
   });
-  const units: Unit[] = primary.flatMap(({ shape, unreadable }, hostIndex) => withSubstitutions(shape, shape, hostIndex, 0, unreadable));
+  const units: Unit[] = primary.flatMap(({ shape, unreadable, scripted }, hostIndex) =>
+    withSubstitutions(shape, shape, hostIndex, 0, unreadable).map((unit) => (scripted === true ? { ...unit, scripted } : unit)),
+  );
   const shapes = units.map((unit) => unit.shape);
   const guard = currentGuard(env, scope.gateRoot);
   // One disk reading per spelling per line (a cost bound: the disk does not
@@ -5957,7 +5963,28 @@ export function refineWriteLandings(
   let skippedFailed: Standing = [];
   let skippedSucceeded: Standing = [];
   /** The previous segment's outcome: where it leaves the shell when it succeeds and when it fails. */
-  let outcome: { ok: Standing; failed: Standing } | null = null;
+  let outcome: { ok: Standing; failed: Standing; sure: boolean } | null = null;
+  /**
+   * S1 (review-b on #715): may a unit before this one on the line change the
+   * disk? The hook reads the disk once, before the line runs, so a folder that
+   * exists now may be gone, renamed or unsearchable when a later cd runs if an
+   * earlier unit writes, deletes, moves, links or changes modes anywhere
+   * (`rmdir d; cd d`, `mv d e; cd d`, `chmod 000 d; cd d`, `npm test; cd d`).
+   * Only a cd and a read with no redirection leave it false.
+   */
+  let earlierMayChange = false;
+  /** Did the last {@link cdLanding} find every landing an existing folder the shell may search, read from the word as written? */
+  let landedSurely = false;
+  /** An existing directory this process may search (`x`), walked by the kernel as spelled. */
+  const searchableDirectory = (path: string): boolean => {
+    try {
+      if (!statSync(path).isDirectory()) return false;
+      accessSync(path, fsConstants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  };
   /** The state as a subshell opened, restored at its end. */
   let subshellFrame: { standing: Standing; skippedFailed: Standing; skippedSucceeded: Standing } | null = null;
   /** The state as a `$(…)` opened, restored at the segment that expands it. */
@@ -5988,7 +6015,13 @@ export function refineWriteLandings(
     const op = entering ? unit.host.listOp : unit.shape.listOp;
     lastHost = unit.hostIndex;
     const ok = outcome === null ? standing : outcome.ok;
-    const failed = outcome === null ? standing : outcome.failed;
+    // S1: a cd that cannot fail keeps no failed branch, but only where the
+    // next step runs in the same shell after it: `&&`, `||`, or `;` and a new
+    // line (no `&`, which runs the cd in a process of its own, and no `(`).
+    // After `&` the segment is conditional with no and-or operator.
+    const conditional = entering ? unit.host.conditional : unit.shape.conditional;
+    const sameShell = op === "&&" || op === "||" || (op === null && !conditional);
+    const failed = outcome === null ? standing : outcome.sure && sameShell ? [] : outcome.failed;
     outcome = null;
     if (op === "|") {
       // A later stage of a pipeline runs in the step its first stage opened,
@@ -6011,6 +6044,7 @@ export function refineWriteLandings(
   };
   /** Where a `cd`, `chdir` or `pushd` at `index` lands from `from`, or `null` where it cannot be named. */
   const cdLanding = (shape: CommandSegmentShape, index: number, bin: string, from: readonly string[]): Standing => {
+    landedSurely = false;
     const target = bin === "popd" ? ({ kind: "unknown" } as const) : cdTarget(bin === "chdir" ? "cd" : bin, shape.args, shape.assignments);
     if (target.kind === "unknown") return null;
     // As the resolved pass reads a word: the line's own value of a name it sets (`D=.approval; cd $D`).
@@ -6029,6 +6063,10 @@ export function refineWriteLandings(
     // and the main loop below marks the directory unknown for it, as it does
     // for zsh's reading of any word a brace splits.
     if (resolved.spellings.every((spelling) => spelling.length === 0)) return null;
+    // zsh's `-s` refuses a path through a link, bash's `-e` fails a `-P` cd
+    // whose directory cannot be read back: either may fail on a folder that
+    // exists, so neither is sure (S1).
+    let sure = (bin === "cd" || bin === "chdir") && !/[se]/u.test(flags);
     const out = new Set<string>();
     for (const spelling of resolved.spellings) {
       if (spelling.length === 0) continue;
@@ -6039,11 +6077,15 @@ export function refineWriteLandings(
           const expanded = volatilePattern(each) === null ? expandOnDisk("/", each, { deadline: Date.now() + GLOB_TIME_LIMIT_MS, list: memo.disk.list }) : null;
           if (expanded === null || "giveUp" in expanded) return null;
           placed = expanded.paths.filter((path) => path.from !== "parent").map((path) => path.path);
+          sure = false;
         }
         for (const dir of placed) {
           if (dir.length > MAX_LANDING_BYTES || volatileOf(dir) !== null) return null;
           const landing = landingPathsOnce(dir);
           if (landing.unknown) return null;
+          // S1: `dir` keeps every `..` as written, so the kernel walks each
+          // component (`cd nonexist/..` fails in bash, sh and zsh).
+          if (sure && !(searchableDirectory(dir) && searchableDirectory(resolvePathSegments(dir)) && landing.paths.every(searchableDirectory))) sure = false;
           // `paths` is the lexical landing, then the kernel's where it differs.
           if (physical) {
             out.add(landing.paths[landing.paths.length - 1] as string);
@@ -6054,12 +6096,28 @@ export function refineWriteLandings(
         }
       }
     }
-    return out.size > 64 ? null : [...out];
+    if (out.size > 64) return null;
+    landedSurely = sure;
+    return [...out];
   };
-  /** Record the outcome of a `cd` at `index`; its landing, `null` where it cannot be named. */
+  /**
+   * Record the outcome of a `cd` at `index`; its landing, `null` where it
+   * cannot be named. S1 (review-b on #715): a cd cannot fail, so it keeps no
+   * failed branch, when every landing is an existing folder the shell may
+   * search, nothing earlier on the line may change the disk, and the cd has
+   * no redirection that may fail to open (`cd d > /nonexistent/x` does not
+   * run the cd); `/dev/null` is the one target taken as safe.
+   */
   const followCd = (shape: CommandSegmentShape, index: number, bin: string): Standing => {
     const ok = standing === null ? null : cdLanding(shape, index, bin, standing);
-    outcome = { ok, failed: standing };
+    const quietRedirects = shape.reads.length === 0 && (shape.clobberBashWrites?.length ?? 0) === 0 && shape.writes.every((word) => word === "/dev/null");
+    // A later stage of a pipeline may run in a subshell (bash): never sure.
+    // Nor a cd inside a script the line runs (`sh -c 'cd ..'`): this pass
+    // reads the script's segments in its place, so its cd seems to reach the
+    // segments after it (review-b's S2), and only the failed branch kept the
+    // shell where the script left it.
+    const sure = ok !== null && landedSurely && !earlierMayChange && quietRedirects && shape.listOp !== "|" && (units[index] as Unit).scripted !== true;
+    outcome = { ok, failed: standing, sure };
     return ok;
   };
   /** A relative word's spellings from the line's start, after the cds this pass follows (only those that differ). */
@@ -6233,6 +6291,12 @@ export function refineWriteLandings(
 
     const unit = units[index] as Unit;
     const host = unit.host.text;
+    // S1: anything but a read with no redirection may change the disk for a later cd.
+    if (!earlierMayChange) {
+      const own = unit.unreadable === null ? ownAnswer(shape) : null;
+      const readsOnly = own !== null && own.class.startsWith("read.") && shape.writes.length === 0 && (shape.clobberBashWrites?.length ?? 0) === 0;
+      if (!readsOnly) earlierMayChange = true;
+    }
     if (unit.unreadable !== null) {
       // Nothing this unit writes can be read: guarded, and nothing after it
       // can trust the disk either.
